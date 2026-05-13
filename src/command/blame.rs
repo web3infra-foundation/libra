@@ -1,4 +1,19 @@
-//! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
+//! Per-line authorship attribution (`libra blame`).
+//!
+//! Implements the `blame` subcommand. Loads the file at the requested
+//! revision, walks the commit graph backwards from that revision, and uses
+//! `compute_diff` against each parent to migrate line ownership to the
+//! oldest ancestor whose content still matches.
+//!
+//! Non-obvious responsibilities:
+//! - Maps domain failures into stable [`CliError`] codes via the
+//!   `From<BlameError>` impl so JSON consumers and shell scripts can match
+//!   on machine-readable categories.
+//! - Supports JSON, quiet, and paged-text output: human output is fed
+//!   through [`Pager`] so very long blames behave well in a terminal.
+//! - Tracks two parallel structures: the in-flight `LineBlame` vector
+//!   (mutated as the BFS progresses) and the queued
+//!   `(commit, parent_lines)` work items.
 
 use chrono::DateTime;
 use clap::Parser;
@@ -44,6 +59,7 @@ pub struct BlameArgs {
     pub line_range: Option<String>,
 }
 
+/// Single attributed line of a blame report. Serialised verbatim to JSON.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlameLine {
     pub line_number: usize,
@@ -54,6 +70,7 @@ pub struct BlameLine {
     pub content: String,
 }
 
+/// Whole-file result of a `libra blame` invocation.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlameOutput {
     pub file: String,
@@ -61,6 +78,9 @@ pub struct BlameOutput {
     pub lines: Vec<BlameLine>,
 }
 
+/// Internal mutable state for one source line during the back-walk.
+/// `commit_id` is updated whenever an older ancestor still contains the same
+/// text — the final value is the line's introducing commit.
 struct LineBlame {
     line_number: usize,
     commit_id: ObjectHash,
@@ -69,14 +89,20 @@ struct LineBlame {
     content: String,
 }
 
+/// Domain error for `libra blame`. Mapped to stable [`CliError`] codes by
+/// the `From` impl below.
 #[derive(Debug, thiserror::Error)]
 enum BlameError {
+    /// CWD is not inside a `.libra` repository.
     #[error("not a libra repository")]
     NotInRepo,
 
+    /// User-supplied revision could not be resolved by `get_target_commit`.
     #[error("invalid revision: '{0}'")]
     InvalidRevision(String),
 
+    /// A repository object (commit/tree/blob) failed to load — typically
+    /// indicates corruption or partial fetch.
     #[error("failed to load {kind} '{object_id}': {detail}")]
     ObjectLoad {
         kind: &'static str,
@@ -84,9 +110,12 @@ enum BlameError {
         detail: String,
     },
 
+    /// The requested path is not present in the tree of the target revision.
     #[error("file '{path}' not found in revision '{revision}'")]
     FileNotFound { path: String, revision: String },
 
+    /// `-L` argument did not match `LINE`, `START,END`, or `START,+COUNT`,
+    /// or the numbers were out of range. Mapped to a usage error.
     #[error("invalid line range: {0}")]
     InvalidLineRange(String),
 }
@@ -112,15 +141,32 @@ impl From<BlameError> for CliError {
     }
 }
 
+/// Fire-and-forget CLI dispatcher for `libra blame`.
+///
+/// Functional scope:
+/// - Calls [`execute_safe`] with a default [`OutputConfig`] and prints any
+///   error to stderr without propagating it.
 pub async fn execute(args: BlameArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Walks commit history for the target file, attributing
-/// each line to the commit that last changed it.
+/// Structured entry point used by `cli::parse` and integration tests.
+///
+/// Functional scope:
+/// - Runs [`run_blame`] to produce a [`BlameOutput`], then renders to JSON,
+///   stays silent in `--quiet` mode, prints "File is empty" for an empty
+///   blob, or formats human-friendly lines and pipes them through [`Pager`].
+///
+/// Boundary conditions:
+/// - Errors from [`run_blame`] are mapped to [`CliError`] via the
+///   `From<BlameError>` impl, preserving stable codes and hints.
+///
+/// See: tests::blame_error_mapping_reports_repo_corrupt_for_storage_failures
+/// in src/command/blame.rs:367;
+/// tests::test_blame_json_output_includes_lines in
+/// tests/command/blame_test.rs:50.
 pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
     let result = run_blame(&args).await.map_err(CliError::from)?;
 
@@ -167,6 +213,22 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
     Ok(())
 }
 
+/// Compute the per-line attribution.
+///
+/// Functional scope:
+/// - Resolves the start commit and reads the file's lines at that revision.
+/// - Initialises one [`LineBlame`] per line, blaming everything to the start
+///   commit, then BFS-walks parents. For each `Equal` chunk in the diff to a
+///   parent, lines whose content still matches inherit the parent's commit
+///   id, author, and timestamp.
+/// - Applies the optional `-L` filter as a final pass.
+///
+/// Boundary conditions:
+/// - Empty target file -> returns an empty [`BlameOutput`] without walking
+///   history.
+/// - Failed parent loads (e.g. shallow clone boundary) are silently skipped
+///   so blame still produces a partial answer.
+/// - Bad `-L` ranges produce [`BlameError::InvalidLineRange`].
 async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
     util::require_repo().map_err(|_| BlameError::NotInRepo)?;
 
@@ -277,6 +339,13 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
             .collect(),
     })
 }
+/// Read `file_path` at `commit` and return its lines (without trailing
+/// newlines).
+///
+/// Boundary conditions:
+/// - Returns [`BlameError::FileNotFound`] if the path is absent in the tree.
+/// - Non-UTF-8 blobs are decoded with `from_utf8_lossy`, replacing invalid
+///   sequences with U+FFFD.
 fn get_file_lines(
     commit: &Commit,
     file_path: &str,
@@ -310,13 +379,23 @@ fn get_file_lines(
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
 
+/// Format an epoch second as RFC 3339 (UTC). Falls back to the raw integer
+/// when the timestamp is outside chrono's representable range.
 fn format_blame_timestamp(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| timestamp.to_string())
 }
 
-/// Parse line range from string like "10", "10,20", "10,+5"
+/// Parse a `-L` argument into an inclusive `(start, end)` line range.
+///
+/// Functional scope:
+/// - Accepts `LINE`, `START,END`, and `START,+COUNT` (offset) syntaxes.
+///
+/// Boundary conditions:
+/// - Returns `Err` for non-numeric tokens, zero indices, indices past the
+///   file end, or `start > end`. Each error message is suitable for direct
+///   inclusion in a [`BlameError::InvalidLineRange`].
 fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize), String> {
     let parts: Vec<&str> = range_str.split(',').collect();
 
@@ -364,6 +443,9 @@ fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize
 mod tests {
     use super::*;
 
+    /// Scenario: object-store failures must surface as `RepoCorrupt` so that
+    /// shell scripts and JSON consumers can distinguish "the object store is
+    /// broken" from "the user typed the wrong revision".
     #[test]
     fn blame_error_mapping_reports_repo_corrupt_for_storage_failures() {
         let error = CliError::from(BlameError::ObjectLoad {
@@ -374,6 +456,9 @@ mod tests {
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 
+    /// Scenario: "file not in revision" is a user-target mistake, not
+    /// corruption. Verifying the stable code keeps the error category
+    /// distinct from object-load failures handled by the previous test.
     #[test]
     fn blame_error_mapping_reports_invalid_target_for_missing_file() {
         let error = CliError::from(BlameError::FileNotFound {

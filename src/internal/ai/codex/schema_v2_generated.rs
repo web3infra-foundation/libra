@@ -1,3 +1,9 @@
+//! Generated Codex v2 wire-schema bindings.
+//!
+//! Boundary: keep this file structurally close to the upstream JSON schema and avoid
+//! behavioral logic here; callers should wrap generated types in safer domain models.
+//! Mock Codex tests exercise deserialization of representative events.
+
 // Auto-generated from schema/v2/*.json. Do not edit by hand.
 use serde::Deserialize;
 

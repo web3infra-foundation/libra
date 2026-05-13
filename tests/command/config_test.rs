@@ -780,6 +780,105 @@ async fn test_config_list_gpg_keys_outputs_configured_key_namespaces() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_generate_ssh_key_replaces_vault_generate_ssh_key_flow() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "origin"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "config generate-ssh-key --remote origin");
+
+    let pubkey = libra::internal::config::ConfigKv::get("vault.ssh.origin.pubkey")
+        .await
+        .unwrap()
+        .expect("config generate-ssh-key should store a public key");
+    assert!(
+        pubkey.value.starts_with("ssh-rsa "),
+        "expected RSA SSH public key, got: {}",
+        pubkey.value
+    );
+
+    let privkey = libra::internal::config::ConfigKv::get("vault.ssh.origin.privkey")
+        .await
+        .unwrap()
+        .expect("config generate-ssh-key should store an encrypted private key");
+    assert!(privkey.encrypted, "private key must stay vault-encrypted");
+    assert!(
+        !privkey.value.contains("PRIVATE KEY"),
+        "private key must not be stored as plaintext"
+    );
+
+    let get_output = run_libra_command(
+        &["config", "get", "vault.ssh.origin.pubkey"],
+        temp_path.path(),
+    );
+    assert_cli_success(&get_output, "config get vault.ssh.origin.pubkey");
+    let stdout = String::from_utf8_lossy(&get_output.stdout);
+    assert!(stdout.contains("ssh-rsa "), "stdout: {stdout}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_gpg_key_replaces_vault_generate_gpg_key_flow() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "generate-gpg-key",
+            "--name",
+            "Config User",
+            "--email",
+            "config@example.com",
+        ],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "config generate-gpg-key");
+
+    let pubkey = libra::internal::config::ConfigKv::get("vault.gpg.pubkey")
+        .await
+        .unwrap()
+        .expect("config generate-gpg-key should store the signing public key");
+    assert!(
+        pubkey.value.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+        "expected armored PGP public key, got: {}",
+        pubkey.value
+    );
+
+    let generated_stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        generated_stdout.contains("Config User <config@example.com>"),
+        "expected configured user ID in command output, stdout: {generated_stdout}"
+    );
+
+    let signing = libra::internal::config::ConfigKv::get("vault.signing")
+        .await
+        .unwrap()
+        .expect("signing key generation should enable vault signing");
+    assert_eq!(signing.value, "true");
+
+    let get_output = run_libra_command(&["config", "get", "vault.gpg.pubkey"], temp_path.path());
+    assert_cli_success(&get_output, "config get vault.gpg.pubkey");
+    let stdout = String::from_utf8_lossy(&get_output.stdout);
+    assert!(
+        stdout.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+        "stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_generate_gpg_key_rejects_invalid_usage() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

@@ -1,6 +1,14 @@
 //! Integration tests for AI object storage (Task, Run, Plan, Artifact) on local and R2 backends.
 //!
-//! **Layer:** `test_ai_flow_local` is L1 (in-memory). `test_ai_flow_r2` is L3 — requires `R2_ENDPOINT`.
+//! Walks through the full create/store/load cycle for the AI object types — Task,
+//! ContextSnapshot, Run, Plan, and an Artifact blob — confirming both local and
+//! Cloudflare R2 backends preserve identity (object hash, body fields). The local
+//! test additionally asserts that `put_tracked` records into the AI history ref
+//! stored in the SQLite DB rather than on disk under `refs/libra/intent`.
+//!
+//! **Layer:** `test_ai_flow_local` is L1 (in-memory). `test_ai_flow_r2` is L3 —
+//! requires `R2_ENDPOINT`. Both tests are `#[serial]` because they mutate the
+//! process CWD.
 
 use std::{str::FromStr, sync::Arc};
 
@@ -26,7 +34,19 @@ use serial_test::serial;
 use tempfile::tempdir;
 use uuid::Uuid;
 
-/// Integration test for the full AI storage flow using LocalStorage
+/// Integration test for the full AI storage flow using LocalStorage.
+///
+/// Scenario: in a fresh temp-dir Libra repo, create a Task, a ContextSnapshot, a
+/// Run, and a Plan via `put_tracked` (which both writes to storage and updates the
+/// AI history). The test asserts:
+/// - The legacy on-disk `refs/libra/intent` file is NOT created (the ref now lives
+///   in the SQLite DB).
+/// - Each object round-trips through `get_json` with identical IDs and bodies.
+/// - An artifact blob committed via `put_artifact` is retrievable both as a generic
+///   blob and via its key.
+/// - Plain blob storage via `put`/`get` continues to work side-by-side.
+///
+/// `#[serial]` because `ChangeDirGuard` mutates process CWD.
 #[tokio::test]
 #[serial]
 async fn test_ai_flow_local() {
@@ -145,7 +165,17 @@ async fn test_ai_flow_local() {
     assert_eq!(loaded_blob, blob_content);
 }
 
-/// Integration test for AI storage flow using Cloudflare R2 (S3-compatible)
+/// Integration test for AI storage flow using Cloudflare R2 (S3-compatible).
+///
+/// Scenario: with a live R2 (or any S3-compatible) endpoint configured via env, write
+/// a Task and an Artifact through `RemoteStorage`, then read both back to confirm the
+/// remote backend round-trips correctly. Acts as the cloud counterpart to
+/// `test_ai_flow_local` and is the only smoke test we have for R2 connectivity at
+/// this layer.
+///
+/// Boundary: silently skipped when `R2_ENDPOINT` is unset. `#[serial]` because the
+/// test changes nothing CWD-related but stays grouped with the `local` flow for
+/// determinism.
 ///
 /// To run this test manually:
 /// 1. Set the following environment variables:

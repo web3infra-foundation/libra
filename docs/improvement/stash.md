@@ -7,11 +7,12 @@
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
-- `StashError` typed enum 已落地，并为 no-stash / invalid ref / merge conflict / object read-write / index save 等路径提供显式 `StableErrorCode`
-- `run_stash()` + `render_stash_output()` 已完成执行层/渲染层拆分，human / JSON / machine 共用一套结果模型
-- `StashOutput` 已覆盖 `push` / `pop` / `apply` / `drop` / `list` / `noop`
+- `StashError` typed enum 已落地（stash.rs:51），含 `NotInRepo` / `NoInitialCommit` / `NoStashFound` / `InvalidStashRef` / `StashNotExist` / `MergeConflict` / `ReadObject` / `WriteObject` / `IndexSave` / `ResetFailed` / `Other` 共 11 变体，每个变体在 stash.rs:89-99 有显式 `StableErrorCode` 映射
+- `run_stash()` + `render_stash_output()` 已完成执行层/渲染层拆分（stash.rs:182 / stash.rs:356），human / JSON / machine 共用一套结果模型
+- `StashOutput` 是 `#[serde(tag = "action")]` enum（stash.rs:134），已覆盖 `push` / `pop` / `apply` / `drop` / `list` / `noop`；list 项使用 `StashListEntry` 结构体（index / message / stash_id）
+- `STASH_EXAMPLES` 常量已定义（stash.rs:3）并通过 cli.rs:201-205 的 `#[command(after_help = command::stash::STASH_EXAMPLES)]` 接入，`libra stash --help` 末尾会显示 7 条示例
 - `docs/commands/stash.md` 已记录 JSON schema、错误码和常用示例
-- `tests/command/stash_test.rs` 已覆盖 push/pop/list/apply/drop、JSON 输出、错误码和仓库外调用
+- `tests/command/stash_test.rs` 已覆盖 push/pop/list/apply/drop、JSON 输出、错误码和仓库外调用（12 个 `#[test]` / `#[tokio::test]`）
 
 ### 基于当前代码的 Review 结论
 - 第四批对外契约已落地，代码、测试和命令文档已对齐

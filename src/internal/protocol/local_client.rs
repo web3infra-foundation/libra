@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::{
     errors::GitError,
-    hash::get_hash_kind,
+    hash::{HashKind, get_hash_kind, set_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -34,8 +34,14 @@ use super::{
 use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
-    internal::{branch::Branch, config::ConfigKv, head::Head, protocol::DiscRef, reflog},
-    utils::{object_ext::TreeExt, util::cur_dir},
+    internal::{
+        branch::Branch, config::ConfigKv, db::get_db_conn_instance_for_path, head::Head,
+        protocol::DiscRef, reflog, tag,
+    },
+    utils::{
+        object_ext::TreeExt,
+        util::{DATABASE, cur_dir},
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -107,6 +113,24 @@ impl Drop for RepoCurrentDirGuard {
                 "failed to restore working directory after local protocol operation"
             );
         }
+    }
+}
+
+struct HashKindRestoreGuard {
+    previous: HashKind,
+}
+
+impl HashKindRestoreGuard {
+    fn switch_to(hash_kind: HashKind) -> Self {
+        let previous = get_hash_kind();
+        set_hash_kind(hash_kind);
+        Self { previous }
+    }
+}
+
+impl Drop for HashKindRestoreGuard {
+    fn drop(&mut self) {
+        set_hash_kind(self.previous);
     }
 }
 
@@ -217,6 +241,37 @@ impl LocalClient {
         &self.repo_path
     }
 
+    async fn repo_hash_kind(&self) -> Result<HashKind, String> {
+        let db_path = self.repo_path.join(DATABASE);
+        let db_conn = get_db_conn_instance_for_path(&db_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to open local repository database '{}': {error}",
+                    db_path.display()
+                )
+            })?;
+        let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to read core.objectformat from local repository '{}': {error}",
+                    db_path.display()
+                )
+            })?
+            .map(|entry| entry.value)
+            .unwrap_or_else(|| "sha1".to_string());
+
+        match object_format.as_str() {
+            "sha1" => Ok(HashKind::Sha1),
+            "sha256" => Ok(HashKind::Sha256),
+            _ => Err(format!(
+                "unsupported object format '{object_format}' in local repository '{}'",
+                db_path.display()
+            )),
+        }
+    }
+
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
@@ -250,6 +305,10 @@ impl LocalClient {
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
+                    let repo_hash_kind =
+                        self.repo_hash_kind().await.map_err(GitError::CustomError)?;
+                    let _hash_guard = HashKindRestoreGuard::switch_to(repo_hash_kind);
+
                     let local_branches = Branch::list_branches_result(None)
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
@@ -268,18 +327,26 @@ impl LocalClient {
                     let head_commit = Head::current_commit_result()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let tags = tag::list()
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let mut tag_references = Vec::new();
+                    for tag in tags {
+                        tag_references.extend(tag_refs(tag).await?);
+                    }
                     Ok(DiscoveryResult {
                         refs: local_branches
                             .into_iter()
                             .chain(remote_branches)
                             .map(Into::into)
+                            .chain(tag_references)
                             .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
                                 _hash: hash,
                                 _ref: reflog::HEAD.to_string(),
                             }))
                             .collect::<Vec<_>>(),
                         capabilities: vec![],
-                        hash_kind: get_hash_kind(),
+                        hash_kind: repo_hash_kind,
                     })
                 })
                 .await
@@ -291,11 +358,12 @@ impl LocalClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         match self.source_type {
             RepoType::GitRepo => {
-                let body = generate_upload_pack_content(have, want, depth);
+                let body = generate_upload_pack_content(have, want, shallow, depth);
                 let mut child = Command::new("git-upload-pack");
                 child.arg("--stateless-rpc");
                 child.arg(&self.repo_path);
@@ -329,6 +397,9 @@ impl LocalClient {
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
+                    let repo_hash_kind = self.repo_hash_kind().await.map_err(IoError::other)?;
+                    let _hash_guard = HashKindRestoreGuard::switch_to(repo_hash_kind);
+
                     let mut seen = HashSet::new();
                     have.iter().for_each(|hash| {
                         seen.insert(hash.clone());
@@ -496,6 +567,53 @@ impl LocalClient {
     }
 }
 
+fn tag_object_hash(object: &tag::TagObject) -> String {
+    match object {
+        tag::TagObject::Commit(commit) => commit.id.to_string(),
+        tag::TagObject::Tag(tag) => tag.id.to_string(),
+        tag::TagObject::Tree(tree) => tree.id.to_string(),
+        tag::TagObject::Blob(blob) => blob.id.to_string(),
+    }
+}
+
+async fn tag_refs(tag: tag::Tag) -> Result<Vec<DiscRef>, GitError> {
+    let refname = format!("refs/tags/{}", tag.name);
+    let mut refs = vec![DiscRef {
+        _hash: tag_object_hash(&tag.object),
+        _ref: refname.clone(),
+    }];
+
+    if let tag::TagObject::Tag(tag_object) = tag.object {
+        refs.push(DiscRef {
+            _hash: peel_tag_object_hash(tag_object.object_hash, &refname).await?,
+            _ref: format!("{refname}^{{}}"),
+        });
+    }
+
+    Ok(refs)
+}
+
+async fn peel_tag_object_hash(
+    mut object_hash: git_internal::hash::ObjectHash,
+    refname: &str,
+) -> Result<String, GitError> {
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(object_hash) {
+            return Err(GitError::CustomError(format!(
+                "detected cycle while peeling tag '{refname}'"
+            )));
+        }
+
+        match tag::load_object_trait(&object_hash).await? {
+            tag::TagObject::Commit(commit) => return Ok(commit.id.to_string()),
+            tag::TagObject::Tree(tree) => return Ok(tree.id.to_string()),
+            tag::TagObject::Blob(blob) => return Ok(blob.id.to_string()),
+            tag::TagObject::Tag(tag) => object_hash = tag.object_hash,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsStr, fs, future::pending, process::Command as StdCommand};
@@ -642,7 +760,7 @@ mod tests {
 
         let want = vec![head];
         let have = Vec::new();
-        let stream = client.fetch_objects(&have, &want, None).await.unwrap();
+        let stream = client.fetch_objects(&have, &want, &[], None).await.unwrap();
         let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();

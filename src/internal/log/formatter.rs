@@ -1,3 +1,9 @@
+//! Formatting helpers for `libra log` output modes.
+//!
+//! Boundary: formatting consumes already-selected commits and decorations; revision
+//! walking and filtering live elsewhere. Command log tests cover empty history,
+//! decorate modes, date formats, and machine-readable output.
+
 use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
 

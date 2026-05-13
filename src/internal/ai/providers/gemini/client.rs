@@ -17,6 +17,9 @@ use crate::internal::ai::client::{Client as HttpClient, Provider};
 
 /// Gemini API provider that carries the API key and injects the
 /// `x-goog-api-key` authentication header into every request.
+///
+/// The `Debug` impl masks the secret to keep it out of `tracing` output and
+/// panic backtraces.
 #[derive(Clone)]
 pub struct GeminiProvider {
     api_key: String,
@@ -33,6 +36,9 @@ impl fmt::Debug for GeminiProvider {
 
 impl GeminiProvider {
     /// Creates a new GeminiProvider with the given API key.
+    ///
+    /// Boundary conditions: the key is not validated; an invalid key surfaces
+    /// at request time as an HTTP 403 from the Gemini API.
     pub fn new(api_key: String) -> Self {
         Self { api_key }
     }
@@ -56,6 +62,16 @@ pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
     /// Creates a Gemini Client from environment variables.
+    ///
+    /// Functional scope: reads `GEMINI_API_KEY` and points at the public
+    /// `generativelanguage.googleapis.com` endpoint.
+    ///
+    /// Boundary conditions: returns `env::VarError::NotPresent` when
+    /// `GEMINI_API_KEY` is unset so callers can render a friendly "no API key"
+    /// message; the CLI deliberately does not expose a base-URL override —
+    /// Gemini's public API has no stable proxy contract for end users.
+    /// Test-only consumers that need to point at a localhost stub should
+    /// use [`Client::with_base_url`].
     pub fn from_env() -> Result<Self, env::VarError> {
         let api_key = env::var("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);
@@ -65,9 +81,25 @@ impl Client {
         ))
     }
 
+    /// Creates a Gemini Client with a custom base URL and API key.
+    ///
+    /// Intended for tests that need to point the client at a localhost stub
+    /// (Wave 10 §5.2 boot smoke); the CLI never invokes this constructor —
+    /// `from_env` is the production entry point. A separate constructor
+    /// (rather than mutating `from_env`) keeps the production base URL
+    /// explicit and ensures CLI-driven configuration cannot accidentally
+    /// reroute requests to an arbitrary host.
+    pub fn with_base_url(base_url: &str, api_key: String) -> Self {
+        let provider = GeminiProvider::new(api_key);
+        Self::new(base_url, provider)
+    }
+
     /// Creates a [`CompletionModel`](super::completion::CompletionModel) bound
     /// to this client for the given Gemini model identifier (e.g.,
     /// `"gemini-2.5-flash"` or one of the constants from [`super`]).
+    ///
+    /// Boundary conditions: the model id is forwarded verbatim; unknown ids
+    /// fail at request time with a 404.
     pub fn completion_model(&self, model: &str) -> super::completion::CompletionModel {
         super::completion::CompletionModel::new(self.clone(), model)
     }

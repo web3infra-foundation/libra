@@ -1,3 +1,9 @@
+//! Prompt package builders for the formal AI runtime phases.
+//!
+//! Boundary: builders assemble provider-ready text from already-validated contracts;
+//! they do not decide workflow state transitions. Runtime contract tests check phase
+//! prompts for required context, acceptance gates, and missing-field handling.
+
 use super::contracts::{PromptPackage, WorkflowPhase};
 
 const PLAN_MODE_DEVELOPER_INSTRUCTIONS: &str = concat!(

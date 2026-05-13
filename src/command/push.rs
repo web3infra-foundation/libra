@@ -33,6 +33,7 @@ use crate::{
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
+        ai::automation::{VCS_EVENT_POST_PUSH, dispatch_current_repo_vcs_event_to_history},
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
         db::get_db_conn_instance,
@@ -346,8 +347,18 @@ pub async fn execute(args: PushArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates arguments, reads remote configuration,
-/// negotiates with the server, and sends local refs and pack data.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads current branch and remote configuration.
+/// - Negotiates with the remote server and uploads pack data/ref updates.
+/// - May update upstream tracking configuration when `--set-upstream` is used.
+/// - Renders push status in human or JSON form.
+///
+/// # Errors
+/// Returns [`CliError`] when arguments are incomplete, HEAD is detached, remote
+/// configuration is missing, authentication/network negotiation fails, pack data
+/// cannot be read, or upstream config cannot be written.
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         return Err(CliError::command_usage(
@@ -361,7 +372,11 @@ pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()
     }
 
     let result = run_push(args, output).await.map_err(CliError::from)?;
-    render_push_output(&result, output)
+    render_push_output(&result, output)?;
+    if !result.dry_run && !result.up_to_date && !result.updates.is_empty() {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

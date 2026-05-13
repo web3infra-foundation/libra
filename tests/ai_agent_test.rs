@@ -1,6 +1,14 @@
-//! L3 integration tests for the Gemini AI agent DAG execution and tool-use pipeline.
+//! L3 integration tests for the AI agent DAG execution and tool-use pipeline.
 //!
-//! **Layer:** L3 — requires `GEMINI_API_KEY`. Skipped silently when unset.
+//! Exercises end-to-end `dagrs` graph execution where one node feeds a prompt into a
+//! DeepSeek-backed `AgentAction`, optionally with registered tools. These tests live
+//! at the highest test layer because they reach a live LLM endpoint.
+//!
+//! **Layer:** L3 — gated on `DEEPSEEK_API_KEY` being set in the environment.
+//! Sourcing `.env.test` before `cargo test --all` is the documented activation
+//! path; the GitHub Actions L3 nightly job injects the same secret. With the
+//! key set the tests are expected to pass — failure here represents a real
+//! provider-client or runtime regression.
 
 use std::sync::{
     Arc,
@@ -13,12 +21,32 @@ use dagrs::{
 };
 use libra::internal::ai::{
     agent::AgentBuilder,
+    client::CompletionClient,
     node_adapter::AgentAction,
-    providers::gemini::Client,
+    providers::deepseek::Client,
     tools::{Tool, ToolDefinition, ToolSet},
 };
 use serde_json::json;
 
+/// L3 model used by every DeepSeek-backed integration test in this crate.
+///
+/// `deepseek-v4-flash` is the cheap / fast tier that matches what
+/// `.env.test`-backed local runs and the GitHub Actions L3 nightly job pay
+/// for. Tests must not silently switch to a costlier tier (e.g.
+/// `deepseek-v4-pro`) without a deliberate per-test override.
+const DEEPSEEK_TEST_MODEL: &str = "deepseek-v4-flash";
+
+/// Return `true` when the DeepSeek live gate is satisfied — i.e. a non-empty
+/// `DEEPSEEK_API_KEY` is in the process environment. Sourcing `.env.test`
+/// before `cargo test --all` is the documented way to enable L3 AI tests.
+fn deepseek_live_enabled() -> bool {
+    std::env::var("DEEPSEEK_API_KEY").is_ok_and(|value| !value.trim().is_empty())
+}
+
+/// Trivial `Action` that broadcasts a fixed prompt as the source node of the DAG.
+///
+/// Used as the upstream node feeding the LLM-backed agent under test. Holding the
+/// prompt as owned `String` keeps it self-contained inside the spawned task.
 struct InputGenerator {
     prompt: String,
 }
@@ -37,27 +65,32 @@ impl Action for InputGenerator {
     }
 }
 
-/// Integration test for Gemini agent execution.
+/// Integration test for DeepSeek agent execution.
+///
+/// Scenario: builds a two-node DAG where an `InputGenerator` feeds a prompt into a
+/// DeepSeek-backed `AgentAction`, runs the graph against the live DeepSeek API, and
+/// asserts that a non-empty translation comes back. This exercises the boundary
+/// between the agent runtime and the provider client.
+///
+/// Boundary: skipped when `DEEPSEEK_API_KEY` is unset. With the key set the
+/// test reaches `https://api.deepseek.com/v1/chat/completions` and is
+/// expected to pass.
 ///
 /// # Setup
-/// This test requires a valid `GEMINI_API_KEY` environment variable.
-/// The test will be skipped if the key is not set.
 ///
 /// ```bash
-/// export GEMINI_API_KEY="your_key_here"
-/// cargo test --test ai_agent_test test_gemini_agent_execution
+/// source .env.test && cargo test --test ai_agent_test test_deepseek_agent_execution
 /// ```
 #[tokio::test]
-async fn test_gemini_agent_execution() {
-    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (GEMINI_API_KEY not set)");
+async fn test_deepseek_agent_execution() {
+    if !deepseek_live_enabled() {
+        eprintln!("skipped (set DEEPSEEK_API_KEY to run the DeepSeek L3 gate)");
         return;
     }
 
-    // 1. Create Gemini Agent
-    let client = Client::from_env().expect("Failed to create client from env");
-    // Use flash model for speed/cost in tests
-    let model = client.completion_model("gemini-2.5-flash");
+    // 1. Create DeepSeek Agent
+    let client = Client::from_env().expect("DEEPSEEK_API_KEY missing despite gate");
+    let model = client.completion_model(DEEPSEEK_TEST_MODEL);
 
     let agent = AgentBuilder::new(model)
         .preamble("You are a translator. Translate the input to Spanish.")
@@ -104,6 +137,11 @@ async fn test_gemini_agent_execution() {
     }
 }
 
+/// Test fixture tool that records whether the agent invoked it.
+///
+/// The `called` flag is shared with the test harness via `Arc<AtomicBool>` so the
+/// assertion can detect whether the model actually emitted a function call instead of
+/// answering directly in natural language.
 struct WeatherTool {
     called: Arc<AtomicBool>,
 }
@@ -139,26 +177,33 @@ impl Tool for WeatherTool {
     }
 }
 
-/// Integration test for Gemini agent execution with Tools.
+/// Integration test for DeepSeek agent execution with Tools.
+///
+/// Scenario: registers a fixture `WeatherTool`, drives the agent with a prompt that
+/// would naturally call it, and asserts the response either invokes the tool or at
+/// minimum produces a plausible weather-shaped answer. This is intentionally lenient
+/// because tool-call routing is non-deterministic across provider revisions — the
+/// test exists to guard the wiring (tool spec is reachable, response shape is
+/// parseable), not the model's behavior.
+///
+/// Boundary: skipped when `DEEPSEEK_API_KEY` is unset, matching
+/// [`test_deepseek_agent_execution`].
 ///
 /// # Setup
-/// This test requires a valid `GEMINI_API_KEY` environment variable.
 ///
 /// ```bash
-/// export GEMINI_API_KEY="your_key_here"
-/// cargo test --test ai_agent_test test_gemini_agent_with_tools
+/// source .env.test && cargo test --test ai_agent_test test_deepseek_agent_with_tools
 /// ```
 #[tokio::test]
-async fn test_gemini_agent_with_tools() {
-    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (GEMINI_API_KEY not set)");
+async fn test_deepseek_agent_with_tools() {
+    if !deepseek_live_enabled() {
+        eprintln!("skipped (set DEEPSEEK_API_KEY to run the DeepSeek L3 gate)");
         return;
     }
 
-    // 1. Create Gemini Agent
-    let client = Client::from_env().expect("Failed to create client from env");
-    // Use flash model for speed/cost in tests
-    let model = client.completion_model("gemini-2.5-flash");
+    // 1. Create DeepSeek Agent
+    let client = Client::from_env().expect("DEEPSEEK_API_KEY missing despite gate");
+    let model = client.completion_model(DEEPSEEK_TEST_MODEL);
 
     let tool_called = Arc::new(AtomicBool::new(false));
 

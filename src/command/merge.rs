@@ -103,8 +103,19 @@ pub async fn execute(args: MergeArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Resolves the merge target, performs fast-forward or
-/// recursive merge, stages results, and updates refs.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Resolves and reads the current and target commits.
+/// - Performs a fast-forward merge for supported cases.
+/// - Updates HEAD/current branch and restores the working tree to the merged
+///   tree state.
+/// - Emits merge status text through [`OutputConfig`].
+///
+/// # Errors
+/// Returns [`CliError`] when the target is invalid, histories are unrelated,
+/// manual merge is required, objects cannot be read, or HEAD/worktree updates
+/// fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
     let result = match run_merge_for_pull(&args.branch, &args.branch, output).await {
         Ok(result) => result,

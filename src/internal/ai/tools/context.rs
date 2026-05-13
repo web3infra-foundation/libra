@@ -215,16 +215,31 @@ impl ToolOutput {
     pub fn log_preview(&self) -> String {
         const MAX_PREVIEW_LENGTH: usize = 500;
         match self {
-            ToolOutput::Function { content, .. } => {
-                if content.len() <= MAX_PREVIEW_LENGTH {
-                    content.clone()
-                } else {
-                    format!("{}... (truncated)", &content[..MAX_PREVIEW_LENGTH])
-                }
+            ToolOutput::Function { content, .. } => log_preview_text(content, MAX_PREVIEW_LENGTH),
+            ToolOutput::Mcp { result } => {
+                log_preview_text(&format!("{:?}", result), MAX_PREVIEW_LENGTH)
             }
-            ToolOutput::Mcp { result } => format!("{:?}", result),
         }
     }
+}
+
+fn log_preview_text(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        content.to_string()
+    } else {
+        format!(
+            "{}... (truncated)",
+            truncate_to_utf8_boundary(content, max_bytes)
+        )
+    }
+}
+
+fn truncate_to_utf8_boundary(content: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
 }
 
 /// Arguments for the read_file tool.
@@ -292,11 +307,11 @@ fn default_depth() -> usize {
 pub struct ShellArgs {
     /// Shell command or script to execute (runs in the user's default shell).
     pub command: String,
-    /// Working directory for the command. Must be an absolute path within the
-    /// sandbox working directory. Defaults to the registry's working directory.
+    /// Working directory for the command. May be absolute or sandbox-relative,
+    /// and must remain within the sandbox working directory.
     #[serde(default)]
     pub workdir: Option<String>,
-    /// Timeout in milliseconds. Defaults to 10,000 ms (10 seconds).
+    /// Timeout in milliseconds. Defaults to 60,000 ms (60 seconds).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     /// Controls whether the command uses sandbox defaults or requests escalation.
@@ -326,6 +341,21 @@ pub struct GrepFilesArgs {
 
 fn default_grep_limit() -> usize {
     100
+}
+
+/// Arguments for the web_search tool.
+#[derive(Clone, Deserialize, Debug)]
+pub struct WebSearchArgs {
+    /// Search query to send to the web search provider.
+    #[serde(alias = "q")]
+    pub query: String,
+    /// Maximum number of results to return (default: 5, max enforced by handler).
+    #[serde(default = "default_web_search_limit")]
+    pub limit: usize,
+}
+
+fn default_web_search_limit() -> usize {
+    5
 }
 
 // ── update_plan types ──────────────────────────────────────────────────
@@ -358,6 +388,25 @@ pub struct UpdatePlanArgs {
     pub plan: Vec<PlanStep>,
 }
 
+// ── submit_plan_draft types ───────────────────────────────────────────
+
+/// One provider-proposed step title for an execution plan draft.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanDraftStep {
+    /// Human-readable draft step title.
+    pub title: String,
+}
+
+/// Arguments for the `submit_plan_draft` tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubmitPlanDraftArgs {
+    /// Optional explanation for the proposed draft.
+    #[serde(default)]
+    pub explanation: Option<String>,
+    /// Ordered provider-proposed draft steps. Runtime status is intentionally absent.
+    pub steps: Vec<PlanDraftStep>,
+}
+
 // ── submit_intent_draft types ─────────────────────────────────────────
 
 /// Arguments for the `submit_intent_draft` tool.
@@ -365,6 +414,44 @@ pub struct UpdatePlanArgs {
 pub struct SubmitIntentDraftArgs {
     /// Structured draft used by the program to resolve a complete IntentSpec.
     pub draft: IntentDraft,
+}
+
+// ── submit_task_complete types ────────────────────────────────────────
+
+/// Final outcome of a task declared via `submit_task_complete`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompleteResult {
+    /// All acceptance criteria are verified to pass.
+    Pass,
+    /// Task is blocked or at least one required criterion failed.
+    Fail,
+    /// Existing workspace state already satisfies the criteria; no edits applied.
+    NoChangesNeeded,
+}
+
+/// One acceptance-check evidence entry attached to `submit_task_complete`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskCompleteEvidence {
+    /// The exact shell command that was executed for verification.
+    pub command: String,
+    /// Exit code returned by the command.
+    pub exit_code: i32,
+    /// Short excerpt of stdout/stderr supporting the verdict.
+    #[serde(default)]
+    pub output_excerpt: Option<String>,
+}
+
+/// Arguments for the `submit_task_complete` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SubmitTaskCompleteArgs {
+    /// Final outcome of the task.
+    pub result: TaskCompleteResult,
+    /// Human-readable summary of what was done and what evidence supports `result`.
+    pub summary: String,
+    /// Optional acceptance-check evidence. Empty for `no_changes_needed`/analysis tasks.
+    #[serde(default)]
+    pub evidence: Vec<TaskCompleteEvidence>,
 }
 
 // ── request_user_input types ───────────────────────────────────────────
@@ -662,6 +749,16 @@ mod tests {
         let preview = output.log_preview();
         assert!(preview.len() < long_content.len());
         assert!(preview.contains("truncated"));
+    }
+
+    #[test]
+    fn test_log_preview_truncates_at_utf8_boundary() {
+        let content = format!("{}├suffix", "x".repeat(498));
+        let output = ToolOutput::success(content);
+        let preview = output.log_preview();
+
+        assert!(preview.contains("truncated"));
+        assert!(preview.is_char_boundary(preview.len()));
     }
 
     #[test]

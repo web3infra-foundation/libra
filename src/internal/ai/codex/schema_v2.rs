@@ -1,3 +1,10 @@
+//! Hand-maintained Codex protocol schema types that complement the generated v2
+//! schema module.
+//!
+//! Boundary: these types must stay wire-compatible with the generated protocol and
+//! tolerate unknown provider fields where possible. Mock Codex integration tests cover
+//! tool-call, message, and streaming edge cases.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

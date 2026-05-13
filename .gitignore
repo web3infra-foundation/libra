@@ -21,17 +21,18 @@ target-codex-review/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 .vscode/
-.claude/
 .qwen/
 .trellis/
 .cursor/
 .agent/
 .agents/
+.air/
 
 # Generated when moving Windows files to WSL
 *:Zone.Identifier
 
 .libra
+.pnpm-store/
 
 # Test credentials (never commit)
 .env.test
@@ -43,7 +44,27 @@ web/.next/
 web/out/
 web/.pnpm-store/
 
+# Publish Worker (Phase 6/7)
+worker/node_modules/
+worker/.next/
+worker/.open-next/
+worker/.wrangler/
+worker/.turbo/
+worker/.pnpm-store/
+worker/test-results/
+worker/playwright-report/
+worker/.next-types/
+worker/.dev.vars
+worker/.dev.vars.*
+worker/cloudflare-env.d.ts
+worker/*.tsbuildinfo
+worker/coverage/
+
 # Mac
 .DS_Store
 .gemini/
 gha-creds-*.json
+
+# AI
+.codex
+.claude

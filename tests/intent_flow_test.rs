@@ -1,6 +1,13 @@
 //! Intent specification flow tests covering draft, resolve, validate, and repair stages.
 //!
-//! **Layer:** L1 — deterministic, no external dependencies.
+//! Pins the v0.7 contract that Intent, IntentEvent, and Task objects all live on the
+//! single AI ref `refs/libra/intent` (now stored in SQLite), share a `HistoryManager`,
+//! and round-trip through `LocalStorage::put_tracked` / `get_json`. Covers the parent
+//! linkage between root and child intents, the `IntentEventKind::Analyzed` lifecycle
+//! marker, and confirms Task and Intent coexist on the same branch.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies. `#[serial]` because
+//! `ChangeDirGuard` mutates the process CWD.
 
 use std::sync::Arc;
 
@@ -19,11 +26,19 @@ use tempfile::tempdir;
 
 /// Integration test: Intent and Task objects share the single AI branch (refs/libra/intent).
 ///
-/// Verifies:
-/// 1. `init_branch()` creates the AI ref at startup.
-/// 2. Intent objects are stored and retrievable from the AI branch.
-/// 3. Task objects share the same AI branch.
-/// 4. Both object types coexist under a single `refs/libra/intent` ref.
+/// Scenario: in a fresh temp-dir Libra repo, walk through the Intent flow end to end.
+/// Asserts:
+/// 1. `init` does NOT create the legacy on-disk `refs/libra/intent` file (it is in
+///    the SQLite DB) and the legacy `refs/libra/history` file is also absent.
+/// 2. Storing a root Intent and a child Intent (via `Intent::new_revision_from`)
+///    succeeds and the child references the root via `parents()`.
+/// 3. `IntentEvent::new` records lifecycle events (`Analyzed`) and round-trips
+///    through `get_json`.
+/// 4. A Task created via the same `HistoryManager` lands on the same branch — the
+///    list filter sees 2 intents, 1 intent event, and 1 task.
+/// 5. The AI branch HEAD resolves to a single hash after all writes.
+///
+/// `#[serial]` because `ChangeDirGuard` mutates process CWD.
 #[tokio::test]
 #[serial]
 async fn test_intent_flow() {

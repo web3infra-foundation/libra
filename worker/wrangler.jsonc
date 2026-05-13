@@ -1,0 +1,52 @@
+// Wrangler configuration for the Libra publish Worker.
+//
+// This file is materialised by `libra publish init` from the embedded
+// template (Phase 6/7). After init the user owns the file: `libra
+// publish deploy` only validates that LIBRA-MANAGED bindings still
+// declare LIBRA_PUBLISH_DB / LIBRA_PUBLISH_BUCKET / ASSETS, never
+// silently overwrites user edits.
+//
+// Cloudflare API tokens MUST NOT be written here. Place credentials
+// in `.dev.vars` (local dev) or Cloudflare dashboard / wrangler
+// secrets (deployed). Add `.dev.vars` to `.gitignore`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "libra-publish",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-05-07",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  "d1_databases": [
+    {
+      "binding": "LIBRA_PUBLISH_DB",
+      "database_name": "libra-publish",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "LIBRA_PUBLISH_BUCKET",
+      "bucket_name": "libra-publish"
+    }
+  ],
+
+  // CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are required for
+  // private visibility sites. The Worker fails closed (403) when
+  // either is missing or when the JWT cannot be validated. Set
+  // these via `wrangler secret put` for production deployments
+  // rather than committing them here. There is no "skip Access"
+  // var: private sites always require a valid Access JWT.
+  "vars": {},
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

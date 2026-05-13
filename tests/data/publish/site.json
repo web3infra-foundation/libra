@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "repoId": "11111111-2222-3333-4444-555555555555",
+  "cloneDomain": "code.example.com",
+  "slug": "libra-demo",
+  "displayOrigin": "https://code.example.com",
+  "name": "Libra Demo",
+  "visibility": "private",
+  "status": "active",
+  "workerName": "libra-publish",
+  "defaultRef": "refs/heads/main",
+  "latestRevisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "refsGeneration": 7,
+  "maxPreviewBytes": 1048576,
+  "createdAt": "2026-05-09T12:00:00Z",
+  "updatedAt": "2026-05-09T13:30:00Z"
+}

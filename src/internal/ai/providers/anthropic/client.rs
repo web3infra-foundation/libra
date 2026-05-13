@@ -20,6 +20,10 @@ use crate::internal::ai::client::{Client as GenericClient, Provider};
 
 /// Anthropic API provider that carries the API key and injects
 /// authentication headers into every request.
+///
+/// Cloning is cheap (the `String` is a single heap allocation) so the type is
+/// freely clonable into background tasks. The `Debug` impl masks the key so it
+/// cannot leak through `tracing` or panic messages.
 #[derive(Clone)]
 pub struct AnthropicProvider {
     api_key: String,
@@ -35,11 +39,18 @@ impl fmt::Debug for AnthropicProvider {
 
 impl AnthropicProvider {
     /// Creates a new Anthropic provider with the given API key.
+    ///
+    /// Boundary conditions:
+    /// - The API key is not validated here; the first request will fail with a
+    ///   401 if the key is malformed or missing privileges.
     pub fn new(api_key: String) -> Self {
         Self { api_key }
     }
 
     /// Returns the API key.
+    ///
+    /// Boundary conditions:
+    /// - Avoid logging the returned slice; prefer the `Debug` impl which masks it.
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
@@ -68,8 +79,14 @@ pub type Client = GenericClient<AnthropicProvider>;
 impl Client {
     /// Creates an Anthropic client from environment variables.
     ///
-    /// Reads the `ANTHROPIC_API_KEY` environment variable.
-    /// Also supports `ANTHROPIC_BASE_URL` for custom endpoints.
+    /// Functional scope:
+    /// - Reads `ANTHROPIC_API_KEY` (required).
+    /// - Falls back to `https://api.anthropic.com` when `ANTHROPIC_BASE_URL` is unset.
+    ///
+    /// Boundary conditions:
+    /// - Returns `std::env::VarError::NotPresent` when `ANTHROPIC_API_KEY` is missing
+    ///   so callers can surface a friendly "no API key" message.
+    /// - `ANTHROPIC_BASE_URL`, when set, is forwarded verbatim — no scheme validation.
     pub fn from_env() -> Result<Self, std::env::VarError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")?;
         let base_url = std::env::var("ANTHROPIC_BASE_URL")
@@ -80,12 +97,18 @@ impl Client {
     }
 
     /// Creates an Anthropic client with the given API key.
+    ///
+    /// Functional scope: Convenience constructor that always uses Anthropic's
+    /// production base URL. Use [`Client::with_base_url`] for self-hosted gateways.
     pub fn with_api_key(api_key: String) -> Self {
         let provider = AnthropicProvider::new(api_key);
         Self::new("https://api.anthropic.com", provider)
     }
 
     /// Creates an Anthropic client with a custom base URL and API key.
+    ///
+    /// Functional scope: Useful for routing through enterprise gateways (e.g. an
+    /// Anthropic-compatible proxy or a regional endpoint).
     pub fn with_base_url(base_url: &str, api_key: String) -> Self {
         let provider = AnthropicProvider::new(api_key);
         Self::new(base_url, provider)
@@ -96,6 +119,8 @@ impl Client {
 mod tests {
     use super::*;
 
+    /// Scenario: Debug formatting must never leak the API key, otherwise it would
+    /// surface in panic backtraces and `tracing` spans during incident debugging.
     #[test]
     fn test_anthropic_provider_debug() {
         let provider = AnthropicProvider::new("sk-ant-test-key".to_string());
@@ -104,6 +129,8 @@ mod tests {
         assert!(debug_str.contains("***"));
     }
 
+    /// Scenario: `api_key()` is the documented escape hatch for tests and
+    /// alternative auth flows. This guards the round-trip from constructor to getter.
     #[test]
     fn test_anthropic_provider_api_key() {
         let provider = AnthropicProvider::new("sk-ant-test-key".to_string());

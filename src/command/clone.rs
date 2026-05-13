@@ -17,6 +17,7 @@ use git_internal::{
 };
 use sea_orm::DatabaseTransaction;
 use serde::Serialize;
+use url::Url;
 
 use super::fetch::{self, RemoteSpecErrorKind};
 use crate::{
@@ -27,7 +28,9 @@ use crate::{
     },
     internal::{
         branch::{self, Branch},
-        config::{ConfigKv, RemoteConfig},
+        config::{
+            ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value_decrypted,
+        },
         db::get_db_conn_instance,
         head::Head,
         protocol::DiscoveryResult,
@@ -35,6 +38,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
+        ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
         util,
     },
@@ -118,6 +122,9 @@ pub struct CloneOutput {
     pub shallow: bool,
     /// Non-fatal warnings (empty remote, init warnings, etc.).
     pub warnings: Vec<String>,
+    /// Worktree-relative paths of `.libraignore` files written by converting
+    /// `.gitignore` files from the source repository.  Empty for bare clones.
+    pub gitignore_converted: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +157,42 @@ pub enum CloneError {
     FetchFailed { source: fetch::FetchError },
     #[error("failed to checkout working tree")]
     CheckoutFailed { source: RestoreError },
+    #[error("failed to convert ignore files")]
+    IgnoreFile {
+        source: ignore_utils::IgnoreFileError,
+    },
     #[error("failed to complete clone setup: {message}")]
     SetupFailed { message: String },
+    #[error("clone domain '{domain}' is not configured for libra+cloud restore")]
+    CloudCloneDomainNotConfigured {
+        domain: String,
+        missing_keys: String,
+    },
+    #[error("failed to read clone domain '{domain}' configuration: {source}")]
+    CloudCloneDomainConfigRead {
+        domain: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("{option} is not supported with libra+cloud:// clone sources: {reason}")]
+    UnsupportedCloudCloneOption {
+        option: &'static str,
+        reason: &'static str,
+        hint: &'static str,
+    },
+    #[error(
+        "libra+cloud:// clone source recognised, but Phase 5 of \
+         docs/improvement/publish.md is not yet implemented; tracking \
+         the v1 release window for `libra clone {input}`"
+    )]
+    CloudPublishSourceNotYetImplemented {
+        input: String,
+        target: String,
+        selector: Option<String>,
+        config_details: Vec<(&'static str, String)>,
+    },
+    #[error("invalid libra+cloud clone source '{input}': {reason}")]
+    InvalidCloudPublishSource { input: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -202,9 +243,84 @@ impl From<CloneError> for CliError {
                 .with_hint("run 'libra status' to verify the local repository state"),
             CloneError::FetchFailed { source } => map_fetch_error(source),
             CloneError::CheckoutFailed { source } => map_checkout_error(source),
+            CloneError::IgnoreFile { source } => {
+                let stable_code = if source.is_write() {
+                    StableErrorCode::IoWriteFailed
+                } else {
+                    StableErrorCode::IoReadFailed
+                };
+                CliError::fatal(source.to_string())
+                    .with_stable_code(stable_code)
+                    .with_hint(source.recovery_hint())
+            }
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("please report this issue at: {ISSUE_URL}")),
+            CloneError::CloudCloneDomainNotConfigured {
+                ref domain,
+                ref missing_keys,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("missing_keys", missing_keys.clone())
+                .with_hint(format!(
+                    "configure cloud.clone_domains.{domain}.account_id, \
+                     cloud.clone_domains.{domain}.d1_database_id, and \
+                     cloud.clone_domains.{domain}.r2_bucket before cloning this source."
+                )),
+            CloneError::CloudCloneDomainConfigRead { ref domain, .. } => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_hint("check the local/global Libra config database and vault state.")
+            }
+            CloneError::UnsupportedCloudCloneOption {
+                ref option,
+                ref hint,
+                ..
+            } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_detail("option", option.to_string())
+                .with_hint(hint.to_string()),
+            CloneError::CloudPublishSourceNotYetImplemented {
+                ref target,
+                ref selector,
+                ref config_details,
+                ..
+            } => {
+                // Codex pass-7 P1: surface the recognised but
+                // unimplemented Cloudflare publish clone source as a
+                // fatal CLI error so the user sees a precise message
+                // instead of falling through to the generic remote
+                // discovery path. Phase 5 of
+                // docs/improvement/publish.md lands the actual
+                // implementation; until then this acts as a clean
+                // surface for forward compatibility.
+                let mut cli = CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_detail("cloud_target", target.clone())
+                    .with_hint(
+                        "Phase 5 of docs/improvement/publish.md is in progress; \
+                         use the local CLI's existing `libra cloud restore` flow \
+                         (or wait for the v1 release) to recover the repository.",
+                    );
+                if let Some(selector) = selector {
+                    cli = cli.with_detail("cloud_selector", selector.clone());
+                }
+                for (key, value) in config_details {
+                    cli = cli.with_detail(*key, value.clone());
+                }
+                cli
+            }
+            CloneError::InvalidCloudPublishSource { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint(
+                        "use `libra+cloud://<clone-domain>/<slug>` or \
+                         `libra+cloud://<clone-domain>/repo/<repo_id>`; pass only one of \
+                         `?ref=<branch|tag|full-ref>` or `?revision=<oid|latest>`",
+                    )
+            }
         }
     }
 }
@@ -316,6 +432,14 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("checkout required downloading LFS content, but the transfer failed")
         }
+        // `clone` never resolves user revisions, so the locked-source guard
+        // in `restore::run_restore` is unreachable here. Surface a fatal
+        // diagnostic rather than panicking on the unreachable branch — keeps
+        // the match exhaustive without burying the case.
+        RestoreError::LockedSource(name) => CliError::fatal(format!(
+            "internal error: clone checkout attempted to restore from locked branch '{name}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 
@@ -430,9 +554,19 @@ pub async fn execute(args: CloneArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Fetches objects from a remote URL, writes refs/config,
-/// and checks out the working tree. Restores the original working directory on
-/// failure.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Creates the destination repository layout and object storage.
+/// - Fetches objects from the remote URL and writes refs/config.
+/// - Checks out the working tree for non-bare clones.
+/// - Restores the original process working directory after success or failure.
+/// - May remove the partially created destination when clone cleanup is needed.
+///
+/// # Errors
+/// Returns [`CliError`] when destination validation fails, remote negotiation or
+/// object transfer fails, refs/config cannot be written, checkout fails, cleanup
+/// fails, or the original working directory cannot be restored.
 ///
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
@@ -504,6 +638,18 @@ fn render_clone_result(result: &CloneOutput, output: &OutputConfig) -> CliResult
         );
     }
 
+    // .gitignore → .libraignore conversion tip.
+    if !result.gitignore_converted.is_empty() {
+        println!();
+        let n = result.gitignore_converted.len();
+        let plural = if n == 1 { "" } else { "s" };
+        println!(
+            "Tip: {n} .gitignore file{plural} converted to .libraignore — \
+             run 'libra add .libraignore' (or 'libra add -A') to track them, \
+             then 'libra commit' to record the change."
+        );
+    }
+
     // Warnings on stderr.
     for w in &result.warnings {
         eprintln!("warning: {w}");
@@ -536,6 +682,32 @@ async fn execute_clone_inner(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, (CloneError, Option<String>)> {
+    // Codex pass-7 P1: intercept the Cloudflare publish source scheme
+    // before generic remote discovery. Phase 5 of
+    // `docs/improvement/publish.md` lands the actual D1/R2 restore
+    // path; until then we fail with a clear "not yet implemented"
+    // error pointing the user at the Phase 5 release window. This
+    // prevents a `libra+cloud://...` URL from falling into the
+    // generic Git fetch path and emitting a confusing protocol
+    // error.
+    if args.remote_repo.starts_with("libra+cloud://") {
+        let source =
+            parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
+        validate_cloud_clone_option_compatibility(args).map_err(|error| (error, None))?;
+        let clone_config = load_cloud_clone_domain_config(&source)
+            .await
+            .map_err(|error| (error, None))?;
+        return Err((
+            CloneError::CloudPublishSourceNotYetImplemented {
+                input: args.remote_repo.clone(),
+                target: source.target_label(),
+                selector: source.selector_label(),
+                config_details: clone_config.into_error_details(source.clone_domain),
+            },
+            None,
+        ));
+    }
+
     let mut remote_repo = args.remote_repo.clone();
     if !remote_repo.ends_with('/') {
         remote_repo.push('/');
@@ -640,6 +812,329 @@ async fn execute_clone_inner(
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CloudPublishSource {
+    clone_domain: String,
+    target: CloudPublishTarget,
+    selector: Option<CloudPublishSelector>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CloudPublishTarget {
+    Slug(String),
+    RepoId(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CloudPublishSelector {
+    Ref(String),
+    Revision(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CloudCloneDomainConfig {
+    account_id: String,
+    d1_database_id: String,
+    r2_bucket: String,
+    credential_profile: Option<String>,
+}
+
+impl CloudCloneDomainConfig {
+    fn into_error_details(self, clone_domain: String) -> Vec<(&'static str, String)> {
+        let mut details = vec![
+            ("clone_domain", clone_domain),
+            ("cloud_account_id", self.account_id),
+            ("cloud_d1_database_id", self.d1_database_id),
+            ("cloud_r2_bucket", self.r2_bucket),
+        ];
+        if let Some(credential_profile) = self.credential_profile {
+            details.push(("cloud_credential_profile", credential_profile));
+        }
+        details
+    }
+}
+
+impl CloudPublishSource {
+    fn target_label(&self) -> String {
+        match &self.target {
+            CloudPublishTarget::Slug(slug) => format!("slug:{slug}"),
+            CloudPublishTarget::RepoId(repo_id) => format!("repo:{repo_id}"),
+        }
+    }
+
+    fn selector_label(&self) -> Option<String> {
+        self.selector.as_ref().map(|selector| match selector {
+            CloudPublishSelector::Ref(value) => format!("ref:{value}"),
+            CloudPublishSelector::Revision(value) => format!("revision:{value}"),
+        })
+    }
+}
+
+fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
+    let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
+        input: input.to_string(),
+        reason: format!("URL parse failed: {source}"),
+    })?;
+    if url.scheme() != "libra+cloud" {
+        return Err(invalid_cloud_source(input, "scheme must be libra+cloud"));
+    }
+
+    let clone_domain = url
+        .host_str()
+        .ok_or_else(|| invalid_cloud_source(input, "clone domain is required"))?;
+    validate_cloud_clone_domain(input, clone_domain)?;
+    let clone_domain = clone_domain.to_ascii_lowercase();
+
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let target = match segments.as_slice() {
+        [] | [""] => return Err(invalid_cloud_source(input, "slug or repo_id is required")),
+        [slug] => {
+            validate_cloud_slug(input, slug, "slug")?;
+            CloudPublishTarget::Slug((*slug).to_string())
+        }
+        ["repo", repo_id] => {
+            validate_cloud_slug(input, repo_id, "repo_id")?;
+            CloudPublishTarget::RepoId((*repo_id).to_string())
+        }
+        _ => {
+            return Err(invalid_cloud_source(
+                input,
+                "path must be /<slug> or /repo/<repo_id>",
+            ));
+        }
+    };
+
+    let mut ref_selector: Option<String> = None;
+    let mut revision_selector: Option<String> = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "ref" => {
+                if ref_selector.replace(value.into_owned()).is_some() {
+                    return Err(invalid_cloud_source(
+                        input,
+                        "ref selector appears more than once",
+                    ));
+                }
+            }
+            "revision" => {
+                if revision_selector.replace(value.into_owned()).is_some() {
+                    return Err(invalid_cloud_source(
+                        input,
+                        "revision selector appears more than once",
+                    ));
+                }
+            }
+            other => {
+                return Err(invalid_cloud_source(
+                    input,
+                    &format!("unsupported query parameter '{other}'"),
+                ));
+            }
+        }
+    }
+    if ref_selector.is_some() && revision_selector.is_some() {
+        return Err(invalid_cloud_source(
+            input,
+            "ref and revision selectors are mutually exclusive",
+        ));
+    }
+    let selector = if let Some(selector) = ref_selector {
+        validate_cloud_ref_selector(input, &selector)?;
+        Some(CloudPublishSelector::Ref(selector))
+    } else if let Some(selector) = revision_selector {
+        validate_cloud_revision_selector(input, &selector)?;
+        Some(CloudPublishSelector::Revision(selector))
+    } else {
+        None
+    };
+
+    Ok(CloudPublishSource {
+        clone_domain,
+        target,
+        selector,
+    })
+}
+
+fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), CloneError> {
+    if args.branch.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--branch",
+            reason: "cloud source refs are selected in the source URL, not with Git branch flags",
+            hint: "use `?ref=<branch|tag|full-ref>` on the libra+cloud:// URL instead of `--branch`.",
+        });
+    }
+    if args.depth.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--depth",
+            reason: "Cloudflare restore must download the complete published object set",
+            hint: "`--depth` is only supported for Git remotes; omit it for libra+cloud:// sources.",
+        });
+    }
+    if args.single_branch {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--single-branch",
+            reason: "Cloudflare restore must preserve all published refs in the local repository",
+            hint: "`--single-branch` is only supported for Git remotes; use `?ref=<branch|tag|full-ref>` to select the checkout target.",
+        });
+    }
+    if args.bare {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--bare",
+            reason: "Cloudflare restore currently targets a non-bare working repository",
+            hint: "`--bare` is only supported for Git remotes until libra+cloud:// restore grows bare-repository support.",
+        });
+    }
+    Ok(())
+}
+
+async fn load_cloud_clone_domain_config(
+    source: &CloudPublishSource,
+) -> Result<CloudCloneDomainConfig, CloneError> {
+    let required_suffixes = ["account_id", "d1_database_id", "r2_bucket"];
+    let mut missing_keys = Vec::new();
+    let local_target = clone_config_local_target();
+    let mut account_id = None;
+    let mut d1_database_id = None;
+    let mut r2_bucket = None;
+
+    for suffix in required_suffixes {
+        let key = format!("cloud.clone_domains.{}.{}", source.clone_domain, suffix);
+        match read_cascaded_config_value_decrypted(local_target, &key).await {
+            Ok(Some(value)) => match suffix {
+                "account_id" => account_id = Some(value),
+                "d1_database_id" => d1_database_id = Some(value),
+                "r2_bucket" => r2_bucket = Some(value),
+                _ => {}
+            },
+            Ok(None) => missing_keys.push(key),
+            Err(source_error) => {
+                return Err(CloneError::CloudCloneDomainConfigRead {
+                    domain: source.clone_domain.clone(),
+                    source: source_error,
+                });
+            }
+        }
+    }
+
+    if !missing_keys.is_empty() {
+        return Err(CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: missing_keys.join(", "),
+        });
+    }
+
+    let credential_profile_key = format!(
+        "cloud.clone_domains.{}.credential_profile",
+        source.clone_domain
+    );
+    let credential_profile =
+        read_cascaded_config_value_decrypted(local_target, &credential_profile_key)
+            .await
+            .map_err(|source_error| CloneError::CloudCloneDomainConfigRead {
+                domain: source.clone_domain.clone(),
+                source: source_error,
+            })?;
+
+    Ok(CloudCloneDomainConfig {
+        account_id: account_id.ok_or_else(|| CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: format!("cloud.clone_domains.{}.account_id", source.clone_domain),
+        })?,
+        d1_database_id: d1_database_id.ok_or_else(|| {
+            CloneError::CloudCloneDomainNotConfigured {
+                domain: source.clone_domain.clone(),
+                missing_keys: format!("cloud.clone_domains.{}.d1_database_id", source.clone_domain),
+            }
+        })?,
+        r2_bucket: r2_bucket.ok_or_else(|| CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: format!("cloud.clone_domains.{}.r2_bucket", source.clone_domain),
+        })?,
+        credential_profile,
+    })
+}
+
+fn clone_config_local_target() -> LocalIdentityTarget<'static> {
+    if util::try_get_storage_path(None).is_ok() {
+        LocalIdentityTarget::CurrentRepo
+    } else {
+        LocalIdentityTarget::None
+    }
+}
+
+fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
+    CloneError::InvalidCloudPublishSource {
+        input: input.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn validate_cloud_clone_domain(input: &str, domain: &str) -> Result<(), CloneError> {
+    if domain.is_empty() || domain.len() > 253 {
+        return Err(invalid_cloud_source(input, "clone domain is invalid"));
+    }
+    for label in domain.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err(invalid_cloud_source(input, "clone domain is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cloud_slug(input: &str, value: &str, label: &str) -> Result<(), CloneError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(invalid_cloud_source(input, &format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+fn validate_cloud_ref_selector(input: &str, value: &str) -> Result<(), CloneError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.contains("..")
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '?' | '#'))
+    {
+        return Err(invalid_cloud_source(input, "ref selector is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_cloud_revision_selector(input: &str, value: &str) -> Result<(), CloneError> {
+    if value == "latest" {
+        return Ok(());
+    }
+    if value.len() < 4
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f'))
+    {
+        return Err(invalid_cloud_source(input, "revision selector is invalid"));
+    }
+    Ok(())
+}
+
 async fn clone_into_destination(
     args: &CloneArgs,
     remote_url: &str,
@@ -711,6 +1206,19 @@ async fn clone_into_destination(
     let setup_result =
         setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
 
+    let mut warnings = init_output.warnings.clone();
+    let mut gitignore_converted = Vec::new();
+    if !args.bare {
+        let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
+            .map_err(|source| CloneError::IgnoreFile { source })?;
+        warnings.extend(summary.warnings);
+        gitignore_converted = summary
+            .converted
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+    }
+
     // Restore original directory before returning.
     env::set_current_dir(original_dir).map_err(|source| CloneError::RestoreDirectory {
         path: original_dir.to_path_buf(),
@@ -718,7 +1226,6 @@ async fn clone_into_destination(
     })?;
 
     // Build CloneOutput.
-    let mut warnings = init_output.warnings.clone();
     if setup_result.branch_name.is_none() {
         warnings.push("You appear to have cloned an empty repository.".to_string());
     }
@@ -734,6 +1241,7 @@ async fn clone_into_destination(
         ssh_key_detected: init_output.ssh_key_detected,
         shallow: args.depth.is_some(),
         warnings,
+        gitignore_converted,
     })
 }
 
@@ -982,5 +1490,102 @@ mod tests {
 
         assert_eq!(cli.stable_code(), StableErrorCode::RepoCorrupt);
         assert_eq!(cli.exit_code(), 128);
+    }
+
+    #[test]
+    fn cloud_publish_source_accepts_slug_repo_and_selectors() {
+        for (input, expected) in [
+            (
+                "libra+cloud://code.example.com/kepler-ledger",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: None,
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/repo/rp_8f4c1b",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::RepoId("rp_8f4c1b".to_string()),
+                    selector: None,
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Ref("refs/tags/v1.0.0".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?ref=feature/branch",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Ref("feature/branch".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?revision=latest",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Revision("latest".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://CODE.EXAMPLE.COM/kepler-ledger?revision=9a1f3e2c",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Revision("9a1f3e2c".to_string())),
+                },
+            ),
+        ] {
+            let parsed = parse_cloud_publish_source(input).unwrap_or_else(|error| {
+                panic!("{input} should parse as a valid cloud publish source: {error}")
+            });
+            assert_eq!(
+                parsed, expected,
+                "{input} should preserve restore selectors"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_publish_source_rejects_invalid_inputs() {
+        for (input, needle) in [
+            ("libra+cloud://bad_domain/repo", "clone domain"),
+            ("libra+cloud://code.example.com/", "slug or repo_id"),
+            ("libra+cloud://code.example.com/repo/", "repo_id"),
+            ("libra+cloud://code.example.com/bad slug", "slug is invalid"),
+            (
+                "libra+cloud://code.example.com/slug?ref=main&revision=latest",
+                "mutually exclusive",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?revision=ABCDEF",
+                "revision selector",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?ref=../main",
+                "ref selector",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?foo=bar",
+                "unsupported query parameter",
+            ),
+        ] {
+            let error =
+                parse_cloud_publish_source(input).expect_err("invalid cloud source rejected");
+            assert!(
+                error.to_string().contains(needle),
+                "{input} should mention {needle:?}, got {error}",
+            );
+            let cli: CliError = error.into();
+            assert_eq!(cli.stable_code(), StableErrorCode::CliInvalidArguments);
+        }
     }
 }

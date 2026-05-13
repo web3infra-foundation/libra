@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "aiObjectModelReference": "docs/agent/ai-object-model-reference.md",
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "aiVersionId": "ai-version-2026-05-09-001",
+  "objects": [
+    {
+      "objectType": "Intent",
+      "objectId": "intent-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Intent/intent-2026-05-09-001.json",
+      "payloadSha256": "a1c2d8b6e5fa20f4e6cb2c3812d3deada3fdabfd3b6f63015b0c0c1f88ae5a47"
+    },
+    {
+      "objectType": "Plan",
+      "objectId": "plan-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Plan/plan-2026-05-09-001.json",
+      "payloadSha256": "0bcb29c10ce62e4df1ab50c6c3e9be0e4c01a5c98f5e4dd0c91b7a8b4d8f1a01"
+    },
+    {
+      "objectType": "Run",
+      "objectId": "run-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Run/run-2026-05-09-001.json",
+      "payloadSha256": "20d4deb8b04a87a2eb20d1d9ed6df8a35c0e60a45c7e3a34d23c5f4cc7e3f410"
+    },
+    {
+      "objectType": "Thread",
+      "objectId": "thread-2026-05-09-001",
+      "layer": "projection",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/projection/Thread/thread-2026-05-09-001.json",
+      "payloadSha256": "fefe35c3f4d7af9e6abf2c0c11df9e2a47c3a0d7c3a8d33f0e0cae4be1a98a55"
+    }
+  ],
+  "relationships": [
+    {
+      "kind": "isPartOf",
+      "fromObjectType": "Plan",
+      "fromObjectId": "plan-2026-05-09-001",
+      "toObjectType": "Intent",
+      "toObjectId": "intent-2026-05-09-001"
+    },
+    {
+      "kind": "appliesTo",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "Plan",
+      "toObjectId": "plan-2026-05-09-001"
+    },
+    {
+      "kind": "groupedBy",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "Thread",
+      "toObjectId": "thread-2026-05-09-001"
+    }
+  ],
+  "indexes": {
+    "byThread": {
+      "thread-2026-05-09-001": ["Run/run-2026-05-09-001"]
+    },
+    "byIntent": {
+      "intent-2026-05-09-001": ["Plan/plan-2026-05-09-001", "Run/run-2026-05-09-001"]
+    },
+    "byPlan": {
+      "plan-2026-05-09-001": ["Run/run-2026-05-09-001"]
+    },
+    "byTask": {},
+    "byRun": {
+      "run-2026-05-09-001": ["PatchSet/patchset-2026-05-09-001"]
+    },
+    "byPatchset": {},
+    "byEvent": {},
+    "byContext": {}
+  },
+  "redaction": {
+    "mode": "default",
+    "rulesVersion": "2026.05.09-1",
+    "removedFieldCount": 6,
+    "removedFieldsByType": {
+      "Run": ["payload.providerRawResponse", "payload.absoluteWorkspacePath"],
+      "Plan": ["payload.absoluteWorkspacePath"],
+      "ContextSnapshot": ["payload.providerRawTranscript"]
+    },
+    "objectCountsByType": {
+      "Intent": 1,
+      "Plan": 1,
+      "Run": 1,
+      "Thread": 1
+    }
+  },
+  "associatedIds": {
+    "sessionId": "4a4f6c7e-e0bc-4cf9-9a17-9d1bd5c4ec01",
+    "checkpointId": "6b8c0a91-7c2d-4d20-bf1a-cb9f4f7c2c10",
+    "threadId": "thread-2026-05-09-001",
+    "treeOid": "1234567812345678123456781234567812345678",
+    "tracesCommit": "fedcba0123456789fedcba0123456789fedcba01"
+  }
+}

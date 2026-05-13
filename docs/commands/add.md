@@ -256,6 +256,8 @@ Libra uses `.libraignore` files for its ignore policy rather than `.gitignore`. 
 conflicts when a Libra repository coexists with or is converted from a Git repository, and
 makes it clear which VCS owns the ignore rules. The ignore file format is compatible with
 Git's pattern syntax (globs, negation with `!`, directory-only patterns with trailing `/`).
+`libra init` creates a root `.libraignore` in non-bare repositories, and Git imports or
+non-bare clones copy existing `.gitignore` files to matching `.libraignore` files.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -302,5 +304,6 @@ Every `AddError` variant maps to an explicit `StableErrorCode`.
 
 - jj does not have an `add` command; it automatically tracks all working tree changes
 - Libra's `add` is required before `commit`, matching Git's explicit staging model
-- `.libraignore` uses the same pattern syntax as `.gitignore` but is a separate file
+- `.libraignore` uses the same pattern syntax as `.gitignore` but is a separate file; imports
+  and non-bare clones copy `.gitignore` rules instead of deleting or renaming the originals
 - LFS-tracked files are automatically converted to pointer files during staging

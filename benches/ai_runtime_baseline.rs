@@ -1,3 +1,9 @@
+//! Baseline benchmark for AI runtime planning and execution overhead.
+//!
+//! Scenario focus: provide a repeatable local performance signal for runtime changes;
+//! benchmark inputs intentionally avoid live providers so regressions are attributable
+//! to local orchestration code.
+
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},

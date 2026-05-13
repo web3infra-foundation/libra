@@ -1,7 +1,12 @@
-//! Utility functions for the AI module.
+//! Utility functions for the AI module: hash anchor normalisation.
 //!
-//! This module provides conversion utilities for commit hashes between different formats,
-//! primarily handling compatibility between SHA-1 (40-char) and SHA-256 (64-char) hash formats.
+//! AI workflow records (intents, plans, tasks, evidence) frequently reference
+//! commits that may be hashed under either SHA-1 or SHA-256 depending on the
+//! repository's `core.objectformat`. To keep the AI history portable between
+//! both modes — and to allow a single fixed-width column in storage and
+//! transport types — every commit hash is normalised into a 64-character
+//! "anchor" before it is recorded. This module provides the anchor encoder
+//! and the inverse extractor.
 //!
 //! # Core Concepts
 //!
@@ -143,14 +148,17 @@ pub fn extract_sha1_from_anchor(anchor64: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// Test: a SHA-256 hash (64 chars) should be accepted and returned as-is.
+    /// Scenario: a SHA-256 hash (64 chars) should be accepted and returned
+    /// as-is, since SHA-256 already matches the anchor width.
     #[test]
     fn normalize_accepts_sha256() {
         let v = "a".repeat(64);
         assert_eq!(normalize_commit_anchor(&v).unwrap(), v);
     }
 
-    /// Test: a SHA-1 hash (40 chars) should be zero-padded to 64 characters.
+    /// Scenario: a SHA-1 hash (40 chars) should be right-padded with 24
+    /// zero characters so the resulting anchor is exactly 64 characters and
+    /// recoverable via [`extract_sha1_from_anchor`].
     #[test]
     fn normalize_pads_sha1() {
         let sha1 = "b".repeat(40);
@@ -160,13 +168,15 @@ mod tests {
         assert_eq!(&normalized[40..], "0".repeat(24));
     }
 
-    /// Test: hashes with unsupported lengths should be rejected with an error.
+    /// Scenario: hashes that are neither 40 nor 64 hex characters must be
+    /// rejected to prevent silently storing truncated or malformed ids.
     #[test]
     fn normalize_rejects_other_lengths() {
         assert!(normalize_commit_anchor("abc").is_err());
     }
 
-    /// Test: the first 40 characters should be correctly extracted as the SHA-1 hash from an anchor.
+    /// Scenario: round-trip an anchor that was built from a SHA-1 hash and
+    /// confirm the first 40 hex characters reproduce the original SHA-1.
     #[test]
     fn extract_sha1_from_anchor_returns_prefix() {
         let anchor = format!("{}{}", "c".repeat(40), "0".repeat(24));

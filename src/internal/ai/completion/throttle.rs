@@ -1,3 +1,9 @@
+//! Lightweight throttling primitives for provider completion calls.
+//!
+//! Boundary: throttling should bound concurrent provider work without hiding provider
+//! errors or retry policy decisions. Runtime and mock-provider tests cover zero-delay
+//! and concurrent request paths.
+
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -72,6 +78,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "ok".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }

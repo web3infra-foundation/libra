@@ -1,3 +1,9 @@
+//! Workspace snapshot utilities used to compare task worktrees against a baseline.
+//!
+//! Boundary: snapshots record relative paths, file content hashes, metadata kind, and
+//! deletion state without following symlinks outside the workspace. Orchestrator
+//! workspace tests cover symlink, deletion, and changed-file edge cases.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -7,11 +13,15 @@ use std::{
 use git_internal::{hash::ObjectHash, internal::object::blob::Blob};
 use ignore::WalkBuilder;
 
-use crate::utils::object_ext::BlobExt;
+use crate::internal::ai::generated_artifacts;
+
+pub(crate) const SNAPSHOT_CONTENT_MAX_FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const SNAPSHOT_CONTENT_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
     pub(crate) entries: BTreeMap<PathBuf, WorkspaceEntry>,
+    pub(crate) file_contents: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +31,18 @@ pub(crate) enum WorkspaceEntry {
 }
 
 pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    snapshot_workspace_inner(root, false)
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_workspace_with_contents(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    snapshot_workspace_inner(root, true)
+}
+
+fn snapshot_workspace_inner(
+    root: &Path,
+    capture_file_contents: bool,
+) -> io::Result<WorkspaceSnapshot> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -32,9 +54,16 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
         .require_git(false)
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right))
-        .filter_entry(|entry| entry.depth() == 0 || !protected_workspace_entry(entry.path()));
+        .filter_entry(|entry| {
+            let is_dir = entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir());
+            entry.depth() == 0 || !ignored_workspace_entry(entry.path(), is_dir)
+        });
 
     let mut entries = BTreeMap::new();
+    let mut file_contents = BTreeMap::new();
+    let mut captured_content_bytes = 0usize;
     for entry in builder.build() {
         let entry = entry.map_err(ignore_error_to_io)?;
         let path = entry.path();
@@ -55,10 +84,21 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
             .strip_prefix(root)
             .map_err(|err| io::Error::other(err.to_string()))?
             .to_path_buf();
-        entries.insert(rel, snapshot_entry(path, &file_type)?);
+        let (snapshot_entry, contents) = snapshot_entry(path, &file_type, capture_file_contents)?;
+        if let Some(contents) = contents {
+            let next_total = captured_content_bytes.saturating_add(contents.len());
+            if next_total <= SNAPSHOT_CONTENT_MAX_TOTAL_BYTES {
+                captured_content_bytes = next_total;
+                file_contents.insert(rel.clone(), contents);
+            }
+        }
+        entries.insert(rel, snapshot_entry);
     }
 
-    Ok(WorkspaceSnapshot { entries })
+    Ok(WorkspaceSnapshot {
+        entries,
+        file_contents,
+    })
 }
 
 pub(crate) fn changed_paths_since_baseline(
@@ -80,10 +120,16 @@ pub(crate) fn changed_paths_since_baseline(
 
 pub(crate) fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<WorkspaceEntry>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => snapshot_entry(path, &metadata.file_type()).map(Some),
+        Ok(metadata) => {
+            snapshot_entry(path, &metadata.file_type(), false).map(|(entry, _)| Some(entry))
+        }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+fn ignored_workspace_entry(path: &Path, _is_dir: bool) -> bool {
+    protected_workspace_entry(path) || generated_artifacts::is_generated_build_dir_path(path)
 }
 
 fn protected_workspace_entry(path: &Path) -> bool {
@@ -92,16 +138,30 @@ fn protected_workspace_entry(path: &Path) -> bool {
         .is_some_and(|name| matches!(name, ".git" | ".libra" | ".codex" | ".agents"))
 }
 
-fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<WorkspaceEntry> {
+fn snapshot_entry(
+    path: &Path,
+    file_type: &fs::FileType,
+    capture_file_contents: bool,
+) -> io::Result<(WorkspaceEntry, Option<Vec<u8>>)> {
     if file_type.is_symlink() {
-        return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
+        return Ok((WorkspaceEntry::Symlink(fs::read_link(path)?), None));
     }
 
     // Workspace snapshots are used only for change detection between two local
     // filesystem states. They should not depend on repository-scoped LFS or
     // attribute resolution, because isolated task workspaces and tests may run
     // outside a Libra repository context.
-    Ok(WorkspaceEntry::File(Blob::from_file(path).id))
+    let contents = fs::read(path)?;
+    let captured = should_capture_snapshot_file_contents(capture_file_contents, &contents)
+        .then(|| contents.clone());
+    let entry = WorkspaceEntry::File(Blob::from_content_bytes(contents).id);
+    Ok((entry, captured))
+}
+
+fn should_capture_snapshot_file_contents(capture_file_contents: bool, contents: &[u8]) -> bool {
+    capture_file_contents
+        && contents.len() <= SNAPSHOT_CONTENT_MAX_FILE_BYTES
+        && std::str::from_utf8(contents).is_ok()
 }
 
 fn ignore_error_to_io(err: ignore::Error) -> io::Error {
@@ -119,7 +179,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{WorkspaceEntry, snapshot_workspace};
+    use super::{
+        SNAPSHOT_CONTENT_MAX_FILE_BYTES, WorkspaceEntry, snapshot_workspace,
+        snapshot_workspace_with_contents,
+    };
 
     #[cfg(unix)]
     fn symlink_path(target: &Path, link: &Path) -> io::Result<()> {
@@ -161,6 +224,156 @@ mod tests {
                 .entries
                 .contains_key(Path::new("web/node_modules/pkg/index.js"))
         );
+    }
+
+    #[test]
+    fn snapshot_with_contents_captures_small_text_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), "[dependencies]\n").unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert_eq!(
+            snapshot.file_contents.get(Path::new("Cargo.toml")),
+            Some(&b"[dependencies]\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn snapshot_with_contents_skips_binary_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("image.bin"), [0xff, 0xfe, 0xfd]).unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("image.bin")));
+        assert!(!snapshot.file_contents.contains_key(Path::new("image.bin")));
+    }
+
+    #[test]
+    fn snapshot_with_contents_skips_large_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("large.txt"),
+            vec![b'a'; SNAPSHOT_CONTENT_MAX_FILE_BYTES + 1],
+        )
+        .unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("large.txt")));
+        assert!(!snapshot.file_contents.contains_key(Path::new("large.txt")));
+    }
+
+    #[test]
+    fn snapshot_skips_default_build_outputs_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+        fs::write(root.join("target/.rustc_info.json"), "{}\n").unwrap();
+        fs::write(root.join("target/debug/app"), "compiled\n").unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("Cargo.lock")));
+        assert!(
+            !snapshot
+                .entries
+                .contains_key(Path::new("target/.rustc_info.json"))
+        );
+        assert!(!snapshot.entries.contains_key(Path::new("target/debug/app")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_skips_generated_build_symlinks_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+        for name in ["target", "build", ".gradle", "bazel-bin"] {
+            let external = temp.path().join(format!("external-{name}"));
+            fs::create_dir_all(&external).unwrap();
+            symlink_path(&external, &root.join(name)).unwrap();
+        }
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("Cargo.lock")));
+        for name in ["target", "build", ".gradle", "bazel-bin"] {
+            assert!(
+                !snapshot.entries.contains_key(Path::new(name)),
+                "{name} symlink should be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_skips_common_compiled_language_build_outputs_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("rust/target/debug")).unwrap();
+        fs::create_dir_all(root.join("java/build/classes")).unwrap();
+        fs::create_dir_all(root.join("java/target/classes")).unwrap();
+        fs::create_dir_all(root.join("dotnet/bin/Debug")).unwrap();
+        fs::create_dir_all(root.join("dotnet/obj")).unwrap();
+        fs::create_dir_all(root.join("swift/.build/debug")).unwrap();
+        fs::create_dir_all(root.join("zig/.zig-cache")).unwrap();
+        fs::create_dir_all(root.join("zig/zig-out/bin")).unwrap();
+        fs::create_dir_all(root.join("cpp/cmake-build-debug")).unwrap();
+        fs::create_dir_all(root.join("cpp/CMakeFiles/app.dir")).unwrap();
+        fs::create_dir_all(root.join("bazel-bin")).unwrap();
+        fs::create_dir_all(root.join("bazel-out")).unwrap();
+        fs::create_dir_all(root.join("bazel-testlogs")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+        fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("rust/target/debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("java/build/classes/App.class"), "compiled\n").unwrap();
+        fs::write(root.join("java/target/classes/App.class"), "compiled\n").unwrap();
+        fs::write(root.join("dotnet/bin/Debug/app.dll"), "compiled\n").unwrap();
+        fs::write(root.join("dotnet/obj/project.assets.json"), "{}\n").unwrap();
+        fs::write(root.join("swift/.build/debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("zig/.zig-cache/state"), "cache\n").unwrap();
+        fs::write(root.join("zig/zig-out/bin/app"), "compiled\n").unwrap();
+        fs::write(root.join("cpp/cmake-build-debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("cpp/CMakeFiles/app.dir/main.o"), "compiled\n").unwrap();
+        fs::write(root.join("bazel-bin/app"), "compiled\n").unwrap();
+        fs::write(root.join("bazel-out/state"), "cache\n").unwrap();
+        fs::write(root.join("bazel-testlogs/test.log"), "log\n").unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("src/lib.rs")));
+        assert!(snapshot.entries.contains_key(Path::new("src/bin/tool.rs")));
+        for generated in [
+            "rust/target/debug/app",
+            "java/build/classes/App.class",
+            "java/target/classes/App.class",
+            "dotnet/bin/Debug/app.dll",
+            "dotnet/obj/project.assets.json",
+            "swift/.build/debug/app",
+            "zig/.zig-cache/state",
+            "zig/zig-out/bin/app",
+            "cpp/cmake-build-debug/app",
+            "cpp/CMakeFiles/app.dir/main.o",
+            "bazel-bin/app",
+            "bazel-out/state",
+            "bazel-testlogs/test.log",
+        ] {
+            assert!(
+                !snapshot.entries.contains_key(Path::new(generated)),
+                "{generated} should be ignored"
+            );
+        }
     }
 
     #[test]

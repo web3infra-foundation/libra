@@ -4,6 +4,7 @@
 
 use std::{fs, path::Path, process::Command};
 
+use serde_json::Value;
 use tempfile::tempdir;
 
 use super::parse_cli_error_stderr;
@@ -46,6 +47,204 @@ fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::
         .unwrap()
 }
 
+#[test]
+fn cloud_clone_missing_clone_domain_config_fails_before_restore_stub() {
+    let cwd = tempdir().unwrap();
+    let dest = cwd.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "cloud clone without clone-domain config should fail"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-AUTH-001");
+    assert!(
+        report
+            .message
+            .contains("clone domain 'code.example.com' is not configured"),
+        "error should identify the missing clone-domain config: {:?}",
+        report.message
+    );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint.contains("cloud.clone_domains.code.example.com.account_id")),
+        "hint should point at the clone-domain config keys: {:?}",
+        report.hints
+    );
+    assert!(
+        !dest.exists(),
+        "cloud clone config preflight must not create the destination"
+    );
+}
+
+#[test]
+fn cloud_clone_rejects_unsupported_git_style_options_before_config_lookup() {
+    let cwd = tempdir().unwrap();
+    let source = "libra+cloud://code.example.com/kepler-ledger";
+
+    for (name, leading_args, needle) in [
+        ("branch", vec!["clone", "--branch", "main"], "--branch"),
+        ("depth", vec!["clone", "--depth", "1"], "--depth"),
+        (
+            "single-branch",
+            vec!["clone", "--single-branch"],
+            "--single-branch",
+        ),
+        ("bare", vec!["clone", "--bare"], "--bare"),
+    ] {
+        let dest = cwd.path().join(format!("restored-{name}"));
+        let mut args = leading_args;
+        args.push(source);
+        args.push(dest.to_str().unwrap());
+
+        let output = run_libra(&args, cwd.path());
+        assert!(
+            !output.status.success(),
+            "{needle} cloud clone should fail before restore"
+        );
+        let (_, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002");
+        assert!(
+            report.message.contains(needle),
+            "error should identify the unsupported option: {:?}",
+            report.message
+        );
+        assert!(
+            report.message.contains("libra+cloud://"),
+            "error should identify the cloud source surface: {:?}",
+            report.message
+        );
+        assert!(
+            !report
+                .message
+                .contains("clone domain 'code.example.com' is not configured"),
+            "unsupported option should be rejected before config lookup: {:?}",
+            report.message
+        );
+        assert!(
+            !dest.exists(),
+            "unsupported cloud clone option must not create the destination"
+        );
+    }
+}
+
+#[test]
+fn cloud_clone_configured_domain_loads_d1_r2_config_before_restore_stub() {
+    let cwd = tempdir().unwrap();
+    let dest = cwd.path().join("restored");
+
+    for (key, value) in [
+        (
+            "cloud.clone_domains.code.example.com.account_id",
+            "acct_123",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.d1_database_id",
+            "d1_pub_456",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.r2_bucket",
+            "publish-r2",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.credential_profile",
+            "prod",
+        ),
+    ] {
+        let output = run_libra(&["config", "set", "--global", key, value], cwd.path());
+        assert!(
+            output.status.success(),
+            "config set should succeed for {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = run_libra(
+        &[
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+            dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "configured cloud clone should reach the restore stub"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report
+            .message
+            .contains("Phase 5 of docs/improvement/publish.md is not yet implemented"),
+        "configured clone-domain should fail at the restore stub: {:?}",
+        report.message
+    );
+    assert!(
+        !report
+            .message
+            .contains("clone domain 'code.example.com' is not configured"),
+        "configured clone-domain should not fail at the config preflight: {:?}",
+        report.message
+    );
+    assert_eq!(
+        report.details.get("clone_domain").and_then(Value::as_str),
+        Some("code.example.com")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_account_id")
+            .and_then(Value::as_str),
+        Some("acct_123")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_d1_database_id")
+            .and_then(Value::as_str),
+        Some("d1_pub_456")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_r2_bucket")
+            .and_then(Value::as_str),
+        Some("publish-r2")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_credential_profile")
+            .and_then(Value::as_str),
+        Some("prod")
+    );
+    assert_eq!(
+        report.details.get("cloud_target").and_then(Value::as_str),
+        Some("slug:kepler-ledger")
+    );
+    assert_eq!(
+        report.details.get("cloud_selector").and_then(Value::as_str),
+        Some("ref:refs/tags/v1.0.0")
+    );
+    assert!(
+        !dest.exists(),
+        "cloud clone restore stub must not create the destination"
+    );
+}
+
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
         .args(args)
@@ -79,6 +278,61 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
     assert!(run_git(&["add", "README.md"], &work).status.success());
     assert!(
         run_git(&["commit", "-m", "initial"], &work)
+            .status
+            .success()
+    );
+    assert!(run_git(&["branch", "-M", "main"], &work).status.success());
+    assert!(
+        run_git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            &work
+        )
+        .status
+        .success()
+    );
+    assert!(run_git(&["push", "origin", "main"], &work).status.success());
+    assert!(
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &remote)
+            .status
+            .success()
+    );
+    remote
+}
+
+fn create_remote_with_gitignore(base: &Path) -> std::path::PathBuf {
+    let remote = base.join("remote-with-ignore.git");
+    assert!(
+        run_git(&["init", "--bare", remote.to_str().unwrap()], base)
+            .status
+            .success()
+    );
+
+    let work = base.join("work-with-ignore");
+    fs::create_dir_all(work.join("nested")).unwrap();
+    assert!(run_git(&["init"], &work).status.success());
+    assert!(
+        run_git(&["config", "user.name", "T"], &work)
+            .status
+            .success()
+    );
+    assert!(
+        run_git(&["config", "user.email", "t@example.com"], &work)
+            .status
+            .success()
+    );
+    fs::write(work.join("README.md"), "hello\n").unwrap();
+    fs::write(work.join(".gitignore"), "ignored-root.log\n").unwrap();
+    fs::write(work.join("nested").join(".gitignore"), "*.tmp\n").unwrap();
+    assert!(
+        run_git(
+            &["add", "README.md", ".gitignore", "nested/.gitignore"],
+            &work
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run_git(&["commit", "-m", "initial with ignore files"], &work)
             .status
             .success()
     );
@@ -240,6 +494,85 @@ fn successful_clone_initializes_vault() {
         !String::from_utf8_lossy(&gpg_output.stdout)
             .trim()
             .is_empty()
+    );
+}
+
+#[test]
+fn clone_converts_gitignore_files_to_visible_libraignore_files() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_gitignore(temp.path());
+    let dest = temp.path().join("clone-ignore");
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read_to_string(dest.join(".libraignore")).unwrap(),
+        "ignored-root.log\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("nested").join(".libraignore")).unwrap(),
+        "*.tmp\n"
+    );
+
+    fs::write(dest.join("ignored-root.log"), "ignored\n").unwrap();
+    fs::write(dest.join("nested").join("ignored.tmp"), "ignored\n").unwrap();
+    fs::write(dest.join("visible.txt"), "visible\n").unwrap();
+
+    let status = run_libra(&["status", "--short"], &dest);
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("?? .libraignore") && stdout.contains("?? nested/.libraignore"),
+        "converted .libraignore files should remain visible, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("?? visible.txt"),
+        "non-ignored untracked files should remain visible, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ignored-root.log") && !stdout.contains("ignored.tmp"),
+        "converted ignore rules should hide matching files, got: {stdout}"
+    );
+}
+
+#[test]
+fn bare_clone_does_not_create_libraignore() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_gitignore(temp.path());
+    let dest = temp.path().join("bare-ignore.git");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "--bare",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "bare clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dest.join(".libraignore").exists(),
+        "bare clone should not create a worktree .libraignore"
     );
 }
 

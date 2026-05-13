@@ -6,6 +6,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use libra::utils::error::StableErrorCode;
 use libra::{
     command::{
         branch::{self, BranchArgs},
@@ -14,7 +16,7 @@ use libra::{
         status::{changes_to_be_committed, changes_to_be_staged},
     },
     internal::{branch::Branch as InternalBranch, config::ConfigKv},
-    utils::{error::StableErrorCode, test::setup_with_new_libra_in},
+    utils::test::setup_with_new_libra_in,
 };
 
 use super::*;
@@ -242,27 +244,38 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
 #[tokio::test]
 #[serial]
 async fn test_reset_corrupt_target_branch_returns_repo_corrupt() {
+    // Use a non-locked branch as the target. Libra now refuses to `reset`
+    // onto locked branches (`main`, `intent`, `agent-traces`) — see
+    // `src/internal/branch.rs::is_locked_branch` and the early check in
+    // `src/command/reset.rs::run_reset` — so corrupting `main` and then
+    // calling `reset main` short-circuits at the locked-target guard with
+    // `LBR-CLI-003` instead of reaching the corrupt-branch resolution we
+    // want this test to exercise. Creating a `feature-corrupt-target`
+    // branch (locked-list check does not match it) and corrupting that
+    // branch's commit lets `reset` reach the
+    // `CommitBaseError::CorruptReference` → `ResetError::RevisionCorrupt`
+    // mapping.
+    const TARGET_BRANCH: &str = "feature-corrupt-target";
+
     let repo = create_committed_repo_via_cli();
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        InternalBranch::update_branch("main", "not-a-valid-hash", None)
+        // Seed the branch with the current main tip so reset would
+        // otherwise be a no-op happy path, then corrupt it.
+        InternalBranch::update_branch(TARGET_BRANCH, "not-a-valid-hash", None)
             .await
             .unwrap();
     }
 
-    let output = run_libra_command(&["reset", "main"], repo.path());
+    let output = run_libra_command(&["reset", TARGET_BRANCH], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-002");
-    assert!(
-        stderr.contains("failed to resolve branch 'main'"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("stored branch reference 'main' is corrupt"),
-        "unexpected stderr: {stderr}"
-    );
+    let resolve_msg = format!("failed to resolve branch '{TARGET_BRANCH}'");
+    let corrupt_msg = format!("stored branch reference '{TARGET_BRANCH}' is corrupt");
+    assert!(stderr.contains(&resolve_msg), "unexpected stderr: {stderr}");
+    assert!(stderr.contains(&corrupt_msg), "unexpected stderr: {stderr}");
     assert!(
         !stderr.contains("invalid reference"),
         "reset should not misclassify corrupt branch storage as invalid target: {stderr}"
@@ -327,7 +340,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
 
     fs::write("base.txt", "base\n").unwrap();
     add::execute(AddArgs {
-        pathspec: vec!["base.txt".to_string()],
+        pathspec: vec![".libraignore".to_string(), "base.txt".to_string()],
         all: false,
         update: false,
         verbose: false,

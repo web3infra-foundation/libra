@@ -1,3 +1,8 @@
+//! Unit tests for SeaORM reference models and serialization assumptions.
+//!
+//! Scenario focus: stable model field names, JSON compatibility, and edge cases that
+//! generated database entities do not express on their own.
+
 use serde_json;
 
 use super::reference::ConfigKind;

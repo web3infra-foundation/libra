@@ -49,7 +49,6 @@ pub struct DescribeArgs {
 // Entry in tag lookup map
 struct TagInfo {
     name: String,
-    #[allow(dead_code)]
     is_annotated: bool,
 }
 

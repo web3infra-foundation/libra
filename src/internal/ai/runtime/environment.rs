@@ -7,8 +7,16 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::internal::ai::orchestrator::workspace::{
-    TaskWorktree, cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back,
+use crate::internal::ai::{
+    orchestrator::{
+        types::TaskWorkspaceBackend,
+        workspace::{
+            FuseAttemptOutcome, FuseProvisionState, SyncBackReport, TaskWorktree,
+            WorkspaceSyncError, cleanup_task_worktree, prepare_task_worktree,
+            sync_task_worktree_back,
+        },
+    },
+    workspace_snapshot::WorkspaceSnapshot,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -16,11 +24,26 @@ pub struct ExecutionEnvironmentProvider;
 
 pub struct TaskExecutionEnvironment {
     worktree: TaskWorktree,
+    fuse_outcome: FuseAttemptOutcome,
 }
 
 impl TaskExecutionEnvironment {
     pub fn root(&self) -> &Path {
         &self.worktree.root
+    }
+
+    pub(crate) fn baseline_snapshot(&self) -> WorkspaceSnapshot {
+        self.worktree.baseline.clone()
+    }
+
+    pub(crate) fn backend(&self) -> TaskWorkspaceBackend {
+        self.worktree.backend()
+    }
+
+    /// Outcome of the FUSE mount attempt during provisioning. Callers use
+    /// `JustDisabled` to emit a one-time TUI hint after the first failure.
+    pub fn fuse_outcome(&self) -> &FuseAttemptOutcome {
+        &self.fuse_outcome
     }
 }
 
@@ -37,21 +60,24 @@ impl ExecutionEnvironmentProvider {
         &self,
         main_working_dir: PathBuf,
         task_id: Uuid,
+        fuse_state: FuseProvisionState,
     ) -> io::Result<TaskExecutionEnvironment> {
-        let worktree =
-            tokio::task::spawn_blocking(move || prepare_task_worktree(&main_working_dir, task_id))
-                .await
-                .map_err(|err| {
-                    io::Error::other(format!("failed to prepare task worktree: {err}"))
-                })??;
-        Ok(TaskExecutionEnvironment { worktree })
+        let (worktree, fuse_outcome) = tokio::task::spawn_blocking(move || {
+            prepare_task_worktree(&main_working_dir, task_id, &fuse_state)
+        })
+        .await
+        .map_err(|err| io::Error::other(format!("failed to prepare task worktree: {err}")))??;
+        Ok(TaskExecutionEnvironment {
+            worktree,
+            fuse_outcome,
+        })
     }
 
-    pub async fn sync_back(
+    pub(crate) async fn sync_back(
         &self,
         environment: &TaskExecutionEnvironment,
         request: SyncBackRequest,
-    ) -> io::Result<()> {
+    ) -> Result<SyncBackReport, WorkspaceSyncError> {
         let task_worktree_dir = environment.root().to_path_buf();
         let baseline = environment.worktree.baseline.clone();
         tokio::task::spawn_blocking(move || {
@@ -65,7 +91,10 @@ impl ExecutionEnvironmentProvider {
             )
         })
         .await
-        .map_err(|err| io::Error::other(format!("sync worker failed: {err}")))?
+        .map_err(|err| WorkspaceSyncError::HardConflict {
+            path: None,
+            reason: format!("sync worker failed: {err}"),
+        })?
     }
 
     pub async fn cleanup(&self, environment: TaskExecutionEnvironment) -> io::Result<()> {
@@ -88,7 +117,11 @@ mod tests {
         let provider = ExecutionEnvironmentProvider;
 
         let environment = provider
-            .provision_task_worktree(main.path().to_path_buf(), Uuid::new_v4())
+            .provision_task_worktree(
+                main.path().to_path_buf(),
+                Uuid::new_v4(),
+                FuseProvisionState::default(),
+            )
             .await
             .expect("provision task worktree");
         assert!(environment.root().join("README.md").exists());

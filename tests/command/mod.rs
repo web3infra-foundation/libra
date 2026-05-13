@@ -1,6 +1,7 @@
 //! Shared test utilities and re-exports for the command integration test suite.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::Path,
@@ -8,8 +9,14 @@ use std::{
 };
 
 use git_internal::{
-    hash::ObjectHash,
-    internal::object::{commit::Commit, tree::Tree},
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+    internal::object::{
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
+        tree::Tree,
+        types::ObjectType,
+    },
 };
 use libra::{
     command::{
@@ -52,6 +59,8 @@ pub(crate) struct CliErrorReport {
     pub(crate) usage: Option<String>,
     #[serde(default)]
     pub(crate) hints: Vec<String>,
+    #[serde(default)]
+    pub(crate) details: BTreeMap<String, Value>,
 }
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
@@ -164,6 +173,31 @@ fn parse_json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("expected stdout to be valid JSON")
 }
 
+fn create_non_commit_tag_object(repo: &Path) -> String {
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("expected HEAD commit");
+    let commit: Commit = load_object(&head).expect("failed to load HEAD commit");
+    let tag = GitTag::new(
+        commit.tree_id,
+        ObjectType::Tree,
+        "tree-tag".to_string(),
+        Signature {
+            signature_type: SignatureType::Tagger,
+            name: "tester".to_string(),
+            email: "tester@example.com".to_string(),
+            timestamp: 1,
+            timezone: "+0000".to_string(),
+        },
+        "tag points to a tree".to_string(),
+    );
+    save_object(&tag, &tag.id).expect("failed to save tree tag object");
+    tag.id.to_string()
+}
+
 /// Build the on-disk path to a loose object given the repository root and full
 /// hex hash. Used by tests that need to corrupt or delete individual objects.
 fn loose_object_path(repo: &Path, hash: &str) -> std::path::PathBuf {
@@ -197,7 +231,7 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 
     fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("failed to create tracked file");
 
-    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
     assert_cli_success(&output, "failed to add tracked file");
 
     let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path());
@@ -256,10 +290,12 @@ mod init_separate_libra_dir_test;
 mod init_test;
 mod lfs_test;
 mod log_test;
+mod ls_remote_test;
 mod merge_test;
 mod mv_test;
 mod open_test;
 mod output_flags_test;
+mod publish_test;
 mod pull_json_test;
 mod pull_test;
 mod push_error_test;
@@ -271,7 +307,11 @@ mod remote_test;
 mod remove_test;
 mod reset_test;
 mod restore_test;
+mod rev_list_test;
+mod rev_parse_test;
 mod revert_test;
+mod sandbox_status_test;
+mod schema_upgrade_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
@@ -282,6 +322,7 @@ mod status_test;
 mod switch_error_test;
 mod switch_json_test;
 mod switch_test;
+mod symbolic_ref_test;
 mod tag_test;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 mod worktree_fuse_test;

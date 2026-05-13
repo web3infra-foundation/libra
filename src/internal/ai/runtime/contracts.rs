@@ -1,3 +1,10 @@
+//! Formal runtime contracts shared by prompt builders, execution phases, validators,
+//! and persistence.
+//!
+//! Boundary: these structs are stable internal APIs. Additive fields need defaults and
+//! tests because persisted runs and projection rebuilds deserialize older records.
+//! Runtime contract tests cover phase transitions and required evidence fields.
+
 use std::{collections::HashSet, path::PathBuf};
 
 use async_trait::async_trait;
@@ -93,6 +100,19 @@ pub struct MaterializedProjection {
     pub freshness: ProjectionFreshness,
     #[serde(default)]
     pub summary: serde_json::Value,
+}
+
+impl super::snapshot::Snapshot for MaterializedProjection {
+    fn snapshot_kind(&self) -> &'static str {
+        "materialized_projection"
+    }
+
+    fn snapshot_id(&self) -> Uuid {
+        // Projection identity is the owning thread; multiple projection
+        // versions for the same thread share the same snapshot id and are
+        // distinguished by `versions`.
+        self.thread_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

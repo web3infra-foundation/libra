@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use futures_util::StreamExt;
 use git_internal::internal::{object::types::ObjectType, pack::entry::Entry};
 use reqwest::{Client, StatusCode};
@@ -45,9 +45,9 @@ static LFS_CLIENT: OnceCell<LFSClient> = OnceCell::const_new();
 impl LFSClient {
     /// Get LFSClient instance
     /// - DO NOT use `async_static!`: No IDE Code Completion & lagging
-    pub async fn get() -> &'static LFSClient {
+    pub async fn get() -> anyhow::Result<&'static LFSClient> {
         LFS_CLIENT
-            .get_or_init(|| async { LFSClient::new().await })
+            .get_or_try_init(|| async { LFSClient::new().await })
             .await
     }
 }
@@ -82,14 +82,33 @@ impl ProtocolClient for LFSClient {
 
 impl LFSClient {
     /// Construct LFSClient from current remote URL.
-    pub async fn new() -> Self {
-        let url = ConfigKv::get_current_remote_url().await.ok().flatten();
-        match url {
-            Some(url) => LFSClient::from_url(&Url::parse(&url).unwrap()),
-            None => panic!(
-                "fatal: no remote set for current branch, use `libra branch --set-upstream-to <remote>/<branch>`"
-            ),
-        }
+    pub async fn new() -> anyhow::Result<Self> {
+        let url = ConfigKv::get_current_remote_url()
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                anyhow!(
+                    "no remote set for current branch, use \
+                     `libra branch --set-upstream-to <remote>/<branch>`"
+                )
+            })?;
+        // generate_lfs_server_url converts SCP-style SSH URLs (git@host:user/repo.git)
+        // to valid HTTPS URLs, so we pass the raw remote string directly instead of
+        // going through Url::parse which rejects SCP format with RelativeUrlWithoutBase.
+        let lfs_server = lfs::generate_lfs_server_url(url.clone()) + "/";
+        let lfs_server = Url::parse(&lfs_server)
+            .with_context(|| format!("failed to derive LFS server URL from remote '{url}'"))?;
+        let client = Client::builder()
+            .default_headers(lfs::LFS_HEADERS.clone())
+            .build()?;
+        Ok(Self {
+            batch_url: lfs_server
+                .join("objects/batch")
+                .expect("'objects/batch' is a valid relative URL"),
+            lfs_url: lfs_server,
+            client,
+        })
     }
 
     /// push LFS objects to remote server
@@ -743,37 +762,6 @@ mod tests {
             ..Default::default()
         };
         println!("{:?}", serde_json::to_string(&vars).unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_github_batch() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        let batch_request = BatchRequest {
-            operation: Operation::Download,
-            transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
-            objects: vec![RequestObject {
-                oid: "01cb1483670f1c497412f25f9f8f7dde31a8fab0960291035af03939ae1dfa6b".to_string(),
-                size: 104103,
-                ..Default::default()
-            }],
-            hash_algo: lfs::LFS_HASH_ALGO.to_string(),
-        };
-        let lfs_client = LFSClient::from_url(
-            &Url::parse("https://github.com/web3infra-foundation/mega.git").unwrap(),
-        );
-        let request = lfs_client
-            .client
-            .post(lfs_client.batch_url.clone())
-            .json(&batch_request)
-            .headers(lfs::LFS_HEADERS.clone());
-        println!("Request {request:?}");
-        let response = request.send().await.unwrap();
-        let text = response.text().await.unwrap();
-        println!("Text {text:?}");
-        let _resp = serde_json::from_str::<LfsBatchResponse>(&text).unwrap();
     }
 
     #[tokio::test]

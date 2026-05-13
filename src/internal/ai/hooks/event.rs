@@ -1,9 +1,17 @@
-//! Hook events, actions, and I/O types.
+//! Strongly-typed events, actions, and JSON I/O contracts shared by hook clients.
+//!
+//! These types form the wire format between Libra and external hook scripts. They are
+//! intentionally `serde`-friendly so a hook implemented in any language can read the
+//! same JSON shape on stdin without having to track Rust internals.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Lifecycle events that can trigger hooks.
+///
+/// `PreToolUse` is the only variant that allows a hook to veto further execution.
+/// All other variants are informational and never alter control flow regardless of
+/// the hook's exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -28,7 +36,10 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
-/// Result of evaluating a hook.
+/// Outcome produced by the hook runner after evaluating one hook.
+///
+/// `Block` carries a reason string surfaced to the user so the agent can explain why
+/// a tool call was rejected. The reason is a human-readable diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookAction {
     /// Allow the operation to proceed.
@@ -38,13 +49,18 @@ pub enum HookAction {
 }
 
 impl HookAction {
-    /// Returns `true` if this action blocks the operation.
+    /// Convenience predicate equivalent to `matches!(self, Block(_))`.
     pub fn is_blocked(&self) -> bool {
         matches!(self, Self::Block(_))
     }
 }
 
-/// Input payload sent to a hook command on stdin.
+/// Input payload sent to a hook command on stdin as a single JSON object.
+///
+/// Tool fields (`tool_name`, `tool_input`, `tool_output`) are populated only for
+/// tool-scoped events. `Option<...>` plus `skip_serializing_if` keeps the serialised
+/// envelope minimal — session events emit a JSON object with just `event` and
+/// `working_dir`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookInput {
     /// The event that triggered this hook.
@@ -64,7 +80,11 @@ pub struct HookInput {
 }
 
 impl HookInput {
-    /// Create input for a PreToolUse event.
+    /// Build the stdin payload for a `PreToolUse` event.
+    ///
+    /// Functional scope: captures the tool's name, raw input arguments, and the
+    /// working directory. `tool_output` is intentionally `None` because the tool has
+    /// not yet been executed.
     pub fn pre_tool_use(tool_name: &str, tool_input: Value, working_dir: &str) -> Self {
         Self {
             event: HookEvent::PreToolUse,
@@ -75,7 +95,10 @@ impl HookInput {
         }
     }
 
-    /// Create input for a PostToolUse event.
+    /// Build the stdin payload for a `PostToolUse` event.
+    ///
+    /// Functional scope: includes both `tool_input` and `tool_output` so observer
+    /// hooks (formatters, log shippers, etc.) can see the full request/response pair.
     pub fn post_tool_use(
         tool_name: &str,
         tool_input: Value,
@@ -91,7 +114,10 @@ impl HookInput {
         }
     }
 
-    /// Create input for a session lifecycle event.
+    /// Build the stdin payload for a session-scoped event.
+    ///
+    /// Functional scope: tool fields are left empty since session events fire once
+    /// per session and have no associated tool invocation.
     pub fn session_event(event: HookEvent, working_dir: &str) -> Self {
         Self {
             event,
@@ -103,7 +129,11 @@ impl HookInput {
     }
 }
 
-/// Output from a hook command (parsed from stdout JSON).
+/// Optional structured response a hook may print to stdout as JSON.
+///
+/// Hooks usually communicate their decision via the exit code (0 = allow, 129 =
+/// block); the optional `message` field is rendered verbatim when present so a
+/// blocking hook can explain itself.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookOutput {
     /// Optional message from the hook.

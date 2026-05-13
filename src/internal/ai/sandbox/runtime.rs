@@ -1,3 +1,9 @@
+//! Runtime enforcement for sandboxed AI tool execution.
+//!
+//! Boundary: this module applies parsed policy to concrete process/file operations and
+//! must preserve explicit denial reasons for user-facing diagnostics. Hardening tests
+//! cover denied commands, allowed commands, and path escape attempts.
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -6,9 +12,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use super::{SandboxPermissions, SandboxPolicy};
+#[cfg(target_os = "macos")]
+use super::sensitive_read_paths;
+use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
+#[cfg(unix)]
+use crate::utils::fuse;
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
+const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 #[cfg(target_os = "macos")]
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
@@ -40,16 +51,77 @@ impl CommandSpec {
         sandbox_permissions: SandboxPermissions,
         justification: Option<String>,
     ) -> Self {
+        Self::shell_inner(
+            command,
+            cwd,
+            timeout_ms,
+            sandbox_permissions,
+            justification,
+            std::env::var_os(CARGO_TARGET_DIR_ENV_VAR).is_some(),
+        )
+    }
+
+    /// Inner constructor that accepts the ambient-env flag explicitly so tests
+    /// can pin the FUSE-injection branch without relying on whatever
+    /// `CARGO_TARGET_DIR` happens to be exported by the surrounding shell or
+    /// CI runner.
+    fn shell_inner(
+        command: impl Into<String>,
+        cwd: PathBuf,
+        timeout_ms: Option<u64>,
+        sandbox_permissions: SandboxPermissions,
+        justification: Option<String>,
+        ambient_cargo_target_dir_is_set: bool,
+    ) -> Self {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(&cwd, &mut env, ambient_cargo_target_dir_is_set);
         Self {
             program: shell,
             args: vec!["-c".to_string(), command.into()],
             cwd,
-            env: HashMap::new(),
+            env,
             timeout_ms,
             sandbox_permissions,
             justification,
         }
+    }
+}
+
+/// Inject env-var overrides for commands launched inside FUSE-backed task
+/// worktrees.
+///
+/// The libfuse-fs overlay rejects some directory-creation calls with `EPERM`,
+/// which breaks `cargo` (it cannot create `./target` inside the worktree).
+/// Pointing `CARGO_TARGET_DIR` to a stable path outside the FUSE mount lets
+/// builds and gate checks succeed without modifying workspace contents.
+///
+/// Existing values are preserved: if the caller has already set
+/// `CARGO_TARGET_DIR` in `env` or the ambient process environment exposes one
+/// (per `ambient_cargo_target_dir_is_set`), we leave the choice to the
+/// user/operator.
+fn apply_fuse_workspace_env_overrides(
+    cwd: &Path,
+    env: &mut HashMap<String, String>,
+    ambient_cargo_target_dir_is_set: bool,
+) {
+    #[cfg(not(unix))]
+    {
+        let _ = (cwd, env, ambient_cargo_target_dir_is_set);
+    }
+
+    #[cfg(unix)]
+    {
+        if env.contains_key(CARGO_TARGET_DIR_ENV_VAR) || ambient_cargo_target_dir_is_set {
+            return;
+        }
+        let Some(target_dir) = fuse::fuse_workspace_cargo_target_dir(cwd) else {
+            return;
+        };
+        env.insert(
+            CARGO_TARGET_DIR_ENV_VAR.to_string(),
+            target_dir.to_string_lossy().into_owned(),
+        );
     }
 }
 
@@ -63,6 +135,7 @@ pub struct ExecEnv {
     pub sandbox_permissions: SandboxPermissions,
     pub justification: Option<String>,
     pub arg0: Option<String>,
+    pub new_session: bool,
 }
 
 impl ExecEnv {
@@ -76,9 +149,31 @@ impl ExecEnv {
         command.args(args);
         command.current_dir(self.cwd);
         command.envs(self.env);
+        if self.new_session {
+            configure_new_session(&mut command);
+        }
         Ok((command, self.timeout_ms))
     }
 }
+
+#[cfg(unix)]
+fn configure_new_session(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the child after fork and before exec. The
+    // closure only invokes the async-signal-safe `setsid(2)` syscall and
+    // converts its errno into an owned `std::io::Error`.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_new_session(_command: &mut Command) {}
 
 pub struct SandboxTransformRequest<'a> {
     pub spec: CommandSpec,
@@ -86,6 +181,8 @@ pub struct SandboxTransformRequest<'a> {
     pub sandbox_policy_cwd: &'a Path,
     pub linux_sandbox_exe: Option<&'a PathBuf>,
     pub use_linux_sandbox_bwrap: bool,
+    pub enforcement: SandboxEnforcement,
+    pub deny_read_paths: &'a [PathBuf],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +197,10 @@ pub enum SandboxTransformError {
     WindowsSandboxNotImplemented,
     #[error("sandboxed command execution is not supported on this platform")]
     UnsupportedPlatform,
+    #[error("sandbox enforcement failed: {reason}")]
+    EnforcementFailed { reason: String },
+    #[error(transparent)]
+    InvalidPolicy(#[from] SandboxPolicyError),
 }
 
 #[derive(Default)]
@@ -158,17 +259,27 @@ impl SandboxManager {
             sandbox_policy_cwd,
             linux_sandbox_exe,
             use_linux_sandbox_bwrap,
+            enforcement,
+            deny_read_paths,
         } = request;
 
         #[cfg(not(target_os = "linux"))]
         let _ = use_linux_sandbox_bwrap;
         #[cfg(not(target_os = "linux"))]
         let _ = linux_sandbox_exe;
+        #[cfg(not(target_os = "macos"))]
+        let _ = deny_read_paths;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = sandbox_policy_cwd;
 
         if spec.program.is_empty() {
             return Err(SandboxTransformError::MissingProgram);
+        }
+
+        if !spec.sandbox_permissions.requires_escalated_permissions()
+            && let Some(policy) = policy
+        {
+            policy.validate_writable_roots_with_cwd(sandbox_policy_cwd)?;
         }
 
         let mut env = spec.env;
@@ -184,14 +295,27 @@ impl SandboxManager {
         command.extend(spec.args.clone());
 
         let sandbox = self.select_initial(policy, spec.sandbox_permissions);
+        if matches!(sandbox, SandboxType::None)
+            && enforcement.requires_effective_sandbox()
+            && internal_sandbox_required(policy, spec.sandbox_permissions)
+        {
+            return Err(SandboxTransformError::EnforcementFailed {
+                reason: "sandbox enforcement is required, but this platform has no supported internal sandbox backend for the selected policy".to_string(),
+            });
+        }
+
         let (command, arg0, effective_sandbox) = match sandbox {
             SandboxType::None => (command, None, SandboxType::None),
             SandboxType::MacosSeatbelt => {
                 #[cfg(target_os = "macos")]
                 {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
-                    let mut seatbelt_args =
-                        create_seatbelt_command_args(command, policy, sandbox_policy_cwd);
+                    let mut seatbelt_args = create_seatbelt_command_args(
+                        command,
+                        policy,
+                        sandbox_policy_cwd,
+                        deny_read_paths,
+                    );
                     let mut full = Vec::with_capacity(1 + seatbelt_args.len());
                     full.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                     full.append(&mut seatbelt_args);
@@ -222,6 +346,11 @@ impl SandboxManager {
                             SandboxType::LinuxSeccomp,
                         )
                     } else {
+                        if enforcement.requires_effective_sandbox() {
+                            return Err(SandboxTransformError::EnforcementFailed {
+                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and the built-in bwrap sandbox is not available yet".to_string(),
+                            });
+                        }
                         tracing::warn!(
                             "linux sandbox executable not configured; running command without linux sandbox"
                         );
@@ -254,8 +383,26 @@ impl SandboxManager {
             sandbox_permissions: spec.sandbox_permissions,
             justification: spec.justification,
             arg0,
+            new_session: matches!(
+                effective_sandbox,
+                SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
+            ),
         })
     }
+}
+
+fn internal_sandbox_required(
+    policy: Option<&SandboxPolicy>,
+    permissions: SandboxPermissions,
+) -> bool {
+    if permissions.requires_escalated_permissions() {
+        return false;
+    }
+
+    matches!(
+        policy,
+        Some(SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. })
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -284,6 +431,7 @@ fn create_seatbelt_command_args(
     command: Vec<String>,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
+    deny_read_paths: &[PathBuf],
 ) -> Vec<String> {
     const SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
     const SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
@@ -291,17 +439,20 @@ fn create_seatbelt_command_args(
     let (file_write_policy, file_write_params) =
         build_macos_file_write_policy(sandbox_policy, sandbox_policy_cwd);
     let file_read_policy = "; allow read-only file operations\n(allow file-read*)";
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let (sensitive_read_policy, sensitive_read_params) =
+        build_macos_sensitive_read_policy(home.as_deref(), deny_read_paths);
     let network_policy = if sandbox_policy.has_full_network_access() {
         SEATBELT_NETWORK_POLICY
     } else {
         ""
     };
     let full_policy = format!(
-        "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{file_write_policy}\n{network_policy}"
+        "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{sensitive_read_policy}{file_write_policy}\n{network_policy}"
     );
 
     let mut seatbelt_args = vec!["-p".to_string(), full_policy];
-    let dir_params = [file_write_params, macos_dir_params()].concat();
+    let dir_params = [file_write_params, sensitive_read_params, macos_dir_params()].concat();
     seatbelt_args.extend(
         dir_params
             .into_iter()
@@ -310,6 +461,31 @@ fn create_seatbelt_command_args(
     seatbelt_args.push("--".to_string());
     seatbelt_args.extend(command);
     seatbelt_args
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_sensitive_read_policy(
+    home: Option<&Path>,
+    deny_read_paths: &[PathBuf],
+) -> (String, Vec<(String, PathBuf)>) {
+    let mut paths = sensitive_read_paths(home);
+    for path in deny_read_paths {
+        if !paths.iter().any(|existing| existing == path) {
+            paths.push(path.clone());
+        }
+    }
+    let mut params = Vec::with_capacity(paths.len());
+    let mut policy = String::from("; deny sensitive host credential reads\n");
+
+    for (index, path) in paths.into_iter().enumerate() {
+        let param = format!("SENSITIVE_READ_{index}");
+        params.push((param.clone(), path));
+        policy.push_str(&format!(
+            "(deny file-read* (subpath (param \"{param}\")))\n"
+        ));
+    }
+
+    (policy, params)
 }
 
 #[cfg(target_os = "macos")]
@@ -460,13 +636,153 @@ mod tests {
             sandbox_policy_cwd: &cwd,
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
         };
 
         let transformed = manager
             .transform(request)
             .expect("transform should fallback");
         assert_eq!(transformed.sandbox, SandboxType::None);
+        assert!(!transformed.new_session);
         assert!(!transformed.command.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_linux_required_enforcement_rejects_missing_helper() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: false,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("required enforcement must not silently fall back");
+        assert!(
+            error
+                .to_string()
+                .contains("Linux sandbox enforcement is required"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn transform_rejects_dangerous_writable_roots_before_execution() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&policy),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("dangerous writable roots must be rejected");
+
+        assert!(
+            error.to_string().contains("Docker socket access"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn escalated_transform_bypasses_dangerous_writable_root_validation() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::RequireEscalated,
+                None,
+            ),
+            policy: Some(&policy),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("explicit escalation should bypass sandbox policy validation");
+        assert_eq!(transformed.sandbox, SandboxType::None);
+        assert!(!transformed.new_session);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_env_new_session_runs_child_as_session_leader() {
+        let env = ExecEnv {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 5".to_string(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: HashMap::new(),
+            timeout_ms: Some(1_000),
+            sandbox: SandboxType::MacosSeatbelt,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            justification: None,
+            arg0: None,
+            new_session: true,
+        };
+        let (mut command, _) = env.into_command().expect("exec env should build");
+        let mut child = command.spawn().expect("child should spawn");
+        let pid = child.id().expect("spawned child should expose a pid");
+        // SAFETY: `getsid` only reads kernel process metadata for the spawned
+        // child PID while it is still alive.
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+        let _ = child.kill().await;
+        assert_eq!(
+            sid, pid as libc::pid_t,
+            "setsid should make the child its session leader; sid={sid} pid={pid}"
+        );
     }
 
     #[test]
@@ -483,5 +799,151 @@ mod tests {
         assert_eq!(spec.cwd, cwd);
         assert_eq!(spec.args, vec!["-c".to_string(), "echo ok".to_string()]);
         assert!(!spec.program.is_empty());
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_sets_cargo_target_dir_inside_fuse_worktree() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/src");
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(cwd, &mut env, false);
+        let target = env
+            .get(CARGO_TARGET_DIR_ENV_VAR)
+            .expect("CARGO_TARGET_DIR should be set inside FUSE worktree");
+        let expected = std::env::temp_dir()
+            .join("libra-fuse-cargo-target")
+            .join("libra-task-worktree-fuse-7-019d");
+        assert_eq!(target, &expected.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_skips_when_caller_already_set_target_dir() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace");
+        let mut env = HashMap::new();
+        env.insert(
+            CARGO_TARGET_DIR_ENV_VAR.to_string(),
+            "/explicit/target".to_string(),
+        );
+        apply_fuse_workspace_env_overrides(cwd, &mut env, false);
+        assert_eq!(
+            env.get(CARGO_TARGET_DIR_ENV_VAR).map(String::as_str),
+            Some("/explicit/target")
+        );
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_skips_when_ambient_env_has_target_dir() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace");
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(cwd, &mut env, true);
+        assert!(
+            !env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "must not override an operator-supplied CARGO_TARGET_DIR"
+        );
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_noops_outside_fuse_worktree() {
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(Path::new("/repo/src"), &mut env, false);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn shell_command_spec_injects_cargo_target_dir_inside_fuse_workspace() {
+        // Production wrapper test: drives the inner constructor with an
+        // explicit ambient-env flag so we don't rely on whatever the test
+        // runner exports for `CARGO_TARGET_DIR`. This covers the wiring from
+        // `CommandSpec::shell{,_inner}` through `apply_fuse_workspace_env_overrides`.
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-9-019e/workspace");
+        let spec = CommandSpec::shell_inner(
+            "cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        let expected = std::env::temp_dir()
+            .join("libra-fuse-cargo-target")
+            .join("libra-task-worktree-fuse-9-019e")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            spec.env.get(CARGO_TARGET_DIR_ENV_VAR).map(String::as_str),
+            Some(expected.as_str()),
+            "CommandSpec::shell must redirect cargo's target dir for FUSE workspaces"
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_skips_injection_when_ambient_env_has_target_dir() {
+        // When the operator has `CARGO_TARGET_DIR` exported the inner
+        // constructor must respect that choice, even inside a FUSE worktree.
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-9-019e/workspace");
+        let spec = CommandSpec::shell_inner(
+            "cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            true,
+        );
+        assert!(
+            !spec.env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "CommandSpec::shell must defer to the ambient CARGO_TARGET_DIR"
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_does_not_inject_cargo_target_dir_outside_fuse_workspace() {
+        let cwd = std::env::temp_dir();
+        let spec = CommandSpec::shell_inner(
+            "echo ok",
+            cwd,
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        assert!(
+            !spec.env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "CommandSpec::shell must not redirect cargo target dir outside FUSE workspaces"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sensitive_read_policy_denies_home_credentials() {
+        let extra = vec![PathBuf::from("/Users/tester/Library/Cookies")];
+        let (policy, params) =
+            build_macos_sensitive_read_policy(Some(Path::new("/Users/tester")), &extra);
+
+        assert!(policy.contains("(deny file-read*"));
+        assert!(policy.contains("SENSITIVE_READ_0"));
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/.ssh"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/.aws"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/etc/shadow"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/Library/Cookies"))
+        );
     }
 }

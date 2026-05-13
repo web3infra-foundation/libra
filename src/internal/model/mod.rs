@@ -23,6 +23,7 @@ pub mod config_kv;
 pub mod object_index;
 pub mod reference;
 pub mod reflog;
+pub mod schema_version;
 
 #[cfg(test)]
 mod reference_test;

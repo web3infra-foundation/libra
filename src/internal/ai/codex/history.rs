@@ -1,3 +1,10 @@
+//! History conversion helpers for mapping Codex conversation events into Libra's AI
+//! runtime history.
+//!
+//! Boundary: conversion preserves message order and tool-call metadata but avoids
+//! provider-specific execution decisions. AI chat and mock-provider tests cover resumed
+//! sessions, tool outputs, and empty-history boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -25,6 +32,7 @@ const LIVE_CONTEXT_WINDOW_MAX: usize = 50;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    ThreadStatus,
     RunStatus,
     TaskStatus,
     PlanStepStatus,
@@ -36,6 +44,7 @@ pub enum EventKind {
 impl EventKind {
     fn storage_slug(&self) -> &'static str {
         match self {
+            Self::ThreadStatus => "thread_status",
             Self::RunStatus => "run_status",
             Self::TaskStatus => "task_status",
             Self::PlanStepStatus => "plan_step_status",

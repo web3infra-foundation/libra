@@ -15,6 +15,7 @@ use super::{
 use crate::{
     command::{branch, load_object, status::StatusArgs},
     internal::{
+        ai::automation::{VCS_EVENT_POST_SWITCH, dispatch_current_repo_vcs_event_to_history},
         branch::{self as repo_branch, Branch},
         db::get_db_conn_instance,
         head::Head,
@@ -510,7 +511,11 @@ pub async fn execute(args: SwitchArgs) {
 /// No-op "already on" cases return before the cleanliness check.
 pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_switch(args, output).await.map_err(CliError::from)?;
-    render_switch_output(&result, output)
+    render_switch_output(&result, output)?;
+    if !result.already_on {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_SWITCH).await;
+    }
+    Ok(())
 }
 
 async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOutput, SwitchError> {

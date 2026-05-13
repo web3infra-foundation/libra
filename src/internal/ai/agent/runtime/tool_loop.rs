@@ -1,21 +1,61 @@
-use std::{collections::HashMap, sync::Arc};
+//! Iterative model-and-tool execution loop.
+//!
+//! This is the heart of the agent runtime: every assistant turn that may include tool
+//! calls funnels through [`run_tool_loop_with_history_and_observer`]. The loop:
+//!
+//! 1. Sends the current chat history to the [`CompletionModel`] together with the
+//!    available tool definitions.
+//! 2. Splits the response into text fragments and tool calls.
+//! 3. Either dispatches each tool call (with hook integration, allow-list enforcement,
+//!    and repeated-call protection) and folds the results back into the history, or —
+//!    when the model produced only text — returns the text as the final answer.
+//!
+//! The loop also enforces three safety budgets that protect against runaway agents:
+//!
+//! - `max_turns` — hard upper bound on iterations.
+//! - Repeated-call detection (warning + abort thresholds over a sliding window) —
+//!   stops the model from looping on the same tool call.
+//! - Identical-blocked-call counter — if a hook or allow-list keeps blocking the
+//!   exact same call, abort instead of letting the model retry forever.
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use serde_json::Value;
 
 use crate::internal::ai::{
     completion::{
-        AssistantContent, CompletionError, CompletionModel, CompletionRequest,
-        CompletionStreamEvent, CompletionThinking, CompletionUsage, CompletionUsageSummary,
-        Message, OneOrMany, ToolResult, UserContent,
+        AssistantContent, CompletionError, CompletionModel, CompletionReasoningEffort,
+        CompletionRequest, CompletionStreamEvent, CompletionThinking, CompletionUsage,
+        CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
+        request::CompletionResponse,
+    },
+    context_budget::{
+        CompactionEvent, CompactionReason, ContextAttachmentStore, ContextBudget,
+        ContextFrameBuilder, ContextFrameCandidate, ContextFrameEvent, ContextFrameKind,
+        ContextFrameSource, ContextSegmentKind, ContextTrustLevel,
     },
     hooks::{HookAction, HookRunner},
+    session::jsonl::{SessionEvent, SessionJsonlStore},
+    sources::{SourcePool, SourcePoolError, SourceToolNaming},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
         ToolRuntimeContext,
     },
+    usage::{UsageContext, UsageRecorder},
 };
 
 /// A single complete tool-loop turn result.
+///
+/// Returned by [`run_tool_loop_with_history_and_observer`]. `final_text` is what the
+/// model produced as its final answer (after all tool calls resolved), and `history`
+/// is the full history including the user prompt, every assistant turn, and every
+/// tool result, ready to be fed into another `run_tool_loop_*` call to continue the
+/// conversation.
 #[derive(Clone, Debug)]
 pub struct ToolLoopTurn {
     pub final_text: String,
@@ -24,11 +64,20 @@ pub struct ToolLoopTurn {
 
 /// Observer hooks for tool-loop execution.
 ///
+/// Implementations receive call-by-call notifications without affecting the loop
+/// itself (except for [`Self::on_tool_call_preflight`], which can cancel a tool call).
+/// Used by the TUI to render thoughts/calls/results live, and by tests to assert the
+/// expected sequence of events.
+///
 /// All callbacks are best-effort and must be non-panicking.
 pub trait ToolLoopObserver: Send {
     fn on_model_turn_start(&mut self, _turn: usize) {}
 
     fn on_model_usage(&mut self, _usage: &CompletionUsageSummary) {}
+
+    fn on_model_usage_recorded(&mut self, usage: &CompletionUsageSummary, _wall_clock_ms: u64) {
+        self.on_model_usage(usage);
+    }
 
     fn on_model_stream_event(&mut self, _event: &CompletionStreamEvent) {}
 
@@ -54,16 +103,24 @@ pub trait ToolLoopObserver: Send {
     }
 }
 
+/// Default observer used when callers do not provide one (the simple `run_tool_loop`
+/// entrypoint). Every method falls back to the trait's no-op default.
 struct NoopObserver;
 
 impl ToolLoopObserver for NoopObserver {}
 
 /// Runtime configuration for iterative tool-calling execution.
+///
+/// Every knob is optional; the [`Default`] impl wires sensible thresholds that match
+/// the typical interactive `libra code` usage. Callers (multi-agent plan executors,
+/// MCP server, etc.) override individual fields as needed.
 #[derive(Clone, Debug)]
 pub struct ToolLoopConfig {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
     pub thinking: Option<CompletionThinking>,
+    pub reasoning_effort: Option<CompletionReasoningEffort>,
+    pub stream: Option<bool>,
     /// Optional hook runner for pre/post tool-use hooks.
     pub hook_runner: Option<Arc<HookRunner>>,
     /// If set, only expose these tools to the model (agent tool restriction).
@@ -72,6 +129,33 @@ pub struct ToolLoopConfig {
     pub runtime_context: Option<ToolRuntimeContext>,
     /// Hard cap for model turns in one tool loop run.
     pub max_turns: Option<usize>,
+    /// Number of recent executed tool calls used to detect repeated calls.
+    pub repeat_detection_window: Option<usize>,
+    /// Same executed tool-call signature count that triggers a strategy warning.
+    pub repeat_warning_threshold: Option<usize>,
+    /// Same executed tool-call signature count that aborts the loop.
+    pub repeat_abort_threshold: Option<usize>,
+    /// Tools that complete the current loop immediately after a successful call.
+    pub terminal_tools: Option<Vec<String>>,
+    /// Session root used for append-only context-frame recording.
+    pub context_frame_session_root: Option<PathBuf>,
+    /// Stable prefix for context-frame prompt IDs.
+    pub context_frame_prompt_id: Option<String>,
+    /// Optional budget override used by tests and constrained runtimes.
+    pub context_frame_budget: Option<ContextBudget>,
+    /// Optional attachment threshold override used by tests and constrained runtimes.
+    pub context_frame_attachment_threshold_bytes: Option<usize>,
+    /// Optional usage recorder for provider-neutral token/cost stats.
+    pub usage_recorder: Option<UsageRecorder>,
+    /// Provider/model/thread metadata attached to usage rows.
+    pub usage_context: Option<UsageContext>,
+    /// Optional Source Pool whose enabled handlers are merged into the tool
+    /// registry at the start of each tool-loop run.
+    pub source_pool: Option<SourcePool>,
+    /// Session id used to build Source Pool state namespaces.
+    pub source_session_id: Option<String>,
+    /// Whether assistant reasoning content should be retained in model history.
+    pub preserve_reasoning_content: bool,
 }
 
 impl Default for ToolLoopConfig {
@@ -80,18 +164,54 @@ impl Default for ToolLoopConfig {
             preamble: None,
             temperature: Some(0.0),
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             hook_runner: None,
             allowed_tools: None,
             runtime_context: None,
             max_turns: None,
+            repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+            repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+            repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
+            terminal_tools: None,
+            context_frame_session_root: None,
+            context_frame_prompt_id: None,
+            context_frame_budget: None,
+            context_frame_attachment_threshold_bytes: None,
+            usage_recorder: None,
+            usage_context: None,
+            source_pool: None,
+            source_session_id: None,
+            preserve_reasoning_content: false,
         }
     }
 }
 
+/// Maximum model turns when `ToolLoopConfig::max_turns` is unset.
+///
+/// 64 is enough for the longest real interactive turn we have observed (deep file
+/// exploration with many small reads) while still bounding pathological agent loops.
 const DEFAULT_MAX_TOOL_LOOP_TURNS: usize = 64;
+/// Sliding window (in executed tool calls) used by the repeat detector.
+const DEFAULT_REPEAT_DETECTION_WINDOW: usize = 10;
+/// Repeat count at which we inject a "you keep calling the same thing" warning into
+/// the next tool result.
+const DEFAULT_REPEAT_WARNING_THRESHOLD: usize = 3;
+/// Repeat count at which we hard-abort the loop with `CompletionError::ResponseError`.
+const DEFAULT_REPEAT_ABORT_THRESHOLD: usize = 5;
+/// Cap on identical *blocked* tool calls (hook deny / allow-list miss / preflight
+/// rejection). Exceeding this means the model is stuck retrying a forbidden call and
+/// the loop aborts to avoid wasted tokens.
 const MAX_IDENTICAL_BLOCKED_TOOL_CALLS: usize = 3;
 
 /// Run a prompt through a completion model, allowing iterative tool calls.
+///
+/// Functional scope: the simplest entry point — starts with no history, no observer,
+/// returns just the final assistant text. Used by the codex executor and any caller
+/// that does not need streaming events or to extend the conversation afterwards.
+///
+/// Boundary conditions: every error case from the underlying loop bubbles up
+/// unchanged (max-turns, repeated tool calls, hook denials, etc.).
 pub async fn run_tool_loop<M: CompletionModel>(
     model: &M,
     prompt: impl Into<String>,
@@ -116,6 +236,30 @@ where
 
 /// Run a prompt through a completion model with an existing conversation history,
 /// allowing iterative tool calls and emitting observer callbacks.
+///
+/// Functional scope:
+/// - Appends the user `prompt` to `existing_history` and iterates: request →
+///   inspect response → either dispatch tools and loop, or return the final text.
+/// - Streams `CompletionStreamEvent`s from the model task to the observer using a
+///   `tokio::select!` between the awaiting completion future and an `mpsc` receiver,
+///   so progressive UIs see chunks as they arrive instead of only at end-of-turn.
+/// - Stamps each tool call into the history (assistant turn) and each tool result
+///   back into the history (synthetic user turn) so the next request includes the
+///   full context.
+/// - Honors hooks, allow-listed tools, and three independent safety budgets.
+///
+/// Boundary conditions:
+/// - `max_turns == 0` is rejected up-front because zero would mean "never call the
+///   model" while still expecting an answer.
+/// - When the model emits no tool calls and no text but produced reasoning content,
+///   the loop returns a `ResponseError` rather than spinning forever — see
+///   [`empty_or_reasoning_only_error`].
+/// - `terminal_tools` short-circuits the loop the moment a successful call to one of
+///   them is recorded; the call's text output (if any) becomes `final_text`.
+/// - `MAX_IDENTICAL_BLOCKED_TOOL_CALLS` aborts the loop if hooks/allow-list/preflight
+///   reject the same call signature this many times.
+/// - `repeat_abort_threshold` aborts the loop if the model successfully repeats the
+///   same tool/argument signature too often within the rolling window.
 pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: ToolLoopObserver>(
     model: &M,
     mut existing_history: Vec<Message>,
@@ -137,10 +281,33 @@ where
     }
     let mut turn_count = 0usize;
     let mut blocked_signatures: HashMap<String, usize> = HashMap::new();
+    let repeat_detection_window = config
+        .repeat_detection_window
+        .unwrap_or(DEFAULT_REPEAT_DETECTION_WINDOW);
+    let repeat_warning_threshold = config
+        .repeat_warning_threshold
+        .unwrap_or(DEFAULT_REPEAT_WARNING_THRESHOLD);
+    let repeat_abort_threshold = config
+        .repeat_abort_threshold
+        .unwrap_or(DEFAULT_REPEAT_ABORT_THRESHOLD);
+    let terminal_tools = config
+        .terminal_tools
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut executed_tool_signatures: VecDeque<String> = VecDeque::new();
+    let mut executed_tool_signature_counts: HashMap<String, usize> = HashMap::new();
 
+    let effective_registry = registry_with_source_tools(registry, &config).map_err(|error| {
+        CompletionError::ResponseError(format!("failed to load source tools: {error}"))
+    })?;
+    let registry = &effective_registry;
     let mut tools = registry_tool_definitions(registry);
 
-    // Apply agent tool restriction
+    // Apply agent tool restriction at the *definition* level so the model never sees
+    // tools outside its allow-list. The same list is re-checked at execution time
+    // below to defend against models that hallucinate names regardless.
     if let Some(ref allowed) = config.allowed_tools {
         tools.retain(|t| allowed.iter().any(|a| a == &t.name));
     }
@@ -159,13 +326,20 @@ where
             chat_history: history.clone(),
             temperature: config.temperature,
             thinking: config.thinking,
+            reasoning_effort: config.reasoning_effort,
+            stream: config.stream,
             tools: tools.clone(),
             stream_events: Some(stream_tx),
             ..Default::default()
         };
 
+        record_tool_loop_context_frame(&config, turn_count, &request);
         observer.on_model_turn_start(turn_count);
-        let response = {
+        let model_request_started = std::time::Instant::now();
+        let response_result = {
+            // Drive the completion future and stream events concurrently. When the
+            // future resolves we drain any events still buffered on the channel before
+            // breaking out, otherwise late events would be lost.
             let completion = model.completion(request);
             tokio::pin!(completion);
 
@@ -175,7 +349,7 @@ where
                         while let Ok(event) = stream_rx.try_recv() {
                             observer.on_model_stream_event(&event);
                         }
-                        break result?;
+                        break result;
                     }
                     Some(event) = stream_rx.recv() => {
                         observer.on_model_stream_event(&event);
@@ -183,9 +357,22 @@ where
                 }
             }
         };
-        if let Some(usage) = response.raw_response.usage_summary() {
-            observer.on_model_usage(&usage);
-        }
+        let wall_clock_ms = duration_millis_u64(model_request_started.elapsed());
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                if let (Some(recorder), Some(context)) = (
+                    config.usage_recorder.as_ref(),
+                    config.usage_context.as_ref(),
+                ) && let Err(record_error) = recorder
+                    .record_failure(context, completion_error_kind(&error), Some(wall_clock_ms))
+                    .await
+                {
+                    tracing::warn!("failed to record failed model usage stats: {record_error}");
+                }
+                return Err(error);
+            }
+        };
 
         let mut tool_calls = Vec::new();
         let mut text_parts = Vec::new();
@@ -198,6 +385,38 @@ where
                     }
                 }
             }
+        }
+        if let (Some(recorder), Some(context)) = (
+            config.usage_recorder.as_ref(),
+            config.usage_context.as_ref(),
+        ) {
+            let tool_call_count = u64::try_from(tool_calls.len()).unwrap_or(u64::MAX);
+            match response.raw_response.usage_summary() {
+                Some(usage) => {
+                    if let Err(error) = recorder
+                        .record_summary_with_tool_count(
+                            context,
+                            &usage,
+                            Some(wall_clock_ms),
+                            tool_call_count,
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to record model usage stats: {error}");
+                    }
+                    observer.on_model_usage_recorded(&usage, wall_clock_ms);
+                }
+                None => {
+                    if let Err(error) = recorder
+                        .record_missing_usage(context, Some(wall_clock_ms), tool_call_count)
+                        .await
+                    {
+                        tracing::warn!("failed to record estimated model usage stats: {error}");
+                    }
+                }
+            }
+        } else if let Some(usage) = response.raw_response.usage_summary() {
+            observer.on_model_usage_recorded(&usage, wall_clock_ms);
         }
 
         if !tool_calls.is_empty() {
@@ -212,6 +431,10 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
+                reasoning_content: history_reasoning_content(
+                    response.reasoning_content.clone(),
+                    config.preserve_reasoning_content,
+                ),
                 content: assistant_content,
             });
 
@@ -332,14 +555,26 @@ where
                     invocation = invocation.with_runtime_context(runtime_context);
                 }
 
-                let tool_result: Result<ToolOutput, String> =
+                let tool_name = call.function.name.clone();
+                let mut tool_result: Result<ToolOutput, String> =
                     match registry.dispatch(invocation).await {
                         Ok(output) => Ok(output),
-                        Err(err) => Err(format!("Tool '{}' failed: {}", call.function.name, err)),
+                        Err(err) => Err(format!("Tool '{}' failed: {}", tool_name, err)),
                     };
                 blocked_signatures.clear();
+                let repeat_status = record_executed_tool_signature(
+                    &mut executed_tool_signatures,
+                    &mut executed_tool_signature_counts,
+                    &tool_name,
+                    &call.function.arguments,
+                    repeat_detection_window,
+                    repeat_warning_threshold,
+                );
+                if let Some(warning) = repeat_status.warning.as_deref() {
+                    append_repeat_warning_to_tool_result(&mut tool_result, warning);
+                }
 
-                observer.on_tool_call_end(&call.id, &call.function.name, &tool_result);
+                observer.on_tool_call_end(&call.id, &tool_name, &tool_result);
 
                 // Run PostToolUse hooks
                 if let Some(ref hook_runner) = config.hook_runner {
@@ -348,11 +583,7 @@ where
                         Err(msg) => serde_json::json!({"error": msg}),
                     };
                     hook_runner
-                        .run_post_tool_use(
-                            &call.function.name,
-                            call.function.arguments.clone(),
-                            output_json,
-                        )
+                        .run_post_tool_use(&tool_name, call.function.arguments.clone(), output_json)
                         .await;
                 }
 
@@ -364,10 +595,29 @@ where
                 history.push(Message::User {
                     content: OneOrMany::One(UserContent::ToolResult(ToolResult {
                         id: call.id,
-                        name: call.function.name,
+                        name: tool_name.clone(),
                         result: result_json,
                     })),
                 });
+
+                if should_abort_repeated_tool_call(repeat_status.count, repeat_abort_threshold) {
+                    return Err(CompletionError::ResponseError(format!(
+                        "Tool loop aborted after repeated calls to '{}' with identical arguments {} times in the last {} executed tool calls: {}",
+                        tool_name,
+                        repeat_status.count,
+                        repeat_detection_window,
+                        truncate_signature_arguments(&call.function.arguments),
+                    )));
+                }
+
+                if tool_result.as_ref().is_ok_and(|output| output.is_success())
+                    && terminal_tools.contains(&tool_name)
+                {
+                    return Ok(ToolLoopTurn {
+                        final_text: terminal_tool_final_text(&tool_name, &tool_result),
+                        history,
+                    });
+                }
             }
 
             continue;
@@ -380,6 +630,10 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
+                reasoning_content: history_reasoning_content(
+                    response.reasoning_content.clone(),
+                    config.preserve_reasoning_content,
+                ),
                 content: assistant_content,
             });
             return Ok(ToolLoopTurn {
@@ -389,14 +643,17 @@ where
         }
 
         if !response.content.is_empty() {
-            return Err(CompletionError::ResponseError(
-                "Model returned non-text response (likely only thought or unsupported content)"
-                    .to_string(),
-            ));
+            return Err(empty_or_reasoning_only_error(&response));
         }
+        return Err(empty_or_reasoning_only_error(&response));
     }
 }
 
+/// Normalize tool-call arguments to the JSON string shape that tool dispatch expects.
+///
+/// Models may already emit a JSON-serialized string for arguments (some providers do
+/// this for backward compatibility with pre-tool-use APIs). When the value is a string
+/// that itself parses as JSON we forward it verbatim; otherwise we re-serialize.
 fn tool_arguments_json(arguments: &Value) -> String {
     match arguments {
         Value::String(raw) => {
@@ -410,10 +667,15 @@ fn tool_arguments_json(arguments: &Value) -> String {
     }
 }
 
+/// Build a signature `"<tool>|<canonical-args>"` used to detect repeated *blocked*
+/// calls. The canonical form sorts object keys so semantically identical arguments
+/// produce identical signatures regardless of JSON ordering.
 fn blocked_tool_call_signature(tool_name: &str, arguments: &Value) -> String {
-    format!("{tool_name}|{}", arguments)
+    format!("{tool_name}|{}", canonical_json_value(arguments))
 }
 
+/// Increment and return the blocked count for `signature`, mutating the cache in
+/// place. The caller compares the returned count against `MAX_IDENTICAL_BLOCKED_TOOL_CALLS`.
 fn increment_blocked_count(
     blocked_signatures: &mut HashMap<String, usize>,
     signature: &str,
@@ -423,6 +685,226 @@ fn increment_blocked_count(
     *count
 }
 
+/// Decide whether to keep the model's reasoning content in subsequent requests.
+///
+/// Some providers (notably reasoning models) charge for re-sending long thoughts; we
+/// drop them by default. Setting `preserve_reasoning_content` is opt-in for callers
+/// that want exact replay (e.g. plan executors that need the same chain of thought).
+fn history_reasoning_content(
+    reasoning_content: Option<String>,
+    preserve_reasoning_content: bool,
+) -> Option<String> {
+    if preserve_reasoning_content {
+        reasoning_content
+    } else {
+        None
+    }
+}
+
+/// Outcome of recording an executed tool call against the rolling window.
+///
+/// `count` is the number of times the same signature appears in the current window
+/// (after recording the new call); `warning` is set when the count crosses the warn
+/// threshold so the loop can surface a system message back to the model.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RepeatToolCallStatus {
+    count: usize,
+    warning: Option<String>,
+}
+
+/// Record an executed tool call and update the rolling window.
+///
+/// Functional scope: pushes the new signature, increments its count, and evicts the
+/// oldest entry if the window grew beyond `window`. Returns the updated count and a
+/// warning string when the count crosses `threshold`.
+///
+/// Boundary conditions:
+/// - `window == 0` disables repeat detection entirely; `threshold == 0` disables the
+///   warning while leaving the counter intact for the abort check.
+/// - When a signature's eviction drops its count to zero the entry is removed from
+///   the count map to keep memory bounded over very long sessions.
+fn record_executed_tool_signature(
+    recent_signatures: &mut VecDeque<String>,
+    signature_counts: &mut HashMap<String, usize>,
+    tool_name: &str,
+    arguments: &Value,
+    window: usize,
+    threshold: usize,
+) -> RepeatToolCallStatus {
+    if window == 0 {
+        return RepeatToolCallStatus::default();
+    }
+
+    let signature = format!("{tool_name}|{}", canonical_json_value(arguments));
+    recent_signatures.push_back(signature.clone());
+    *signature_counts.entry(signature.clone()).or_insert(0) += 1;
+
+    while recent_signatures.len() > window {
+        if let Some(expired) = recent_signatures.pop_front()
+            && let Some(count) = signature_counts.get_mut(&expired)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                signature_counts.remove(&expired);
+            }
+        }
+    }
+
+    let count = signature_counts
+        .get(&signature)
+        .copied()
+        .unwrap_or_default();
+    let warning = if threshold > 0 && count >= threshold {
+        Some(format!(
+            "[system warning: repeated tool call] You have called `{tool_name}` with the same arguments {count} times in the last {window} executed tool calls. The prior result is in history above — read it instead of re-running the call. Either explore something new, or, if you have enough evidence, call `submit_task_complete` to end the task with a structured verdict."
+        ))
+    } else {
+        None
+    };
+    RepeatToolCallStatus { count, warning }
+}
+
+/// Decide whether the loop must abort because the same tool signature has executed
+/// too often. `abort_threshold == 0` disables the abort check.
+fn should_abort_repeated_tool_call(count: usize, abort_threshold: usize) -> bool {
+    abort_threshold > 0 && count >= abort_threshold
+}
+
+/// Build a `CompletionError::ResponseError` that explains why the loop refused to
+/// continue with the given response.
+///
+/// Three cases produce specific messages:
+/// 1. Empty content with non-empty reasoning content — the model is "thinking out
+///    loud" but never producing visible text or tool calls.
+/// 2. Empty content overall — provider returned a malformed response.
+/// 3. Non-empty content that contains nothing actionable (e.g. only thoughts as
+///    `AssistantContent` blocks).
+fn empty_or_reasoning_only_error<R>(response: &CompletionResponse<R>) -> CompletionError {
+    if response.content.is_empty() {
+        if response
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty())
+        {
+            return CompletionError::ResponseError(
+                "Model returned reasoning_content without text or tool calls; aborting to prevent an infinite tool loop".to_string(),
+            );
+        }
+        return CompletionError::ResponseError(
+            "Model returned empty response with no text or tool calls; aborting to prevent an infinite tool loop".to_string(),
+        );
+    }
+
+    CompletionError::ResponseError(
+        "Model returned non-text response (likely only thought or unsupported content)".to_string(),
+    )
+}
+
+/// Render a compact preview of repeated arguments for the abort error message.
+///
+/// `MAX_LEN` of 240 keeps the error readable even for large argument blobs; we count
+/// chars (not bytes) so multibyte content does not slice through a code point.
+fn truncate_signature_arguments(arguments: &Value) -> String {
+    let serialized = canonical_json_value(arguments);
+    const MAX_LEN: usize = 240;
+    if serialized.chars().count() <= MAX_LEN {
+        serialized
+    } else {
+        let mut truncated = serialized.chars().take(MAX_LEN).collect::<String>();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+/// Compute the `final_text` to surface when a terminal tool short-circuits the loop.
+///
+/// Prefers the tool's textual output, falls back to a human-readable confirmation,
+/// and on failure uses the error message verbatim so the caller still learns what
+/// went wrong.
+fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, String>) -> String {
+    match tool_result {
+        Ok(output) => output
+            .as_text()
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("Tool '{tool_name}' completed.")),
+        Err(message) => message.clone(),
+    }
+}
+
+/// Inject the repeat-call warning into the next tool result so the model sees it on
+/// its next turn.
+///
+/// The injection point depends on the result shape:
+/// - Function tools: append to the textual content with a blank-line separator.
+/// - MCP tools: add a `repeat_warning` key to the JSON object so structured callers
+///   can detect it without regex.
+/// - Errors: append to the error string the same way as function content.
+fn append_repeat_warning_to_tool_result(result: &mut Result<ToolOutput, String>, warning: &str) {
+    match result {
+        Ok(ToolOutput::Function { content, .. }) => {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(warning);
+        }
+        Ok(ToolOutput::Mcp { result }) => {
+            if let Value::Object(object) = result {
+                object.insert(
+                    "repeat_warning".to_string(),
+                    Value::String(warning.to_string()),
+                );
+            }
+        }
+        Err(message) => {
+            if !message.is_empty() {
+                message.push_str("\n\n");
+            }
+            message.push_str(warning);
+        }
+    }
+}
+
+/// Stable string representation of a JSON value with object keys sorted.
+///
+/// Used to compare argument payloads for equality regardless of how the LLM emitted
+/// the keys. Cheaper than re-parsing because we walk the in-memory `Value` directly.
+fn canonical_json_value(value: &Value) -> String {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.to_string(),
+        Value::Array(items) => {
+            let inner = items
+                .iter()
+                .map(canonical_json_value)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{inner}]")
+        }
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            let inner = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = match serde_json::to_string(key) {
+                        Ok(serialized) => serialized,
+                        Err(_) => "\"<invalid-key>\"".to_string(),
+                    };
+                    format!("{key}:{}", canonical_json_value(value))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{inner}}}")
+        }
+    }
+}
+
+/// Convert a [`ToolRegistry`] into `ToolDefinition`s shaped for the completion model.
+///
+/// Functional scope: pulls the registry's specs and converts each parameter schema to
+/// JSON. `FunctionParameters::Empty` is rewritten to an explicit empty-object schema
+/// because some providers reject tools with no `parameters` field.
 fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
     registry
         .tool_specs()
@@ -449,9 +931,334 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         .collect()
 }
 
+fn registry_with_source_tools(
+    registry: &ToolRegistry,
+    config: &ToolLoopConfig,
+) -> Result<ToolRegistry, SourcePoolError> {
+    let mut effective = registry.clone();
+    let Some(source_pool) = config.source_pool.as_ref() else {
+        return Ok(effective);
+    };
+    let session_id = config
+        .source_session_id
+        .as_deref()
+        .or_else(|| {
+            config
+                .usage_context
+                .as_ref()
+                .and_then(|context| context.session_id.as_deref())
+        })
+        .unwrap_or("session");
+    for (name, handler) in
+        source_pool.tool_handlers_for_session(session_id, SourceToolNaming::Prefixed)?
+    {
+        effective.register(name, handler);
+    }
+    Ok(effective)
+}
+
+fn record_tool_loop_context_frame(
+    config: &ToolLoopConfig,
+    model_turn: usize,
+    request: &CompletionRequest,
+) {
+    let Some(session_root) = config.context_frame_session_root.as_deref() else {
+        return;
+    };
+
+    let prompt_id = context_frame_prompt_id(config.context_frame_prompt_id.as_deref(), model_turn);
+    let budget = config.context_frame_budget.clone().unwrap_or_default();
+    let frame = match build_tool_loop_context_frame(
+        session_root,
+        prompt_id,
+        request,
+        budget,
+        config.context_frame_attachment_threshold_bytes,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::warn!(
+                model_turn,
+                error = %error,
+                "failed to build tool-loop context frame"
+            );
+            return;
+        }
+    };
+
+    let store = SessionJsonlStore::new(session_root.to_path_buf());
+    if let Err(error) = store.append(&SessionEvent::context_frame(frame.clone())) {
+        tracing::warn!(
+            model_turn,
+            error = %error,
+            "failed to append tool-loop context frame"
+        );
+        return;
+    }
+
+    if frame_requires_compaction_event(&frame) {
+        let compaction = CompactionEvent::from_frame(
+            &frame,
+            CompactionReason::BudgetPressure,
+            format!("deterministic context allocation for model turn {model_turn}"),
+        );
+        if let Err(error) = store.append(&SessionEvent::compaction(compaction)) {
+            tracing::warn!(
+                model_turn,
+                error = %error,
+                "failed to append context compaction event"
+            );
+        }
+    }
+}
+
+fn context_frame_prompt_id(base_prompt_id: Option<&str>, model_turn: usize) -> String {
+    match base_prompt_id.filter(|value| !value.trim().is_empty()) {
+        Some(base) => format!("{base}/model-turn-{model_turn}"),
+        None => format!("model-turn-{model_turn}"),
+    }
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn completion_error_kind(error: &CompletionError) -> &'static str {
+    match error {
+        CompletionError::HttpError(error) if error.is_timeout() => "timeout",
+        CompletionError::HttpError(_) => "http_error",
+        CompletionError::JsonError(_) => "json_error",
+        CompletionError::RequestError(error) if error_message_is_cancelled(&error.to_string()) => {
+            "cancelled"
+        }
+        CompletionError::RequestError(error) if error_message_is_timeout(&error.to_string()) => {
+            "timeout"
+        }
+        CompletionError::RequestError(_) => "request_error",
+        CompletionError::ProviderError(message) if error_message_is_cancelled(message) => {
+            "cancelled"
+        }
+        CompletionError::ProviderError(message) if error_message_is_timeout(message) => "timeout",
+        CompletionError::ProviderError(_) => "provider_error",
+        CompletionError::ResponseError(message) if error_message_is_cancelled(message) => {
+            "cancelled"
+        }
+        CompletionError::ResponseError(message) if error_message_is_timeout(message) => "timeout",
+        CompletionError::ResponseError(_) => "response_error",
+        CompletionError::NotImplemented(_) => "not_implemented",
+    }
+}
+
+fn error_message_is_cancelled(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cancelled") || lower.contains("canceled")
+}
+
+fn error_message_is_timeout(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
+}
+
+fn build_tool_loop_context_frame(
+    session_root: &Path,
+    prompt_id: String,
+    request: &CompletionRequest,
+    budget: ContextBudget,
+    attachment_threshold_bytes: Option<usize>,
+) -> io::Result<ContextFrameEvent> {
+    let attachments = ContextAttachmentStore::new(session_root);
+    let mut builder =
+        ContextFrameBuilder::new(ContextFrameKind::PromptBuild, budget).with_prompt_id(prompt_id);
+    if let Some(threshold) = attachment_threshold_bytes {
+        builder = builder.with_attachment_threshold_bytes(threshold);
+    }
+
+    if let Some(preamble) = request.preamble.as_deref()
+        && !preamble.trim().is_empty()
+    {
+        builder = builder.push(
+            ContextFrameCandidate::new("preamble", ContextSegmentKind::SystemRules, preamble)
+                .source(ContextFrameSource::runtime("tool_loop_preamble"))
+                .trust(ContextTrustLevel::Trusted)
+                .non_compressible(true),
+        );
+    }
+
+    for (message_index, message) in request.chat_history.iter().enumerate() {
+        builder = push_message_context_candidates(builder, message_index, message);
+    }
+
+    builder.build(&attachments)
+}
+
+fn push_message_context_candidates(
+    mut builder: ContextFrameBuilder,
+    message_index: usize,
+    message: &Message,
+) -> ContextFrameBuilder {
+    match message {
+        Message::User { content } => {
+            for (part_index, part) in content.iter().enumerate() {
+                match part {
+                    UserContent::Text(text) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-user-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            text.text.clone(),
+                            ContextFrameSource::runtime("conversation_user"),
+                            ContextTrustLevel::Untrusted,
+                            false,
+                        );
+                    }
+                    UserContent::Image(image) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-user-image-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            format!(
+                                "image mime_type={} bytes={}",
+                                image.mime_type.as_deref().unwrap_or("unknown"),
+                                image.data.len()
+                            ),
+                            ContextFrameSource::runtime("conversation_user_image"),
+                            ContextTrustLevel::Untrusted,
+                            false,
+                        );
+                    }
+                    UserContent::ToolResult(result) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-tool-result-{part_index}"),
+                            ContextSegmentKind::ToolResults,
+                            render_tool_result_context(result),
+                            ContextFrameSource::tool(result.name.clone(), result.id.clone()),
+                            ContextTrustLevel::External,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        Message::Assistant { content, .. } => {
+            for (part_index, part) in content.iter().enumerate() {
+                match part {
+                    AssistantContent::Text(text) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-assistant-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            text.text.clone(),
+                            ContextFrameSource::runtime("conversation_assistant"),
+                            ContextTrustLevel::Trusted,
+                            false,
+                        );
+                    }
+                    AssistantContent::ToolCall(call) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-tool-call-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            render_tool_call_context(call),
+                            ContextFrameSource::runtime("conversation_assistant_tool_call"),
+                            ContextTrustLevel::Trusted,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        Message::System { content } => {
+            for (part_index, part) in content.iter().enumerate() {
+                if let Some(content) = render_user_content_context(part) {
+                    builder = push_text_context_candidate(
+                        builder,
+                        format!("message-{message_index}-system-{part_index}"),
+                        ContextSegmentKind::SystemRules,
+                        content,
+                        ContextFrameSource::runtime("conversation_system"),
+                        ContextTrustLevel::Trusted,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+    builder
+}
+
+fn push_text_context_candidate(
+    builder: ContextFrameBuilder,
+    id: String,
+    segment: ContextSegmentKind,
+    content: String,
+    source: ContextFrameSource,
+    trust: ContextTrustLevel,
+    non_compressible: bool,
+) -> ContextFrameBuilder {
+    if content.trim().is_empty() {
+        return builder;
+    }
+
+    builder.push(
+        ContextFrameCandidate::new(id, segment, content)
+            .source(source)
+            .trust(trust)
+            .non_compressible(non_compressible),
+    )
+}
+
+fn render_user_content_context(content: &UserContent) -> Option<String> {
+    match content {
+        UserContent::Text(text) => Some(text.text.clone()),
+        UserContent::Image(image) => Some(format!(
+            "image mime_type={} bytes={}",
+            image.mime_type.as_deref().unwrap_or("unknown"),
+            image.data.len()
+        )),
+        UserContent::ToolResult(result) => Some(render_tool_result_context(result)),
+    }
+}
+
+fn render_tool_call_context(call: &crate::internal::ai::completion::ToolCall) -> String {
+    format!(
+        "tool_call id={} name={} arguments={}",
+        call.id,
+        call.function.name,
+        json_string(&call.function.arguments)
+    )
+}
+
+fn render_tool_result_context(result: &ToolResult) -> String {
+    format!(
+        "tool_result id={} name={} result={}",
+        result.id,
+        result.name,
+        json_string(&result.result)
+    )
+}
+
+fn json_string(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        format!("\"<failed to serialize JSON value for context frame: {error}>\"")
+    })
+}
+
+fn frame_requires_compaction_event(frame: &ContextFrameEvent) -> bool {
+    frame.budget_exceeded_by > 0
+        || !frame.omissions.is_empty()
+        || frame
+            .segments
+            .iter()
+            .any(|segment| segment.attachment.is_some())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use serde_json::json;
@@ -462,6 +1269,10 @@ mod tests {
         completion::{
             CompletionResponse,
             message::{Function, Text, ToolCall},
+        },
+        sources::{
+            CapabilityManifest, Source, SourceCallContext, SourceKind, SourcePool,
+            SourceToolCapability, TrustTier,
         },
         tools::{ToolHandler, ToolKind, ToolSpec},
     };
@@ -493,6 +1304,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -501,6 +1313,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -526,10 +1339,66 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct LoopFakeSource {
+        manifest: CapabilityManifest,
+    }
+
+    #[async_trait]
+    impl Source for LoopFakeSource {
+        fn manifest(&self) -> &CapabilityManifest {
+            &self.manifest
+        }
+
+        async fn call_tool(
+            &self,
+            context: SourceCallContext,
+            _invocation: ToolInvocation,
+        ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
+            Ok(ToolOutput::success(format!(
+                "{}:{}",
+                context.source_slug, context.tool_name
+            )))
+        }
+    }
+
+    fn source_manifest(tool_names: &[&str]) -> CapabilityManifest {
+        tool_names.iter().fold(
+            CapabilityManifest::new("project_docs", SourceKind::LocalDocs, TrustTier::Project),
+            |manifest, name| {
+                manifest.with_tool(SourceToolCapability::new(
+                    *name,
+                    ToolSpec::new(*name, "source tool"),
+                ))
+            },
+        )
+    }
+
+    struct LongOutputHandler;
+
+    #[async_trait]
+    impl ToolHandler for LongOutputHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+        ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
+            Ok(ToolOutput::success(long_tool_context_output()))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::new("mock_tool", "mock tool")
+        }
+    }
+
     #[derive(Default)]
     struct RecordingObserver {
         begins: Vec<(String, String)>,
         ends: Vec<(String, String, bool)>,
+        result_texts: Vec<String>,
         stream_events: Vec<CompletionStreamEvent>,
     }
 
@@ -549,6 +1418,10 @@ mod tests {
             tool_name: &str,
             result: &Result<ToolOutput, String>,
         ) {
+            self.result_texts.push(match result {
+                Ok(output) => output.as_text().unwrap_or("").to_string(),
+                Err(message) => message.clone(),
+            });
             self.ends.push((
                 call_id.to_string(),
                 tool_name.to_string(),
@@ -557,6 +1430,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn completion_error_kind_classifies_cancel_and_timeout() {
+        assert_eq!(
+            completion_error_kind(&CompletionError::ProviderError(
+                "mock timeout after 100ms".to_string()
+            )),
+            "timeout"
+        );
+        assert_eq!(
+            completion_error_kind(&CompletionError::ResponseError(
+                "request cancelled by user".to_string()
+            )),
+            "cancelled"
+        );
+        assert_eq!(
+            completion_error_kind(&CompletionError::ProviderError(
+                "provider overloaded".to_string()
+            )),
+            "provider_error"
+        );
+    }
+
+    /// Scenario: a model that emits text and thinking deltas via the stream channel
+    /// has every event delivered to the observer before the loop returns.
     #[tokio::test]
     async fn tool_loop_forwards_completion_stream_events() {
         #[derive(Clone)]
@@ -577,6 +1474,12 @@ mod tests {
                         })
                         .expect("stream receiver should be open");
                     stream_events
+                        .send(CompletionStreamEvent::ThinkingDelta {
+                            request_id: Some("req_1".to_string()),
+                            delta: "checking".to_string(),
+                        })
+                        .expect("stream receiver should be open");
+                    stream_events
                         .send(CompletionStreamEvent::TextDelta {
                             request_id: Some("req_1".to_string()),
                             delta: "lo".to_string(),
@@ -588,6 +1491,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "hello".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -609,18 +1513,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(turn.final_text, "hello");
-        assert_eq!(observer.stream_events.len(), 2);
+        assert_eq!(observer.stream_events.len(), 3);
+        assert!(observer.stream_events.iter().any(|event| matches!(
+            event,
+            CompletionStreamEvent::ThinkingDelta { delta, .. } if delta == "checking"
+        )));
         let streamed = observer
             .stream_events
             .iter()
             .filter_map(|event| match event {
                 CompletionStreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                CompletionStreamEvent::ThinkingDelta { .. } => None,
                 CompletionStreamEvent::ToolCallPreview { .. } => None,
             })
             .collect::<String>();
         assert_eq!(streamed, "hello");
     }
 
+    /// Scenario: a tool-call preview event surfaces in the observer's stream history
+    /// but does not trigger tool execution — previews are pure UI hints.
     #[tokio::test]
     async fn tool_loop_forwards_tool_call_preview_without_execution() {
         #[derive(Clone)]
@@ -648,6 +1559,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -686,6 +1598,9 @@ mod tests {
         }
     }
 
+    /// Scenario: a single tool call followed by a text response yields the canonical
+    /// four-message history (user, assistant tool-call, user tool-result, assistant
+    /// text) and emits the matching begin/end events.
     #[tokio::test]
     async fn tool_loop_emits_tool_events_and_updates_history() {
         let temp_dir = TempDir::new().unwrap();
@@ -702,10 +1617,25 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
+                terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
+                source_pool: None,
+                source_session_id: None,
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -730,6 +1660,271 @@ mod tests {
         assert!(matches!(&turn.history[3], Message::Assistant { .. }));
     }
 
+    /// Scenario: every provider request is mirrored as an append-only context frame,
+    /// and large tool results are moved to session attachments before replay.
+    #[tokio::test]
+    async fn tool_loop_records_context_frames_and_attachments() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_root = temp_dir.path().join("session-1");
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(LongOutputHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &MockModel,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                preamble: Some("system rules\nprotected branch=main".to_string()),
+                context_frame_session_root: Some(session_root.clone()),
+                context_frame_prompt_id: Some("turn-42".to_string()),
+                context_frame_attachment_threshold_bytes: Some(64),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        let replay = SessionJsonlStore::new(session_root.clone())
+            .load_context_replay()
+            .unwrap();
+        assert_eq!(replay.frames.len(), 2);
+        assert_eq!(
+            replay.frames[0].prompt_id.as_deref(),
+            Some("turn-42/model-turn-1")
+        );
+        assert_eq!(
+            replay.frames[1].prompt_id.as_deref(),
+            Some("turn-42/model-turn-2")
+        );
+        assert!(replay.frames[0].segments.iter().any(|segment| {
+            segment.id == "preamble"
+                && segment.segment == ContextSegmentKind::SystemRules
+                && segment.non_compressible
+        }));
+
+        let tool_segment = replay.frames[1]
+            .segments
+            .iter()
+            .find(|segment| segment.segment == ContextSegmentKind::ToolResults)
+            .unwrap();
+        let attachment = tool_segment.attachment.as_ref().unwrap();
+        let attachments = ContextAttachmentStore::new(&session_root);
+        assert_eq!(
+            attachments.read_to_string(attachment).unwrap(),
+            render_tool_result_context(&ToolResult {
+                id: "call_1".to_string(),
+                name: "mock_tool".to_string(),
+                result: ToolOutput::success(long_tool_context_output()).into_response(),
+            })
+        );
+        assert_eq!(replay.compactions.len(), 1);
+        assert!(
+            replay.compactions[0]
+                .protected_segment_ids
+                .iter()
+                .any(|id| id == "preamble")
+        );
+        let events = std::fs::read_to_string(session_root.join("events.jsonl")).unwrap();
+        assert!(!events.contains("tool output line 7"));
+    }
+
+    /// Scenario: when `preserve_reasoning_content` is `false` (default), assistant
+    /// reasoning is dropped before being re-sent to the model on the next turn.
+    #[tokio::test]
+    async fn tool_loop_clears_assistant_reasoning_content_by_default() {
+        #[derive(Clone)]
+        struct ReasoningToolModel {
+            seen_followup_reasoning: Arc<Mutex<Vec<Option<String>>>>,
+        }
+
+        impl CompletionModel for ReasoningToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let has_tool_result = request.chat_history.iter().any(|msg| match msg {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|item| matches!(item, UserContent::ToolResult(_))),
+                    _ => false,
+                });
+
+                if has_tool_result {
+                    let reasoning = request.chat_history.iter().find_map(|msg| match msg {
+                        Message::Assistant {
+                            reasoning_content, ..
+                        } => reasoning_content.clone(),
+                        _ => None,
+                    });
+                    self.seen_followup_reasoning.lock().unwrap().push(reasoning);
+
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: Some("final reasoning".to_string()),
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: Some("need tool result".to_string()),
+                    raw_response: (),
+                })
+            }
+        }
+
+        let seen_followup_reasoning = Arc::new(Mutex::new(Vec::new()));
+        let model = ReasoningToolModel {
+            seen_followup_reasoning: Arc::clone(&seen_followup_reasoning),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        assert_eq!(seen_followup_reasoning.lock().unwrap().as_slice(), &[None]);
+        assert!(matches!(
+            &turn.history[1],
+            Message::Assistant {
+                reasoning_content: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &turn.history[3],
+            Message::Assistant {
+                reasoning_content: None,
+                ..
+            }
+        ));
+    }
+
+    /// Scenario: when `preserve_reasoning_content` is `true`, the model's chain of
+    /// thought is replayed in the next request — used by long-horizon plan executors.
+    #[tokio::test]
+    async fn tool_loop_preserves_assistant_reasoning_content_when_configured() {
+        #[derive(Clone)]
+        struct ReasoningToolModel {
+            seen_followup_reasoning: Arc<Mutex<Vec<Option<String>>>>,
+        }
+
+        impl CompletionModel for ReasoningToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let has_tool_result = request.chat_history.iter().any(|msg| match msg {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|item| matches!(item, UserContent::ToolResult(_))),
+                    _ => false,
+                });
+
+                if has_tool_result {
+                    let reasoning = request.chat_history.iter().find_map(|msg| match msg {
+                        Message::Assistant {
+                            reasoning_content, ..
+                        } => reasoning_content.clone(),
+                        _ => None,
+                    });
+                    self.seen_followup_reasoning.lock().unwrap().push(reasoning);
+
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: Some("final reasoning".to_string()),
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: Some("need tool result".to_string()),
+                    raw_response: (),
+                })
+            }
+        }
+
+        let seen_followup_reasoning = Arc::new(Mutex::new(Vec::new()));
+        let model = ReasoningToolModel {
+            seen_followup_reasoning: Arc::clone(&seen_followup_reasoning),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                preserve_reasoning_content: true,
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        assert_eq!(
+            seen_followup_reasoning.lock().unwrap().as_slice(),
+            &[Some("need tool result".to_string())]
+        );
+        assert!(matches!(
+            &turn.history[1],
+            Message::Assistant {
+                reasoning_content: Some(reasoning),
+                ..
+            } if reasoning == "need tool result"
+        ));
+        assert!(matches!(
+            &turn.history[3],
+            Message::Assistant {
+                reasoning_content: Some(reasoning),
+                ..
+            } if reasoning == "final reasoning"
+        ));
+    }
+
+    /// Scenario: a `PreToolUse` hook returns `Block`. The tool is never dispatched,
+    /// the model receives the failure as a tool result, and the loop continues.
     #[tokio::test]
     async fn tool_loop_hook_blocks_tool_call() {
         use crate::internal::ai::hooks::{
@@ -791,6 +1986,8 @@ mod tests {
         assert_eq!(turn.history.len(), 4);
     }
 
+    /// Scenario: a tool that returns an error has the error text fed back to the
+    /// model so it can recover, rather than aborting the whole loop.
     #[tokio::test]
     async fn tool_loop_tool_error_is_reported_to_model() {
         /// A handler that always fails.
@@ -844,6 +2041,7 @@ mod tests {
                                 arguments: json!({}),
                             },
                         })],
+                        reasoning_content: None,
                         raw_response: (),
                     });
                 }
@@ -852,6 +2050,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "handled error".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -871,10 +2070,25 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
+                terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
+                source_pool: None,
+                source_session_id: None,
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -893,6 +2107,8 @@ mod tests {
         assert_eq!(turn.final_text, "handled error");
     }
 
+    /// Scenario: `allowed_tools` removes filtered tools from the definition list sent
+    /// to the model so they never appear as available choices.
     #[tokio::test]
     async fn tool_loop_allowed_tools_filters_definitions() {
         let temp_dir = TempDir::new().unwrap();
@@ -922,6 +2138,53 @@ mod tests {
         assert_eq!(filtered.len(), 1);
     }
 
+    /// Scenario: Source Pool reloads must take effect on the next tool-loop
+    /// setup, not require a TUI restart. The loop builds an effective registry
+    /// from the current SourcePool snapshot at run start, so a reloaded manifest
+    /// changes the next request's tool definitions.
+    #[tokio::test]
+    async fn source_pool_reload_updates_next_tool_loop_registry() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        let pool = SourcePool::new();
+        pool.register_source(Arc::new(LoopFakeSource {
+            manifest: source_manifest(&["lookup"]),
+        }))
+        .expect("register initial source");
+
+        let config = ToolLoopConfig {
+            source_pool: Some(pool.clone()),
+            source_session_id: Some("session-a".to_string()),
+            ..Default::default()
+        };
+        let effective = registry_with_source_tools(&registry, &config)
+            .expect("source handlers should merge into registry");
+        let tool_names = registry_tool_definitions(&effective)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, vec!["project_docs__lookup"]);
+
+        pool.reload_source(Arc::new(LoopFakeSource {
+            manifest: source_manifest(&["lookup", "search"]),
+        }))
+        .expect("reload source manifest");
+
+        let effective = registry_with_source_tools(&registry, &config)
+            .expect("reloaded source handlers should merge into registry");
+        let mut tool_names = registry_tool_definitions(&effective)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        assert_eq!(
+            tool_names,
+            vec!["project_docs__lookup", "project_docs__search"]
+        );
+    }
+
+    /// Scenario: even if a model hallucinates a tool name outside `allowed_tools`,
+    /// execution is rejected and the model receives a structured failure message.
     #[tokio::test]
     async fn tool_loop_allowed_tools_blocks_execution() {
         // MockModel always calls "mock_tool" on first turn.
@@ -941,10 +2204,25 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
+                terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
+                source_pool: None,
+                source_session_id: None,
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -965,6 +2243,8 @@ mod tests {
         );
     }
 
+    /// Scenario: a runaway model that never stops calling tools is stopped at the
+    /// configured `max_turns` cap with a `ResponseError`.
     #[tokio::test]
     async fn tool_loop_stops_when_max_turns_is_reached() {
         #[derive(Clone)]
@@ -986,6 +2266,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1014,6 +2295,494 @@ mod tests {
         );
     }
 
+    /// Scenario: model returns reasoning content but no text and no tool calls. The
+    /// loop must error rather than retrying — repeated reasoning-only responses would
+    /// infinitely loop without progress.
+    #[tokio::test]
+    async fn tool_loop_errors_on_reasoning_only_empty_content() {
+        #[derive(Clone)]
+        struct ReasoningOnlyModel {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl CompletionModel for ReasoningOnlyModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: Vec::new(),
+                    reasoning_content: Some("thinking without an answer".to_string()),
+                    raw_response: (),
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = ReasoningOnlyModel {
+            calls: Arc::clone(&calls),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+
+        let err = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(err, CompletionError::ResponseError(msg) if msg.contains("reasoning_content"))
+        );
+    }
+
+    /// Scenario: a completely empty response (no content, no reasoning) errors out
+    /// immediately rather than burning through `max_turns` retrying.
+    #[tokio::test]
+    async fn tool_loop_errors_on_empty_response_without_retrying_to_max_turns() {
+        #[derive(Clone)]
+        struct EmptyModel {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl CompletionModel for EmptyModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: Vec::new(),
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = EmptyModel {
+            calls: Arc::clone(&calls),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+
+        let err = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                max_turns: Some(20),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(err, CompletionError::ResponseError(msg) if msg.contains("empty response"))
+        );
+    }
+
+    /// Scenario: when a model repeats the same tool/argument signature past the warn
+    /// threshold, the next tool result includes a system warning so the model has a
+    /// chance to change strategy.
+    #[tokio::test]
+    async fn tool_loop_warns_on_repeated_executed_tool_call() {
+        #[derive(Clone)]
+        struct RepeatingToolModel;
+
+        impl CompletionModel for RepeatingToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let tool_result_count = request
+                    .chat_history
+                    .iter()
+                    .filter_map(|msg| match msg {
+                        Message::User { content } => Some(
+                            content
+                                .iter()
+                                .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                                .count(),
+                        ),
+                        _ => None,
+                    })
+                    .sum::<usize>();
+
+                if tool_result_count >= 3 {
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: None,
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: format!("call_{tool_result_count}"),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"b": 2, "a": 1}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &RepeatingToolModel,
+            Vec::new(),
+            "repeat",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_result_contents = turn
+            .history
+            .iter()
+            .filter_map(|msg| match msg {
+                Message::User { content } => content.iter().find_map(|item| match item {
+                    UserContent::ToolResult(result) => {
+                        result.result["content"].as_str().map(str::to_string)
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_result_contents.len(), 3);
+        assert!(!tool_result_contents[0].contains("repeated tool call"));
+        assert!(!tool_result_contents[1].contains("repeated tool call"));
+        assert!(tool_result_contents[2].contains("repeated tool call"));
+        assert!(tool_result_contents[2].contains("same arguments 3 times"));
+    }
+
+    /// Scenario: if the model ignores the repeat warning and continues, the loop
+    /// hard-aborts at the abort threshold.
+    #[tokio::test]
+    async fn tool_loop_warns_then_aborts_repeated_successful_tool_call() {
+        #[derive(Clone)]
+        struct EndlessRepeatingToolModel;
+
+        impl CompletionModel for EndlessRepeatingToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let tool_result_count = request
+                    .chat_history
+                    .iter()
+                    .filter_map(|msg| match msg {
+                        Message::User { content } => Some(
+                            content
+                                .iter()
+                                .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                                .count(),
+                        ),
+                        _ => None,
+                    })
+                    .sum::<usize>();
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: format!("call_{tool_result_count}"),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"same": true}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+        let mut observer = RecordingObserver::default();
+
+        let err = run_tool_loop_with_history_and_observer(
+            &EndlessRepeatingToolModel,
+            Vec::new(),
+            "repeat",
+            &registry,
+            ToolLoopConfig {
+                max_turns: Some(20),
+                ..Default::default()
+            },
+            &mut observer,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, CompletionError::ResponseError(msg) if msg.contains("repeated calls"))
+        );
+        assert_eq!(observer.result_texts.len(), DEFAULT_REPEAT_ABORT_THRESHOLD);
+        assert!(observer.result_texts[2].contains("repeated tool call"));
+        assert!(observer.result_texts[3].contains("repeated tool call"));
+        assert!(observer.result_texts[4].contains("same arguments 5 times"));
+    }
+
+    /// Scenario: a successful call to a tool listed in `terminal_tools` short-circuits
+    /// the loop and returns its output as the final answer.
+    #[tokio::test]
+    async fn tool_loop_stops_after_successful_terminal_tool() {
+        #[derive(Clone)]
+        struct TerminalToolModel {
+            calls: Arc<AtomicUsize>,
+            tool_name: &'static str,
+        }
+
+        impl CompletionModel for TerminalToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_terminal".to_string(),
+                        name: self.tool_name.to_string(),
+                        function: Function {
+                            name: self.tool_name.to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = TerminalToolModel {
+            calls: Arc::clone(&calls),
+            tool_name: "mock_tool",
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "terminal",
+            &registry,
+            ToolLoopConfig {
+                terminal_tools: Some(vec!["mock_tool".to_string()]),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(turn.final_text, "ok");
+        assert_eq!(turn.history.len(), 3);
+    }
+
+    /// Helper: asserts the terminal-tool short-circuit works for a specific tool
+    /// name. Used by the two `submit_*_draft` regression tests below.
+    async fn assert_successful_named_terminal_tool(tool_name: &'static str) {
+        #[derive(Clone)]
+        struct TerminalToolModel {
+            calls: Arc<AtomicUsize>,
+            tool_name: &'static str,
+        }
+
+        impl CompletionModel for TerminalToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_terminal".to_string(),
+                        name: self.tool_name.to_string(),
+                        function: Function {
+                            name: self.tool_name.to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = TerminalToolModel {
+            calls: Arc::clone(&calls),
+            tool_name,
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register(tool_name, Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "terminal",
+            &registry,
+            ToolLoopConfig {
+                terminal_tools: Some(vec![tool_name.to_string()]),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(turn.final_text, "ok");
+    }
+
+    /// Scenario: regression — `submit_intent_draft` is one of the terminal tools used
+    /// by intent flows; a successful call must end the loop with the tool's text.
+    #[tokio::test]
+    async fn tool_loop_stops_after_successful_submit_intent_draft_terminal_tool() {
+        assert_successful_named_terminal_tool("submit_intent_draft").await;
+    }
+
+    /// Scenario: regression — same as above for `submit_plan_draft`, used by plan
+    /// generation flows.
+    #[tokio::test]
+    async fn tool_loop_stops_after_successful_submit_plan_draft_terminal_tool() {
+        assert_successful_named_terminal_tool("submit_plan_draft").await;
+    }
+
+    /// Scenario: a *failed* terminal tool call must NOT short-circuit the loop —
+    /// only successful ones count, so the model can retry or reroute.
+    #[tokio::test]
+    async fn tool_loop_does_not_stop_on_failed_terminal_tool() {
+        struct FailingTerminalHandler;
+
+        #[async_trait]
+        impl ToolHandler for FailingTerminalHandler {
+            fn kind(&self) -> ToolKind {
+                ToolKind::Function
+            }
+
+            async fn handle(
+                &self,
+                _invocation: ToolInvocation,
+            ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
+                Err(crate::internal::ai::tools::ToolError::ExecutionFailed(
+                    "terminal failed".to_string(),
+                ))
+            }
+
+            fn schema(&self) -> ToolSpec {
+                ToolSpec::new("terminal_tool", "terminal tool")
+            }
+        }
+
+        #[derive(Clone)]
+        struct FailedTerminalModel;
+
+        impl CompletionModel for FailedTerminalModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let has_tool_result = request.chat_history.iter().any(|msg| match msg {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|item| matches!(item, UserContent::ToolResult(_))),
+                    _ => false,
+                });
+                if has_tool_result {
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "handled terminal failure".to_string(),
+                        })],
+                        reasoning_content: None,
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_terminal".to_string(),
+                        name: "terminal_tool".to_string(),
+                        function: Function {
+                            name: "terminal_tool".to_string(),
+                            arguments: json!({}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("terminal_tool", Arc::new(FailingTerminalHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &FailedTerminalModel,
+            Vec::new(),
+            "terminal",
+            &registry,
+            ToolLoopConfig {
+                terminal_tools: Some(vec!["terminal_tool".to_string()]),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "handled terminal failure");
+    }
+
+    /// Scenario: when an observer's preflight keeps blocking the same call signature,
+    /// the loop aborts after `MAX_IDENTICAL_BLOCKED_TOOL_CALLS` rejections instead of
+    /// letting the model retry forever.
     #[tokio::test]
     async fn tool_loop_stops_on_repeated_blocked_identical_calls() {
         #[derive(Clone)]
@@ -1035,6 +2804,7 @@ mod tests {
                             arguments: json!({"value": 7}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1075,5 +2845,12 @@ mod tests {
         assert!(
             matches!(err, CompletionError::ResponseError(msg) if msg.contains("repeated blocked calls"))
         );
+    }
+
+    fn long_tool_context_output() -> String {
+        (0..8)
+            .map(|index| format!("tool output line {index}: xxxxxxxxxxxxxxxxxxxx"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

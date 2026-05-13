@@ -602,3 +602,230 @@ fn stash_round_trip_preserves_nested_dotfile_paths() {
         "stash pop should not flatten nested dotfiles into the repo root"
     );
 }
+
+// ── C4 surface tests: `stash show` / `stash branch` / `stash clear` ───────────────────────
+
+/// `libra stash --help` lists the new subcommands plus the EXAMPLES banner.
+#[test]
+fn test_stash_help_lists_show_branch_clear() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["stash", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "stash --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for sub in ["show", "branch", "clear"] {
+        assert!(
+            stdout.contains(sub),
+            "stash --help should list '{sub}', stdout: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "stash --help should include EXAMPLES, stdout: {stdout}"
+    );
+}
+
+/// `stash show` against a stash with a modified file emits a per-file
+/// status entry and the matching JSON envelope.
+#[test]
+fn test_stash_show_reports_modified_file() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified content\n")
+        .expect("failed to modify tracked file");
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before show",
+    );
+
+    let output = run_libra_command(&["stash", "show", "--json"], repo.path());
+    assert_cli_success(&output, "stash show --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "stash");
+    assert_eq!(json["data"]["action"], "show");
+    let files = json["data"]["files"]
+        .as_array()
+        .expect("files should be an array");
+    let tracked_modified = files
+        .iter()
+        .find(|f| f["path"] == "tracked.txt")
+        .expect("tracked.txt must appear in stash show output");
+    assert_eq!(
+        tracked_modified["status"], "modified",
+        "tracked.txt should be reported as modified"
+    );
+    assert!(
+        json["data"]["files_changed"]["modified"]
+            .as_u64()
+            .expect("files_changed.modified should be a number")
+            >= 1
+    );
+}
+
+/// `stash show --name-only` in human mode prints only the file path,
+/// without the "files changed" footer.
+#[test]
+fn test_stash_show_name_only_strips_summary() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified content\n")
+        .expect("failed to modify tracked file");
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before show --name-only",
+    );
+
+    let output = run_libra_command(&["stash", "show", "--name-only"], repo.path());
+    assert_cli_success(&output, "stash show --name-only");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|l| l == "tracked.txt"),
+        "stash show --name-only should print 'tracked.txt', stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("files changed"),
+        "stash show --name-only should suppress the footer, stdout: {stdout}"
+    );
+}
+
+/// `stash show stash@{NN}` with an out-of-range index returns a fatal
+/// error mapped to `LBR-CLI-003`.
+#[test]
+fn test_stash_show_invalid_index_errors() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before invalid show",
+    );
+
+    let output = run_libra_command(&["stash", "show", "stash@{42}"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash show with bad index must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-003"),
+        "stash show invalid index should map to CLI-003, stderr: {stderr}"
+    );
+}
+
+/// `stash branch <name>` creates a new branch, applies the stash, and
+/// drops it. `applied` and `dropped` are both `true` in the JSON output
+/// when the operation succeeds end-to-end.
+#[test]
+fn test_stash_branch_creates_branch_and_applies() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before branch",
+    );
+
+    let output = run_libra_command(&["stash", "branch", "stash-feature", "--json"], repo.path());
+    assert_cli_success(&output, "stash branch --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "branch");
+    assert_eq!(json["data"]["branch"], "stash-feature");
+    assert_eq!(json["data"]["applied"], true);
+    assert_eq!(json["data"]["dropped"], true);
+}
+
+/// `stash branch <existing-name>` refuses with the dedicated
+/// `LBR-CONFLICT-002` so callers can distinguish from generic failures.
+#[test]
+fn test_stash_branch_refuses_existing_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a competing branch first via the CLI.
+    assert_cli_success(
+        &run_libra_command(&["branch", "occupied"], repo.path()),
+        "create occupied branch",
+    );
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before branch conflict",
+    );
+
+    let output = run_libra_command(&["stash", "branch", "occupied"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch onto existing name must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CONFLICT-002"),
+        "branch conflict should surface ConflictOperationBlocked, stderr: {stderr}"
+    );
+}
+
+/// `stash clear` without `--force` and not in JSON mode is rejected with
+/// `LBR-CLI-002` to avoid accidental destructive runs in interactive use.
+#[test]
+fn test_stash_clear_requires_force_in_human_mode() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before clear without force",
+    );
+
+    let output = run_libra_command(&["stash", "clear"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash clear without --force should fail in human mode"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "stash clear refusal should use CLI-002, stderr: {stderr}"
+    );
+}
+
+/// `stash clear --force` removes every entry and reports the count.
+#[test]
+fn test_stash_clear_force_removes_all_entries() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create two stash entries so the cleared_count is non-trivial.
+    fs::write(repo.path().join("tracked.txt"), "first\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push first",
+    );
+    fs::write(repo.path().join("tracked.txt"), "second\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push second",
+    );
+
+    let output = run_libra_command(&["stash", "clear", "--force", "--json"], repo.path());
+    assert_cli_success(&output, "stash clear --force --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "clear");
+    assert_eq!(json["data"]["cleared_count"], 2);
+
+    // After clear the list should be empty again.
+    let list = run_libra_command(&["stash", "list", "--json"], repo.path());
+    assert_cli_success(&list, "stash list after clear");
+    let list_json = parse_json_stdout(&list);
+    assert_eq!(
+        list_json["data"]["entries"]
+            .as_array()
+            .expect("entries array")
+            .len(),
+        0
+    );
+}

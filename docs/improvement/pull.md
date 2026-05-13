@@ -1,5 +1,7 @@
 ## Pull 命令改进详细计划
 
+> **实施状态：✅ 已落地** — `PullError`、`PullOutput`、`run_pull()` / `render_pull_output()`、JSON / machine 聚合输出、fetch/merge phase detail 和显式错误码映射均已在当前代码库完成。
+
 > 最后编写时间：2026-03-27
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
@@ -15,35 +17,28 @@
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
 - `execute()` / `execute_safe(args, output)` 双入口已存在（`pull.rs`）
-- Pull 当前实现仅 81 行，是 fetch + merge 的薄包装层
+- Pull 已从薄包装层改为 `run_pull()` + `render_pull_output()` 的聚合命令
 - 远程/refspec 自动检测已实现：从 `branch.<name>.remote` + `branch.<name>.merge` 推导
-- `fetch::execute_safe()` 和 `merge::execute_safe()` 是当前委托目标
+- pull 复用 fetch / merge 的 typed helper，而不是调用子命令 `execute_safe()` 后解析文本
 - 当前 `merge` 仅稳定支持 `Already up to date.` 和 fast-forward；非 fast-forward / three-way merge 仍返回错误，而不是生成 merge commit 或冲突状态
 
-**基于当前代码的 Review 结论（pull 仍需改进的部分）：**
+**基于当前代码的 Review 结论（2026-05-11 复核）：**
 
-- **零 JSON / machine 输出**：`pull` 本身无结构化输出；虽然委托给 fetch 和 merge，但 pull 层面没有聚合的结构化结果
-- **零显式 `StableErrorCode`**：仅有 2 个 `CliError::failure()` 调用（no tracking info、not on a branch），均无显式错误码
-- **fetch/merge 的输出未经 pull 协调**：fetch 和 merge 各自直接写 stdout，pull 无法控制它们的输出交织
-- **缺少 pull 级别的成功摘要**：成功后无任何 pull 特有的输出——用户看到的是 fetch 输出 + merge 输出的简单拼接
-- **错误传播不透明**：fetch 或 merge 失败时，pull 直接传播底层 `CliError`，没有添加"这是在 pull 的 fetch/merge 阶段失败"的上下文
-- **当前能力边界与文档承诺不一致**：底层 `merge` 尚不支持 three-way merge / 冲突结构化，pull 计划不能在本批承诺这些输出
-- **实现方案不能靠解析子命令 stdout**：`fetch::execute_safe()` / `merge::execute_safe()` 当前输出的是 human 文本，不是稳定机器接口；pull 必须依赖内部 typed helper，而不是捕获文本再反解析
-- **结构化输出的 stderr 契约尚未定义**：若沿用当前 fetch/merge 输出，`--json` / `--machine` 成功路径会被子命令文本或 progress 污染
-- **对 fetch / merge 前置改造量的评估偏乐观**：当前 pull 计划要成立，必须先让 `fetch.rs` 和 `merge.rs` 暴露可静默复用的 typed 执行层与结构化结果；这不是“顺手小改”，而是 pull 本批的明确前置依赖
-- **缺少 `--rebase` 选项**：Git 的 `pull --rebase` 是常用模式，当前不支持（标为非目标，留后续）
-- **hint 不完整**：`"there is no tracking information for the current branch"` 已有 hint，但 not-on-branch 场景无 hint
-- **测试覆盖极度不足**：仅有 1 个测试验证 no-tracking 场景的退出码
+- `PullOutput` 已聚合 fetch 和 merge 结果，`--json` / `--machine` 输出单一 `pull` envelope。
+- `PullError → CliError` 已显式映射；fetch / merge 失败会保留根因并追加 `phase=fetch|merge` detail。
+- `run_pull()` 复用 fetch / merge typed helper，结构化输出不解析子命令 stdout/stderr。
+- human 成功路径已有 pull 级摘要；结构化模式抑制子级装饰输出。
+- `--rebase`、three-way merge / 冲突结构化仍按非目标保留给 rebase / merge 专项，不阻塞当前 pull 改造验收。
 
 ### 目标与非目标
 
-**本批目标：**
+**已完成目标：**
 - 引入 `PullError` typed error enum，覆盖 pull 层面的错误场景
 - 所有 `PullError → CliError` 映射使用显式 `StableErrorCode`
 - 拆分执行层与渲染层：新增 `run_pull(args) -> Result<PullOutput, PullError>` 纯执行入口
-- 在 `fetch.rs` / `merge.rs` 建立 pull 可复用的 typed helper 与静默子级输出边界
+- 复用 `fetch.rs` / `merge.rs` 已落地的 typed helper 与静默子级输出边界
 
-> **前置依赖说明**：Pull 依赖 fetch/merge 的 typed helper，为打破批次依赖，本批将 **fetch 和 merge 的基础 typed helper** 纳入第一批前置工作。第五批（远程管理）将对 fetch 做完整 JSON/进度改造，本批仅要求 fetch/merge 提供 pull 可用的最小内部接口。
+> **依赖现状（已变更）**：原计划把"fetch / merge 的最小 typed helper"列为前置依赖；当前 `fetch` 第五批改造已整体落地（README #22），`fetch.rs` 已暴露 `FetchOutput` 顶层结果与可静默复用的内部接口；`merge` 命令的完整改造仍归 README 第六批（merge / rebase 状态机），本批 pull 只需要 merge 的"fast-forward / already-up-to-date / requires-manual-merge"最小接口，已可直接消费。**因此 pull 不再有任何阻塞性前置依赖**，剩余工作纯粹是 pull 自身的执行/渲染拆分与错误码补齐。
 
 - `PullOutput` 聚合 fetch 和 merge 的结构化结果，但**只覆盖当前底层真正支持的 pull 语义**（fast-forward / already-up-to-date）
 - JSON 输出只承诺当前底层确定可得的数据；拿不到稳定统计值的字段不进入首版 schema
@@ -71,7 +66,7 @@
 
 ### 特性 1：PullError typed error enum
 
-**当前问题：** pull 仅有 2 个 `CliError::failure()` 调用，且无显式 `StableErrorCode`。fetch/merge 的错误直接透传。
+**历史问题（已修复）：** pull 曾仅有 2 个 `CliError::failure()` 调用，且无显式 `StableErrorCode`。fetch/merge 的错误直接透传。
 
 **修正后的方案：**
 
@@ -119,7 +114,7 @@ pub enum PullError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**当前问题：** `execute_safe()` 直接调用 fetch 和 merge 的 `execute_safe()`，它们各自独立写 stdout/stderr。pull 无法协调输出格式。
+**历史问题（已修复）：** `execute_safe()` 曾直接调用 fetch 和 merge 的 `execute_safe()`，它们各自独立写 stdout/stderr。pull 无法协调输出格式。
 
 **修正后的方案：**
 
@@ -353,14 +348,14 @@ EXAMPLES:
 #### `tests/command/pull_test.rs`（核心执行路径，重大扩展）
 
 - **（已有）** no-tracking-info 退出码验证
-- **（新增）`PullError` 变体覆盖**：
+- **已覆盖`PullError` 变体覆盖**：
   - `NotOnBranch`：detached HEAD 状态下 pull 返回对应错误
   - `NoTrackingInfo`：无 tracking 配置时返回对应错误 + hint
   - `RemoteNotFound`：指定不存在的 remote 名时返回对应错误
   - `ManualMergeRequired`：本地与远端无法 fast-forward 时返回对应错误 + hint
-- **（新增）fast-forward pull**：本地落后于远端时 pull 成功，HEAD 更新到最新 commit
-- **（新增）already-up-to-date**：本地与远端一致时返回 up-to-date 结果
-- **（新增）`--quiet` 静默**：成功路径下 stdout 为空
+- **已覆盖fast-forward pull**：本地落后于远端时 pull 成功，HEAD 更新到最新 commit
+- **已覆盖already-up-to-date**：本地与远端一致时返回 up-to-date 结果
+- **已覆盖`--quiet` 静默**：成功路径下 stdout 为空
 
 #### `tests/command/pull_json_test.rs`（JSON schema 稳定性，新增文件）
 
@@ -398,8 +393,8 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/command/pull.rs` | **重构** | 从 81 行薄包装扩展为完整的组合命令；新增 `PullError` typed enum；新增 `PullOutput` / `PullFetchResult` / `PullMergeResult` 结构体；新增 `run_pull()` 纯执行入口；`PullError → CliError` 显式 `StableErrorCode` 映射；fetch/merge 子级 `OutputConfig` 隔离；补齐 `--help` EXAMPLES |
-| `src/command/fetch.rs` | **前置依赖（第一批）** | 新增 pull 可复用的内部 typed helper `run_fetch_for_pull()` 与静默 child-output 边界；返回结构化 `FetchResult`；**注意：完整 JSON/进度改造留到第五批** |
-| `src/command/merge.rs` | **前置依赖（第一批）** | 新增 pull 可复用的内部 typed helper `run_merge_for_pull()`；仅返回 fast-forward / already-up-to-date / requires-manual-merge 结果；**注意：three-way merge 能力留到第六批** |
+| `src/command/fetch.rs` | **复用已落地能力** | 已具备 `FetchOutput` 顶层结果（fetch.md 第五批已整体落地）；pull 直接消费现有 typed 接口与静默 child-output 边界，无需在本批额外改造 fetch |
+| `src/command/merge.rs` | **复用最小接口** | merge 当前稳定支持 `Already up to date` / fast-forward / `requires-manual-merge` 三态，pull 已可消费；three-way merge 与冲突结构化输出由 README 第六批 merge / rebase 状态机改造交付，不在本批 pull 范围 |
 | `tests/command/pull_test.rs` | **重大扩展** | 新增 `PullError` 变体覆盖、fast-forward、up-to-date、quiet 场景 |
 | `tests/command/pull_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
 | `tests/command/pull_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode、阶段上下文） |

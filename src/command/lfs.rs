@@ -109,7 +109,15 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 cursor: "".to_string(),
                 refspec,
             };
-            let locks = LFSClient::get().await.get_locks(query).await.locks;
+            let locks = LFSClient::get()
+                .await
+                .map_err(|e| {
+                    CliError::fatal(e.to_string())
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?
+                .get_locks(query)
+                .await
+                .locks;
             if !locks.is_empty() {
                 let max_path_len = locks.iter().map(|l| l.path.len()).max().unwrap();
                 for lock in locks {
@@ -134,6 +142,10 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
             let refspec = current_refspec_or_err().await?;
             let code = LFSClient::get()
                 .await
+                .map_err(|e| {
+                    CliError::fatal(e.to_string())
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?
                 .lock(path.clone(), refspec.clone())
                 .await;
             if code.is_success() {
@@ -173,6 +185,10 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                     // get id by path
                     let locks = LFSClient::get()
                         .await
+                        .map_err(|e| {
+                            CliError::fatal(e.to_string())
+                                .with_stable_code(StableErrorCode::NetworkUnavailable)
+                        })?
                         .get_locks(LockListQuery {
                             refspec: refspec.clone(),
                             path: path.clone(),
@@ -192,6 +208,10 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
             };
             let code = LFSClient::get()
                 .await
+                .map_err(|e| {
+                    CliError::fatal(e.to_string())
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?
                 .unlock(id.clone(), refspec.clone(), force)
                 .await;
             if code.is_success() {

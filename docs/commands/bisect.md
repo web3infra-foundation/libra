@@ -11,6 +11,8 @@ libra bisect good [<rev>]
 libra bisect reset [<rev>]
 libra bisect skip [<rev>]
 libra bisect log
+libra bisect run <cmd> [<args>...]
+libra bisect view
 ```
 
 ## Description
@@ -117,6 +119,46 @@ Show the bisect log, displaying all good, bad, and skipped marks made during the
 libra bisect log
 ```
 
+### Subcommand: `run`
+
+Run a command at each bisect step and dispatch `good` / `bad` / `skip` automatically based on its exit code. The command is invoked at each candidate commit and bisect advances until convergence (or until candidates are exhausted).
+
+| Argument | Description |
+|----------|-------------|
+| `<cmd> [<args>...]` | The command to execute. The first token is the executable; everything after is forwarded verbatim. `--` is allowed and pass-through (e.g. `libra bisect run cargo test -- --ignored`). |
+
+Exit-code semantics (aligned with stock `git bisect run`):
+
+| Exit code | Mark / Action |
+|-----------|---------------|
+| `0` | `good` |
+| `1`–`124`, `126`–`127` | `bad` |
+| `125` | `skip` (cannot test this commit) |
+| `128` and above | Terminate the bisect with a fatal `BISECT_RUN_FAILED` error |
+
+Killed by signal also terminates the bisect with a fatal error.
+
+```bash
+# Drive bisect with a cargo test
+libra bisect run cargo test --test foo
+
+# Pass flags through to the underlying test command
+libra bisect run cargo test -- --ignored
+
+# Use a custom shell script
+libra bisect run bash -c 'cargo build && ./target/debug/repro'
+```
+
+### Subcommand: `view`
+
+Show the current bisect state — good / bad boundaries, current HEAD, remaining candidates, and any skipped commits.
+
+```bash
+libra bisect view
+```
+
+If no bisect is in progress, returns a fatal error (`NOT_IN_BISECT`).
+
 ## Common Commands
 
 ```bash
@@ -202,19 +244,46 @@ Bisecting: N revisions left to test (roughly M steps)
 Bisect session reset. HEAD restored to original position.
 ```
 
+**`bisect run`** (converging):
+
+```text
+Bisecting: 5 candidates remaining
+Running cargo test --test foo at abc1234... PASS (good)
+Bisecting: 2 candidates remaining
+Running cargo test --test foo at def5678... FAIL (bad)
+Bisecting: 1 candidate remaining
+Running cargo test --test foo at 901abcd... FAIL (bad)
+Converged: first bad commit is 901abcd
+3 steps, 0 skipped
+```
+
+**`bisect view`**:
+
+```text
+Bisecting between abc1234 (good) and def5678 (bad)
+HEAD: 901abcd
+Remaining: 1 candidate
+Skipped: (none)
+```
+
 ## Design Rationale
 
 ### Why is bisect not hidden?
 
 Despite being listed as a hidden command in some early designs, `libra bisect` is a fully visible subcommand. Binary search for regressions is a fundamental debugging workflow that benefits both human users and AI agents. Hiding it would reduce discoverability without meaningful benefit. The command is stable and follows the same patterns as other Libra commands.
 
-### Why no `--run` for automated bisect?
+### How does `bisect run` handle exit codes?
 
-Git's `git bisect run <script>` automatically runs a test script at each step and marks commits as good or bad based on the exit code. This is a powerful feature but introduces several complications: shell escaping, cross-platform script execution, error handling for flaky tests, and timeout management. Libra omits `--run` in favor of explicit `good`/`bad` marking for the following reasons:
+`bisect run` mirrors stock `git bisect run` to keep AI-agent and CI integration straightforward. The exit-code contract is:
 
-1. **Agent integration**: AI agents can drive the bisect loop programmatically by calling `bisect good` and `bisect bad` based on their own test evaluation, which is more flexible than a shell script.
-2. **Simplicity**: The manual workflow is straightforward and covers the common case. Automated bisect can be built on top using a shell loop.
-3. **Error transparency**: With manual marking, the user always knows exactly which commit is being tested and can investigate unexpected results. Automated runs can mask flaky test failures.
+- `0` → mark `good` and advance.
+- `1`–`124` or `126`–`127` → mark `bad` and advance.
+- `125` → `skip` (the commit cannot be tested — e.g. it does not compile) and advance.
+- `128` and above → fatal: terminate the bisect and surface `BISECT_RUN_FAILED` so the caller can react. Killed by signal (e.g. SIGINT) is treated the same way.
+
+The full command line is passed through verbatim, so `libra bisect run cargo test -- --ignored` forwards `--ignored` to the test command rather than parsing it as a `bisect` flag. This is enabled by `trailing_var_arg` + `allow_hyphen_values` on the `cmd` argument.
+
+Manual marking (`bisect good` / `bisect bad`) remains the recommended path for AI agents that evaluate results in-process and prefer explicit control over each step.
 
 ### Why no `--first-parent`?
 
@@ -238,10 +307,11 @@ Sometimes the user wants to end the bisect session but go to a different commit 
 | Reset | `bisect reset [<rev>]` | `bisect reset [<commit>]` | N/A |
 | Skip | `bisect skip [<rev>]` | `bisect skip [<rev>...]` | N/A |
 | Show log | `bisect log` | `bisect log` | N/A |
-| Automated run | Not supported | `bisect run <script>` | N/A |
-| Custom terms | Not supported | `bisect terms` / `--term-old` / `--term-new` | N/A |
-| Replay session | Not supported | `bisect replay <logfile>` | N/A |
-| Visualize | Not supported | `bisect visualize` | N/A |
+| Automated run | `bisect run <cmd> [<args>...]` | `bisect run <script>` | N/A |
+| Show current state | `bisect view` | `bisect visualize` (GUI / log) | N/A |
+| Custom terms | Not supported (deferred — see compatibility/declined.md D7) | `bisect terms` / `--term-old` / `--term-new` | N/A |
+| Replay session | Not supported (deferred — see compatibility/declined.md D6) | `bisect replay <logfile>` | N/A |
+| Visualize (GUI) | Not supported | `bisect visualize` | N/A |
 | First-parent only | Not supported | `--first-parent` | N/A |
 | Multiple good commits | Via repeated `bisect good` | Positional args to `start` | N/A |
 | State storage | SQLite (`bisect_state` table) | Flat files (`.git/BISECT_*`) | N/A |
@@ -262,3 +332,6 @@ Note: jj does not have a bisect command. Users who need binary search debugging 
 | `LBR-IO-001` | Failed to read bisect state from database |
 | `LBR-IO-002` | Failed to save bisect state to database |
 | `LBR-IO-002` | Failed to create bisect_state table |
+| `LBR-BISECT-001` | `bisect view` or `bisect run` invoked outside an active bisect session (`NOT_IN_BISECT`) |
+| `LBR-BISECT-002` | `bisect run` command exited with code ≥ 128 or was killed by a signal (`BISECT_RUN_FAILED`) |
+| `LBR-BISECT-003` | `bisect run` cannot advance because no candidate commits remain (`BISECT_NO_CANDIDATES`) |

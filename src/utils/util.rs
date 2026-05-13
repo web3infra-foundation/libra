@@ -2,7 +2,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io,
+    env,
+    ffi::OsStr,
+    fs, io,
     io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -38,6 +40,12 @@ pub const ATTRIBUTES: &str = ".libra_attributes";
 
 static OBJECTS_STORAGE_CACHE: Lazy<Mutex<HashMap<PathBuf, ClientStorage>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRepositoryLocation {
+    pub root: PathBuf,
+    pub is_bare: bool,
+}
 
 /// Returns the current working directory as a `PathBuf`.
 ///
@@ -88,6 +96,117 @@ fn is_valid_storage_dir(path: &Path) -> bool {
         .filter(|marker| path.join(marker).exists())
         .count()
         >= 2
+}
+
+fn read_gitdir_file(path: &Path, worktree: &Path) -> Option<PathBuf> {
+    let contents = fs::read_to_string(path).ok()?;
+    let line = contents.lines().next()?.trim();
+    let raw = line.strip_prefix("gitdir:")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let git_dir = Path::new(raw);
+    Some(if git_dir.is_absolute() {
+        git_dir.to_path_buf()
+    } else {
+        worktree.join(git_dir)
+    })
+}
+
+fn resolve_dot_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    let metadata = fs::metadata(&dot_git).ok()?;
+    if metadata.is_dir() {
+        return Some(dot_git);
+    }
+    if metadata.is_file() {
+        return read_gitdir_file(&dot_git, worktree);
+    }
+    None
+}
+
+fn git_common_dir(git_dir: &Path) -> Option<PathBuf> {
+    let contents = fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let raw = contents.lines().next()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let common_dir = Path::new(raw);
+    Some(if common_dir.is_absolute() {
+        common_dir.to_path_buf()
+    } else {
+        git_dir.join(common_dir)
+    })
+}
+
+fn git_dir_marker_exists(git_dir: &Path, common_dir: Option<&Path>, marker: &str) -> bool {
+    git_dir.join(marker).exists() || common_dir.is_some_and(|dir| dir.join(marker).exists())
+}
+
+fn is_valid_git_storage_dir(git_dir: &Path) -> bool {
+    let common_dir = git_common_dir(git_dir);
+    git_dir.join("HEAD").exists()
+        && git_dir_marker_exists(git_dir, common_dir.as_deref(), "config")
+        && git_dir_marker_exists(git_dir, common_dir.as_deref(), "objects")
+}
+
+fn git_config_declares_bare(git_dir: &Path) -> bool {
+    fs::read_to_string(git_dir.join("config")).is_ok_and(|config| {
+        config.lines().any(|line| {
+            line.trim().split_once('=').is_some_and(|(key, value)| {
+                key.trim() == "bare" && value.trim().eq_ignore_ascii_case("true")
+            })
+        })
+    })
+}
+
+fn worktree_root_for_dot_git_storage(candidate: &Path) -> Option<PathBuf> {
+    if candidate.file_name() != Some(OsStr::new(".git"))
+        || !is_valid_git_storage_dir(candidate)
+        || git_config_declares_bare(candidate)
+    {
+        return None;
+    }
+    let parent = candidate.parent()?;
+    Some(fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
+}
+
+pub fn find_git_repository(path: Option<&Path>) -> Option<GitRepositoryLocation> {
+    let mut candidate = path.map(Path::to_path_buf).unwrap_or_else(cur_dir);
+    if candidate.is_file() {
+        candidate.pop();
+    }
+
+    loop {
+        if let Some(git_dir) = resolve_dot_git_dir(&candidate)
+            && is_valid_git_storage_dir(&git_dir)
+        {
+            return Some(GitRepositoryLocation {
+                root: fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone()),
+                is_bare: false,
+            });
+        }
+
+        if let Some(root) = worktree_root_for_dot_git_storage(&candidate) {
+            return Some(GitRepositoryLocation {
+                root,
+                is_bare: false,
+            });
+        }
+
+        if is_valid_git_storage_dir(&candidate) {
+            return Some(GitRepositoryLocation {
+                root: fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone()),
+                is_bare: true,
+            });
+        }
+
+        if !candidate.pop() {
+            return None;
+        }
+    }
 }
 
 fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {
@@ -565,6 +684,18 @@ fn split_revision_navigation(name: &str) -> Option<(&str, &str)> {
         .map(|(index, _)| name.split_at(index))
 }
 
+pub(crate) fn remote_tracking_candidates(name: &str) -> impl Iterator<Item = (&str, &str)> + '_ {
+    name.char_indices().filter_map(|(index, ch)| {
+        if ch != '/' {
+            return None;
+        }
+
+        let remote = &name[..index];
+        let branch_name = &name[index + 1..];
+        (!remote.is_empty() && !branch_name.is_empty()).then_some((remote, branch_name))
+    })
+}
+
 fn nth_parent_commit_typed(
     commit_id: &ObjectHash,
     n: usize,
@@ -659,25 +790,42 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
         return Ok(commit);
     }
 
-    // Support both short remote branches (`main` with `remote = origin`) and
-    // fetched remote-tracking refs (`refs/remotes/origin/main`) for inputs such
-    // as `origin/main`.
-    if let Some((remote, branch_name)) = name.split_once('/')
-        && !remote.is_empty()
-        && !branch_name.is_empty()
-    {
-        if let Some(commit) = resolve_branch_commit_typed(
-            &format!("refs/remotes/{remote}/{branch_name}"),
-            Some(remote),
-            name,
-        )
-        .await?
-        {
+    // Support both short remote branches (`origin/main`) and fetched
+    // remote-tracking refs (`refs/remotes/origin/main`), including multi-segment
+    // remotes like `upstream/origin/main`.
+    if let Some(short_name) = name.strip_prefix("refs/remotes/") {
+        if let Some(commit) = resolve_branch_commit_typed(name, None, name).await? {
             return Ok(commit);
         }
 
-        if let Some(commit) = resolve_branch_commit_typed(branch_name, Some(remote), name).await? {
-            return Ok(commit);
+        for (remote, branch_name) in remote_tracking_candidates(short_name) {
+            if let Some(commit) = resolve_branch_commit_typed(name, Some(remote), name).await? {
+                return Ok(commit);
+            }
+
+            if let Some(commit) =
+                resolve_branch_commit_typed(branch_name, Some(remote), name).await?
+            {
+                return Ok(commit);
+            }
+        }
+    } else {
+        for (remote, branch_name) in remote_tracking_candidates(name) {
+            if let Some(commit) = resolve_branch_commit_typed(
+                &format!("refs/remotes/{remote}/{branch_name}"),
+                Some(remote),
+                name,
+            )
+            .await?
+            {
+                return Ok(commit);
+            }
+
+            if let Some(commit) =
+                resolve_branch_commit_typed(branch_name, Some(remote), name).await?
+            {
+                return Ok(commit);
+            }
         }
     }
 
@@ -718,19 +866,51 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
 
     match object_type {
         ObjectType::Commit => Ok(object_id),
-        ObjectType::Tag => {
-            // Manually dereference tag if search returned a tag object directly
-            let tag_obj: git_internal::internal::object::tag::Tag = load_object(&object_id)
-                .map_err(|e| {
-                    CommitBaseError::classify_storage_failure(format!(
-                        "failed to load tag object: {e}"
-                    ))
-                })?;
-            Ok(tag_obj.object_hash)
-        }
+        ObjectType::Tag => peel_tag_hash_to_commit(&storage, object_id, name),
         _ => Err(CommitBaseError::InvalidReference(format!(
             "reference is not a commit: {name}, is {object_type}"
         ))),
+    }
+}
+
+fn peel_tag_hash_to_commit(
+    storage: &ClientStorage,
+    object_id: ObjectHash,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let mut current = object_id;
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current) {
+            return Err(CommitBaseError::CorruptReference(format!(
+                "tag cycle detected while resolving '{display_name}'"
+            )));
+        }
+
+        let tag_obj: git_internal::internal::object::tag::Tag =
+            load_object(&current).map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "failed to load tag object while resolving '{display_name}': {error}"
+                ))
+            })?;
+        let target_type = storage
+            .get_object_type(&tag_obj.object_hash)
+            .map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "could not read tag target type while resolving '{display_name}': {error}"
+                ))
+            })?;
+
+        match target_type {
+            ObjectType::Commit => return Ok(tag_obj.object_hash),
+            ObjectType::Tag => current = tag_obj.object_hash,
+            _ => {
+                return Err(CommitBaseError::InvalidReference(format!(
+                    "reference is not a commit: {display_name}, tag points to {target_type}"
+                )));
+            }
+        }
     }
 }
 
@@ -922,6 +1102,10 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
 mod test {
     use std::{env, path::PathBuf};
 
+    use git_internal::internal::object::{
+        signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
+    };
     use sea_orm::{ActiveModelTrait, Set};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -931,10 +1115,27 @@ mod test {
         command::{
             add::{self, AddArgs},
             commit::{self, CommitArgs},
+            save_object,
         },
         internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
         utils::test,
     };
+
+    fn test_tag_object(object_hash: ObjectHash, object_type: ObjectType, name: &str) -> GitTag {
+        GitTag::new(
+            object_hash,
+            object_type,
+            name.to_string(),
+            Signature {
+                signature_type: SignatureType::Tagger,
+                name: "tester".to_string(),
+                email: "tester@example.com".to_string(),
+                timestamp: 1,
+                timezone: "+0000".to_string(),
+            },
+            format!("{name} message"),
+        )
+    }
 
     #[test]
     ///Test get current directory success.
@@ -1105,6 +1306,93 @@ mod test {
             .await
             .expect("tag object hash ^0 should resolve to the tagged commit");
         assert_eq!(resolved, head_commit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_peels_nested_tag_object_hash_to_commit() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let inner = internal_tag::create("inner", Some("inner tag".into()), false)
+            .await
+            .expect("failed to create inner tag");
+        let outer = test_tag_object(inner.target, ObjectType::Tag, "outer");
+        save_object(&outer, &outer.id).expect("failed to save outer tag object");
+
+        let resolved = get_commit_base_typed(&outer.id.to_string())
+            .await
+            .expect("nested tag object hash should resolve to commit");
+
+        assert_eq!(resolved, head_commit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_reports_tag_cycle_as_corruption() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let tag_a = test_tag_object(head_commit, ObjectType::Commit, "tag-a");
+        let tag_b = test_tag_object(tag_a.id, ObjectType::Tag, "tag-b");
+        let tag_a_cycle = test_tag_object(tag_b.id, ObjectType::Tag, "tag-a");
+        save_object(&tag_b, &tag_b.id).expect("failed to save tag-b");
+        save_object(&tag_a_cycle, &tag_a.id).expect("failed to save cyclic tag-a");
+
+        let error = get_commit_base_typed(&tag_a.id.to_string())
+            .await
+            .expect_err("tag cycle should fail");
+
+        assert!(matches!(error, CommitBaseError::CorruptReference(_)));
+        assert!(error.to_string().contains("tag cycle detected"));
     }
 
     #[tokio::test]
@@ -1310,5 +1598,93 @@ mod test {
             result.is_err(),
             ".libra with only objects/ should not be treated as a valid repository"
         );
+    }
+
+    #[test]
+    fn test_find_git_repository_detects_worktree_ancestor() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("project");
+        let git = repo.join(".git");
+        fs::create_dir_all(git.join("objects")).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n",
+        )
+        .unwrap();
+        let nested = repo.join("src").join("lib");
+        fs::create_dir_all(&nested).unwrap();
+
+        let location = find_git_repository(Some(&nested)).expect("should detect Git repository");
+
+        assert_eq!(location.root, repo.canonicalize().unwrap());
+        assert!(!location.is_bare);
+    }
+
+    #[test]
+    fn test_find_git_repository_detects_gitdir_file_worktree() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("linked-worktree");
+        let common = temp.path().join("main.git");
+        let worktree_git = common.join("worktrees").join("linked-worktree");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::create_dir_all(&worktree_git).unwrap();
+        fs::write(
+            repo.join(".git"),
+            format!("gitdir: {}\n", worktree_git.display()),
+        )
+        .unwrap();
+        fs::write(
+            common.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n",
+        )
+        .unwrap();
+        fs::write(worktree_git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(worktree_git.join("commondir"), b"../..\n").unwrap();
+
+        let location = find_git_repository(Some(&repo)).expect("should detect Git worktree");
+
+        assert_eq!(location.root, repo.canonicalize().unwrap());
+        assert!(!location.is_bare);
+    }
+
+    #[test]
+    fn test_find_git_repository_treats_dot_git_directory_as_worktree() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("project");
+        let git = repo.join(".git");
+        fs::create_dir_all(git.join("objects").join("aa")).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        )
+        .unwrap();
+
+        let location = find_git_repository(Some(&git.join("objects")))
+            .expect("should detect parent Git worktree from inside .git");
+
+        assert_eq!(location.root, repo.canonicalize().unwrap());
+        assert!(!location.is_bare);
+    }
+
+    #[test]
+    fn test_find_git_repository_keeps_bare_dot_git_directory_bare() {
+        let temp = tempdir().unwrap();
+        let bare = temp.path().join(".git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            bare.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+        )
+        .unwrap();
+
+        let location = find_git_repository(Some(&bare))
+            .expect("should detect a bare repository named .git as bare");
+
+        assert_eq!(location.root, bare.canonicalize().unwrap());
+        assert!(location.is_bare);
     }
 }

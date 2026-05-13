@@ -120,8 +120,18 @@ pub async fn execute(args: ResetArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
-/// target commit using soft, mixed, or hard mode.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Moves HEAD/current branch to the resolved target commit.
+/// - In mixed mode, rewrites the index from the target tree or pathspecs.
+/// - In hard mode, rewrites both the index and working tree.
+/// - Emits warnings for recoverable filesystem cleanup issues.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing, the revision or
+/// pathspecs cannot be resolved, object reads fail, or HEAD/index/worktree
+/// updates fail.
 pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_reset(args).await.map_err(CliError::from)?;
     render_reset_output(&result.output, output)?;
@@ -188,6 +198,12 @@ enum ResetError {
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
 
+    /// Refused to reset onto a Libra-managed locked branch (`intent`,
+    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// should not be able to overwrite by `reset`.
+    #[error("refusing to reset to locked branch '{0}'")]
+    LockedTarget(String),
+
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback {
         primary: Box<ResetError>,
@@ -215,6 +231,7 @@ impl ResetError {
             Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
             Self::Rollback { primary, .. } => primary.stable_code(),
         }
     }
@@ -240,6 +257,9 @@ impl ResetError {
                 "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
             ),
             Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::LockedTarget(_) => Some(
+                "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
+            ),
             Self::RevisionRead(_) => {
                 Some("check whether the repository references and object storage are readable.")
             }
@@ -308,6 +328,13 @@ fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
 
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
+
+    // Refuse to reset onto a Libra-managed locked branch. `is_locked_revision`
+    // strips `~` / `^` / `@` suffixes so attempts like `agent-traces~1` or
+    // `intent^` are still rejected.
+    if branch::is_locked_revision(&args.target) {
+        return Err(ResetError::LockedTarget(args.target.clone()));
+    }
 
     let mode = if args.soft {
         ResetMode::Soft
@@ -445,6 +472,9 @@ async fn perform_reset(
     } else {
         HashSet::new()
     };
+    // INVARIANT: apply index/worktree changes before moving HEAD. If a
+    // filesystem write fails, rollback can still restore the old index/worktree
+    // while refs continue to point at the previous commit.
     let stats =
         match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
             Ok(stats) => stats,
@@ -463,6 +493,9 @@ async fn perform_reset(
         )
         .await
     {
+        // INVARIANT: if the final ref move fails after side effects, restore the
+        // index/worktree to match the old commit so the visible checkout does
+        // not diverge from HEAD.
         let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
         return Err(merge_reset_failure(error, rollback));
     }

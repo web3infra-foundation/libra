@@ -8,7 +8,7 @@
 
 第一批全部 8 个命令的主改造已在当前代码库落地。`show` 是第三批（历史查询命令）中展示任意 Git 对象的通用命令。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> **实施状态：✅ 已落地（用户契约）** — `run_show()` / `ShowOutput`、commit/tag/tree/blob JSON / machine 输出、稳定错误码、`--quiet`、refs best-effort、历史 blob strict failure 和 `--help` EXAMPLES 均已交付。完整 `ShowError` + human render split 是后续跨命令内部收口，不阻塞第三批验收。
 
 **已确认落地的基线：**
 
@@ -27,9 +27,7 @@
 - commit patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
 - `--help` EXAMPLES 已落地，`tests/command/show_test.rs` 已覆盖 bad ref 错误码、JSON schema、quiet 和 refs 回归
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
-
-已改进（当前代码已具备）：
+**基于当前代码的 Review 结论：**
 
 - **JSON / machine 输出已落地**：`run_show()` + `ShowOutput` 已覆盖 commit/tag/tree/blob 四类对象
 - **主要错误码已显式映射**：bad revision、path not found、object load failure 等路径已带 `StableErrorCode`
@@ -37,10 +35,10 @@
 - **refs 查询已改为 best-effort**：无关 HEAD/branch/tag 元数据错误不再导致 `show <commit>` 整体失败
 - **命令文档已与实现对齐**：`docs/commands/show.md` 已记录对象类型 schema 与错误码
 
-仍需改进：
+后续维护项：
 
-- **尚未引入统一 `ShowError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
-- **计划文档后文仍保留完整设计稿写法**：后续可继续收口为“现状 + follow-up”格式，但不阻塞第三批验收
+- **统一 `ShowError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
+- **计划文档维护**：后文保留完整设计稿写法作为实现规格；后续可继续收口为“现状 + follow-up”格式，但不阻塞第三批验收
 
 ### 目标与非目标
 
@@ -115,6 +113,11 @@ pub enum ShowOutput {
     Blob(ShowBlobData),
 }
 
+// Schema ownership: commit metadata 字段集（hash / author / committer / subject / body /
+// parents / refs / files）由 log.md 拥有定义权，详见 [README.md 跨命令契约约定 §4](README.md#4-json-schema-的所有权与重叠)。
+// 本结构体是该 schema 在 `show` 命令的复用（与 LogCommitEntry 字段一一对应），
+// 仅在 ShowOutput 包装层通过 `type: "commit"` 区分对象类型。
+// 添加新字段必须先在 log.md 的 LogCommitEntry 中落地，再同步到这里。
 #[derive(Debug, Clone, Serialize)]
 pub struct ShowCommitData {
     pub hash: String,

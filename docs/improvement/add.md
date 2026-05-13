@@ -1,5 +1,7 @@
 ## Add 命令改进详细计划
 
+> **实施状态：✅ 已落地** — `run_add()` / `AddOutput` / `render_add_output()`、JSON / machine 输出、显式 `AddError → CliError`、warning tracker 与 `--exit-code-on-warning` 接入均已在当前代码库完成。
+
 > 最后编写时间：2026-03-26
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
@@ -14,28 +16,24 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 16 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_exit_code()`
-- `execute_safe(args, _output)` 入口已存在（`add.rs:121`），接受 `OutputConfig` 但当前未使用
-- `AddError` 枚举已定义 10 个变体（`add.rs:71-93`），覆盖主要错误场景
-- `AddError → CliError` 映射（`add.rs:95-104`）目前仅对 `PathspecNotMatched` 提供 hint，其余全部落入通用 `CliError::fatal()`
-- `--dry-run` 已实现（`add.rs:63`），但输出格式为裸 `println!("add: {}")`，无结构化支持
-- `--verbose` 已实现（`add.rs:55`），在 add/refresh 各阶段输出裸 `println!()`
+- `execute_safe(args, output)` 入口已接入 `OutputConfig`，调用 `run_add()` 后由 `render_add_output()` 统一渲染
+- `AddError` 枚举已覆盖主要错误场景，并显式映射到 `StableErrorCode`
+- `--dry-run` 已实现结构化预览；JSON / machine 模式返回同一 `AddOutput`
+- `--verbose` 已由渲染层控制，不再在执行层裸 `println!()`
 - `--force` 已实现（`add.rs:59`），允许暂存被 `.libraignore` 忽略的文件
 - `--refresh` 已实现（`add.rs:51`），仅更新索引元数据不暂存新文件
 - `finish_ignored()` 在忽略文件被拦截时返回 `CliError::failure()` + hint
 
-**基于当前代码的 Review 结论（add 仍需改进的部分）：**
+**基于当前代码的 Review 结论（2026-05-11 复核）：**
 
-- **无 JSON / machine 输出**：`execute_safe()` 接受 `OutputConfig` 参数但完全未使用（变量名为 `_output`）；成功路径无任何输出，`--dry-run` 和 `--verbose` 使用裸 `println!()`
-- **成功时沉默**：审计报告核心发现"成功时沉默"在 `add` 上完全成立——暂存 50 个文件后不输出任何确认信息
-- **无 `StableErrorCode`**：`AddError → CliError` 映射全部使用通用 `fatal()`，没有显式错误码
-- **`--dry-run` 输出不可机读**：`println!("add: {}")` 无法被 Agent 解析
-- **warning 语义与全局输出框架冲突**：`finish_ignored()` 当前直接返回 `CliError::failure()`；即使改成 success warning，也必须接入共享 warning tracker（`record_warning()` / `emit_warning()`），而不是让 `add` 私有地产生 `LBR-WARN-001`
-- **`--verbose` 使用裸 `println!()`**：不经过 `OutputConfig`，在 `--json` / `--quiet` 模式下会泄漏到 stdout
-- **`--ignore-errors` 的结构化结果不完整**：当前计划只有成功文件列表，没有字段承载“哪些路径失败且被继续跳过”，无法让 Agent 精确判断部分成功
+- `run_add()` 纯执行层已返回 `AddOutput`，包含 `added` / `modified` / `removed` / `refreshed` / `ignored` / `failed` / `dry_run`。
+- `render_add_output()` 已统一 human / verbose / dry-run / quiet / JSON / machine 输出，不污染结构化 stdout。
+- `AddError → CliError` 已显式绑定 `StableErrorCode`；`PathspecNotMatched`、index 读写、工作区读取、path encoding 等错误都有稳定分类。
+- ignored / failed 路径已作为结构化结果和 warning 接入共享 warning 语义；`--exit-code-on-warning` 由全局层处理。
 
 ### 目标与非目标
 
-**本批目标：**
+**已完成目标：**
 - 消除 `add` 成功路径的沉默，human 模式下输出变更文件摘要
 - 为 `add` 补齐结构化输出（`--json` / `--machine`），返回被暂存的文件列表
 - 将 `AddError → CliError` 映射改为显式 `StableErrorCode`
@@ -62,7 +60,7 @@
 
 ### 特性 1：执行层与渲染层拆分
 
-**当前问题：** `execute_safe()` 直接执行暂存逻辑并在内部使用裸 `println!()` 输出 `--verbose` / `--dry-run` 信息。成功路径不返回任何结构化结果。`execute()` 是一个 fire-and-forget 包装。
+**历史问题（已修复）：** `execute_safe()` 曾直接执行暂存逻辑并在内部使用裸 `println!()` 输出 `--verbose` / `--dry-run` 信息。成功路径不返回任何结构化结果，`execute()` 是一个 fire-and-forget 包装。
 
 **修正后的方案：**
 
@@ -302,14 +300,14 @@ nothing to add
 
 **"Nothing specified" 场景改进：**
 
-当前无 pathspec 且无 `-A` / `-u` / `--refresh` 时，`execute_safe()` 直接 `eprintln!()` 后 `return Ok(())`。改为：
+历史实现中，无 pathspec 且无 `-A` / `-u` / `--refresh` 时，`execute_safe()` 直接 `eprintln!()` 后 `return Ok(())`。当前已改为：
 - 返回 `CliError::command_usage()` + `StableErrorCode::CliInvalidArguments`
 - hint: `maybe you wanted to say 'libra add .'?`
 - 退出码 `129`
 
 ### 特性 4：Human 成功确认消息
 
-**当前问题：** `libra add src/main.rs` 成功后无任何输出。审计报告核心发现"成功时沉默"。
+**历史问题（已修复）：** `libra add src/main.rs` 成功后曾无任何输出。审计报告核心发现"成功时沉默"。
 
 **修正后的方案（仅在 human 模式、非 `--quiet` 时输出到 stdout）：**
 
@@ -480,21 +478,21 @@ EXAMPLES:
 #### `tests/command/add_test.rs`（核心执行路径扩展）
 
 - **（已有）** 基础暂存：单文件、多文件、`-A`、`-u`、`--dry-run`、`--force`、空文件、子目录
-- **（新增）`run_add()` 分类结果**：验证 `added` / `modified` / `removed` / `refreshed` / `ignored` / `failed` 分类准确，不依赖 stdout/stderr 文本
-- **（新增）ignored-only 执行路径**：全部 pathspec 被忽略时返回 `AddError`，staged 列表为空、`ignored` 非空；退出码非零
-- **（新增）`--ignore-errors` 部分成功**：部分文件失败时 `failed` 非空，但成功文件仍被写入索引
-- **（新增）无变更**：所有匹配文件均未修改时返回空结果，不写索引脏状态
+- **已覆盖`run_add()` 分类结果**：验证 `added` / `modified` / `removed` / `refreshed` / `ignored` / `failed` 分类准确，不依赖 stdout/stderr 文本
+- **已覆盖ignored-only 执行路径**：全部 pathspec 被忽略时返回 `AddError`，staged 列表为空、`ignored` 非空；退出码非零
+- **已覆盖`--ignore-errors` 部分成功**：部分文件失败时 `failed` 非空，但成功文件仍被写入索引
+- **已覆盖无变更**：所有匹配文件均未修改时返回空结果，不写索引脏状态
 
 #### `tests/command/add_cli_test.rs`（二进制输出与退出码扩展）
 
 - **（已有）** pathspec 不匹配、忽略文件、损坏索引等 CLI 级回归
-- **（新增）成功摘要输出**：`libra add src/main.rs` 后 stdout 包含 `add` 和文件名
-- **（新增）stdout/stderr 分离**：部分忽略场景下摘要只出现在 stdout，warning 只出现在 stderr
-- **（新增）ignored-only human 输出**：ignored-only 场景下 stdout 为空，stderr 包含 error + hint，退出码非零
-- **（新增）`--quiet` 静默**：无 warning 的成功路径下 stdout 和 stderr 均为空；有 warning 时仅 stderr 保留 warning
-- **（新增）`--verbose` 受控输出**：human 模式下 `--verbose` 输出逐文件列表 + 摘要；`--json` + `--verbose` 不产生 human 格式输出
-- **（新增）"Nothing specified" 退出码**：无 pathspec 且无 mode flag 时退出码为 `129`
-- **（新增）`--exit-code-on-warning`**：ignored-only 和 `--ignore-errors` 部分失败场景默认 exit `0`，加上 `--exit-code-on-warning` 后 exit `9`
+- **已覆盖成功摘要输出**：`libra add src/main.rs` 后 stdout 包含 `add` 和文件名
+- **已覆盖stdout/stderr 分离**：部分忽略场景下摘要只出现在 stdout，warning 只出现在 stderr
+- **已覆盖ignored-only human 输出**：ignored-only 场景下 stdout 为空，stderr 包含 error + hint，退出码非零
+- **已覆盖`--quiet` 静默**：无 warning 的成功路径下 stdout 和 stderr 均为空；有 warning 时仅 stderr 保留 warning
+- **已覆盖`--verbose` 受控输出**：human 模式下 `--verbose` 输出逐文件列表 + 摘要；`--json` + `--verbose` 不产生 human 格式输出
+- **已覆盖"Nothing specified" 退出码**：无 pathspec 且无 mode flag 时退出码为 `129`
+- **已覆盖`--exit-code-on-warning`**：ignored-only 和 `--ignore-errors` 部分失败场景默认 exit `0`，加上 `--exit-code-on-warning` 后 exit `9`
 
 #### `tests/command/add_json_test.rs`（JSON schema 稳定性，新增文件）
 

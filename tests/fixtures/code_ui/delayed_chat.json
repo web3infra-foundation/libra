@@ -1,0 +1,14 @@
+{
+  "responses": [
+    {
+      "match": { "contains": "slow" },
+      "type": "text",
+      "delayMs": 10000,
+      "text": "fake assistant: delayed response"
+    }
+  ],
+  "fallback": {
+    "type": "text",
+    "text": "fake assistant: fallback"
+  }
+}

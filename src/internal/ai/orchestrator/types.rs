@@ -1,5 +1,12 @@
+//! Shared orchestrator domain types for tasks, plans, evidence, and workspace backend
+//! choices.
+//!
+//! Boundary: these types form the internal API between planner, executor, verifier,
+//! persistence, and projection. Runtime contract tests cover default values and
+//! serialized compatibility for persisted run records.
+
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     sync::Arc,
 };
@@ -12,6 +19,7 @@ use uuid::Uuid;
 
 use super::run_state::RunStateSnapshot;
 use crate::internal::ai::{
+    agent::ToolLoopConfig,
     completion::CompletionUsageSummary,
     intentspec::types::{ChangeLogEntry, Check},
     mcp::server::LibraMcpServer,
@@ -35,6 +43,10 @@ pub enum OrchestratorError {
     PolicyViolation(String),
     #[error("config error: {0}")]
     ConfigError(String),
+    #[error("persistence error: {0}")]
+    PersistenceError(String),
+    #[error("projection error: {0}")]
+    ProjectionError(String),
 }
 
 /// Status of a single task node in the DAG.
@@ -368,6 +380,8 @@ pub struct TaskResult {
     pub model_usage: Option<CompletionUsageSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Final decision outcome for the orchestration run.
@@ -496,6 +510,8 @@ pub struct PersistedDerivedRecords {
 /// Persisted execution object chain for an orchestrator run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_snapshot_id: Option<String>,
@@ -533,17 +549,38 @@ pub enum TaskRuntimeNoteLevel {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskWorkspaceBackend {
+    Shared,
+    Copy,
+    Fuse,
+}
+
+impl TaskWorkspaceBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared workspace",
+            Self::Copy => "copy worktree",
+            Self::Fuse => "FUSE worktree",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TaskRuntimeEvent {
     Phase(TaskRuntimePhase),
     WorkspaceReady {
         working_dir: PathBuf,
         isolated: bool,
+        backend: TaskWorkspaceBackend,
+        main_working_dir: Option<PathBuf>,
     },
     Note {
         level: TaskRuntimeNoteLevel,
         text: String,
     },
+    ThinkingDelta(String),
     AssistantMessage(String),
     ToolCallBegin {
         call_id: String,
@@ -554,6 +591,10 @@ pub enum TaskRuntimeEvent {
         call_id: String,
         tool_name: String,
         result: Result<ToolOutput, String>,
+    },
+    UsageUpdated {
+        usage: CompletionUsageSummary,
+        wall_clock_ms: u64,
     },
 }
 
@@ -589,12 +630,23 @@ fn default_execution_revision() -> u32 {
     1
 }
 
+/// Formal Plan/Task snapshots created during Phase 1 review and reused during execution.
+#[derive(Clone, Debug, Default)]
+pub struct PersistedPlanReviewBundle {
+    pub plan_id: String,
+    pub step_ids: HashMap<Uuid, Uuid>,
+    pub task_ids: HashMap<Uuid, String>,
+}
+
 /// Configuration for the orchestrator.
 #[derive(Clone)]
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
     pub persisted_intent_id: Option<String>,
+    /// Preferred formal review bundle containing the user-approved Plan and Task snapshots.
+    pub persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
+    /// Compatibility path for older review flows that only persisted a Plan snapshot.
     pub persisted_plan_id: Option<String>,
     /// Optional user-approved plan to execute instead of compiling the first plan locally.
     pub initial_plan: Option<ExecutionPlanSpec>,
@@ -603,6 +655,8 @@ pub struct OrchestratorConfig {
     /// Note: This field is currently unused. The checkpoint/resume feature needs to be
     /// redesigned around userspace-fs change tracking. dagrs-native resume remains disabled.
     pub dagrs_resume_checkpoint_id: Option<String>,
+    /// Base tool-loop configuration inherited by task and reviewer execution.
+    pub tool_loop_config: ToolLoopConfig,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,
     /// Optional system prompt for the reviewer pass.
@@ -797,6 +851,7 @@ mod tests {
             lifecycle_change_log: vec![],
             replan_count: 1,
             persistence: Some(PersistedExecution {
+                thread_id: Some("019ce515-077c-7c12-8e90-755533e512e3".into()),
                 run_id: "run-1".into(),
                 initial_snapshot_id: Some("snapshot-1".into()),
                 provenance_id: Some("prov-1".into()),

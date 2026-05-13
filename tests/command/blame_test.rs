@@ -1,6 +1,16 @@
-//! Tests blame output to ensure line attribution and formatting for specified commits and ranges.
+//! Tests `libra blame` for line-level attribution, format envelopes
+//! (human/JSON/machine), and SHA-1 vs. SHA-256 repository handling.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture conventions:
+//! - CLI-driven cases use `create_committed_repo_via_cli()` from `mod.rs`
+//!   plus extra `add`/`commit` invocations through `run_libra_command()`.
+//! - In-process cases call `setup_repo_with_hash()` to bootstrap a repo
+//!   under a chosen `core.objectformat` and `prepare_history()` to lay
+//!   down a known two-commit history of `foo.txt` (line2 changed in the
+//!   second commit). The two returned commit hashes act as expected blame
+//!   targets.
 
 use std::{fs, io::Write};
 
@@ -19,6 +29,8 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// Scenario: running `libra blame` outside any repo must exit 128 with a
+/// "fatal: not a libra repository" message. Pins the repo-presence guard.
 #[test]
 fn test_blame_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
@@ -31,6 +43,9 @@ fn test_blame_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+/// Scenario: `--json blame <file>` must emit the canonical envelope with
+/// `command="blame"`, `data.file=<path>`, and `data.lines` as an array.
+/// Schema pin for downstream JSON consumers.
 #[test]
 fn test_blame_json_output_includes_lines() {
     let repo = create_committed_repo_via_cli();
@@ -64,6 +79,9 @@ fn test_blame_json_output_includes_lines() {
     assert!(json["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: `--machine blame` must emit exactly one non-empty stdout
+/// line of valid JSON (NDJSON-friendly). Mirrors `add_json_test`'s
+/// machine-mode contract.
 #[test]
 fn test_blame_machine_output_is_single_line_json() {
     let repo = create_committed_repo_via_cli();
@@ -86,6 +104,9 @@ fn test_blame_machine_output_is_single_line_json() {
     assert!(parsed["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: human-readable blame output must truncate excessively long
+/// (Unicode) author names with an ellipsis ("...") rather than corrupt
+/// the table layout. Regression guard against char-vs-byte width bugs.
 #[test]
 fn test_blame_human_output_handles_long_unicode_author_names() {
     let repo = create_committed_repo_via_cli();
@@ -124,6 +145,10 @@ fn test_blame_human_output_handles_long_unicode_author_names() {
     );
 }
 
+/// Scenario: each line in JSON blame output must reference the commit
+/// hash that introduced it. With the known 2-commit `foo.txt` history,
+/// line 1 maps to the first commit and line 2 to the second. The `date`
+/// field must be RFC3339-parseable.
 #[tokio::test]
 #[serial]
 async fn test_blame_json_assigns_lines_to_introducing_commits() {
@@ -152,6 +177,9 @@ async fn test_blame_json_assigns_lines_to_introducing_commits() {
     );
 }
 
+/// Scenario: `-L <n>,<m>` must restrict blame output to the requested
+/// line range. Asks for line 2 only and asserts the array has length 1
+/// with the expected hash and content.
 #[tokio::test]
 #[serial]
 async fn test_blame_json_line_range_filters_output() {
@@ -172,6 +200,9 @@ async fn test_blame_json_line_range_filters_output() {
     assert_eq!(lines[0]["content"], "line2-modified");
 }
 
+/// Scenario: an out-of-bounds `-L` range must surface as a stable CLI
+/// error tagged `LBR-CLI-002` (category `cli`) with exit code 129.
+/// Pins the structured error envelope.
 #[test]
 fn test_blame_invalid_line_range_uses_stable_cli_error() {
     let repo = create_committed_repo_via_cli();
@@ -184,6 +215,10 @@ fn test_blame_invalid_line_range_uses_stable_cli_error() {
     assert_eq!(report.category, "cli");
 }
 
+/// Bootstrap a repo with the requested hash algorithm (`"sha1"` or
+/// `"sha256"`), set a stable identity, and return the
+/// `ChangeDirGuard` that pins the process CWD to the repo for the
+/// remainder of the test (RAII; lives to end of test).
 async fn setup_repo_with_hash(
     temp: &tempfile::TempDir,
     object_format: &str,
@@ -213,6 +248,11 @@ async fn setup_repo_with_hash(
     guard
 }
 
+/// Build a fixed two-commit history of `foo.txt`:
+///   c1: "line1\nline2\n"      (first hash)
+///   c2: "line1\nline2-modified\n" (second hash)
+/// Returns `(first, second)` in chronological order. Assumes a
+/// `ChangeDirGuard` is already active.
 async fn prepare_history() -> (ObjectHash, ObjectHash) {
     // first commit
     let mut f = fs::File::create("foo.txt").unwrap();
@@ -266,6 +306,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
     (first, second)
 }
 
+/// Scenario: `blame::execute` against a SHA-1 repo must complete without
+/// panic. Smoke test for the SHA-1 code path.
 #[tokio::test]
 #[serial]
 async fn blame_runs_with_sha1() {
@@ -282,6 +324,9 @@ async fn blame_runs_with_sha1() {
     .await;
 }
 
+/// Scenario: `blame::execute` against a SHA-256 repo must complete
+/// without panic. Smoke test for the SHA-256 code path; pairs with the
+/// SHA-1 case to guarantee both are wired through.
 #[tokio::test]
 #[serial]
 async fn blame_runs_with_sha256() {
@@ -298,6 +343,9 @@ async fn blame_runs_with_sha256() {
     .await;
 }
 
+/// Scenario: a 40-hex (SHA-1 length) commit identifier passed against a
+/// SHA-256 repo must be rejected by `get_target_commit`. Format-mismatch
+/// regression guard so users do not silently get the wrong commit.
 #[tokio::test]
 #[serial]
 async fn blame_rejects_sha1_length_on_sha256_repo() {

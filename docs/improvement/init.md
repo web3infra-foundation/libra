@@ -1,6 +1,7 @@
 ## Init 命令改进详细计划
 
 > 最后编写时间：2026-03-24
+> **实施状态：✅ 已落地** — `run_init()` 纯执行层 / `InitOutput` 结构化结果 / `InitError → StableErrorCode` 显式映射、`InitProgress` stderr 进度、`--separate-libra-dir` / `--separate-git-dir` 全链路移除、共享 identity helper（`resolve_user_identity_sources()` + `LocalIdentityTarget`）均已交付。本文档保留为已交付契约的实现规格。
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
 
@@ -14,22 +15,22 @@
 - local / global scope、`config_kv` 后端以及 `resolve_env()` 已落地
 - `init_config()` 已通过 `ConfigKv::set_with_conn()` 写入所有 canonical seed keys（`core.*`、`libra.repoid`），不再使用旧 `config` 表；config_kv 迁移本身已完成，不是本批的主体工作
 
-**基于当前代码的 Review 结论：**
-- `init` 仍未提供顶层 `--json` / `--machine` 成功输出
-- `init` 仍把 `--from-git-repository` 的 `canonicalize()` 放在外层，错误无法稳定映射到 `InitError`
-- `convert_from_git_repository()` 仍直接向 stderr 打印 `"Converting from Git repository..."`
-- `init_vault_for_repo()` 仍只读取 local `user.name` / `user.email`，没有复用已经落地的 scope-aware config / env fallback 规则
-- `--separate-libra-dir` 当前仍被 `init` / `util` / `worktree` / 测试广泛使用；既然本批要顺手完成移除，就必须把参数、路径解析、worktree 兼容分支和测试一起纳入范围，不能只删 `init` flag
+**基于当前代码的已交付确认：**
+- 顶层 `libra init` `--json` / `--machine` 成功输出已交付：`render_init_result()` 走 `emit_json_data("init", ...)`（init.rs:373）
+- `--from-git-repository` 路径校验改为 `InitError::SourcePathNotFound` / `InvalidGitRepository` 变体，并显式映射到 `StableErrorCode::CliInvalidTarget` / `RepoStateInvalid`（init.rs:145-159）
+- `convert_from_git_repository()` 改用 `fetch_repository_safe(...)` 并强制子级 `OutputConfig` 静默；嵌套 fetch 不再向 stderr 泄漏 progress / NDJSON
+- `init_vault_for_repo()` 改为通过共享 helper `resolve_user_identity_sources(LocalIdentityTarget::ExplicitDb(database_path))` 解析 identity（init.rs:998），与 `commit.rs` 复用同一来源边界（commit.rs:34, 307, 324）
+- `--separate-libra-dir` / `--separate-git-dir` 全链路已移除：`InitArgs` 字段删除；`.libra` 文件形式的 legacy `gitdir:` link 解析删除；`worktree` separate-layout 兼容分支删除；`tests/command/init_separate_libra_dir_test.rs` 已改写为验证 clap 拒绝该 flag（错误消息含 `unexpected argument '--separate-libra-dir'`）
 
 ### 目标与非目标
 
-**本批目标：**
-- 消除 `libra init` 成功路径上的长时间沉默，在默认 human 模式下提供实时进度
-- 为顶层 `libra init` 提供稳定的结构化输出（`--json` / `--machine`）
-- 统一成功消息、错误码、hint 和 reinit 语义
-- 在 `config` 已完成的基线上，补齐 `init` 与 `config` / `clone` 的行为对齐
-- 停止在 `init` 中生成仓库专属 SSH key，改为检测系统 SSH key 并给出后续提示
-- 在本批顺手完成 `--separate-libra-dir` / `--separate-git-dir` 的全链路移除，并收口到标准 `.libra/` 布局
+**本批已交付：**
+- 消除了 `libra init` 成功路径上的长时间沉默：默认 human 模式下通过 `InitProgress`（init.rs:285）向 stderr 输出阶段性进度（创建目录 → 数据库 → refs → vault keygen → SSH 检测）
+- 为顶层 `libra init` 交付了稳定的结构化输出（`--json` / `--machine`），共用 `InitOutput` schema（init.rs:238）
+- 统一了成功消息（过去时 `Initialized empty ...`）、显式 `StableErrorCode`、actionable hint 与 reinit 语义（worktree 与 bare 都返回 `LBR-REPO-003`）
+- 在 `config` 基线上，对齐了 `init` 与 `config` / `clone` 的 `config_kv` 写入与 identity 读取链路
+- 停止在 `init` 中生成仓库专属 SSH key，改为通过 `detect_system_ssh_key()`（init.rs:1072）检测系统 key，并给出后续 tip / `ssh_key_detected` JSON 字段
+- 完成了 `--separate-libra-dir` / `--separate-git-dir` 的全链路移除（CLI 参数 / `util.rs` link 解析 / `worktree` 兼容分支 / 测试断言）
 
 **本批非目标：**
 - **不把默认 `libra init` 总耗时优化到 `<500ms`**。只要 `--vault true` 仍然在 init 阶段生成 PGP key，总耗时仍会显著高于 500ms；本批解决的是“等待时无反馈”，不是“立即完成”
@@ -149,14 +150,15 @@ struct InitOutput {
 
 ### 特性 3：Config 存储现状确认与剩余补齐
 
-**当前代码状态：** `init_config()` 已经通过 `ConfigKv::set_with_conn()` 把 canonical seed keys 写入 `config_kv`。因此，“把 init 迁移到 `config_kv`”本身已经完成；本批要做的是把剩余行为和测试补齐，而不是重做迁移。
+**当前代码状态（2026-05-11 复核）：** `init_config()` 已经通过 `ConfigKv::set_with_conn()` 把 canonical seed keys 写入 `config_kv`。因此，“把 init 迁移到 `config_kv`”本身已经完成；当前文档记录的是已交付契约与回归边界。
 
-**当前仍未对齐的缺口：**
-- `--vault false` 还没有显式写入 `vault.signing=false`，会把“明确关闭”和“未配置”混在一起
-- `init_vault_for_repo()` 只读取 local `ConfigKv::get("user.name")` / `ConfigKv::get("user.email")`，没有复用当前代码库已经具备的 scope-aware 配置与 env fallback 规则
-- 测试计划仍停留在“迁移 legacy `config` 表”的旧叙事，没有直接验证 canonical `config_kv` seed keys
+**已对齐事实：**
+- `--vault false` 已显式写入 `vault.signing=false`，不再把“明确关闭”和“未配置”混在一起
+- `--vault true` 仅在 vault 初始化、credential 存储和 PGP key 生成成功后写入 `vault.signing=true`
+- `init_vault_for_repo()` 已复用共享 helper `resolve_user_identity_sources(LocalIdentityTarget::ExplicitDb(database_path))`，支持 target-local → global → env → 默认值的 identity fallback
+- `tests/command/init_test.rs` 已直接断言 canonical `config_kv` seed keys、`vault.signing` true/false、legacy `config` 表无 seed row、global/env/目标仓库 identity fallback
 
-**本批的绝对策略（保持纯 `config_kv`，补齐剩余行为）：**
+**已落地策略（保持纯 `config_kv`）：**
 
 `init` 成功创建 `libra.db` 后，写入 `config_kv` 的 canonical seed keys 必须完整且唯一，至少包括：
 
@@ -330,11 +332,11 @@ Tip: no SSH key found at ~/.ssh/
 
 ### 特性 5：`--from-git-repository` 改进
 
-**当前问题：**
+**已修复问题：**
 
-- `execute_safe()` 在调用 `init()` 前就先对源路径做 `canonicalize()`，缺失路径会直接变成通用 fatal 错误，绕开 init 自己的错误映射
-- `convert_from_git_repository()` 目前调用的是 `fetch::fetch_repository()`，它内部自己打印错误，不返回结构化失败
-- helper 只返回 `Result<(), InitError>`，没有结构化元数据，无法稳定支持 human/JSON 输出
+- `execute_safe()` 不再在调用执行层前直接 `canonicalize()` 并绕过错误映射；源路径缺失和无效 Git repo 已收口到 `InitError::SourcePathNotFound` / `InvalidGitRepository`
+- `convert_from_git_repository()` 已调用 `fetch_repository_safe(...)` 并使用子级静默 `OutputConfig`，避免嵌套 fetch progress / NDJSON 污染 `init --json` / `--machine`
+- helper 已返回 `InitOutput` 结构化结果，顶层 `render_init_result()` 统一渲染 human / JSON / machine
 
 **修正后的方案：**
 
@@ -429,19 +431,18 @@ enum InitError {
 | **F** | 拼写纠错 | **范围**：仅对 `--object-format` 做 fuzzy match（`sha265` → `did you mean 'sha256'?`）。`--ref-format` 和 `--initial-branch` 参数不做 fuzzy match——前者只有两个合法值（clap enum 已提供完整候选列表），后者是自由文本（分支名）无法做有意义的纠错 |
 | **G** | Issues URL | 仅在 `LBR-INTERNAL-001`（数据库/vault 不变量破坏）时输出 `hint: please report this issue at: https://github.com/web3infra-foundation/libra/issues`。其他错误（参数错误、已初始化、路径缺失）不输出 Issues URL——这些是用户可自行修复的问题 |
 
-### 特性 7：Separate Directory 全链路移除（纳入本批定位目标）
+### 特性 7：Separate Directory 全链路移除（已落地）
 
-**当前代码状态：** 虽然 `docs/improvement/config.md` 已把 `--separate-git-dir` / `--separate-libra-dir` 记为“系统全局取消”，但当前代码并非如此：
+**当前代码状态（2026-05-11 复核）：**
 
-- `src/command/init.rs` 仍声明 `separate_libra_dir` 参数并保留 `--separate-git-dir` alias / warning
-- `src/utils/util.rs` 仍把 `.libra` 文件当作 `gitdir:` link file 解析
-- `tests/command/init_separate_libra_dir_test.rs` 和 `tests/command/worktree_test.rs` 仍把 separate layout 当成正常成功路径
+- `src/command/init.rs` 不再声明 `separate_libra_dir` 参数，也不再保留 `--separate-git-dir` alias / warning
+- `.libra` 文件形式的 legacy separate-layout repo 不再被 Libra 仓库发现链路识别；[`tests/command/init_separate_libra_dir_test.rs`](../../tests/command/init_separate_libra_dir_test.rs) 覆盖这一路径并断言 `not a libra repository`
+- `worktree` 已移除 separate-layout 成功路径；标准 non-bare 仓库只支持工作树根目录下的 `.libra/` 目录布局
+- `src/utils/util.rs` 仍保留 `.git` 文件中的 `gitdir:` 解析，用于识别 stock Git worktree/bare source；这不是 Libra `.libra` separate-layout 兼容路径
 
-既然本轮要把此项纳入本批定位目标，就必须把这些链路一起收口，而不是只删 CLI 参数定义。
-
-**本批处理原则：**
+**已落地处理原则：**
 - 删除 `InitArgs::separate_libra_dir` 与 `--separate-git-dir` alias
-- 删除 `src/utils/util.rs` 中 `.libra` link file / `gitdir:` 解析逻辑
+- 删除 `.libra` link file / `gitdir:` 解析逻辑
 - 删除或改写 `worktree` 中所有 separate-layout 兼容/修复分支
 - 删除或改写依赖 separate-layout 的测试与辅助函数
 - 发布后的 non-bare 仓库统一只支持工作树根目录下的标准 `.libra/` 布局
@@ -455,13 +456,12 @@ directory back into the working tree:
   mv /path/to/separate/storage .libra   # move storage dir into place
 ```
 
-**本批 release gate：**
-- 删除 `InitArgs::separate_libra_dir` 及 `--separate-git-dir` alias
-- 删除 `src/utils/util.rs` 中 `.libra` link file / `gitdir:` 解析逻辑
-- 删除或改写 `src/command/worktree.rs` 中 `gitdir:` link 写入和 separate-layout 兼容逻辑
-- 删除或改写 `tests/command/init_separate_libra_dir_test.rs` 和 `tests/command/worktree_test.rs` 中所有 separate-layout 成功路径
-- 删除 `src/` 与 `tests/` 下**所有**构造 `InitArgs` 时传递 `separate_libra_dir` 字段的代码。当前已知影响面至少包括：`src/command/clone.rs`、`src/command/tag.rs`、`src/utils/test.rs`、`tests/command/{status,commit,blame,checkout,cherry_pick,init_separate_libra_dir,worktree}_test.rs`
-- 只有当以上链路全部清理完成时，才能在 CHANGELOG / docs 中宣称该功能已移除
+**已满足 release gate：**
+- `InitArgs::separate_libra_dir` 及 `--separate-git-dir` alias 已删除
+- `.libra` link file / `gitdir:` 解析逻辑已删除；`.git` 的 stock Git worktree 解析保留给 Git source discovery
+- `src/command/worktree.rs` 中的 separate-layout 写入和兼容逻辑已删除
+- `tests/command/init_separate_libra_dir_test.rs` 已改写为拒绝/不识别回归测试，`tests/command/worktree_test.rs` 不再把 separate layout 当成功路径
+- `src/` 与 `tests/` 下构造 `InitArgs` 的代码不再传递 `separate_libra_dir`
 
 ### 特性 8：成功消息与 Human Output
 

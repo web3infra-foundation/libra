@@ -1,3 +1,9 @@
+//! Extension helpers for storage backends that need higher-level object operations.
+//!
+//! Boundary: these helpers keep backend-neutral behavior out of individual storage
+//! implementations. Storage-flow and cloud-backup tests cover missing objects,
+//! compression boundaries, and local/remote fallback behavior.
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use git_internal::{

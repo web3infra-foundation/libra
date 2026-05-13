@@ -1,6 +1,11 @@
 //! Mock-based S3/R2 storage tests using in-memory object store for prefix isolation, tiered logic, and search.
 //!
-//! **Layer:** L1 — deterministic, uses `object_store::memory::InMemory`.
+//! Sister file to `cloud_storage_backup_test.rs` — reuses the in-memory backend
+//! pattern but isolates the storage-shape contracts (per-repo prefix, tiered routing,
+//! prefix search) so they remain testable without the cloud backup workflow on top.
+//!
+//! **Layer:** L1 — deterministic, uses `object_store::memory::InMemory`. No env vars
+//! required, runs on every default `cargo test`.
 
 use std::{str::FromStr, sync::Arc};
 
@@ -11,6 +16,9 @@ use libra::utils::storage::{
 use object_store::memory::InMemory;
 use tempfile::tempdir;
 
+/// Scenario: when constructed with `new_with_prefix("repo-a")`, every put writes
+/// under `repo-a/objects/...`. Asserts both the physical path layout and that
+/// `exist`/`get` round-trip via the abstraction. Pins per-repo prefix isolation.
 #[tokio::test]
 async fn test_mock_remote_storage_with_repo_prefix() {
     let memory_store = Arc::new(InMemory::new());
@@ -31,6 +39,15 @@ async fn test_mock_remote_storage_with_repo_prefix() {
     assert_eq!(data, blob.data);
 }
 
+/// Scenario: with a 10-byte threshold and a 1024-byte local cap, store a 3-byte
+/// "small" blob (perma-stored locally) and a 15-byte "large" blob (LRU-cached
+/// locally, primary in remote). Asserts that:
+/// - Both `put` calls return remote paths under the configured `repo-tiered/`
+///   prefix (so the prefix propagates through the tier layer).
+/// - Both blobs are present in local storage after writes.
+/// - The large blob retrieves correctly through the tiered abstraction.
+///
+/// Pins the dual-write semantics for the tiered backend.
 #[tokio::test]
 async fn test_mock_tiered_storage_logic() {
     // 1. Setup Components
@@ -84,6 +101,11 @@ async fn test_mock_tiered_storage_logic() {
     assert_eq!(data, large_blob.data);
 }
 
+/// Scenario: insert a blob with hex prefix `aabbccdd...` under `repo-search/` and
+/// confirm `search` matches `"aabb"` (full-prefix), `"a"` (single-char prefix), and
+/// returns empty for `"ccdd"` (does not match anywhere in the canonical
+/// `aa/bbccdd...` layout). Pins the prefix-matching contract that `cloud restore`
+/// uses to discover objects.
 #[tokio::test]
 async fn test_mock_remote_search() {
     let memory_store = Arc::new(InMemory::new());

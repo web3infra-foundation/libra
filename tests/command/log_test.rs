@@ -56,7 +56,7 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     );
     assert_eq!(
         stderr,
-        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003\nHint: create a commit first before running 'libra log'."
+        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003\n\nHint: create a commit first before running 'libra log'."
     );
 }
 
@@ -455,15 +455,17 @@ async fn test_execute_log() {
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None)
         .await
         .unwrap();
-    // default sort with signature time
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    // newest first
+    reachable_commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
+
     //the last seven commits
     let max_output_number = min(6, reachable_commits.len());
-    let mut output_number = 6;
-    for commit in reachable_commits.iter().take(max_output_number) {
+    let expected_msgs = [
+        "Commit_6", "Commit_5", "Commit_4", "Commit_3", "Commit_2", "Commit_1",
+    ];
+    for (i, commit) in reachable_commits.iter().take(max_output_number).enumerate() {
         let msg = commit.message.trim_start_matches('\n');
-        assert_eq!(msg, format!("Commit_{output_number}"));
-        output_number -= 1;
+        assert_eq!(msg, expected_msgs[i]);
     }
 }
 
@@ -563,13 +565,14 @@ async fn test_log_oneline() {
 
     // Since execute function writes to stdout, we'll test the logic directly
     let mut sorted_commits = reachable_commits.clone();
-    sorted_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    sorted_commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
 
     let max_commits = std::cmp::min(
         args.unwrap().number.unwrap_or(usize::MAX),
         sorted_commits.len(),
     );
 
+    let expected_msgs = ["Commit_6", "Commit_5", "Commit_4"];
     for (i, commit) in sorted_commits.iter().take(max_commits).enumerate() {
         // Test short hash format (should be 7 characters)
         let short_hash = &commit.id.to_string()[..7];
@@ -580,8 +583,7 @@ async fn test_log_oneline() {
         assert!(!msg.is_empty());
 
         // For our test commits, verify the expected format
-        let expected_number = 6 - i; // commits are numbered 6, 5, 4, 3, 2, 1
-        assert_eq!(msg.trim(), format!("Commit_{expected_number}"));
+        assert_eq!(msg.trim(), expected_msgs[i]);
     }
 }
 
@@ -791,8 +793,7 @@ async fn test_log_patch_with_pathspec() {
 async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::PathBuf>) -> String {
     // Get head commit and reachable commits
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await.unwrap();
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    let reachable_commits = get_reachable_commits(commit_hash, None).await.unwrap();
 
     let max_output_number = std::cmp::min(count, reachable_commits.len());
     let mut out = String::new();
@@ -1573,4 +1574,190 @@ fn test_log_json_oneline_flag_does_not_alter_schema() {
         plain_json["data"]["commits"][0]["author_name"],
         oneline_json["data"]["commits"][0]["author_name"]
     );
+}
+
+// ============================================================================
+// --grep 参数测试
+// ============================================================================
+
+// Test grep parameter parsing
+#[test]
+fn test_log_args_grep() {
+    let args = LogArgs::parse_from(["libra", "--grep", "fix"]);
+    assert_eq!(args.grep, Some("fix".to_string()));
+
+    let args = LogArgs::parse_from(["libra"]);
+    assert_eq!(args.grep, None);
+}
+
+// Test grep combined with other arguments
+#[test]
+fn test_grep_with_other_args() {
+    let args = LogArgs::parse_from(["libra", "--grep", "feature", "--oneline", "-n", "5"]);
+    assert_eq!(args.grep, Some("feature".to_string()));
+    assert!(args.oneline);
+    assert_eq!(args.number, Some(5));
+}
+
+// Test case-sensitive matching
+#[test]
+fn test_grep_case_sensitive() {
+    let args = LogArgs::parse_from(["libra", "--grep", "FIX"]);
+    assert_eq!(args.grep, Some("FIX".to_string()));
+}
+
+// Test empty string grep
+#[test]
+fn test_grep_empty_string() {
+    let args = LogArgs::parse_from(["libra", "--grep", ""]);
+    assert_eq!(args.grep, Some("".to_string()));
+}
+
+// Test graph with grep combination
+#[test]
+fn test_graph_with_grep() {
+    let args = LogArgs::parse_from(["libra", "--graph", "--grep", "fix"]);
+    assert!(args.graph);
+    assert_eq!(args.grep, Some("fix".to_string()));
+}
+
+// Integration test: verify actual filtering behavior
+#[tokio::test]
+#[serial]
+async fn test_log_grep_filtering() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create first commit: fix message
+    test::ensure_file("file1.txt", Some("content1\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("fix: bug fix".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Create second commit: feat message
+    test::ensure_file("file2.txt", Some("content2\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file2.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("feat: new feature".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Create third commit: docs message
+    test::ensure_file("file3.txt", Some("content3\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file3.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("docs: update readme".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Test grep "fix" - should only show the fix commit
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", "fix"], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    assert!(stdout.contains("fix: bug fix"));
+    assert!(!stdout.contains("feat: new feature"));
+    assert!(!stdout.contains("docs: update readme"));
+
+    // Test grep "feat" - should only show the feat commit
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", "feat"], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    assert!(stdout.contains("feat: new feature"));
+    assert!(!stdout.contains("fix: bug fix"));
+    assert!(!stdout.contains("docs: update readme"));
+
+    // Test grep "nonexistent" - should show no commits
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", "nonexistent"], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    assert!(!stdout.contains("fix: bug fix"));
+    assert!(!stdout.contains("feat: new feature"));
+    assert!(!stdout.contains("docs: update readme"));
+    // With no matches, stdout should be empty
+    assert!(stdout.is_empty());
+
+    // Test empty grep pattern - should show all commits
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", ""], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    assert!(stdout.contains("fix: bug fix"));
+    assert!(stdout.contains("feat: new feature"));
+    assert!(stdout.contains("docs: update readme"));
+
+    // Test case-sensitive matching - "Fix" should not match "fix"
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", "Fix"], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    assert!(!stdout.contains("fix: bug fix"));
+    assert!(!stdout.contains("feat: new feature"));
+    assert!(!stdout.contains("docs: update readme"));
+    assert!(stdout.is_empty());
+
+    // Test case-insensitive should not work (we document case-sensitive)
+    // but that's the intended behavior
+
+    // Test grep with -n limit
+    let (status, stdout, stderr) = run_log_cmd(&["--grep", "fix", "-n", "1"], temp_path.path());
+    assert!(status.success(), "log --grep failed: {stderr}");
+    // Should show at most 1 commit with "fix"
+    let commit_count = count_commit_lines(&stdout);
+    assert_eq!(commit_count, 1);
 }

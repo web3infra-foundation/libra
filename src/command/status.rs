@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use clap::{Parser, ValueEnum};
@@ -339,6 +339,49 @@ fn load_status_index() -> CliResult<Index> {
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
+
+/// Collect repository status and render it inside the same `{ok, command,
+/// data}` envelope that `libra status --json` prints, so `/api/repo/status`
+/// stays byte-compatible with the CLI output.
+///
+/// Internally re-uses [`collect_status_data`] + [`build_status_json`] with a
+/// default [`StatusArgs`] (untracked files in normal mode, no porcelain v2,
+/// no ignored files, no stash count).
+///
+/// Status collection currently resolves storage from the process working
+/// directory; the embedded web server expects to be launched from (or with
+/// `--cwd`/`--repo` already chdir'd to) the repository root. Callers that
+/// need to scope to a specific path should pass it via `working_dir`.
+pub async fn collect_status_json_envelope_for_api(
+    working_dir: &std::path::Path,
+) -> CliResult<serde_json::Value> {
+    use std::path::PathBuf;
+
+    let args = StatusArgs::default();
+    let canon_working =
+        std::fs::canonicalize(working_dir).unwrap_or_else(|_| PathBuf::from(working_dir));
+    let canon_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::fs::canonicalize(&cwd).ok());
+    if canon_cwd.as_deref() != Some(canon_working.as_path()) {
+        return Err(CliError::fatal(format!(
+            "/api/repo/status currently requires the libra process to run inside its repository root. Expected '{}', found '{}'. Re-launch `libra code` from the repo or open an issue if you need cross-directory status.",
+            canon_working.display(),
+            canon_cwd
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unavailable>".to_string()),
+        )));
+    }
+
+    let data = collect_status_data(&args).await?;
+    let inner = build_status_json(&data, &args);
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "status",
+        "data": inner,
+    }))
+}
 
 pub async fn execute(args: StatusArgs) {
     if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
@@ -1531,8 +1574,8 @@ fn changes_to_be_staged_split_with_index(
             }
         }
     }
-    let files =
-        list_workdir_files_safe(workdir).map_err(|source| StatusError::ListWorkdirFiles {
+    let (files, ignored_files) =
+        list_workdir_files_split_safe(workdir).map_err(|source| StatusError::ListWorkdirFiles {
             path: workdir.clone(),
             source,
         })?;
@@ -1541,42 +1584,55 @@ fn changes_to_be_staged_split_with_index(
             .to_str()
             .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
         if !index.tracked(file_str, 0) {
-            let file_abs = workdir.join(&file);
-            if util::check_gitignore(workdir, &file_abs) {
-                ignored.new.push(file);
-            } else {
-                visible.new.push(file);
-            }
+            visible.new.push(file);
+        }
+    }
+    for file in ignored_files {
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
+        if !index.tracked(file_str, 0) {
+            ignored.new.push(file);
         }
     }
     Ok((visible, ignored))
 }
 
-fn list_workdir_files_safe(workdir: &Path) -> io::Result<Vec<PathBuf>> {
+fn list_workdir_files_split_safe(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut files = Vec::new();
+    let mut ignored = Vec::new();
+    let mut pending_dirs = vec![workdir.clone()];
 
-    for entry in walkdir::WalkDir::new(workdir)
-        .into_iter()
-        .filter_entry(|entry| {
-            entry.path() == workdir || entry.file_name() != std::ffi::OsStr::new(util::ROOT_DIR)
-        })
-    {
-        let entry = entry.map_err(|err| {
-            let err_text = err.to_string();
-            err.into_io_error()
-                .unwrap_or_else(|| io::Error::other(err_text))
-        })?;
-        let path = entry.path();
+    while let Some(dir) = pending_dirs.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR) {
+                continue;
+            }
 
-        if entry.file_type().is_file() {
+            let file_type = entry.file_type()?;
             let relative = path
                 .strip_prefix(workdir)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            files.push(relative.to_path_buf());
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .to_path_buf();
+            if file_type.is_dir() {
+                if util::check_gitignore(workdir, &path) {
+                    ignored.push(relative);
+                } else {
+                    pending_dirs.push(path);
+                }
+            } else if file_type.is_file() {
+                if util::check_gitignore(workdir, &path) {
+                    ignored.push(relative);
+                } else {
+                    files.push(relative);
+                }
+            }
         }
     }
 
-    Ok(files)
+    Ok((files, ignored))
 }
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
@@ -1598,6 +1654,28 @@ mod test {
             test::{self, ChangeDirGuard},
         },
     };
+
+    #[test]
+    fn list_workdir_files_prunes_ignored_directories() {
+        let repo = tempdir().expect("failed to create temp repo");
+        let workdir = repo.path().to_path_buf();
+        std::fs::write(workdir.join(".libraignore"), "ignored-dir/\n")
+            .expect("failed to write ignore file");
+        std::fs::create_dir_all(workdir.join("ignored-dir/nested"))
+            .expect("failed to create ignored directory");
+        std::fs::write(workdir.join("ignored-dir/nested/file.txt"), "ignored")
+            .expect("failed to write ignored file");
+        std::fs::write(workdir.join("visible.txt"), "visible").expect("failed to write file");
+
+        let (visible, ignored) =
+            list_workdir_files_split_safe(&workdir).expect("failed to list workdir files");
+
+        assert!(visible.contains(&PathBuf::from(".libraignore")));
+        assert!(visible.contains(&PathBuf::from("visible.txt")));
+        assert!(ignored.contains(&PathBuf::from("ignored-dir")));
+        assert!(!visible.contains(&PathBuf::from("ignored-dir/nested/file.txt")));
+        assert!(!ignored.contains(&PathBuf::from("ignored-dir/nested/file.txt")));
+    }
 
     #[tokio::test]
     #[serial]

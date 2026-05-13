@@ -2,7 +2,7 @@
 
 > 最后编写时间：2026-03-31
 
-与 [switch.md](switch.md) 联动时，仅提前落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）；`A/F/G` 仍留待 [README.md](README.md#第六批辅助命令p2-增强) 中 `checkout` 的完整现代化批次统一处理。
+与 [switch.md](switch.md) 联动时，仅提前落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）；`A/F/G` 仍留待 [README.md](README.md#后续批次基于本轮-review-重排) 第 30 批中 `checkout` 的完整现代化批次统一处理。
 
 本文是 `checkout` 的**兼容性收口计划**，用于和 [switch.md](switch.md) 同步落地，避免 `switch` 的 typed error 改造把 `checkout` 的现有行为搞坏。
 
@@ -11,7 +11,7 @@
 **范围说明：**
 
 - **本次落地**：`checkout` 对 `switch::ensure_clean_status()` 新返回类型的适配、`--help` EXAMPLES、相关回归测试补强。
-- **留待后续**：`checkout` 自身完整的 JSON 输出、显式 `StableErrorCode`、执行层/渲染层拆分、typed `CheckoutError` 统一建模，仍按 [README.md](README.md#第六批辅助命令p2-增强) 的第六批执行。
+- **留待后续**：`checkout` 自身完整的 JSON 输出、显式 `StableErrorCode`、执行层/渲染层拆分、typed `CheckoutError` 统一建模，仍按 [README.md](README.md#后续批次基于本轮-review-重排) 的第 30 批执行。
 
 因此，本文**不是**把 `checkout` 提前升级为完整现代化命令，而是记录与 `switch` 联动时必须一起收口的最小兼容面。
 
@@ -55,27 +55,25 @@
 
 **当前代码仍需改进的部分：**
 
-- **`checkout.rs` 依赖 `err.message()` 字符串匹配**：`checkout.rs:69-83` 通过错误文案判断是否是 dirty-tree，fragile 且无法在 message 变化时编译期发现
-- **缺少 `--help` EXAMPLES 段**
-- **无 checkout 专属改进文档**：当前所有联动约束都堆在 `switch.md`，后续容易双边漂移
-- **完整现代化仍未开始**：无 JSON、无显式 `StableErrorCode`、无 `CheckoutError` typed enum、无执行层/渲染层拆分
+- **完整现代化仍留待第 30 批**：`checkout` 当前仍无 JSON 成功输出、无专属 `CheckoutError` typed enum、无执行层/渲染层拆分
+- **命令文档需持续跟随行为演进**：后续如新增 checkout 语义（detach / tag / restore path 兼容等），需同步更新本文件与命令文档
 
 ### 目标与非目标
 
-**本次目标：**
+**本次已完成目标：**
 
-- 与 [switch.md](switch.md) 对齐：当 `switch::ensure_clean_status()` 改为返回 `Result<(), SwitchError>` 后，`checkout.rs` 同步改为**变体匹配**，消除字符串匹配
-- 保持 `checkout` 现有对外行为不变：
+- 已与 [switch.md](switch.md) 对齐：`checkout.rs` 通过 `SwitchError` 变体匹配消费 `switch::ensure_clean_status()` / `switch::ensure_clean_status_for_commit()`，不再依赖错误文案字符串
+- 已保持 `checkout` 现有对外行为不变：
   - 当前分支仍是 no-op
   - dirty-tree 仍报 `local changes would be overwritten by checkout`
   - 状态损坏仍直接透传原始错误
   - quiet / machine 输出约定保持不变
-- 补齐 `checkout` 的 `--help` EXAMPLES 段
-- 明确记录 `switch` / `checkout` 的边界，避免两个计划互相覆盖
+- 已补齐 `checkout` 的 `--help` EXAMPLES 段
+- 已明确记录 `switch` / `checkout` 的边界，避免两个计划互相覆盖
 
 **本次非目标：**
 
-- **不实现 `checkout --json` / `--machine` 结构化成功输出**。这属于第六批完整现代化范围
+- **不实现 `checkout --json` / `--machine` 结构化成功输出**。这属于第 30 批完整现代化范围
 - **不引入完整 `CheckoutError` typed enum**
 - **不改写 `get_remote()` 的业务语义**。remote auto-track + pull 现有流程保持不变
 - **不统一 `checkout` 和 `switch` 的成功文案**。`checkout` 继续保留自己的兼容语气，例如 `Already on {branch}`（无引号）
@@ -87,11 +85,11 @@
 1. **switch 联动优先，checkout 行为稳定优先**：`switch` 改 helper 签名时，`checkout` 必须同步，但不能借机改掉现有命令行为
 2. **只替换脆弱实现，不扩大本批范围**：本次只把字符串匹配换成 `SwitchError` 变体匹配，不顺手做 JSON / typed error 全量重构
 3. **checkout 保持自己的对外文案**：即使内部依赖 `switch`，外部仍是 `checkout` 语义，不和 `switch` 强行统一
-4. **未来完整现代化留在第六批**：本次文档必须显式给未来 `CheckoutError` / JSON 输出留边界，避免与 README 排期冲突
+4. **未来完整现代化留在第 30 批**：本次文档必须显式给未来 `CheckoutError` / JSON 输出留边界，避免与 README 排期冲突
 
 ### 特性 1：`switch::ensure_clean_status()` 新返回类型适配
 
-**当前实现（fragile string matching）：**
+**历史实现（已替换的 fragile string matching）：**
 
 ```rust
 match switch::ensure_clean_status(output).await {
@@ -111,14 +109,21 @@ match switch::ensure_clean_status(output).await {
 }
 ```
 
-**目标实现（typed variant matching）：**
+**当前实现（typed variant matching，已落地）：**
 
 ```rust
-use super::switch::SwitchError;
+let clean_status = match target_commit {
+    Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
+    None => switch::ensure_clean_status(output).await,
+};
 
-match switch::ensure_clean_status(output).await {
+match clean_status {
     Ok(()) => {}
-    Err(SwitchError::DirtyUnstaged | SwitchError::DirtyUncommitted) => {
+    Err(
+        switch::SwitchError::DirtyUnstaged
+        | switch::SwitchError::DirtyUncommitted
+        | switch::SwitchError::UntrackedOverwrite(..),
+    ) => {
         return Err(CliError::failure(
             "local changes would be overwritten by checkout",
         ));
@@ -129,8 +134,8 @@ match switch::ensure_clean_status(output).await {
 
 **关键约束：**
 
-- 仅 `DirtyUnstaged` / `DirtyUncommitted` 被翻译成 checkout 文案
-- `ensure_clean_status()` 当前只可能返回 `StatusCheck`、`DirtyUnstaged`、`DirtyUncommitted` 三个变体；catch-all arm 处理 `StatusCheck`（经 `impl From<SwitchError> for CliError` 转换为 `IoReadFailed`）以及未来可能新增的变体，不能被折叠成 dirty-tree
+- 仅 `DirtyUnstaged` / `DirtyUncommitted` / `UntrackedOverwrite(..)` 被翻译成 checkout 文案
+- `StatusCheck`（经 `impl From<SwitchError> for CliError` 转换为 `IoReadFailed`）以及未来可能新增的变体不能被折叠成 dirty-tree
 - `current branch` 的 no-op 快路径仍应在 cleanliness check 之前执行，避免脏工作树影响 `checkout <current-branch>`
 
 ### 特性 2：`--help` EXAMPLES 段
@@ -157,22 +162,22 @@ EXAMPLES:
 - `run_switch()` 仍保持私有；`checkout` 不复用 `switch` 的执行层结果结构
 - `checkout` 的完整 JSON / typed error / render split 不在本次联动范围内
 
-### 特性 4：第六批完整现代化的预留边界
+### 特性 4：第 30 批完整现代化的预留边界
 
-按照 [README.md](README.md#第六批辅助命令p2-增强)，`checkout` 的完整改造仍留在第六批。届时再单独推进：
+按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造仍留在第 30 批。届时再单独推进：
 
 - `CheckoutError` typed enum
 - 显式 `StableErrorCode`
 - `run_checkout()` + `render_checkout_output()` 执行/渲染拆分
 - `checkout --json` 成功输出（至少覆盖 show-current / switch-local / create / remote-track）
 
-本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第六批未来落地。
+本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第 30 批未来落地。
 
 ### 本次联动中的 Cross-Cutting Improvements 约束
 
 | ID | 本次是否落地 | checkout 中的处理 |
 |----|-------------|------------------|
-| **A** | 否 | 当前兼容收口不引入新的 `StableErrorCode` / 退出码模型，继续保持既有 `checkout` 行为；完整退出码现代化留第六批 |
+| **A** | 否 | 当前兼容收口不引入新的 `StableErrorCode` / 退出码模型，继续保持既有 `checkout` 行为；完整退出码现代化留第 30 批 |
 | **B** | 是 | 补齐 `--help` EXAMPLES 段，与 `switch` / `init` / `config` 风格保持一致 |
 | **F** | 否 | 本次不为 `checkout` 单独设计 fuzzy suggestion；与分支目标相关的提示增强由 `switch` 侧承接 |
 | **G** | 否 | 本次不新增 Issues URL 规则；待 `checkout` 自身进入 typed error / 显式错误码阶段后再统一定义 |
@@ -186,9 +191,10 @@ EXAMPLES:
 - `test_checkout_new_branch_with_dirty_worktree_returns_error()`（line 263）：dirty **staged** worktree（即 `SwitchError::DirtyUncommitted` 路径）仍应映射为 `local changes would be overwritten by checkout`
 - `test_checkout_current_branch_with_dirty_worktree_succeeds()`（line 361）：checkout 当前分支仍应是 no-op，不受脏工作树阻塞
 
-本次建议补一条：
+已补齐的联动回归：
 
 - `test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_error()`：覆盖 `SwitchError::DirtyUnstaged` 也能被 `checkout` 正确翻译，而不是只覆盖 staged dirty 路径
+- `test_checkout_existing_branch_with_conflicting_untracked_file_returns_error()`：覆盖 `SwitchError::UntrackedOverwrite(..)` 被保留为 checkout 专属文案
 
 #### `tests/command/output_flags_test.rs`（输出契约回归）
 
@@ -202,7 +208,7 @@ EXAMPLES:
 
 #### 不新增 `checkout_json_test.rs`
 
-本次不实现 `checkout --json`，因此**不新增** `checkout_json_test.rs`。该测试文件留待第六批完整现代化时引入。
+本次不实现 `checkout --json`，因此**不新增** `checkout_json_test.rs`。该测试文件留待第 30 批完整现代化时引入。
 
 ### 质量验收
 

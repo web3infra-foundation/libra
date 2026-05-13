@@ -151,8 +151,17 @@ pub async fn execute(args: PullArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Fetches from the remote then merges into the current
-/// branch.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Resolves the remote/upstream target for the current branch or CLI args.
+/// - Fetches remote objects and updates remote-tracking refs.
+/// - Fast-forwards the current branch and working tree when merge succeeds.
+/// - Renders pull summary output.
+///
+/// # Errors
+/// Returns [`CliError`] when the pull target cannot be resolved, fetch fails,
+/// histories cannot be merged safely, or refs/worktree updates fail.
 pub async fn execute_safe(args: PullArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_pull(args, output).await.map_err(CliError::from)?;
     render_pull_output(&result, output)

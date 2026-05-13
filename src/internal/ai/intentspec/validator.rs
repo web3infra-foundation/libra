@@ -1,3 +1,11 @@
+//! Validation rules for canonical IntentSpecs before they are accepted by the
+//! scheduler and orchestrator.
+//!
+//! Boundary: validators report actionable defects without mutating the spec; callers
+//! that want fixups must run `repair` first. Regression tests cover missing goals,
+//! invalid artifact references, and acceptance criteria that cannot be converted into
+//! executable checks.
+
 use std::collections::HashSet;
 
 use super::types::{ArtifactName, ChangeType, Check, IntentSpec, LifecycleStatus, RiskLevel};

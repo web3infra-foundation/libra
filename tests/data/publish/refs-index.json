@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "refsGeneration": 7,
+  "defaultRef": "refs/heads/main",
+  "refs": [
+    {
+      "refName": "refs/heads/main",
+      "refType": "branch",
+      "shortName": "main",
+      "targetOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "isDefault": true,
+      "updatedAt": "2026-05-09T13:30:00Z"
+    },
+    {
+      "refName": "refs/heads/dev",
+      "refType": "branch",
+      "shortName": "dev",
+      "targetOid": "112233445566778899aabbccddeeff0011223344",
+      "revisionOid": "112233445566778899aabbccddeeff0011223344",
+      "isDefault": false,
+      "updatedAt": "2026-05-09T13:25:00Z"
+    },
+    {
+      "refName": "refs/tags/v1.0.0",
+      "refType": "tag",
+      "shortName": "v1.0.0",
+      "targetOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "isDefault": false,
+      "updatedAt": "2026-05-09T13:25:00Z"
+    },
+    {
+      "refName": "refs/tags/v1.1.0-rc",
+      "refType": "tag",
+      "shortName": "v1.1.0-rc",
+      "targetOid": "0011223344556677889900112233445566778899",
+      "revisionOid": "112233445566778899aabbccddeeff0011223344",
+      "isDefault": false,
+      "updatedAt": "2026-05-09T13:25:30Z"
+    }
+  ],
+  "generatedAt": "2026-05-09T13:30:00Z"
+}

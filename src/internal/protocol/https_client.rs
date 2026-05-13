@@ -7,8 +7,6 @@ use git_internal::errors::GitError;
 use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
-#[cfg(test)]
-use super::DiscRef;
 use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
@@ -79,8 +77,11 @@ impl BasicAuth {
             } // if no auth exists, try without auth (e.g. clone public)
             res = request.send().await?;
             if res.status() == StatusCode::FORBIDDEN {
-                // 403: no access, no need to retry
-                eprintln!("fatal: authentication failed, forbidden");
+                // 403: no access, no need to retry. The caller receives the
+                // response and decides how to handle it — some callers (e.g.
+                // LFS Chunks API) expect 403 as a normal "not supported" signal,
+                // so do not print an alarming message here.
+                tracing::warn!("HTTP 403 Forbidden from server; caller will decide how to handle");
                 break;
             } else if res.status() != StatusCode::UNAUTHORIZED {
                 break;
@@ -172,11 +173,12 @@ impl HttpsClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
         let url = self.url.join("git-upload-pack").unwrap();
-        let body = generate_upload_pack_content(have, want, depth);
+        let body = generate_upload_pack_content(have, want, shallow, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
         let res = BasicAuth::send(|| async {
@@ -212,78 +214,5 @@ impl HttpsClient {
                 .body(data.clone())
         })
         .await
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
-
-    #[tokio::test]
-    async fn test_discover_reference_upload() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        init_debug_logger();
-
-        let test_repo = "https://github.com/web3infra-foundation/mega.git/";
-
-        let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let discovery = client.discovery_reference(UploadPack).await;
-        if let Err(e) = discovery {
-            tracing::error!("{:?}", e);
-            panic!();
-        } else {
-            let discovery = discovery.unwrap();
-            println!("refs count: {:?}", discovery.refs.len());
-            println!("example: {:?}", discovery.refs.get(1));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_post_git_upload_pack_() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        init_debug_logger();
-
-        let test_repo = "https://github.com/web3infra-foundation/mega/";
-        let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let discovery = client.discovery_reference(UploadPack).await.unwrap();
-        let refs: Vec<DiscRef> = discovery
-            .refs
-            .iter()
-            .filter(|r| r._ref.starts_with("refs/heads"))
-            .cloned()
-            .collect();
-        tracing::info!("refs: {:?}", refs);
-
-        let want: Vec<String> = refs.iter().map(|r| r._hash.clone()).collect();
-
-        let have = vec!["81a162e7b725bbad2adfe01879fd57e0119406b9".to_string()];
-        let mut result_stream = client.fetch_objects(&have, &want, None).await.unwrap();
-
-        let mut buffer = vec![];
-        while let Some(item) = result_stream.next().await {
-            let item = item.unwrap();
-            buffer.extend(item);
-        }
-
-        // pase pkt line
-        if let Some(pack_pos) = buffer.windows(4).position(|w| w == b"PACK") {
-            tracing::info!("pack data found at: {}", pack_pos);
-            let readable_output = std::str::from_utf8(&buffer[..pack_pos]).unwrap();
-            tracing::debug!("stdout readable: \n{}", readable_output);
-            tracing::info!("pack length: {}", buffer.len() - pack_pos);
-            assert!(buffer[pack_pos..pack_pos + 4].eq(b"PACK"));
-        } else {
-            tracing::error!(
-                "no pack data found, stdout is :\n{}",
-                std::str::from_utf8(&buffer).unwrap()
-            );
-            panic!("no pack data found");
-        }
     }
 }

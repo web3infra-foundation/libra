@@ -1,0 +1,248 @@
+@import "tailwindcss";
+
+/*
+ * Libra publish — paper-navy design system.
+ *
+ * Ports the publish design tokens, type stack and component primitives
+ * onto the Next.js + Tailwind v4 build that deploys to Cloudflare.
+ *
+ * Sources of truth:
+ *   - Palette: paper / paper-deep / ink-deep / gold (warm + restrained).
+ *   - Type:    Inter (sans), JetBrains Mono (mono), Georgia fallback (brand).
+ *   - Layout:  sidebar (desktop) / icon-rail (tablet) / topbar+drawer (mobile).
+ */
+
+:root {
+  /* Type stacks */
+  --font-serif: "Source Serif 4", "Source Serif Pro", Georgia, serif;
+
+  /* Paper-navy palette */
+  --paper: #f7f3ec;
+  --paper-deep: #efeae0;
+  --paper-edge: #e5dfd2;
+  --paper-line: #d6cdb9;
+  --paper-ink: #bfb39a;
+
+  --ink-deep: #0e1f36;
+  --ink: #1f3a5f;
+  --ink-mid: #3d5577;
+  --ink-soft: #687588;
+  --ink-faint: #a4acba;
+
+  --gold: #8c6a2b;
+  --gold-soft: #c9a24a;
+  --gold-tint: rgba(140, 106, 43, 0.10);
+
+  /* Status — semantic */
+  --good: #4f6b3a;
+  --warn: #8c6a2b;
+  --bad: #8e3a2e;
+  --info: #2f4e76;
+  --good-tint: rgba(79, 107, 58, 0.10);
+  --warn-tint: rgba(140, 106, 43, 0.12);
+  --bad-tint: rgba(142, 58, 46, 0.10);
+  --info-tint: rgba(47, 78, 118, 0.10);
+
+  /* Radius + shadow */
+  --r-1: 4px;
+  --r-2: 8px;
+  --shadow-1: 0 1px 0 rgba(20, 36, 60, 0.04), 0 0 0 1px rgba(20, 36, 60, 0.04);
+  --shadow-2: 0 1px 2px rgba(20, 36, 60, 0.06), 0 4px 14px rgba(20, 36, 60, 0.06);
+
+  /* Layout */
+  --sidebar-w-desktop: 248px;
+  --sidebar-w-tablet: 64px;
+  --topbar-h: 56px;
+  --content-max: 1240px;
+
+  /*
+   * Codex pass-1 P2: components originally written against ad-hoc
+   * `--surface*` / `--line` / `--ink-muted` tokens still consume
+   * those names. Map them onto the canonical paper-navy tokens so
+   * the legacy class set renders correctly while we migrate
+   * components to the `lb-*` / `var(--paper*)` names used by the
+   * design package.
+   */
+  --surface: var(--paper);
+  --surface-2: var(--paper-deep);
+  --surface-3: var(--paper-edge);
+  --line: var(--paper-line);
+  --ink-muted: var(--ink-soft);
+  --ink-faint: var(--ink-faint);
+}
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { min-height: 100dvh; }
+  body {
+    margin: 0;
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+    background: var(--paper);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  pre, code { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
+  ::selection { background: var(--gold-tint); color: var(--ink-deep); }
+
+  :focus { outline: none; }
+  :focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  a {
+    color: var(--gold);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+  a:hover { border-bottom-color: var(--gold); }
+}
+
+@layer components {
+  .lb-mono,
+  .libra-mono { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
+  .lb-serif { font-family: var(--font-serif); }
+  .lb-brand {
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--ink-deep);
+  }
+
+  .lb-eyebrow {
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .lb-meta {
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    line-height: 1.45;
+  }
+  .lb-meta-soft { color: var(--ink-faint); }
+
+  .lb-h1 {
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink-deep);
+    line-height: 1.2;
+    margin: 0;
+  }
+  .lb-h2 {
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--ink-deep);
+    margin: 0;
+  }
+
+  /* Chip/pill — five tones map to design tokens */
+  .lb-chip,
+  .libra-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: var(--r-1);
+    border: 1px solid var(--paper-line);
+    background: var(--paper);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 11.5px;
+    color: var(--ink-mid);
+    white-space: nowrap;
+  }
+  .lb-chip-good,
+  .libra-pill-good { background: var(--good-tint); border-color: transparent; color: var(--good); }
+  .lb-chip-warn,
+  .libra-pill-warn { background: var(--warn-tint); border-color: transparent; color: var(--warn); }
+  .lb-chip-bad,
+  .libra-pill-bad { background: var(--bad-tint); border-color: transparent; color: var(--bad); }
+  .lb-chip-info { background: var(--info-tint); border-color: transparent; color: var(--info); }
+  .lb-chip-accent,
+  .libra-pill-accent { background: var(--gold-tint); border-color: transparent; color: var(--gold); }
+
+  .lb-card,
+  .libra-card {
+    background: var(--paper);
+    border: 1px solid var(--paper-line);
+    border-radius: var(--r-2);
+    box-shadow: var(--shadow-1);
+  }
+  .lb-card-pad,
+  .libra-card-pad { padding: 14px 16px; }
+  .lb-card-row,
+  .libra-card-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--paper-edge);
+  }
+  .lb-card-row:last-child { border-bottom: 0; }
+
+  .lb-codebox,
+  .libra-codebox {
+    background: var(--paper-deep);
+    border: 1px solid var(--paper-line);
+    border-radius: var(--r-1);
+    padding: 12px 14px;
+    overflow: auto;
+    font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-deep);
+  }
+
+  .lb-link,
+  .libra-link { color: var(--gold); border-bottom: 1px solid transparent; }
+  .lb-link:hover,
+  .libra-link:hover { border-bottom-color: var(--gold); }
+
+  /* Scrollbars (paper) */
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(31, 58, 95, 0.18);
+    border-radius: var(--r-1);
+  }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(31, 58, 95, 0.32); }
+  *::-webkit-scrollbar-track { background: transparent; }
+
+  /* Visually-hidden helper for sr-only */
+  .lb-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+/*
+ * Backwards-compatibility layer for components written before the
+ * design-system port. Keeping the `libra-*` classes mapped to the
+ * paper-navy tokens means the Phase 6/7 components render correctly
+ * even before they are migrated to `lb-*`. Codex review should call
+ * out any new component that uses these legacy aliases instead of
+ * the canonical `lb-*` names.
+ */
+@layer components {
+  .libra-text-muted { color: var(--ink-soft); }
+  .libra-text-faint { color: var(--ink-faint); }
+  .libra-divider { height: 1px; background: var(--paper-line); }
+}

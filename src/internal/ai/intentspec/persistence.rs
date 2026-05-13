@@ -1,3 +1,11 @@
+//! Persistence bridge for storing and loading canonical IntentSpecs in Libra's AI
+//! object history.
+//!
+//! Boundary: this module maps between human-facing intent identifiers and immutable
+//! object storage records; it must preserve IDs, status, and validation metadata across
+//! round trips. The storage and migration paths are covered by
+//! `tests/intent_flow_test.rs` and `tests/ai_schema_migration_test.rs`.
+
 use anyhow::{Context, Result};
 use rmcp::model::CallToolResult;
 

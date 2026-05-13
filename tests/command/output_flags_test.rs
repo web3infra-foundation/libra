@@ -36,11 +36,17 @@ fn run(args: &[&str], cwd: &Path) -> Output {
 
 /// Run libra with an extra env var.
 fn run_with_env(args: &[&str], cwd: &Path, key: &str, value: &str) -> Output {
+    run_with_envs(args, cwd, &[(key, value)])
+}
+
+/// Run libra with extra env vars.
+fn run_with_envs(args: &[&str], cwd: &Path, extra_env: &[(&str, &str)]) -> Output {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
     fs::create_dir_all(&config_home).unwrap();
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
@@ -50,10 +56,11 @@ fn run_with_env(args: &[&str], cwd: &Path, key: &str, value: &str) -> Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .env("LIBRA_TEST", "1")
-        .env(key, value)
-        .output()
-        .expect("failed to execute libra binary")
+        .env("LIBRA_TEST", "1");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("failed to execute libra binary")
 }
 
 fn init_repo_with_commit_via_cli(repo: &Path) {
@@ -65,6 +72,59 @@ fn init_repo_with_commit_via_cli(repo: &Path) {
     assert_cli_success(&add, "add");
     let commit = run(&["commit", "-m", "init", "--no-verify"], repo);
     assert_cli_success(&commit, "commit");
+}
+
+#[test]
+fn log_file_writes_tracing_without_stderr() {
+    let repo = tempdir().unwrap();
+    init_repo_with_commit_via_cli(repo.path());
+    let log_path = repo.path().join("libra.log");
+    let log_path = log_path.to_str().expect("test path should be UTF-8");
+
+    let output = run_with_envs(
+        &["diff"],
+        repo.path(),
+        &[
+            ("LIBRA_LOG", "libra::command::diff=debug"),
+            ("LIBRA_LOG_FILE", log_path),
+        ],
+    );
+
+    assert_cli_success(&output, "diff with file logging");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "file logging should not write tracing output to stderr: {stderr}"
+    );
+    let log = fs::read_to_string(log_path).expect("failed to read log file");
+    assert!(
+        log.contains("diff args"),
+        "expected diff tracing event in log file, got: {log}"
+    );
+}
+
+#[test]
+fn invalid_log_file_does_not_fall_back_to_stderr_tracing() {
+    let repo = tempdir().unwrap();
+    init_repo_with_commit_via_cli(repo.path());
+    let log_path = repo.path().join("missing-parent").join("libra.log");
+    let log_path = log_path.to_str().expect("test path should be UTF-8");
+
+    let output = run_with_envs(
+        &["diff"],
+        repo.path(),
+        &[
+            ("LIBRA_LOG", "libra::command::diff=debug"),
+            ("LIBRA_LOG_FILE", log_path),
+        ],
+    );
+
+    assert_cli_success(&output, "diff with invalid log file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("diff args") && !stderr.contains("DEBUG"),
+        "invalid LIBRA_LOG_FILE should not fall back to stderr tracing: {stderr}"
+    );
 }
 
 // ─── --json ──────────────────────────────────────────────────────────────────
@@ -179,8 +239,13 @@ fn json_status_success_returns_structured_data() {
         data["untracked"].is_array(),
         "data must have untracked array"
     );
-    // Clean repo should be empty.
-    assert_eq!(data["is_clean"], true);
+    assert_eq!(data["is_clean"], false);
+    assert!(
+        data["untracked"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == ".libraignore")),
+        "init-created .libraignore should be reported as untracked: {data}"
+    );
 }
 
 #[test]

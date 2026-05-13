@@ -6,7 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +17,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
+use serde::Deserialize;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
@@ -25,43 +26,55 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
+    app_event::{
+        AgentEvent, AgentStatus, AppEvent, ProviderPlanDraft, ProviderPlanDraftStep, TurnId,
+        TurnInputSource,
+    },
     chatwidget::ChatWidget,
+    control::{CancelSource, TuiControlCommand, TuiControlError},
     diff::FileChange,
     history_cell::{
         AssistantHistoryCell, DiffHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
-        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ThinkingHistoryCell, ToolCallHistoryCell,
+        UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
     welcome_shader::{self, WelcomeView},
 };
+#[cfg(unix)]
+use crate::utils::fuse as fuse_utils;
 use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            ToolLoopConfig, ToolLoopObserver, profile::AgentProfileRouter,
-            run_tool_loop_with_history_and_observer,
+            TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
+            TaskIntentClassifierError, TaskIntentDecision, ToolLoopConfig, ToolLoopObserver,
+            profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
-            CompletionStreamEvent, CompletionUsage, Message, RetryingCompletionModel,
+            CompletionStreamEvent, CompletionUsage, CompletionUsageSummary, Message,
+            RetryingCompletionModel,
+        },
+        context_budget::{
+            MemoryAnchor, MemoryAnchorDraft, MemoryAnchorEvent, MemoryAnchorLookupError,
+            build_memory_anchor_prompt_section,
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
             persistence::persist_intentspec,
             render_summary, repair_intentspec, resolve_intentspec,
             types::{
-                ConflictResolution, DecompositionMode, LibraBinding, Objective, ObjectiveKind,
-                PlanGenerationConfig,
+                ConflictResolution, DecompositionMode, LibraBinding, NetworkPolicy, Objective,
+                ObjectiveKind, PlanGenerationConfig,
             },
             validate_intentspec,
         },
         mcp::{
             resource::{
                 CreateContextFrameParams, CreateContextSnapshotParams, CreateDecisionParams,
-                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
-                PlanStepParams,
+                CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
@@ -69,21 +82,32 @@ use crate::{
             planner::compile_execution_plan_spec,
             types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
-                OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
-                SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-                TaskRuntimePhase,
+                OrchestratorResult, PersistedPlanReviewBundle, PhaseConfirmationDecision,
+                PhaseConfirmationPrompt, PolicyViolation, SystemReport, TaskKind, TaskNodeStatus,
+                TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase, TaskWorkspaceBackend,
             },
         },
         projection::ProjectionRebuilder,
-        sandbox::{ExecApprovalRequest, ReviewDecision},
-        session::{SessionState, SessionStore},
+        prompt::SystemPromptBuilder,
+        sandbox::{ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, ReviewDecision},
+        session::{
+            SessionState, SessionStore,
+            file_history::FileHistoryError,
+            jsonl::{SessionEvent, SessionJsonlStore},
+        },
+        skills::SkillDispatcher,
+        sources::{BUILTIN_MCP_SOURCE_SLUG, McpSource, SourceEnablement, SourcePool, SourceStatus},
         tools::{
             ToolOutput, ToolRegistry,
             context::{
-                RequestUserInputArgs, StepStatus, UpdatePlanArgs, UserInputAnswer,
+                RequestUserInputArgs, SubmitPlanDraftArgs, UpdatePlanArgs, UserInputAnswer,
                 UserInputRequest, UserInputResponse,
             },
             handlers::submit_intent_draft::parse_submit_intent_draft_value,
+        },
+        usage::{
+            UsageDisplaySnapshot, UsageGrouping, UsageQueryFilter, format_usage_badge,
+            format_usage_detail_panel,
         },
         web::code_ui::{
             CodeUiApplyToFuture, CodeUiEventEnvelope, CodeUiInteractionKind,
@@ -93,7 +117,6 @@ use crate::{
             CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry,
             CodeUiTranscriptEntryKind, snapshot_from_event,
         },
-        workflow_objects::{build_git_plan, parse_object_id},
     },
 };
 
@@ -144,6 +167,8 @@ const LATEST_INTENTSPEC_WORKSPACE_KEY: &str = "latest_intentspec_workspace_key";
 const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
 const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
+const MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 10;
+const DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 0;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
@@ -167,6 +192,30 @@ fn session_graph_thread_id(session: &SessionState) -> Option<String> {
                 .ok()
                 .map(|thread_id| thread_id.to_string())
         })
+}
+
+fn graph_thread_id_from_orchestrator_result(result: &OrchestratorResult) -> Option<String> {
+    result
+        .persistence
+        .as_ref()
+        .and_then(|persistence| persistence.thread_id.as_deref())
+        .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+        .map(str::to_string)
+}
+
+fn graph_command_from_thread_id(thread_id: &str) -> Option<String> {
+    uuid::Uuid::parse_str(thread_id)
+        .ok()
+        .map(|_| format!("libra graph {thread_id}"))
+}
+
+fn record_orchestrator_thread_metadata(session: &mut SessionState, result: &OrchestratorResult) {
+    if let Some(thread_id) = graph_thread_id_from_orchestrator_result(result) {
+        session.metadata.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(thread_id),
+        );
+    }
 }
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
@@ -237,18 +286,59 @@ struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
     plan_id: Option<String>,
+    persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
     plan: ExecutionPlanSpec,
-    llm_plan: UpdatePlanArgs,
+    plan_draft: ProviderPlanDraft,
     warnings: Vec<String>,
+    network_access: bool,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+}
+
+/// Network policy dialog state after the user approves the execution plan.
+struct PendingNetworkPolicyChoice {
+    post_plan: PendingPostPlan,
+    selected: usize, // 0=Deny, 1=Allow, 2=Back
 }
 
 /// Execution-plan revision state after the user chooses Modify on the plan review.
 struct PendingExecutionPlanRevision {
     spec_json: String,
     intent_id: Option<String>,
-    current_plan: UpdatePlanArgs,
+    current_plan: ProviderPlanDraft,
     warnings: Vec<String>,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
+    network_access: bool,
+    failure_report: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionFailureRevision {
+    PlanRevision,
+    IntentSpecRevision,
+    ManualAction,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAutoPlanRepairExecution {
+    attempt: u8,
+    max_attempts: u8,
+    network_access: bool,
+}
+
+struct ExecuteWorkflowRequest {
+    spec_json: String,
+    persisted_intent_id: Option<String>,
+    persisted_plan_id: Option<String>,
+    persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
+    approved_plan: Option<ExecutionPlanSpec>,
+    approved_plan_draft: Option<ProviderPlanDraft>,
+    plan_warnings: Vec<String>,
+    network_access_override: Option<bool>,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
@@ -260,10 +350,37 @@ struct PendingIntentReview {
     selected: usize, // 0=Confirm, 1=Modify, 2=Cancel
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewScrollAction {
+    Top,
+    Bottom,
+    Up(usize),
+    Down(usize),
+}
+
+fn review_scroll_action(key: crossterm::event::KeyEvent) -> Option<ReviewScrollAction> {
+    let has_scroll_modifier = key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.modifiers.contains(KeyModifiers::ALT)
+        || key.modifiers.contains(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Home => Some(ReviewScrollAction::Top),
+        KeyCode::End => Some(ReviewScrollAction::Bottom),
+        KeyCode::PageUp => Some(ReviewScrollAction::Up(10)),
+        KeyCode::PageDown => Some(ReviewScrollAction::Down(10)),
+        KeyCode::Up if has_scroll_modifier => Some(ReviewScrollAction::Up(1)),
+        KeyCode::Down if has_scroll_modifier => Some(ReviewScrollAction::Down(1)),
+        KeyCode::Char('j') if key.modifiers.is_empty() => Some(ReviewScrollAction::Up(1)),
+        KeyCode::Char('l') if key.modifiers.is_empty() => Some(ReviewScrollAction::Down(1)),
+        _ => None,
+    }
+}
+
 /// Pending sandbox approval state.
 struct PendingExecApproval {
     request: ExecApprovalRequest,
-    selected: usize, // 0=Approve, 1=Approve Session, 2=Deny, 3=Abort
+    selected: usize,
+    allow_all_confirmation_requested: bool,
 }
 
 /// Pending managed-provider interaction mirrored into the approval dialog.
@@ -284,6 +401,7 @@ struct PendingPhaseConfirmation {
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
+    pub skill_dispatcher: SkillDispatcher,
     pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
@@ -297,8 +415,18 @@ pub struct AppConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional Code UI session mirror for the browser UI.
     pub code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Optional Code UI runtime handle for local controller operations.
+    pub code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Optional local automation command receiver.
+    pub code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Optional managed provider runtime controlled through the same TUI.
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Default network access policy selected at TUI launch.
+    pub default_network_access: bool,
+    /// Whether the first unprofiled user message should be model-classified.
+    pub auto_classify_first_user_message: bool,
+    /// Source Pool control surface backing `/source` commands.
+    pub source_pool: SourcePool,
 }
 
 /// The main application struct.
@@ -335,6 +463,8 @@ pub struct App<M: CompletionModel> {
     welcome_active: bool,
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
+    /// Markdown skill dispatcher.
+    skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
     agent_router: AgentProfileRouter,
     /// Session state for persistence.
@@ -355,16 +485,27 @@ pub struct App<M: CompletionModel> {
     pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
+    /// Network policy dialog state after the user has chosen to execute the plan.
+    pending_network_policy: Option<PendingNetworkPolicyChoice>,
     /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
     pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
     pending_plan_revision: Option<String>,
     /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
     pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
+    /// Auto-execute the next generated plan as an execution-failure repair attempt.
+    pending_auto_plan_repair_execution: Option<PendingAutoPlanRepairExecution>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
     provider_name: String,
+    /// Session-level model usage rendered in the compact bottom-pane line.
+    usage_snapshot: UsageDisplaySnapshot,
+    /// Estimated output tokens already added from streaming text deltas for
+    /// the active turn. Final provider usage replaces this estimate.
+    pending_stream_output_tokens: u64,
+    /// Arguments used to render the currently open usage detail panel.
+    usage_detail_args: Option<String>,
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// Latest execution plan ID for attaching new turn runs.
@@ -385,10 +526,25 @@ pub struct App<M: CompletionModel> {
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
     /// Provider-agnostic web snapshot state shared with the browser UI.
     code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Provider-agnostic web runtime state shared with the browser UI.
+    code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Receiver for local automation commands from the Code UI adapter.
+    code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Managed provider runtime for providers that own their own tool loop.
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Default network access policy selected at TUI launch.
+    default_network_access: bool,
+    /// Whether the first unprofiled user message should be model-classified.
+    auto_classify_first_user_message: bool,
     /// Monotonic id source for browser transcript artifacts.
     next_code_ui_item_id: u64,
+    /// Active Goal session for this `libra code` invocation, if any
+    /// (`/goal start <objective>` or `--goal "<objective>"`).
+    /// Shared by both the TUI slash-command surface and the Code
+    /// Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).
+    goal_session: Option<super::goal_session::GoalSession>,
+    /// Source Pool control state for this TUI session.
+    source_pool: SourcePool,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -428,12 +584,7 @@ where
             }
         }
         let history = app_config.session.to_history();
-        let default_allowed_tools = registry
-            .tool_specs()
-            .into_iter()
-            .map(|s| s.function.name)
-            .filter(|name| name != "submit_intent_draft")
-            .collect();
+        let default_allowed_tools = default_chat_allowed_tools(&registry, &config);
         let mut widget = ChatWidget::new();
         widget
             .bottom_pane
@@ -441,6 +592,17 @@ where
         widget
             .bottom_pane
             .set_git_branch(current_git_branch_label(registry.working_dir()));
+        let usage_snapshot = UsageDisplaySnapshot {
+            provider: app_config.provider_name.clone(),
+            model: app_config.model_name.clone(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            wall_clock_ms: 0,
+            cost_usd: None,
+        };
+        let usage_badge = format_usage_badge(&usage_snapshot);
+        widget.bottom_pane.set_usage_line(Some(usage_badge.clone()));
+        widget.set_usage_header(Some(usage_badge));
         let mcp_plan_id = app_config
             .session
             .metadata
@@ -469,6 +631,7 @@ where
             welcome_message: app_config.welcome_message,
             welcome_active: true,
             command_dispatcher: app_config.command_dispatcher,
+            skill_dispatcher: app_config.skill_dispatcher,
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
@@ -479,11 +642,16 @@ where
             pending_managed_interaction: None,
             pending_phase_confirmation: None,
             pending_post_plan: None,
+            pending_network_policy: None,
             pending_intent_review: None,
             pending_plan_revision: None,
             pending_execution_plan_revision: None,
+            pending_auto_plan_repair_execution: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
+            usage_snapshot,
+            pending_stream_output_tokens: 0,
+            usage_detail_args: None,
             mcp_server: app_config.mcp_server,
             mcp_plan_id,
             mcp_run_id: None,
@@ -494,8 +662,14 @@ where
             running_tool_calls: 0,
             active_turn_run_id: None,
             code_ui_session: app_config.code_ui_session,
+            code_ui_runtime: app_config.code_ui_runtime,
+            code_control_rx: app_config.code_control_rx,
             managed_code_ui_runtime: app_config.managed_code_ui_runtime,
+            default_network_access: app_config.default_network_access,
+            auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
+            goal_session: None,
+            source_pool: app_config.source_pool,
         }
     }
 
@@ -504,7 +678,9 @@ where
         // Enter alternate screen
         self.tui.enter_alt_screen()?;
         let run_result = self.run_in_alt_screen().await;
+        self.interrupt_agent_task();
         let leave_result = self.tui.leave_alt_screen();
+        self.sweep_fuse_task_worktrees_on_shutdown().await;
 
         // Save session on exit (best-effort)
         if self.session.message_count() > 0
@@ -521,6 +697,55 @@ where
         }
     }
 
+    #[cfg(unix)]
+    async fn sweep_fuse_task_worktrees_on_shutdown(&self) {
+        let repo_working_dir = self.registry.working_dir().to_path_buf();
+        let display_repo = repo_working_dir.display().to_string();
+        let sweep_result = tokio::task::spawn_blocking(move || {
+            fuse_utils::sweep_repo_fuse_task_worktrees(&repo_working_dir)
+        })
+        .await;
+
+        match sweep_result {
+            Ok(Ok(report)) => {
+                if !report.is_empty() {
+                    tracing::info!(
+                        repo = %display_repo,
+                        scanned = report.scanned,
+                        cleaned = report.cleaned,
+                        skipped_live_owner = report.skipped_live_owner,
+                        failures = report.failures.len(),
+                        "swept repo-local FUSE task worktrees during TUI shutdown"
+                    );
+                }
+                for failure in report.failures {
+                    tracing::warn!(
+                        path = %failure.path.display(),
+                        error = %failure.message,
+                        "failed to clean repo-local FUSE task worktree during TUI shutdown"
+                    );
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    repo = %display_repo,
+                    error = %err,
+                    "failed to sweep repo-local FUSE task worktrees during TUI shutdown"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    repo = %display_repo,
+                    error = %err,
+                    "repo-local FUSE task worktree shutdown sweep task failed"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn sweep_fuse_task_worktrees_on_shutdown(&self) {}
+
     async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
 
@@ -532,6 +757,12 @@ where
                 .iter()
                 .map(|c| (c.name.clone(), c.description.clone())),
         );
+        hints.extend(self.skill_dispatcher.skills().iter().map(|skill| {
+            (
+                format!("skill {}", skill.name),
+                format!("Skill: {}", skill.description),
+            )
+        }));
         self.widget.bottom_pane.set_command_hints(hints);
 
         // Initial draw - ensure UI is rendered immediately
@@ -542,6 +773,7 @@ where
         let mut animation_tick = interval(Duration::from_millis(120));
         let (managed_event_tx, mut managed_event_rx) =
             mpsc::unbounded_channel::<CodeUiEventEnvelope>();
+        let mut code_control_rx = self.code_control_rx.take();
         let managed_event_task = self.managed_code_ui_runtime.as_ref().map(|runtime| {
             let mut events = runtime.subscribe();
             tokio::spawn(async move {
@@ -579,6 +811,15 @@ where
                 // Mirror managed provider snapshots into the local TUI.
                 Some(event) = managed_event_rx.recv(), if self.managed_code_ui_runtime.is_some() => {
                     self.handle_managed_code_ui_event(event).await?;
+                }
+
+                Some(command) = async {
+                    match code_control_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if code_control_rx.is_some() => {
+                    self.handle_tui_control_command(command).await;
                 }
 
                 // Handle user-input requests from the tool handler
@@ -669,11 +910,7 @@ where
                 }
             }
             TuiEvent::Paste(text) => {
-                for c in text.chars() {
-                    self.widget.bottom_pane.insert_char(c);
-                }
-                self.widget.bottom_pane.sync_command_popup();
-                self.schedule_draw();
+                self.handle_paste_text(&text);
             }
             TuiEvent::Mouse(mouse) => {
                 self.handle_mouse_event(mouse);
@@ -689,6 +926,469 @@ where
             }
         }
         Ok(())
+    }
+
+    fn handle_paste_text(&mut self, text: &str) {
+        let text = normalize_terminal_paste_text(text);
+        if text.is_empty() {
+            return;
+        }
+
+        match self.widget.bottom_pane.status {
+            AgentStatus::Idle => {
+                self.widget.bottom_pane.insert_text(&text);
+                self.widget.bottom_pane.sync_command_popup();
+            }
+            AgentStatus::AwaitingUserInput => {
+                let is_freeform = self.pending_user_input.as_ref().is_some_and(|pending| {
+                    let question = &pending.request.questions[pending.current_question];
+                    question.options.as_ref().is_none_or(Vec::is_empty)
+                });
+                let notes_focused = self
+                    .pending_user_input
+                    .as_ref()
+                    .is_some_and(|pending| pending.notes_focused);
+
+                if notes_focused {
+                    if let Some(pending) = self.pending_user_input.as_mut() {
+                        pending.notes_text.push_str(&text);
+                    }
+                    self.sync_user_input_to_pane();
+                } else if is_freeform {
+                    self.widget.bottom_pane.insert_text(&text);
+                } else {
+                    return;
+                }
+            }
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
+                if self.widget.has_task_mux() =>
+            {
+                self.widget.bottom_pane.insert_text(&text);
+            }
+            _ => return,
+        }
+
+        self.schedule_draw();
+    }
+
+    async fn handle_tui_control_command(&mut self, command: TuiControlCommand) {
+        match command {
+            TuiControlCommand::SubmitMessage { text, ack } => {
+                let result = self.submit_message_from_code_ui(text).await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::RespondInteraction {
+                interaction_id,
+                response,
+                ack,
+            } => {
+                let result = self
+                    .respond_pending_interaction_from_code_ui(&interaction_id, response)
+                    .await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::CancelCurrentTurn { ack } => {
+                let result = self.cancel_current_turn(CancelSource::Automation).await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::ReclaimController { ack } => {
+                let result = self.reclaim_local_controller().await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::GoalStart { objective, ack } => {
+                let result = self.goal_session_start_from_control(objective);
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::GoalStatus { ack } => {
+                let result = self.goal_session_status_from_control();
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::GoalCancel { reason, ack } => {
+                let result = self.goal_session_cancel_from_control(reason);
+                let _ = ack.send(result);
+            }
+        }
+    }
+
+    /// `goal.start { objective }` — create an active Goal mirroring
+    /// `/goal start <objective>`. Refuses if a Goal is already
+    /// active in this session. The Code Control client receives
+    /// the rendered status so it can display the goal id without a
+    /// follow-up `goal.status` call.
+    fn goal_session_start_from_control(
+        &mut self,
+        objective: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSession, GoalSessionError, render_goal_status};
+        if self.goal_session.as_ref().is_some_and(|s| !s.is_terminal()) {
+            return Err(TuiControlError::GoalAlreadyActive);
+        }
+        // Reuse the session id for both `thread_id` and
+        // `session_id` on the spec — the schema accepts any string
+        // for those fields, and this keeps the in-memory Goal
+        // bound to the running TUI session.
+        let session_id = self.session.id.clone();
+        let actor = goal_actor_for_session(self);
+        match GoalSession::create(session_id.clone(), session_id, objective, actor) {
+            Ok(session) => {
+                let rendered = render_goal_status(session.state());
+                self.goal_session = Some(session);
+                Ok(rendered)
+            }
+            Err(GoalSessionError::InvalidObjective { source }) => {
+                Err(TuiControlError::GoalInvalidObjective(source.to_string()))
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
+        }
+    }
+
+    /// `goal.status` — render the active Goal's snapshot, or
+    /// `GoalNotActive` if none.
+    fn goal_session_status_from_control(&self) -> Result<String, TuiControlError> {
+        use super::goal_session::render_goal_status;
+        match self.goal_session.as_ref() {
+            Some(session) => Ok(render_goal_status(session.state())),
+            None => Err(TuiControlError::GoalNotActive),
+        }
+    }
+
+    /// `goal.cancel { reason }` — append `GoalEvent::Cancelled` to
+    /// the active session and clear the slot. Refuses if no Goal is
+    /// active or if the active Goal is already terminal.
+    fn goal_session_cancel_from_control(
+        &mut self,
+        reason: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSessionError, render_goal_status};
+        let actor = goal_actor_for_session(self);
+        let Some(session) = self.goal_session.as_mut() else {
+            return Err(TuiControlError::GoalNotActive);
+        };
+        match session.cancel(reason, actor) {
+            Ok(outcome) => {
+                let rendered = render_goal_status(&outcome.state);
+                // Per opencode.md:665 a Cancelled session is
+                // terminal; clear the slot so a subsequent
+                // `goal.start` succeeds without an explicit
+                // teardown call.
+                self.goal_session = None;
+                Ok(rendered)
+            }
+            Err(GoalSessionError::NotActive) => {
+                self.goal_session = None;
+                Err(TuiControlError::GoalNotActive)
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
+        }
+    }
+
+    async fn submit_message_from_code_ui(&mut self, text: String) -> Result<(), TuiControlError> {
+        if !self.can_accept_code_ui_submit() {
+            return Err(TuiControlError::Busy);
+        }
+        self.submit_message_from_source(text, TurnInputSource::Automation)
+            .await;
+        Ok(())
+    }
+
+    fn can_accept_code_ui_submit(&self) -> bool {
+        matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+            && self.active_turn_id.is_none()
+            && self.pending_user_input.is_none()
+            && self.pending_exec_approval.is_none()
+            && self.pending_managed_interaction.is_none()
+            && self.pending_phase_confirmation.is_none()
+            && self.pending_post_plan.is_none()
+            && self.pending_network_policy.is_none()
+            && self.pending_intent_review.is_none()
+            && self.pending_plan_revision.is_none()
+            && self.pending_execution_plan_revision.is_none()
+    }
+
+    async fn automation_controller_active(&self) -> bool {
+        let Some(code_ui_session) = self.code_ui_session.as_ref() else {
+            return false;
+        };
+        let snapshot = code_ui_session.snapshot().await;
+        snapshot.controller.kind
+            == crate::internal::ai::web::code_ui::CodeUiControllerKind::Automation
+            && snapshot
+                .controller
+                .lease_expires_at
+                .is_some_and(|expires_at| expires_at > Utc::now())
+    }
+
+    async fn reclaim_local_controller(&mut self) -> Result<(), TuiControlError> {
+        let Some(runtime) = self.code_ui_runtime.clone() else {
+            return Err(TuiControlError::ControllerConflict);
+        };
+        runtime
+            .reclaim_local_tui_controller()
+            .await
+            .map_err(|error| {
+                if error.code == "CONTROLLER_CONFLICT" {
+                    TuiControlError::ControllerConflict
+                } else {
+                    TuiControlError::Internal(error.message)
+                }
+            })?;
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        Ok(())
+    }
+
+    async fn respond_pending_interaction_from_code_ui(
+        &mut self,
+        interaction_id: &str,
+        response: CodeUiInteractionResponse,
+    ) -> Result<(), TuiControlError> {
+        if self
+            .pending_user_input
+            .as_ref()
+            .is_some_and(|pending| pending.request.call_id == interaction_id)
+        {
+            return self.respond_pending_user_input_from_code_ui(response).await;
+        }
+
+        if self
+            .pending_exec_approval
+            .as_ref()
+            .is_some_and(|pending| pending.request.call_id == interaction_id)
+        {
+            let Some(pending) = self.pending_exec_approval.as_ref() else {
+                return Err(TuiControlError::UnsupportedInteractionKind);
+            };
+            let cache_disabled = pending.request.cache_disabled_reason.is_some();
+            let confirm_allow_all = pending.allow_all_confirmation_requested;
+            let option_ids = exec_approval_option_ids(cache_disabled, confirm_allow_all);
+            let selected = selection_from_response(
+                &option_ids,
+                &response,
+                Some(0),
+                Some(exec_approval_deny_selection(
+                    cache_disabled,
+                    confirm_allow_all,
+                )),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_exec_approval.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_exec_approval_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_phase_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending.interaction_id == interaction_id)
+        {
+            let selected = selection_from_response(
+                &["continue", "reject", "abort"],
+                &response,
+                Some(0),
+                Some(1),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_phase_confirmation.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_phase_confirmation_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_managed_interaction
+            .as_ref()
+            .is_some_and(|pending| pending.interaction.id == interaction_id)
+        {
+            let selected = {
+                let pending = self.pending_managed_interaction.as_ref().ok_or_else(|| {
+                    TuiControlError::Internal("managed interaction disappeared".to_string())
+                })?;
+                selection_from_interaction_options(&pending.interaction.options, &response)
+                    .ok_or(TuiControlError::UnsupportedInteractionKind)?
+            };
+            if let Some(pending) = self.pending_managed_interaction.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_managed_interaction_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_intent_review
+            .as_ref()
+            .is_some_and(|pending| pending.interaction_id == interaction_id)
+        {
+            let selected = selection_from_response(
+                &["confirm", "modify", "cancel"],
+                &response,
+                Some(0),
+                Some(2),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_intent_review.as_mut() {
+                pending.selected = selected;
+            }
+            self.handle_intent_review_choice().await;
+            return Ok(());
+        }
+
+        if self.pending_post_plan.as_ref().is_some_and(|pending| {
+            pending.plan_id.as_deref().unwrap_or("post-plan-choice") == interaction_id
+        }) {
+            let selected = selection_from_response(
+                &["execute", "modify", "cancel"],
+                &response,
+                Some(0),
+                Some(2),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_post_plan.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.post_plan_selected = selected;
+            }
+            self.handle_post_plan_choice().await;
+            return Ok(());
+        }
+
+        if self.pending_network_policy.as_ref().is_some_and(|pending| {
+            network_policy_interaction_id(pending.post_plan.plan_id.as_deref()) == interaction_id
+        }) {
+            let selected = selection_from_response(
+                &["network-deny", "network-allow", "back"],
+                &response,
+                None,
+                None,
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_network_policy.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.post_plan_selected = selected;
+            }
+            self.handle_network_policy_choice().await;
+            return Ok(());
+        }
+
+        Err(TuiControlError::InteractionNotActive)
+    }
+
+    async fn respond_pending_user_input_from_code_ui(
+        &mut self,
+        response: CodeUiInteractionResponse,
+    ) -> Result<(), TuiControlError> {
+        let Some(pending) = self.pending_user_input.take() else {
+            return Err(TuiControlError::InteractionNotActive);
+        };
+        let interaction_id = pending.request.call_id.clone();
+        let answers = user_input_answers_from_code_ui(&pending, response)?;
+        let _ = pending
+            .request
+            .response_tx
+            .send(UserInputResponse { answers });
+        self.widget.bottom_pane.set_user_input_questions(None);
+        self.widget.bottom_pane.clear();
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            code_ui_session.resolve_interaction(&interaction_id).await;
+            code_ui_session
+                .set_status(CodeUiSessionStatus::ExecutingTool)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn cancel_current_turn(&mut self, source: CancelSource) -> Result<(), TuiControlError> {
+        if !self.has_local_active_turn() && !self.has_code_ui_active_turn().await {
+            return Err(TuiControlError::Busy);
+        }
+
+        let reason = match source {
+            CancelSource::Esc => "Turn interrupted by user",
+            CancelSource::SlashQuit => "Turn interrupted by quit command",
+            CancelSource::Automation => "Turn interrupted by automation",
+        };
+        self.enqueue_mcp_turn_decision("abandon", reason.to_string());
+        self.cancel_pending_user_input();
+        self.cancel_pending_exec_approval();
+        self.cancel_pending_phase_confirmation_for_control();
+        self.clear_pending_code_ui_dialogs().await;
+        self.interrupt_agent_task();
+        self.clear_mcp_run_id();
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.sync_mux_input_context();
+        self.complete_streaming_assistant_cell("Interrupted.".to_string());
+        self.complete_running_tool_cells_with_interrupt();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+        }
+        Ok(())
+    }
+
+    fn has_local_active_turn(&self) -> bool {
+        self.active_turn_id.is_some()
+            || matches!(
+                self.widget.bottom_pane.status,
+                AgentStatus::Thinking
+                    | AgentStatus::Retrying
+                    | AgentStatus::ExecutingTool
+                    | AgentStatus::AwaitingApproval
+            )
+    }
+
+    async fn has_code_ui_active_turn(&self) -> bool {
+        let Some(code_ui_session) = self.code_ui_session.as_ref() else {
+            return false;
+        };
+        matches!(
+            code_ui_session.snapshot().await.status,
+            CodeUiSessionStatus::Thinking
+                | CodeUiSessionStatus::ExecutingTool
+                | CodeUiSessionStatus::AwaitingInteraction
+        )
+    }
+
+    fn cancel_pending_phase_confirmation_for_control(&mut self) {
+        if let Some(pending) = self.pending_phase_confirmation.take() {
+            let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+            self.widget.bottom_pane.set_exec_approval(None);
+        }
+    }
+
+    async fn clear_pending_code_ui_dialogs(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(pending) = self.pending_intent_review.take() {
+            ids.push(pending.interaction_id);
+        }
+        if let Some(pending) = self.pending_post_plan.take() {
+            ids.push(
+                pending
+                    .plan_id
+                    .unwrap_or_else(|| "post-plan-choice".to_string()),
+            );
+        }
+        if let Some(pending) = self.pending_network_policy.take() {
+            ids.push(network_policy_interaction_id(
+                pending.post_plan.plan_id.as_deref(),
+            ));
+        }
+        self.pending_plan_revision = None;
+        self.pending_execution_plan_revision = None;
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            for id in ids {
+                code_ui_session.clear_interaction(&id).await;
+            }
+        }
     }
 
     /// Handle a key press event.
@@ -709,6 +1409,11 @@ where
         // Handle input based on agent status
         match self.widget.bottom_pane.status {
             AgentStatus::Idle => match key.code {
+                KeyCode::Esc if self.widget.bottom_pane.is_usage_detail_panel_visible() => {
+                    self.widget.bottom_pane.dismiss_usage_detail_panel();
+                    self.usage_detail_args = None;
+                    self.schedule_draw();
+                }
                 // ── Command popup intercepts (when visible) ──────────
                 KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.complete_command();
@@ -730,6 +1435,16 @@ where
                 // ── Normal idle handlers ─────────────────────────────
                 KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
                     let text = self.widget.bottom_pane.take_input();
+                    if self.automation_controller_active().await
+                        && !is_control_reclaim_command_input(&text)
+                    {
+                        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                            "Automation is in control. Use `/control reclaim` to take back local input.".to_string(),
+                        )));
+                        self.widget.bottom_pane.sync_command_popup();
+                        self.schedule_draw();
+                        return Ok(());
+                    }
                     if self.welcome_active {
                         self.welcome_active = false;
                         self.schedule_draw();
@@ -831,7 +1546,7 @@ where
                         pending.selected = (pending.selected + 1).min(max);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     } else if let Some(ref mut pending) = self.pending_exec_approval {
-                        pending.selected = (pending.selected + 1).min(3);
+                        pending.selected = (pending.selected + 1).min(5);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     }
                     self.schedule_draw();
@@ -852,52 +1567,99 @@ where
                 }
                 _ => {}
             },
-            AgentStatus::AwaitingPostPlanChoice => match key.code {
-                KeyCode::Up => {
-                    if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = p.selected.saturating_sub(1);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
-                    }
+            AgentStatus::AwaitingPostPlanChoice => {
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
                     self.schedule_draw();
+                    return Ok(());
                 }
-                KeyCode::Down => {
-                    if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = (p.selected + 1).min(2);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_post_plan {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
                     }
-                    self.schedule_draw();
-                }
-                KeyCode::Enter => {
-                    self.handle_post_plan_choice().await;
-                }
-                KeyCode::Esc => {
-                    self.dismiss_post_plan_dialog();
-                }
-                _ => {}
-            },
-            AgentStatus::AwaitingIntentReviewChoice => match key.code {
-                KeyCode::Up => {
-                    if let Some(ref mut p) = self.pending_intent_review {
-                        p.selected = p.selected.saturating_sub(1);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_post_plan {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
                     }
-                    self.schedule_draw();
-                }
-                KeyCode::Down => {
-                    if let Some(ref mut p) = self.pending_intent_review {
-                        p.selected = (p.selected + 1).min(2);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    KeyCode::Enter => {
+                        self.handle_post_plan_choice().await;
                     }
+                    KeyCode::Esc => {
+                        self.dismiss_post_plan_dialog();
+                    }
+                    _ => {}
+                }
+            }
+            AgentStatus::AwaitingNetworkPolicyChoice => {
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
                     self.schedule_draw();
+                    return Ok(());
                 }
-                KeyCode::Enter => {
-                    self.handle_intent_review_choice().await;
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_network_policy {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_network_policy {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter => {
+                        self.handle_network_policy_choice().await;
+                    }
+                    KeyCode::Esc => {
+                        self.return_to_post_plan_dialog();
+                    }
+                    _ => {}
                 }
-                KeyCode::Esc => {
-                    self.dismiss_intent_review_dialog();
+            }
+            AgentStatus::AwaitingIntentReviewChoice => {
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
+                    self.schedule_draw();
+                    return Ok(());
                 }
-                _ => {}
-            },
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_intent_review {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_intent_review {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter => {
+                        self.handle_intent_review_choice().await;
+                    }
+                    KeyCode::Esc => {
+                        self.dismiss_intent_review_dialog();
+                    }
+                    _ => {}
+                }
+            }
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 let mux_visible = self.widget.has_task_mux();
                 match key.code {
@@ -965,17 +1727,7 @@ where
                         self.schedule_draw();
                     }
                     KeyCode::Esc => {
-                        self.enqueue_mcp_turn_decision(
-                            "abandon",
-                            "Turn interrupted by user".to_string(),
-                        );
-                        self.interrupt_agent_task();
-                        self.clear_mcp_run_id();
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                        self.sync_mux_input_context();
-                        self.complete_streaming_assistant_cell("Interrupted.".to_string());
-                        self.complete_running_tool_cells_with_interrupt();
-                        self.schedule_draw();
+                        let _ = self.cancel_current_turn(CancelSource::Esc).await;
                     }
                     _ => {}
                 }
@@ -983,6 +1735,15 @@ where
         }
 
         Ok(())
+    }
+
+    fn apply_review_scroll_action(&mut self, action: ReviewScrollAction) {
+        match action {
+            ReviewScrollAction::Top => self.widget.scroll_to_top(),
+            ReviewScrollAction::Bottom => self.widget.scroll_to_bottom(),
+            ReviewScrollAction::Up(lines) => self.widget.scroll_up_lines(lines),
+            ReviewScrollAction::Down(lines) => self.widget.scroll_down_lines(lines),
+        }
     }
 
     /// Handle keyboard input while in the AwaitingUserInput state.
@@ -1118,20 +1879,38 @@ where
             return;
         };
 
-        let done = if let Some(pending) = self.pending_user_input.as_mut() {
-            let question_id = pending.request.questions[pending.current_question]
-                .id
-                .clone();
-            pending.answers.insert(question_id, answer);
-            pending.current_question += 1;
-            pending.selected_option = 0;
-            pending.notes_focused = false;
-            pending.notes_text.clear();
-            self.widget.bottom_pane.clear();
-            pending.current_question >= pending.request.questions.len()
-        } else {
-            return;
-        };
+        let (done, question_number, question_count, answer_count) =
+            if let Some(pending) = self.pending_user_input.as_mut() {
+                let question_id = pending.request.questions[pending.current_question]
+                    .id
+                    .clone();
+                let question_number = pending.current_question + 1;
+                let question_count = pending.request.questions.len();
+                let answer_count = answer.answers.len();
+                pending.answers.insert(question_id, answer);
+                pending.current_question += 1;
+                pending.selected_option = 0;
+                pending.notes_focused = false;
+                pending.notes_text.clear();
+                self.widget.bottom_pane.clear();
+                (
+                    pending.current_question >= pending.request.questions.len(),
+                    question_number,
+                    question_count,
+                    answer_count,
+                )
+            } else {
+                return;
+            };
+
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            question_number,
+            question_count,
+            answer_count,
+            completed = done,
+            "tui user-input answer submitted"
+        );
 
         if done {
             // Send the response back to the handler.
@@ -1166,6 +1945,13 @@ where
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                answered_questions = pending.answers.len(),
+                total_questions = pending.request.questions.len(),
+                "tui user-input request cancelled"
+            );
             // Dropping response_tx signals cancellation to the handler.
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
@@ -1189,6 +1975,19 @@ where
 
     /// Handle a user-input request from the tool handler.
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        let first_question = request.questions.first();
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %request.call_id,
+            question_count = request.questions.len(),
+            first_question_id = first_question.map(|question| question.id.as_str()).unwrap_or(""),
+            first_question_options = first_question
+                .and_then(|question| question.options.as_ref())
+                .map(Vec::len)
+                .unwrap_or_default(),
+            "tui user-input request received"
+        );
+
         let interaction = CodeUiInteractionRequest {
             id: request.call_id.clone(),
             kind: CodeUiInteractionKind::RequestUserInput,
@@ -1268,9 +2067,28 @@ where
 
     fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
         if self.active_turn_id.is_none() {
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %request.call_id,
+                command = %log_preview_text(&request.command),
+                "tui sandbox approval denied because there is no active turn"
+            );
             let _ = request.response_tx.send(ReviewDecision::Denied);
             return;
         }
+
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %request.call_id,
+            command = %log_preview_text(&request.command),
+            cwd = %request.cwd.display(),
+            sandbox = %request.sandbox_label,
+            network_access = request.network_access,
+            writable_roots = request.writable_roots.len(),
+            is_retry = request.is_retry,
+            has_reason = request.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()),
+            "tui sandbox approval requested"
+        );
 
         let interaction = CodeUiInteractionRequest {
             id: request.call_id.clone(),
@@ -1278,28 +2096,7 @@ where
             title: Some("Sandbox approval required".to_string()),
             description: request.reason.clone(),
             prompt: Some(request.command.clone()),
-            options: vec![
-                CodeUiInteractionOption {
-                    id: "approve".to_string(),
-                    label: "Approve".to_string(),
-                    description: Some("Run this command once".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "approve_session".to_string(),
-                    label: "Approve Session".to_string(),
-                    description: Some("Approve matching commands for this session".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "deny".to_string(),
-                    label: "Deny".to_string(),
-                    description: Some("Reject this command".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "abort".to_string(),
-                    label: "Abort".to_string(),
-                    description: Some("Stop the current turn".to_string()),
-                },
-            ],
+            options: exec_approval_interaction_options(request.cache_disabled_reason.is_some()),
             status: CodeUiInteractionStatus::Pending,
             metadata: serde_json::json!({
                 "cwd": request.cwd,
@@ -1307,6 +2104,7 @@ where
                 "networkAccess": request.network_access,
                 "writableRoots": request.writable_roots,
                 "isRetry": request.is_retry,
+                "cacheDisabledReason": request.cache_disabled_reason,
             }),
             requested_at: Utc::now(),
             resolved_at: None,
@@ -1316,6 +2114,7 @@ where
         self.pending_exec_approval = Some(PendingExecApproval {
             request,
             selected: 0,
+            allow_all_confirmation_requested: false,
         });
         self.widget.bottom_pane.exec_approval_selected = 0;
         self.widget
@@ -1496,13 +2295,27 @@ where
             return;
         };
 
-        let decision = match pending.selected {
-            0 => ReviewDecision::Approved,
-            1 => ReviewDecision::ApprovedForSession,
-            2 => ReviewDecision::Denied,
-            _ => ReviewDecision::Abort,
-        };
+        let cache_disabled = pending.request.cache_disabled_reason.is_some();
+        let decision = exec_approval_decision_from_selection(
+            pending.selected,
+            cache_disabled,
+            pending.allow_all_confirmation_requested,
+        );
+        if decision == ReviewDecision::ApprovedForAllCommands
+            && !pending.allow_all_confirmation_requested
+        {
+            self.request_allow_all_confirmation(pending);
+            return;
+        }
         let interaction_id = pending.request.call_id.clone();
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %interaction_id,
+            decision = ?decision,
+            selected = pending.selected,
+            command = %log_preview_text(&pending.request.command),
+            "tui sandbox approval resolved"
+        );
         let _ = pending.request.response_tx.send(decision);
 
         self.widget.bottom_pane.set_exec_approval(None);
@@ -1542,6 +2355,75 @@ where
         }
     }
 
+    fn request_allow_all_confirmation(&mut self, mut pending: PendingExecApproval) {
+        pending.allow_all_confirmation_requested = true;
+        pending.selected = 0;
+        let interaction_id = pending.request.call_id.clone();
+        let command = pending.request.command.clone();
+        let cwd = pending.request.cwd.clone();
+        let sandbox_label = pending.request.sandbox_label.clone();
+        let network_access = pending.request.network_access;
+        let writable_roots = pending.request.writable_roots.clone();
+        let is_retry = pending.request.is_retry;
+
+        self.widget.bottom_pane.set_approval_dialog(
+            "Confirm allow all commands".to_string(),
+            command.clone(),
+            cwd.clone(),
+            Some(
+                "This will allow every command for this session and bypass future approval prompts."
+                    .to_string(),
+            ),
+            is_retry,
+            sandbox_label.clone(),
+            network_access,
+            writable_roots.clone(),
+            vec![
+                (
+                    "Confirm Allow All".to_string(),
+                    "Allow every command for this session".to_string(),
+                ),
+                ("Deny".to_string(), "Reject this execution".to_string()),
+                (
+                    "Abort Turn".to_string(),
+                    "Interrupt the current turn".to_string(),
+                ),
+            ],
+        );
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.pending_exec_approval = Some(pending);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let interaction = CodeUiInteractionRequest {
+                id: interaction_id,
+                kind: CodeUiInteractionKind::SandboxApproval,
+                title: Some("Confirm allow all commands".to_string()),
+                description: Some(
+                    "This will allow every command for this session and bypass future approval prompts."
+                        .to_string(),
+                ),
+                prompt: Some(command),
+                options: exec_approval_allow_all_confirmation_options(),
+                status: CodeUiInteractionStatus::Pending,
+                metadata: serde_json::json!({
+                    "cwd": cwd,
+                    "sandboxLabel": sandbox_label,
+                    "networkAccess": network_access,
+                    "writableRoots": writable_roots,
+                    "isRetry": is_retry,
+                    "confirmation": "allow_all_commands",
+                }),
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+            });
+        }
+    }
+
     fn reject_pending_exec_approval(&mut self) {
         if self.pending_managed_interaction.is_some() {
             self.reject_pending_managed_interaction();
@@ -1550,6 +2432,12 @@ where
 
         if let Some(pending) = self.pending_exec_approval.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                command = %log_preview_text(&pending.request.command),
+                "tui sandbox approval rejected"
+            );
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
             if let Some(code_ui_session) = self.code_ui_session.clone() {
                 tokio::spawn(async move {
@@ -1576,6 +2464,12 @@ where
 
         if let Some(pending) = self.pending_exec_approval.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                command = %log_preview_text(&pending.request.command),
+                "tui sandbox approval cancelled"
+            );
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
             if let Some(code_ui_session) = self.code_ui_session.clone() {
                 tokio::spawn(async move {
@@ -1683,6 +2577,7 @@ where
             AppEvent::SubmitUserMessage {
                 turn_id,
                 text,
+                source,
                 allowed_tools,
             } => {
                 let browser_user_entry = CodeUiTranscriptEntry {
@@ -1712,6 +2607,7 @@ where
                 // Track in session
                 self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
+                self.save_session_snapshot_after_user_message();
 
                 // Add user cell immediately
                 self.widget
@@ -1774,8 +2670,26 @@ where
                 let model = self.model.clone();
                 let registry = self.registry.clone();
                 let mut config = self.config.clone();
-                config.allowed_tools =
-                    Some(allowed_tools.unwrap_or_else(|| self.default_allowed_tools.clone()));
+                if source == TurnInputSource::Automation {
+                    apply_automation_approval_scope(&mut config, turn_id);
+                }
+                let session_root = self.session_store.session_root(&self.session.id);
+                attach_file_history_context(&mut config, session_root.clone(), turn_id);
+                config.context_frame_session_root = Some(session_root.clone());
+                config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
+                let should_auto_classify = should_auto_classify_first_user_message(
+                    self.auto_classify_first_user_message,
+                    &self.history,
+                    allowed_tools.as_ref(),
+                );
+                if self.auto_classify_first_user_message && self.history.is_empty() {
+                    self.auto_classify_first_user_message = false;
+                }
+                config.allowed_tools = Some(
+                    allowed_tools
+                        .clone()
+                        .unwrap_or_else(|| self.default_allowed_tools.clone()),
+                );
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
@@ -1809,6 +2723,16 @@ where
                                         },
                                     });
                                 }
+                                CompletionStreamEvent::ThinkingDelta { delta, .. }
+                                    if !delta.is_empty() =>
+                                {
+                                    let _ = self.tx.send(AppEvent::AgentEvent {
+                                        turn_id: self.turn_id,
+                                        event: AgentEvent::ThinkingDelta {
+                                            delta: delta.clone(),
+                                        },
+                                    });
+                                }
                                 CompletionStreamEvent::ToolCallPreview {
                                     call_id,
                                     tool_name,
@@ -1824,6 +2748,20 @@ where
                                 }
                                 _ => {}
                             }
+                        }
+
+                        fn on_model_usage_recorded(
+                            &mut self,
+                            usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                            wall_clock_ms: u64,
+                        ) {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::UsageUpdated {
+                                    usage: usage.clone(),
+                                    wall_clock_ms,
+                                },
+                            });
                         }
 
                         fn on_assistant_step_text(&mut self, text: &str) {
@@ -1935,6 +2873,34 @@ where
                         mcp_write_tracker,
                         turn_id,
                     };
+                    if should_auto_classify {
+                        match classify_first_turn_task_intent(
+                            &model,
+                            &registry,
+                            &mut config,
+                            &user_text,
+                            FirstTurnIntentPolicyUpdate::PromptAndAllowedTools,
+                        )
+                        .await
+                        {
+                            Ok(decision) => {
+                                send_task_intent_classified_event(
+                                    &observer.tx,
+                                    observer.turn_id,
+                                    decision,
+                                    &config,
+                                    &registry,
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    "first-turn task intent classification failed; using launch prompt and tool policy"
+                                );
+                            }
+                        }
+                    }
+                    attach_memory_anchor_prompt_context(&mut config);
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,
@@ -1968,12 +2934,45 @@ where
 
                 self.agent_task = Some(handle);
             }
+            AppEvent::TaskIntentClassified {
+                turn_id: _turn_id,
+                intent,
+                preamble,
+                allowed_tools,
+            } => {
+                self.config.preamble = Some(preamble);
+                self.config.allowed_tools = Some(allowed_tools.clone());
+                self.default_allowed_tools = allowed_tools;
+                tracing::info!(
+                    intent = %intent,
+                    "first-turn task intent classification updated TUI prompt and tool policy"
+                );
+            }
             AppEvent::AgentEvent {
                 turn_id: _turn_id,
                 event: agent_event,
             } => {
                 match agent_event {
+                    AgentEvent::UsageUpdated {
+                        usage,
+                        wall_clock_ms,
+                    } => {
+                        apply_final_usage_update(
+                            &mut self.usage_snapshot,
+                            &usage,
+                            wall_clock_ms,
+                            &mut self.pending_stream_output_tokens,
+                        );
+                        let usage_badge = format_usage_badge(&self.usage_snapshot);
+                        self.widget
+                            .bottom_pane
+                            .set_usage_line(Some(usage_badge.clone()));
+                        self.widget.set_usage_header(Some(usage_badge));
+                        self.refresh_usage_detail_panel().await;
+                        self.schedule_draw();
+                    }
                     AgentEvent::ResponseComplete { text, new_history } => {
+                        self.pending_stream_output_tokens = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
@@ -2009,6 +3008,8 @@ where
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
+                        self.pending_stream_output_tokens = 0;
+                        self.pending_auto_plan_repair_execution = None;
                         self.enqueue_mcp_turn_decision(
                             "abandon",
                             format!("Turn failed: {message}"),
@@ -2035,6 +3036,16 @@ where
                         self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseDelta { delta } => {
+                        apply_streaming_usage_delta(
+                            &mut self.usage_snapshot,
+                            &delta,
+                            &mut self.pending_stream_output_tokens,
+                        );
+                        let usage_badge = format_usage_badge(&self.usage_snapshot);
+                        self.widget
+                            .bottom_pane
+                            .set_usage_line(Some(usage_badge.clone()));
+                        self.widget.set_usage_header(Some(usage_badge));
                         self.append_streaming_assistant_delta(&delta);
                         if let Some(code_ui_session) = self.code_ui_session.clone() {
                             code_ui_session
@@ -2047,12 +3058,18 @@ where
                                 .set_status(CodeUiSessionStatus::Thinking)
                                 .await;
                         }
+                        self.refresh_usage_detail_panel().await;
+                        self.schedule_draw();
+                    }
+                    AgentEvent::ThinkingDelta { delta } => {
+                        self.append_streaming_thinking_delta(&delta);
                         self.schedule_draw();
                     }
                     AgentEvent::ManagedResponseComplete {
                         text,
                         provider_session_id: _provider_session_id,
                     } => {
+                        self.pending_stream_output_tokens = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
@@ -2106,11 +3123,14 @@ where
                 new_history,
                 intent_id,
                 plan_id,
+                persisted_plan_bundle,
                 spec_json,
                 spec,
                 plan,
-                llm_plan,
+                plan_draft,
                 warnings,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             } => {
                 self.finish_turn_state();
                 self.history = new_history;
@@ -2120,7 +3140,7 @@ where
                     "Phase 1 plan",
                     intent_id.clone(),
                     plan_id.clone(),
-                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                    text.clone(),
                 );
                 let browser_plan_steps = plan
                     .tasks
@@ -2172,6 +3192,10 @@ where
 
                 let execution_plan = (*plan).clone();
                 self.widget.show_dag_preview(execution_plan.clone());
+                let network_access = matches!(
+                    spec.constraints.security.network_policy,
+                    NetworkPolicy::Allow
+                );
                 let plan_summary_cell = Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     execution_plan.clone(),
@@ -2179,11 +3203,68 @@ where
                     plan_id.clone(),
                     warnings.clone(),
                 ));
-                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
-                    self.complete_streaming_assistant_cell(raw);
-                    self.widget.add_cell(plan_summary_cell);
-                } else {
-                    self.replace_streaming_assistant_cell(plan_summary_cell);
+                let _ = llm_output;
+                self.replace_streaming_assistant_cell(plan_summary_cell);
+                if let Some(auto_repair) = self.pending_auto_plan_repair_execution.take() {
+                    let note = format!(
+                        "Automatic plan repair attempt {} produced a revised plan. Executing it now.",
+                        automatic_plan_repair_attempt_label(
+                            auto_repair.attempt,
+                            auto_repair.max_attempts
+                        )
+                    );
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(note.clone())));
+                    self.history.push(Message::assistant(note.clone()));
+                    self.session.add_assistant_message(&note);
+                    if let Some(code_ui_session) = self.code_ui_session.clone() {
+                        let plan_snapshot = CodeUiPlanSnapshot {
+                            id: plan_id
+                                .clone()
+                                .unwrap_or_else(|| format!("plan-{_turn_id}")),
+                            title: Some("Execution Plan".to_string()),
+                            summary: Some(text.clone()),
+                            status: "executing".to_string(),
+                            steps: browser_plan_steps,
+                            updated_at: Utc::now(),
+                        };
+                        let transcript_entry = CodeUiTranscriptEntry {
+                            id: Self::code_ui_assistant_entry_id(_turn_id),
+                            kind: CodeUiTranscriptEntryKind::PlanSummary,
+                            title: Some("Plan Ready".to_string()),
+                            content: Some(text.clone()),
+                            status: Some("completed".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({
+                                "intentId": intent_id.clone(),
+                                "planId": plan_id.clone(),
+                                "automaticRepairAttempt": auto_repair.attempt,
+                            }),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        };
+                        code_ui_session.upsert_plan(plan_snapshot).await;
+                        code_ui_session
+                            .upsert_transcript_entry(transcript_entry)
+                            .await;
+                        code_ui_session
+                            .set_status(CodeUiSessionStatus::Thinking)
+                            .await;
+                    }
+                    self.start_execute_workflow(ExecuteWorkflowRequest {
+                        spec_json,
+                        persisted_intent_id: intent_id.clone(),
+                        persisted_plan_id: plan_id.clone(),
+                        persisted_plan_bundle,
+                        approved_plan: Some(execution_plan),
+                        approved_plan_draft: Some(plan_draft),
+                        plan_warnings: warnings,
+                        network_access_override: Some(auto_repair.network_access),
+                        automatic_repair_attempts: auto_repair.attempt,
+                        automatic_repair_max_attempts: auto_repair.max_attempts,
+                    })
+                    .await;
+                    return Ok(());
                 }
                 if let Some(code_ui_session) = self.code_ui_session.clone() {
                     let plan_snapshot = CodeUiPlanSnapshot {
@@ -2222,7 +3303,9 @@ where
                             CodeUiInteractionOption {
                                 id: "execute".to_string(),
                                 label: "Execute Plan".to_string(),
-                                description: Some("Run the approved plan now".to_string()),
+                                description: Some(
+                                    "Confirm the plan and choose network policy".to_string(),
+                                ),
                             },
                             CodeUiInteractionOption {
                                 id: "modify".to_string(),
@@ -2239,6 +3322,7 @@ where
                         metadata: serde_json::json!({
                             "intentId": transcript_entry.metadata["intentId"].clone(),
                             "planId": transcript_entry.metadata["planId"].clone(),
+                            "networkAccess": network_access,
                         }),
                         requested_at: Utc::now(),
                         resolved_at: None,
@@ -2258,12 +3342,19 @@ where
                     spec_json,
                     intent_id,
                     plan_id,
+                    persisted_plan_bundle,
                     plan: execution_plan,
-                    llm_plan,
+                    plan_draft,
                     warnings,
+                    network_access,
+                    automatic_repair_attempts,
+                    automatic_repair_max_attempts,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
+                self.widget
+                    .bottom_pane
+                    .set_post_plan_network_access(network_access);
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
@@ -2507,6 +3598,20 @@ where
                 total,
             } => {
                 self.widget.update_dag_progress(completed, total);
+                self.schedule_draw();
+            }
+            AppEvent::DagValidationStatus {
+                turn_id: _turn_id,
+                passed,
+            } => {
+                self.widget.update_dag_validation_status(passed);
+                self.schedule_draw();
+            }
+            AppEvent::DagReleaseStatus {
+                turn_id: _turn_id,
+                passed,
+            } => {
+                self.widget.update_dag_release_status(passed);
                 self.schedule_draw();
             }
             AppEvent::DagTaskMuxClear { turn_id: _turn_id } => {
@@ -2783,6 +3888,7 @@ where
                             AgentStatus::AwaitingUserInput
                             | AgentStatus::AwaitingApproval
                             | AgentStatus::AwaitingPostPlanChoice
+                            | AgentStatus::AwaitingNetworkPolicyChoice
                             | AgentStatus::AwaitingIntentReviewChoice => {
                                 CodeUiSessionStatus::AwaitingInteraction
                             }
@@ -2860,13 +3966,50 @@ where
                 text,
                 new_history,
                 result,
+                spec_json,
+                intent_id,
+                plan_draft,
+                warnings,
+                network_access,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             } => {
                 self.finish_turn_state();
                 self.widget.clear_task_mux();
                 self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                let repair_required = execution_requires_plan_repair(result.as_deref());
+                let mut repair_plan = result
+                    .as_deref()
+                    .map(|result| provider_plan_draft_from_plan(&result.execution_plan_spec))
+                    .unwrap_or_else(|| plan_draft.clone());
+                if repair_plan.steps.is_empty() {
+                    repair_plan = plan_draft;
+                }
+                let failure_report = repair_required
+                    .then(|| execution_failure_report(result.as_deref(), Some(text.as_str())));
+                let repair_route = repair_required.then(|| {
+                    classify_execution_failure_revision(result.as_deref(), Some(text.as_str()))
+                });
+                let can_auto_repair = repair_route.is_some_and(|route| {
+                    should_auto_repair_execution_failure(
+                        route,
+                        automatic_repair_attempts,
+                        automatic_repair_max_attempts,
+                    )
+                });
+                let repair_message = repair_route.map(|route| {
+                    repair_message_for_execution_failure(
+                        route,
+                        failure_report.as_deref().unwrap_or_default(),
+                        can_auto_repair,
+                        automatic_repair_attempts,
+                        automatic_repair_max_attempts,
+                    )
+                });
                 if let Some(result) = result {
+                    record_orchestrator_thread_metadata(&mut self.session, &result);
                     self.replace_streaming_assistant_cell(Box::new(
                         OrchestratorResultHistoryCell::new(*result),
                     ));
@@ -2894,6 +4037,51 @@ where
                         })
                         .await;
                     code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                }
+                if let Some(message) = repair_message {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
+                    self.history.push(Message::assistant(message.clone()));
+                    self.session.add_assistant_message(&message);
+                    match repair_route {
+                        Some(ExecutionFailureRevision::PlanRevision) => {
+                            let pending = PendingExecutionPlanRevision {
+                                spec_json,
+                                intent_id,
+                                current_plan: repair_plan,
+                                warnings,
+                                automatic_repair_attempts,
+                                automatic_repair_max_attempts,
+                                network_access,
+                                failure_report: failure_report.clone(),
+                            };
+                            if can_auto_repair {
+                                let next_attempt = automatic_repair_attempts.saturating_add(1);
+                                let request = automatic_plan_repair_request_from_report(
+                                    failure_report.as_deref().unwrap_or_default(),
+                                    next_attempt,
+                                    automatic_repair_max_attempts,
+                                );
+                                self.begin_automatic_execution_plan_repair(
+                                    pending,
+                                    request,
+                                    next_attempt,
+                                    automatic_repair_max_attempts,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            self.pending_execution_plan_revision = Some(pending);
+                        }
+                        Some(ExecutionFailureRevision::IntentSpecRevision) => {
+                            self.pending_plan_revision = Some(spec_json);
+                        }
+                        Some(ExecutionFailureRevision::ManualAction) | None => {}
+                    }
+                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.sync_mux_input_context();
+                    self.schedule_draw();
+                    return Ok(());
                 }
                 self.set_idle_and_draw();
             }
@@ -3102,6 +4290,11 @@ where
 
     /// Submit a user message, expanding slash commands and applying agent context.
     async fn submit_message(&mut self, text: String) {
+        self.submit_message_from_source(text, TurnInputSource::Local)
+            .await;
+    }
+
+    async fn submit_message_from_source(&mut self, text: String, source: TurnInputSource) {
         // 1. Check for built-in TUI commands first.
         if let Some((cmd, args)) = super::slash_command::parse_builtin(&text) {
             self.handle_builtin_command(cmd, args).await;
@@ -3116,6 +4309,13 @@ where
                 )));
                 self.sync_mux_input_context();
                 self.schedule_draw();
+                return;
+            }
+            if let PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts } =
+                parse_pending_plan_revision_command(&text)
+            {
+                self.continue_automatic_execution_plan_repair(pending, max_attempts)
+                    .await;
                 return;
             }
             self.begin_execution_plan_revision_flow(pending, &text)
@@ -3167,10 +4367,20 @@ where
 
         self.widget.clear_dag_panel();
         self.sync_mux_input_context();
+        self.submit_direct_agent_message(final_text, allowed_tools, source);
+    }
+
+    fn submit_direct_agent_message(
+        &mut self,
+        text: String,
+        allowed_tools: Option<Vec<String>>,
+        source: TurnInputSource,
+    ) {
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
-            text: final_text,
+            text,
+            source,
             allowed_tools,
         });
     }
@@ -3204,7 +4414,53 @@ where
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
                 self.pending_execution_plan_revision = None;
+                self.pending_auto_plan_repair_execution = None;
                 self.sync_mux_input_context();
+            }
+            BuiltinCommand::Chat => {
+                let request = args.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /chat <your question>".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
+                self.widget.clear_dag_panel();
+                self.sync_mux_input_context();
+                self.submit_direct_agent_message(
+                    request.to_string(),
+                    Some(vec![
+                        "read_file".to_string(),
+                        "list_dir".to_string(),
+                        "grep_files".to_string(),
+                        "search_files".to_string(),
+                        "web_search".to_string(),
+                    ]),
+                    TurnInputSource::Local,
+                );
+            }
+            BuiltinCommand::Run => {
+                // `/run` mirrors `/chat`'s plan-bypass but defers
+                // the allowed-tool decision to the launch-time
+                // `--context` / `--agent` selection rather than
+                // pinning a read-only set. Passing `None` lets
+                // `default_chat_allowed_tools` pick up
+                // `config.allowed_tools` (set from
+                // `registry.filter_by_intent(...)` at startup).
+                // Wave 5 generation matrix uses this so
+                // `--context dev` actually exposes `apply_patch`.
+                let request = args.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /run <prompt>".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
+                self.widget.clear_dag_panel();
+                self.sync_mux_input_context();
+                self.submit_direct_agent_message(request.to_string(), None, TurnInputSource::Local);
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -3224,9 +4480,27 @@ where
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
+            BuiltinCommand::Usage => {
+                if usage_detail_popup_enabled(self.registry.working_dir()) {
+                    self.usage_detail_args = Some(args.trim().to_string());
+                    let details = self.usage_detail_panel_text(args).await;
+                    self.widget
+                        .bottom_pane
+                        .set_usage_detail_panel(Some(details));
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        self.usage_report_text(),
+                    )));
+                }
+                self.schedule_draw();
+            }
             BuiltinCommand::Plan => {
                 if let Some(pending) = self.pending_execution_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts } => {
+                            self.continue_automatic_execution_plan_repair(pending, max_attempts)
+                                .await;
+                        }
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_execution_plan_revision_flow(pending, request)
                                 .await;
@@ -3250,6 +4524,14 @@ where
                     }
                 } else if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::ContinueAutoRepair { .. } => {
+                            self.pending_plan_revision = Some(spec_json);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_plan_revision_flow(spec_json, request).await;
                         }
@@ -3274,6 +4556,22 @@ where
                     self.start_plan_workflow(args).await;
                 }
             }
+            BuiltinCommand::Skill => match self.skill_dispatcher.dispatch(args) {
+                Ok(result) => {
+                    self.widget.clear_dag_panel();
+                    self.sync_mux_input_context();
+                    self.submit_direct_agent_message(
+                        result.prompt,
+                        Some(result.allowed_tools),
+                        TurnInputSource::Local,
+                    );
+                }
+                Err(error) => {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                    self.schedule_draw();
+                }
+            },
             BuiltinCommand::Intent => {
                 self.handle_intent_command(args).await;
             }
@@ -3286,9 +4584,457 @@ where
                 }
                 self.schedule_draw();
             }
+            BuiltinCommand::Control => {
+                if args.trim().eq_ignore_ascii_case("reclaim") {
+                    match self.reclaim_local_controller().await {
+                        Ok(()) => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Local TUI control reclaimed.".to_string(),
+                            )));
+                        }
+                        Err(error) => {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(format!(
+                                    "Unable to reclaim control: {}",
+                                    error.message()
+                                ))));
+                        }
+                    }
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /control reclaim".to_string(),
+                    )));
+                }
+                self.schedule_draw();
+            }
+            BuiltinCommand::Approvals => {
+                let message = self.approvals_command_message(args).await;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Anchors => {
+                let message = self.anchors_command_message(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Source => {
+                let message = self.source_command_message(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Undo => {
+                let working_dir = self.registry.working_dir();
+                let message = if undo_should_prefer_vcs_rollback(working_dir) {
+                    "Working tree is clean. Use Libra VCS rollback for committed changes; /undo only reverts uncommitted AI file edits.".to_string()
+                } else {
+                    let store = self.session_store.file_history(&self.session.id);
+                    match store.undo_latest_batch(working_dir) {
+                        Ok(report) => format!(
+                            "Undid AI file edit batch `{}` ({} path(s) restored).",
+                            report.batch_id, report.restored_paths
+                        ),
+                        Err(FileHistoryError::NoUndoBatch) => {
+                            "No AI file edits are available to undo.".to_string()
+                        }
+                        Err(error) => format!("Unable to undo latest AI file edit batch: {error}"),
+                    }
+                };
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Agents => {
+                // OC-Phase 5 P5.4: declarative agents.toml is not yet wired
+                // through the TUI session config (lands with the dispatcher
+                // integration in P5.5 + later). Until then, surface an
+                // actionable placeholder so the slash command exists as a
+                // discoverable UX surface.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Multi-agent declarative config (`agents.toml`) is not yet loaded by this \
+                     session. See `docs/improvement/opencode.md` OC-Phase 5 for the rollout \
+                     plan."
+                        .to_string(),
+                )));
+            }
+            BuiltinCommand::Budget => {
+                // Same gating as Agents — budget enforcement is implemented
+                // (`src/internal/ai/agent/budget.rs`) but the runtime tracker
+                // is not yet plumbed into the TUI session.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Per-session / per-agent budget tracker is not yet plumbed through this \
+                     TUI session. The `[code.budget]` config schema and enforcement primitive \
+                     are in place; runtime wiring lands in OC-Phase 5 P5.5."
+                        .to_string(),
+                )));
+            }
+            BuiltinCommand::Goal => {
+                let message = self.format_goal_command_response(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+            }
             BuiltinCommand::Quit => {
                 self.request_user_exit();
             }
+        }
+    }
+
+    /// Render the response cell for a `/goal …` invocation. The
+    /// parser lives in [`super::goal_command::parse_goal_subcommand`];
+    /// this helper dispatches the typed result into the App's
+    /// goal-session methods (the same methods the Code Control
+    /// NDJSON `goal.*` handlers call), so both surfaces share one
+    /// authority for state mutation (OC-Phase 6 P6.5 / P6.6). The
+    /// `criteria add` arm stays parse-only because `CriteriaRevised`
+    /// envelopes flow through the supervisor's apply path —
+    /// integration ships once `run_tool_loop` integrates.
+    fn format_goal_command_response(&mut self, args: &str) -> String {
+        use super::goal_command::{GoalSubcommand, parse_goal_subcommand};
+        match parse_goal_subcommand(args) {
+            Ok(GoalSubcommand::Start { objective }) => {
+                match self.goal_session_start_from_control(objective) {
+                    Ok(rendered) => format!("Goal started.\n{rendered}"),
+                    Err(err) => format!("`/goal start` failed: {}", err.message()),
+                }
+            }
+            Ok(GoalSubcommand::Status) => match self.goal_session_status_from_control() {
+                Ok(rendered) => rendered,
+                Err(err) => err.message(),
+            },
+            Ok(GoalSubcommand::Cancel { reason }) => {
+                match self.goal_session_cancel_from_control(reason) {
+                    Ok(rendered) => format!("Goal cancelled.\n{rendered}"),
+                    Err(err) => format!("`/goal cancel` failed: {}", err.message()),
+                }
+            }
+            Ok(GoalSubcommand::CriteriaAdd { text }) => format!(
+                "`/goal criteria add` parsed.\n  Description: {text}\n\
+                 Appending criteria mid-Goal needs the supervisor's `CriteriaRevised` \
+                 envelope path, which lands once `run_tool_loop` integrates."
+            ),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    async fn refresh_usage_detail_panel(&mut self) {
+        if !self.widget.bottom_pane.is_usage_detail_panel_visible() {
+            return;
+        }
+        let args = self.usage_detail_args.clone().unwrap_or_default();
+        let details = self.usage_detail_panel_text(&args).await;
+        self.widget
+            .bottom_pane
+            .set_usage_detail_panel(Some(details));
+    }
+
+    async fn usage_detail_panel_text(&self, args: &str) -> String {
+        let grouping = match parse_usage_grouping(args) {
+            Ok(grouping) => grouping,
+            Err(message) => return format!("{}\n\n{message}", self.usage_report_text()),
+        };
+        let Some(recorder) = self.config.usage_recorder.as_ref() else {
+            return self.usage_report_text();
+        };
+        let filter = UsageQueryFilter {
+            session_id: self
+                .config
+                .usage_context
+                .as_ref()
+                .and_then(|context| context.session_id.clone()),
+            ..Default::default()
+        };
+        match recorder.query().aggregate_filtered(grouping, &filter).await {
+            Ok(rows) => format_usage_detail_panel(
+                &self.usage_snapshot,
+                usage_grouping_label(grouping),
+                &rows,
+            ),
+            Err(error) => format!(
+                "{}\n\nFailed to load SQLite usage details: {error}",
+                self.usage_report_text()
+            ),
+        }
+    }
+
+    fn usage_report_text(&self) -> String {
+        let total_tokens = self
+            .usage_snapshot
+            .prompt_tokens
+            .saturating_add(self.usage_snapshot.completion_tokens);
+        let cost = self
+            .usage_snapshot
+            .cost_usd
+            .map(|cost| format!("\nCost estimate: ${cost:.4}"))
+            .unwrap_or_default();
+        format!(
+            "Usage\nProvider: {}\nModel: {}\nPrompt tokens: {}\nCompletion tokens: {}\nTotal tokens: {}\nWall clock: {:.1}s{}",
+            self.usage_snapshot.provider,
+            self.usage_snapshot.model,
+            self.usage_snapshot.prompt_tokens,
+            self.usage_snapshot.completion_tokens,
+            total_tokens,
+            self.usage_snapshot.wall_clock_ms as f64 / 1000.0,
+            cost
+        )
+    }
+
+    fn source_command_message(&mut self, args: &str) -> String {
+        let args = args.trim();
+        if args.is_empty() || args.eq_ignore_ascii_case("list") {
+            return match self.source_pool.source_statuses() {
+                Ok(statuses) => format_source_statuses(&statuses),
+                Err(error) => format!("Unable to list sources: {error}"),
+            };
+        }
+
+        let mut parts = args.split_whitespace();
+        let subcommand = parts.next().unwrap_or_default().to_ascii_lowercase();
+        let slug = parts.next();
+        if parts.next().is_some() {
+            return source_command_usage();
+        }
+
+        match (subcommand.as_str(), slug) {
+            ("enable", Some(slug)) => match self
+                .source_pool
+                .enable_source(slug, SourceEnablement::SessionExplicit)
+            {
+                Ok(()) => format!("Enabled source `{slug}` for this session."),
+                Err(error) => format!("Unable to enable source `{slug}`: {error}"),
+            },
+            ("disable", Some(slug)) => match self.source_pool.disable_source(slug) {
+                Ok(()) => format!("Disabled source `{slug}` for this session."),
+                Err(error) => format!("Unable to disable source `{slug}`: {error}"),
+            },
+            ("reload", Some(slug)) if slug == BUILTIN_MCP_SOURCE_SLUG => {
+                let Some(server) = self.mcp_server.clone() else {
+                    return format!("Unable to reload source `{slug}`: MCP server unavailable.");
+                };
+                match self
+                    .source_pool
+                    .reload_source(Arc::new(McpSource::builtin(server)))
+                {
+                    Ok(status) => format!(
+                        "Reloaded source `{}`; next source handler build sees {} tool(s).",
+                        status.slug, status.tool_count
+                    ),
+                    Err(error) => format!("Unable to reload source `{slug}`: {error}"),
+                }
+            }
+            ("reload", Some(slug)) => {
+                format!("Reload is not available for source `{slug}` in this session.")
+            }
+            _ => source_command_usage(),
+        }
+    }
+
+    async fn approvals_command_message(&self, args: &str) -> String {
+        let Some(approval) = self
+            .config
+            .runtime_context
+            .as_ref()
+            .and_then(|runtime| runtime.approval.as_ref())
+            .cloned()
+        else {
+            return "Approval cache is not available for this session.".to_string();
+        };
+
+        let args = args.trim();
+        if let Some(prefix) = args.strip_prefix("revoke").map(str::trim) {
+            if prefix.is_empty() {
+                return "Usage: /approvals revoke <key-prefix> | revoke allow-all <scope>"
+                    .to_string();
+            }
+
+            // Allow-all decisions live in a separate map and were previously
+            // unrevocable from the UI — once `ApprovedForAllCommands` was
+            // chosen the cache stayed open for the whole session. The
+            // `revoke allow-all <scope>` form clears that record.
+            if let Some(scope_arg) = prefix.strip_prefix("allow-all").map(str::trim) {
+                if scope_arg.is_empty() {
+                    return "Usage: /approvals revoke allow-all <scope>".to_string();
+                }
+                let mut store = approval.store.lock().await;
+                return if store.revoke_allow_all_for_scope(scope_arg) {
+                    format!("Revoked allow-all approval for scope `{scope_arg}`.")
+                } else {
+                    format!("No allow-all approval was active for scope `{scope_arg}`.")
+                };
+            }
+
+            let mut store = approval.store.lock().await;
+            let matches = store
+                .active_memos_at(Utc::now())
+                .into_iter()
+                .filter(|memo| memo.key.starts_with(prefix))
+                .collect::<Vec<_>>();
+
+            return match matches.as_slice() {
+                [] => format!("No active approval memo matches `{prefix}`."),
+                [memo] => {
+                    let key = memo.key.clone();
+                    if store.revoke(&key) {
+                        format!("Revoked approval memo `{key}`.")
+                    } else {
+                        format!("Approval memo `{key}` was already inactive.")
+                    }
+                }
+                _ => format!(
+                    "Approval key prefix `{prefix}` is ambiguous:\n{}",
+                    format_approval_memos(&matches)
+                ),
+            };
+        }
+
+        if !args.is_empty() && !args.eq_ignore_ascii_case("list") {
+            return "Usage: /approvals [list|revoke <key-prefix>|revoke allow-all <scope>]"
+                .to_string();
+        }
+
+        let store = approval.store.lock().await;
+        let memos = store.active_memos_at(Utc::now());
+        let allow_all = store.active_allow_all_scopes();
+        match (memos.is_empty(), allow_all.is_empty()) {
+            (true, true) => "No active approval memos.".to_string(),
+            (false, true) => format!("Active approval memos:\n{}", format_approval_memos(&memos)),
+            (true, false) => format!(
+                "Active allow-all scopes (use `/approvals revoke allow-all <scope>`):\n{}",
+                allow_all
+                    .iter()
+                    .map(|scope| format!("  {scope}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            (false, false) => format!(
+                "Active approval memos:\n{}\nActive allow-all scopes (use `/approvals revoke allow-all <scope>`):\n{}",
+                format_approval_memos(&memos),
+                allow_all
+                    .iter()
+                    .map(|scope| format!("  {scope}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }
+    }
+
+    fn anchors_command_message(&self, args: &str) -> String {
+        let session_root = self.session_store.session_root(&self.session.id);
+        let store = SessionJsonlStore::new(session_root);
+        let args = args.trim();
+        if args.is_empty() || args.eq_ignore_ascii_case("list") {
+            return match store.load_memory_anchors() {
+                Ok(replay) => format_memory_anchors(&replay.anchors()),
+                Err(error) => format!("Unable to load memory anchors: {error}"),
+            };
+        }
+
+        if let Some(content) = args.strip_prefix("draft").map(str::trim) {
+            if content.is_empty() {
+                return "Usage: /anchors draft <memory>".to_string();
+            }
+            let event = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+                content, "user",
+            ));
+            return match store.append(&SessionEvent::memory_anchor(event.clone())) {
+                Ok(()) => format!(
+                    "Drafted memory anchor `{}`. Use `/anchors confirm {}` to activate it.",
+                    short_anchor_id(event.anchor_id),
+                    short_anchor_id(event.anchor_id)
+                ),
+                Err(error) => format!("Unable to draft memory anchor: {error}"),
+            };
+        }
+
+        if let Some(prefix) = args.strip_prefix("confirm").map(str::trim) {
+            if prefix.is_empty() {
+                return "Usage: /anchors confirm <id-prefix>".to_string();
+            }
+            return self.update_anchor_by_prefix(&store, prefix, |anchor| {
+                MemoryAnchorEvent::confirm(anchor, Some("confirmed by user".to_string()))
+            });
+        }
+
+        if let Some(rest) = args.strip_prefix("revoke").map(str::trim) {
+            let (prefix, reason) = split_anchor_prefix_and_tail(rest);
+            if prefix.is_empty() {
+                return "Usage: /anchors revoke <id-prefix> [reason]".to_string();
+            }
+            let reason = if reason.is_empty() {
+                Some("revoked by user".to_string())
+            } else {
+                Some(reason.to_string())
+            };
+            return self.update_anchor_by_prefix(&store, prefix, |anchor| {
+                MemoryAnchorEvent::revoke(anchor, reason.clone())
+            });
+        }
+
+        if let Some(rest) = args.strip_prefix("supersede").map(str::trim) {
+            let (prefix, content) = split_anchor_prefix_and_tail(rest);
+            if prefix.is_empty() || content.is_empty() {
+                return "Usage: /anchors supersede <id-prefix> <replacement memory>".to_string();
+            }
+            let replay = match store.load_memory_anchors() {
+                Ok(replay) => replay,
+                Err(error) => return format!("Unable to load memory anchors: {error}"),
+            };
+            let anchor = match replay.find_unique_by_prefix(prefix) {
+                Ok(anchor) => anchor,
+                Err(error) => return anchor_lookup_message(error),
+            };
+            let draft = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+                content, "user",
+            ));
+            let supersede = MemoryAnchorEvent::supersede(
+                &anchor,
+                draft.anchor_id,
+                Some("superseded by user".to_string()),
+            );
+            if let Err(error) = store.append(&SessionEvent::memory_anchor(draft.clone())) {
+                return format!("Unable to draft replacement memory anchor: {error}");
+            }
+            if let Err(error) = store.append(&SessionEvent::memory_anchor(supersede)) {
+                return format!("Unable to supersede memory anchor: {error}");
+            }
+            return format!(
+                "Superseded `{}` with draft `{}`. Use `/anchors confirm {}` to activate it.",
+                anchor.short_id(),
+                short_anchor_id(draft.anchor_id),
+                short_anchor_id(draft.anchor_id)
+            );
+        }
+
+        "Usage: /anchors [list|draft <memory>|confirm <id-prefix>|revoke <id-prefix> [reason]|supersede <id-prefix> <replacement memory>]".to_string()
+    }
+
+    fn update_anchor_by_prefix(
+        &self,
+        store: &SessionJsonlStore,
+        prefix: &str,
+        build_event: impl FnOnce(&MemoryAnchor) -> MemoryAnchorEvent,
+    ) -> String {
+        let replay = match store.load_memory_anchors() {
+            Ok(replay) => replay,
+            Err(error) => return format!("Unable to load memory anchors: {error}"),
+        };
+        let anchor = match replay.find_unique_by_prefix(prefix) {
+            Ok(anchor) => anchor,
+            Err(error) => return anchor_lookup_message(error),
+        };
+        let event = build_event(&anchor);
+        match store.append(&SessionEvent::memory_anchor(event.clone())) {
+            Ok(()) => format!(
+                "Memory anchor `{}` is now {}.",
+                anchor.short_id(),
+                event.review_state
+            ),
+            Err(error) => format!("Unable to update memory anchor: {error}"),
         }
     }
 
@@ -3308,6 +5054,9 @@ where
         self.cancel_pending_exec_approval();
         if self.pending_post_plan.is_some() {
             self.dismiss_post_plan_dialog();
+        }
+        if self.pending_network_policy.is_some() {
+            self.dismiss_network_policy_dialog();
         }
         if self.pending_intent_review.is_some() {
             self.dismiss_intent_review_dialog();
@@ -3507,9 +5256,20 @@ where
     fn finish_turn_state(&mut self) {
         self.cancel_pending_phase_confirmation();
         self.cancel_pending_exec_approval();
+        self.complete_streaming_thinking_cells();
         self.agent_task = None;
         self.running_tool_calls = 0;
         self.clear_turn_tracking();
+    }
+
+    fn save_session_snapshot_after_user_message(&self) {
+        if let Err(error) = self.session_store.save(&self.session) {
+            tracing::warn!(
+                session_id = %self.session.id,
+                error = %error,
+                "failed to save session snapshot before context-frame recording"
+            );
+        }
     }
 
     fn set_idle_and_draw(&mut self) {
@@ -3558,7 +5318,8 @@ where
                 .bottom_pane
                 .set_input_context_label(Some("Revise IntentSpec".to_string()));
             self.widget.bottom_pane.set_input_hint(Some(
-                "Describe spec changes, or use /plan modify <changes> or /plan cancel".to_string(),
+                "Describe spec changes, or use /intent modify <changes> or /intent cancel"
+                    .to_string(),
             ));
         } else {
             self.widget.bottom_pane.set_input_context_label(None);
@@ -3638,7 +5399,87 @@ where
         warnings: Vec<String>,
     ) {
         let prompt = build_execution_plan_prompt(&spec_json);
-        self.begin_llm_execution_plan_workflow(spec_json, intent_id, warnings, prompt)
+        self.begin_llm_execution_plan_workflow(
+            spec_json,
+            intent_id,
+            warnings,
+            prompt,
+            0,
+            DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        )
+        .await;
+    }
+
+    async fn begin_automatic_execution_plan_repair(
+        &mut self,
+        mut pending: PendingExecutionPlanRevision,
+        request: String,
+        attempt: u8,
+        max_attempts: u8,
+    ) {
+        pending.automatic_repair_attempts = pending.automatic_repair_attempts.max(attempt);
+        pending.automatic_repair_max_attempts = max_attempts;
+        self.pending_auto_plan_repair_execution = Some(PendingAutoPlanRepairExecution {
+            attempt,
+            max_attempts,
+            network_access: pending.network_access,
+        });
+        self.begin_execution_plan_revision_flow(pending, &request)
+            .await;
+    }
+
+    async fn continue_automatic_execution_plan_repair(
+        &mut self,
+        pending: PendingExecutionPlanRevision,
+        requested_max_attempts: Option<u8>,
+    ) {
+        let Some(failure_report) = pending.failure_report.clone() else {
+            self.pending_execution_plan_revision = Some(pending);
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                pending_execution_plan_revision_help_message(),
+            )));
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        };
+
+        let next_attempt = pending.automatic_repair_attempts.saturating_add(1);
+        if next_attempt > MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS {
+            self.pending_execution_plan_revision = Some(pending);
+            let message = format!(
+                "Automatic plan repair is capped at {} attempts. Describe specific Plan repair guidance, use `/plan modify <changes>`, or use `/plan cancel` to stop.",
+                MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+            );
+            self.widget
+                .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
+            self.history.push(Message::assistant(message.clone()));
+            self.session.add_assistant_message(&message);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
+        let max_attempts = requested_max_attempts
+            .unwrap_or(pending.automatic_repair_max_attempts)
+            .max(next_attempt)
+            .min(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS);
+        let request =
+            automatic_plan_repair_request_from_report(&failure_report, next_attempt, max_attempts);
+        let mut note = String::new();
+        if requested_max_attempts.is_some() && max_attempts != pending.automatic_repair_max_attempts
+        {
+            note.push_str(&format!(
+                "Plan automatic repair retry limit set to {max_attempts}.\n"
+            ));
+        }
+        note.push_str(&automatic_plan_repair_started_message(
+            next_attempt,
+            max_attempts,
+        ));
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::new(note.clone())));
+        self.history.push(Message::assistant(note.clone()));
+        self.session.add_assistant_message(&note);
+        self.begin_automatic_execution_plan_repair(pending, request, next_attempt, max_attempts)
             .await;
     }
 
@@ -3662,12 +5503,15 @@ where
             &pending.spec_json,
             &pending.current_plan,
             request,
+            pending.failure_report.as_deref(),
         );
         self.begin_llm_execution_plan_workflow(
             pending.spec_json,
             pending.intent_id,
             pending.warnings,
             prompt,
+            pending.automatic_repair_attempts,
+            pending.automatic_repair_max_attempts,
         )
         .await;
     }
@@ -3678,10 +5522,13 @@ where
         intent_id: Option<String>,
         mut warnings: Vec<String>,
         prompt: String,
+        automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     ) {
         let spec = match serde_json::from_str::<IntentSpec>(&spec_json) {
             Ok(spec) => spec,
             Err(error) => {
+                self.pending_auto_plan_repair_execution = None;
                 let msg = format!("Plan failed: stored IntentSpec JSON is invalid: {error}");
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
@@ -3703,32 +5550,39 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let mut config = self.config.clone();
-        config.allowed_tools = Some(vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep_files".to_string(),
-            "search_files".to_string(),
-            "update_plan".to_string(),
-        ]);
+        let mut config = phase1_plan_tool_loop_config(self.config.clone());
+        let session_root = self.session_store.session_root(&self.session.id);
+        config.context_frame_session_root = Some(session_root);
+        config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let fallback_history = self.history.clone();
+        let auto_repair_pending = self.pending_auto_plan_repair_execution.is_some();
 
         let handle = tokio::spawn(async move {
             struct ExecutionPlanObserver {
                 tx: UnboundedSender<AppEvent>,
                 turn_id: TurnId,
-                plan: Option<UpdatePlanArgs>,
+                plan_draft: Option<ProviderPlanDraft>,
             }
 
             impl ToolLoopObserver for ExecutionPlanObserver {
                 fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
                     match event {
-                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                        CompletionStreamEvent::TextDelta { delta, .. }
+                            if should_forward_phase1_model_text_delta(delta) =>
+                        {
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ThinkingDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
                                     delta: delta.clone(),
                                 },
                             });
@@ -3739,6 +5593,9 @@ where
                             arguments,
                             ..
                         } => {
+                            if is_phase1_plan_draft_tool(tool_name) {
+                                return;
+                            }
                             let _ = self.tx.send(AppEvent::ToolCallPreview {
                                 turn_id: self.turn_id,
                                 call_id: call_id.clone(),
@@ -3750,25 +5607,42 @@ where
                     }
                 }
 
+                fn on_model_usage_recorded(
+                    &mut self,
+                    usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                    wall_clock_ms: u64,
+                ) {
+                    let _ = self.tx.send(AppEvent::AgentEvent {
+                        turn_id: self.turn_id,
+                        event: AgentEvent::UsageUpdated {
+                            usage: usage.clone(),
+                            wall_clock_ms,
+                        },
+                    });
+                }
+
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
                     tool_name: &str,
                     arguments: &serde_json::Value,
                 ) {
+                    if is_phase1_plan_draft_tool(tool_name) {
+                        if let Ok(args) =
+                            serde_json::from_value::<SubmitPlanDraftArgs>(arguments.clone())
+                            && let Ok(plan_draft) = provider_plan_draft_from_args(args)
+                        {
+                            self.plan_draft = Some(plan_draft);
+                        }
+                        return;
+                    }
+
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
                         turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
                     });
-
-                    if tool_name == "update_plan"
-                        && let Ok(args) =
-                            serde_json::from_value::<UpdatePlanArgs>(arguments.clone())
-                    {
-                        self.plan = Some(args);
-                    }
                 }
 
                 fn on_tool_call_end(
@@ -3777,6 +5651,9 @@ where
                     tool_name: &str,
                     result: &Result<ToolOutput, String>,
                 ) {
+                    if is_phase1_plan_draft_tool(tool_name) {
+                        return;
+                    }
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
                         turn_id: self.turn_id,
                         call_id: call_id.to_string(),
@@ -3789,8 +5666,9 @@ where
             let mut observer = ExecutionPlanObserver {
                 tx: tx.clone(),
                 turn_id,
-                plan: None,
+                plan_draft: None,
             };
+            attach_memory_anchor_prompt_context(&mut config);
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
                 fallback_history.clone(),
@@ -3801,9 +5679,9 @@ where
             )
             .await;
 
-            let turn = match run_result {
+            let _turn = match run_result {
                 Ok(turn) => Some(turn),
-                Err(e) if observer.plan.is_some() => {
+                Err(e) if observer.plan_draft.is_some() => {
                     let _ = tx.send(AppEvent::InsertHistoryCell {
                         turn_id,
                         cell: Box::new(AssistantHistoryCell::new(format!(
@@ -3824,20 +5702,20 @@ where
                 }
             };
 
-            let llm_plan = match observer.plan.take() {
-                Some(plan) => plan,
+            let plan_draft = match observer.plan_draft.take() {
+                Some(plan_draft) => plan_draft,
                 None => {
                     let _ = tx.send(AppEvent::AgentEvent {
                         turn_id,
                         event: AgentEvent::Error {
-                            message: "Plan failed: LLM did not call update_plan.".to_string(),
+                            message: "Plan failed: LLM did not call submit_plan_draft.".to_string(),
                         },
                     });
                     return;
                 }
             };
 
-            let spec_for_plan = match intentspec_with_llm_plan_objectives(&spec, &llm_plan) {
+            let spec_for_plan = match intentspec_with_plan_draft_objectives(&spec, &plan_draft) {
                 Ok(spec) => spec,
                 Err(error) => {
                     let _ = tx.send(AppEvent::AgentEvent {
@@ -3864,19 +5742,27 @@ where
             };
 
             let mut summary = render_summary(&spec_for_plan, intent_id.as_deref());
-            if let Some(explanation) = llm_plan.explanation.as_deref()
+            if let Some(explanation) = plan_draft.explanation.as_deref()
                 && !explanation.trim().is_empty()
             {
                 summary.push_str(&format!("\nPlan rationale: {}", explanation.trim()));
             }
             let mut plan_warning = None;
-            let plan_id = if let (Some(mcp_server), Some(intent_id)) =
+            let persisted_plan_bundle = if let (Some(mcp_server), Some(intent_id)) =
                 (mcp_server.as_ref(), intent_id.as_ref())
             {
-                match persist_execution_plan(&execution_plan, intent_id, mcp_server).await {
-                    Ok(id) => Some(id),
+                match crate::internal::ai::orchestrator::persistence::persist_plan_review_bundle(
+                    mcp_server,
+                    intent_id,
+                    &execution_plan,
+                )
+                .await
+                {
+                    Ok(bundle) => Some(bundle),
                     Err(e) => {
-                        plan_warning = Some(format!("failed to persist execution plan: {e}"));
+                        plan_warning = Some(format!(
+                            "failed to persist execution plan review bundle: {e}"
+                        ));
                         None
                     }
                 }
@@ -3890,21 +5776,27 @@ where
                     Some("MCP server unavailable; execution plan not persisted.".to_string());
                 None
             };
+            let plan_id = persisted_plan_bundle
+                .as_ref()
+                .map(|bundle| bundle.plan_id.clone());
 
             if let Some(ref warn) = plan_warning {
                 summary.push_str(&format!("\nWarning: {warn}"));
             }
-            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute Plan / Modify Plan / Cancel below.");
+            if auto_repair_pending {
+                summary.push_str(
+                    "\n\nAutomatic repair plan ready. Libra will execute this revised plan now.",
+                );
+            } else {
+                summary.push_str("\n\nExecution plan ready. Review the right-side workflow graph and choose Execute Plan / Modify Plan / Cancel below.");
+            }
 
             if let Some(warning) = plan_warning {
                 warnings.push(warning);
             }
 
-            let llm_output = turn
-                .as_ref()
-                .map(|turn| turn.final_text.clone())
-                .filter(|text| !text.trim().is_empty());
-            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
+            let llm_output = None;
+            let mut new_history = fallback_history;
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
@@ -3914,11 +5806,14 @@ where
                 new_history,
                 intent_id,
                 plan_id,
+                persisted_plan_bundle,
                 spec_json,
                 spec: Box::new(spec_for_plan),
                 plan: Box::new(execution_plan),
-                llm_plan,
+                plan_draft,
                 warnings,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             });
         });
 
@@ -3940,21 +5835,19 @@ where
 
         match selected {
             0 => {
-                self.start_execute_workflow(
-                    &pending.spec_json,
-                    pending.intent_id.clone(),
-                    pending.plan_id.clone(),
-                    Some(pending.plan.clone()),
-                )
-                .await;
+                self.show_network_policy_dialog(pending);
             }
             _ => {
                 if pending.selected == 1 {
                     self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
                         spec_json: pending.spec_json,
                         intent_id: pending.intent_id.clone(),
-                        current_plan: pending.llm_plan,
+                        current_plan: pending.plan_draft,
                         warnings: pending.warnings,
+                        automatic_repair_attempts: pending.automatic_repair_attempts,
+                        automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
+                        network_access: pending.network_access,
+                        failure_report: None,
                     });
                     let msg = format!(
                         "{} Your next plain-text message will revise the current execution plan.",
@@ -3971,7 +5864,7 @@ where
         }
         if let Some(code_ui_session) = self.code_ui_session.clone() {
             let next_status = if selected == 0 {
-                CodeUiSessionStatus::Thinking
+                CodeUiSessionStatus::AwaitingInteraction
             } else {
                 CodeUiSessionStatus::Idle
             };
@@ -3981,6 +5874,125 @@ where
             });
         }
         self.schedule_draw();
+    }
+
+    fn show_network_policy_dialog(&mut self, pending: PendingPostPlan) {
+        let selected = if pending.network_access { 1 } else { 0 };
+        let interaction_id = network_policy_interaction_id(pending.plan_id.as_deref());
+        let intent_id = pending.intent_id.clone();
+        let plan_id = pending.plan_id.clone();
+        let network_access = pending.network_access;
+        self.pending_network_policy = Some(PendingNetworkPolicyChoice {
+            post_plan: pending,
+            selected,
+        });
+        self.widget.bottom_pane.post_plan_selected = selected;
+        self.widget
+            .bottom_pane
+            .set_post_plan_network_access(network_access);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingNetworkPolicyChoice);
+        self.sync_mux_input_context();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session
+                    .upsert_interaction(CodeUiInteractionRequest {
+                        id: interaction_id,
+                        kind: CodeUiInteractionKind::PostPlanChoice,
+                        title: Some("Choose network policy".to_string()),
+                        description: Some(
+                            "Select whether shell tools and gates may use the network.".to_string(),
+                        ),
+                        prompt: None,
+                        options: vec![
+                            CodeUiInteractionOption {
+                                id: "network-deny".to_string(),
+                                label: "Network: Deny".to_string(),
+                                description: Some("Run shell/gates offline".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "network-allow".to_string(),
+                                label: "Network: Allow".to_string(),
+                                description: Some("Allow network for shell/gates".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "back".to_string(),
+                                label: "Back".to_string(),
+                                description: Some("Return to plan choices".to_string()),
+                            },
+                        ],
+                        status: CodeUiInteractionStatus::Pending,
+                        metadata: serde_json::json!({
+                            "intentId": intent_id,
+                            "planId": plan_id,
+                            "networkAccess": network_access,
+                            "phase": "networkPolicy",
+                        }),
+                        requested_at: Utc::now(),
+                        resolved_at: None,
+                    })
+                    .await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
+    }
+
+    async fn handle_network_policy_choice(&mut self) {
+        let pending = match self.pending_network_policy.take() {
+            Some(p) => p,
+            None => return,
+        };
+        let selected = pending.selected;
+        if selected == 2 {
+            self.restore_post_plan_dialog(pending.post_plan);
+            self.schedule_draw();
+            return;
+        }
+
+        let network_access = selected == 1;
+        let interaction_id = network_policy_interaction_id(pending.post_plan.plan_id.as_deref());
+        let request = Self::execute_request_from_post_plan(pending.post_plan, network_access);
+        self.start_execute_workflow(request).await;
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+        self.schedule_draw();
+    }
+
+    fn return_to_post_plan_dialog(&mut self) {
+        let Some(pending) = self.pending_network_policy.take() else {
+            return;
+        };
+        self.restore_post_plan_dialog(pending.post_plan);
+        self.schedule_draw();
+    }
+
+    fn restore_post_plan_dialog(&mut self, mut pending: PendingPostPlan) {
+        pending.selected = 0;
+        let interaction_id = network_policy_interaction_id(pending.plan_id.as_deref());
+        self.pending_post_plan = Some(pending);
+        self.widget.bottom_pane.reset_post_plan_selection();
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingPostPlanChoice);
+        self.sync_mux_input_context();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
     }
 
     fn dismiss_post_plan_dialog(&mut self) {
@@ -3998,13 +6010,40 @@ where
         self.set_idle_and_draw();
     }
 
-    async fn start_execute_workflow(
-        &mut self,
-        spec_json: &str,
-        persisted_intent_id: Option<String>,
-        persisted_plan_id: Option<String>,
-        approved_plan: Option<ExecutionPlanSpec>,
-    ) {
+    fn dismiss_network_policy_dialog(&mut self) {
+        if let Some(interaction_id) = self
+            .pending_network_policy
+            .as_ref()
+            .map(|pending| network_policy_interaction_id(pending.post_plan.plan_id.as_deref()))
+            && let Some(code_ui_session) = self.code_ui_session.clone()
+        {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+            });
+        }
+        self.pending_network_policy = None;
+        self.set_idle_and_draw();
+    }
+
+    fn execute_request_from_post_plan(
+        pending: PendingPostPlan,
+        network_access: bool,
+    ) -> ExecuteWorkflowRequest {
+        ExecuteWorkflowRequest {
+            spec_json: pending.spec_json,
+            persisted_intent_id: pending.intent_id.clone(),
+            persisted_plan_id: pending.plan_id.clone(),
+            persisted_plan_bundle: pending.persisted_plan_bundle.clone(),
+            approved_plan: Some(pending.plan.clone()),
+            approved_plan_draft: Some(pending.plan_draft.clone()),
+            plan_warnings: pending.warnings.clone(),
+            network_access_override: Some(network_access),
+            automatic_repair_attempts: pending.automatic_repair_attempts,
+            automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
+        }
+    }
+
+    async fn start_execute_workflow(&mut self, request: ExecuteWorkflowRequest) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
             orchestrator::{
@@ -4013,7 +6052,20 @@ where
             },
         };
 
-        let spec: IntentSpec = match serde_json::from_str(spec_json) {
+        let ExecuteWorkflowRequest {
+            spec_json,
+            persisted_intent_id,
+            persisted_plan_id,
+            persisted_plan_bundle,
+            approved_plan,
+            approved_plan_draft,
+            plan_warnings,
+            network_access_override,
+            automatic_repair_attempts,
+            automatic_repair_max_attempts,
+        } = request;
+
+        let mut spec: IntentSpec = match serde_json::from_str(&spec_json) {
             Ok(s) => s,
             Err(e) => {
                 self.widget
@@ -4024,6 +6076,9 @@ where
                 return;
             }
         };
+        if let Some(network_access) = network_access_override {
+            apply_developer_network_access(&mut spec, network_access);
+        }
 
         self.widget.clear_dag_panel();
         self.widget
@@ -4036,6 +6091,12 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
+        let mut tool_loop_config = self.config.clone();
+        attach_file_history_context(
+            &mut tool_loop_config,
+            self.session_store.session_root(&self.session.id),
+            turn_id,
+        );
         let working_dir = self.registry.working_dir().to_path_buf();
         let coder_preamble = self
             .agent_router
@@ -4048,6 +6109,16 @@ where
         let mcp_server = self.mcp_server.clone();
         let tx = self.app_event_tx.clone();
         let history = self.history.clone();
+        let execution_spec_json =
+            serde_json::to_string_pretty(&spec).unwrap_or_else(|_| spec_json.clone());
+        let execution_intent_id = persisted_intent_id.clone();
+        let execution_plan_draft = approved_plan_draft
+            .or_else(|| approved_plan.as_ref().map(provider_plan_draft_from_plan))
+            .unwrap_or_else(|| provider_plan_draft_from_spec(&spec));
+        let execution_network_access = matches!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Allow
+        );
 
         let handle = tokio::spawn(async move {
             struct UiOrchestratorObserver {
@@ -4151,11 +6222,15 @@ where
                         TaskRuntimeEvent::WorkspaceReady {
                             working_dir,
                             isolated,
+                            backend,
+                            main_working_dir,
                         } => {
                             self.send_note(format_task_workspace_note(
                                 task.title(),
                                 working_dir,
                                 *isolated,
+                                *backend,
+                                main_working_dir.as_deref(),
                             ));
                         }
                         TaskRuntimeEvent::Note { level, text } => {
@@ -4166,6 +6241,26 @@ where
                                 }
                             };
                             self.send_note(format!("{title}  \n{text}"));
+                        }
+                        TaskRuntimeEvent::ThinkingDelta(delta) if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        TaskRuntimeEvent::UsageUpdated {
+                            usage,
+                            wall_clock_ms,
+                        } => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::UsageUpdated {
+                                    usage: usage.clone(),
+                                    wall_clock_ms: *wall_clock_ms,
+                                },
+                            });
                         }
                         _ => {}
                     }
@@ -4221,10 +6316,22 @@ where
                     let _ = self.tx.send(AppEvent::DagTaskMuxClear {
                         turn_id: self.turn_id,
                     });
+                    // The right-side workflow graph tracks whether Phase 3 ran.
+                    // Pass/fail details remain in the verification summary.
+                    let _ = self.tx.send(AppEvent::DagValidationStatus {
+                        turn_id: self.turn_id,
+                        passed: true,
+                    });
                     self.send_note(format_system_verification_stage_note(plan, report));
                 }
 
                 fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
+                    // The release row represents Phase 4 completion, not whether
+                    // the decision was Commit, HumanReviewRequired, or Abandon.
+                    let _ = self.tx.send(AppEvent::DagReleaseStatus {
+                        turn_id: self.turn_id,
+                        passed: true,
+                    });
                     self.send_note(format_decision_stage_note(plan, decision));
                 }
 
@@ -4289,9 +6396,11 @@ where
                 working_dir,
                 base_commit: None,
                 persisted_intent_id,
+                persisted_plan_bundle,
                 persisted_plan_id,
                 initial_plan: approved_plan,
                 dagrs_resume_checkpoint_id: None,
+                tool_loop_config,
                 coder_preamble,
                 reviewer_preamble,
                 mcp_server,
@@ -4318,6 +6427,13 @@ where
                 text: summary,
                 new_history,
                 result: ui_result,
+                spec_json: execution_spec_json,
+                intent_id: execution_intent_id,
+                plan_draft: execution_plan_draft,
+                warnings: plan_warnings,
+                network_access: execution_network_access,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             });
         });
 
@@ -4382,6 +6498,7 @@ where
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
+        self.save_session_snapshot_after_user_message();
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
         self.widget.clear_dag_panel();
@@ -4394,19 +6511,25 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let mut config = self.config.clone();
-        config.allowed_tools = Some(vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep_files".to_string(),
-            "search_files".to_string(),
-            "request_user_input".to_string(),
-            "submit_intent_draft".to_string(),
-        ]);
+        let mut config = phase0_plan_tool_loop_config(self.config.clone());
+        let session_root = self.session_store.session_root(&self.session.id);
+        attach_file_history_context(&mut config, session_root.clone(), turn_id);
+        config.context_frame_session_root = Some(session_root.clone());
+        config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
+        let should_auto_classify = should_auto_classify_first_user_message(
+            self.auto_classify_first_user_message,
+            &self.history,
+            None,
+        );
+        if self.auto_classify_first_user_message && self.history.is_empty() {
+            self.auto_classify_first_user_message = false;
+        }
         let history = self.history.clone();
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let working_dir = self.registry.working_dir().to_path_buf();
+        let default_network_access = self.default_network_access;
+        let classification_text = user_text.clone();
 
         let handle = tokio::spawn(async move {
             struct PlanObserver {
@@ -4432,10 +6555,20 @@ where
             impl ToolLoopObserver for PlanObserver {
                 fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
                     match event {
-                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                        CompletionStreamEvent::TextDelta { delta, .. }
+                            if should_forward_phase0_model_text_delta(delta) =>
+                        {
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ThinkingDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
                                     delta: delta.clone(),
                                 },
                             });
@@ -4455,6 +6588,20 @@ where
                         }
                         _ => {}
                     }
+                }
+
+                fn on_model_usage_recorded(
+                    &mut self,
+                    usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                    wall_clock_ms: u64,
+                ) {
+                    let _ = self.tx.send(AppEvent::AgentEvent {
+                        turn_id: self.turn_id,
+                        event: AgentEvent::UsageUpdated {
+                            usage: usage.clone(),
+                            wall_clock_ms,
+                        },
+                    });
                 }
 
                 fn on_tool_call_begin(
@@ -4513,6 +6660,30 @@ where
             }
 
             let mut observer = PlanObserver::new(tx.clone(), turn_id);
+            if should_auto_classify {
+                match classify_first_turn_task_intent(
+                    &model,
+                    &registry,
+                    &mut config,
+                    &classification_text,
+                    FirstTurnIntentPolicyUpdate::PromptOnly,
+                )
+                .await
+                {
+                    Ok(decision) => {
+                        send_task_intent_classified_event(
+                            &tx, turn_id, decision, &config, &registry,
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "first-turn task intent classification failed; using launch prompt and plan tool policy"
+                        );
+                    }
+                }
+            }
+            attach_memory_anchor_prompt_context(&mut config);
             let fallback_history = history.clone();
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
@@ -4596,6 +6767,7 @@ where
                     created_by_id: "tui-user".to_string(),
                 },
             );
+            apply_developer_network_access(&mut spec, default_network_access);
 
             let mut issues = validate_intentspec(&spec);
             for _ in 0..MAX_INTENTSPEC_REPAIR_ATTEMPTS {
@@ -4667,7 +6839,11 @@ where
     }
 
     async fn handle_intent_command(&mut self, args: &str) {
-        match args.trim() {
+        let trimmed = args.trim();
+        let (command, rest) = trimmed
+            .split_once(char::is_whitespace)
+            .unwrap_or((trimmed, ""));
+        match command.to_ascii_lowercase().as_str() {
             "show" => {
                 let rendered = match self.load_latest_intentspec_json().await {
                     LatestIntentSpecLoad::Found(json) => json,
@@ -4682,20 +6858,28 @@ where
             }
             "execute" => match self.load_latest_intentspec_json().await {
                 LatestIntentSpecLoad::Found(spec_json) => {
-                    self.start_execute_workflow(
-                        &spec_json,
-                        self.session
+                    self.start_execute_workflow(ExecuteWorkflowRequest {
+                        spec_json,
+                        persisted_intent_id: self
+                            .session
                             .metadata
                             .get(LATEST_INTENTSPEC_INTENT_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
-                        self.session
+                        persisted_plan_id: self
+                            .session
                             .metadata
                             .get(LATEST_EXECUTION_PLAN_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
-                        None,
-                    )
+                        persisted_plan_bundle: None,
+                        approved_plan: None,
+                        approved_plan_draft: None,
+                        plan_warnings: Vec::new(),
+                        network_access_override: Some(self.default_network_access),
+                        automatic_repair_attempts: 0,
+                        automatic_repair_max_attempts: DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                    })
                     .await;
                 }
                 LatestIntentSpecLoad::Missing => {
@@ -4710,9 +6894,56 @@ where
                     self.schedule_draw();
                 }
             },
+            "modify" | "revise" => {
+                let request = rest.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        pending_plan_revision_help_message(),
+                    )));
+                    self.sync_mux_input_context();
+                    self.schedule_draw();
+                    return;
+                }
+
+                let spec_json = match self.pending_plan_revision.take() {
+                    Some(spec_json) => spec_json,
+                    None => match self.load_latest_intentspec_json().await {
+                        LatestIntentSpecLoad::Found(json) => json,
+                        LatestIntentSpecLoad::Missing => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                            )));
+                            self.schedule_draw();
+                            return;
+                        }
+                        LatestIntentSpecLoad::BindingMismatch(message) => {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                            self.schedule_draw();
+                            return;
+                        }
+                    },
+                };
+
+                self.begin_plan_revision_flow(spec_json, request).await;
+            }
+            "cancel" => {
+                if self.pending_plan_revision.take().is_some() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Spec revision canceled.".to_string(),
+                    )));
+                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.sync_mux_input_context();
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "No IntentSpec revision is active.".to_string(),
+                    )));
+                }
+                self.schedule_draw();
+            }
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Usage: /intent show|execute".to_string(),
+                    "Usage: /intent show|execute|modify <changes>|cancel".to_string(),
                 )));
                 self.schedule_draw();
             }
@@ -4785,6 +7016,8 @@ where
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
+        self.pending_auto_plan_repair_execution = None;
+        self.complete_streaming_thinking_cells();
         self.clear_active_turn();
         self.running_tool_calls = 0;
     }
@@ -4792,6 +7025,8 @@ where
     fn update_status_after_tool_progress(&mut self) {
         let next_status = if self.pending_intent_review.is_some() {
             AgentStatus::AwaitingIntentReviewChoice
+        } else if self.pending_network_policy.is_some() {
+            AgentStatus::AwaitingNetworkPolicyChoice
         } else if self.pending_post_plan.is_some() {
             AgentStatus::AwaitingPostPlanChoice
         } else if self.pending_phase_confirmation.is_some() || self.pending_exec_approval.is_some()
@@ -4914,6 +7149,33 @@ where
         let mut cell = AssistantHistoryCell::streaming();
         cell.content.push_str(delta);
         self.widget.add_cell(Box::new(cell));
+    }
+
+    fn append_streaming_thinking_delta(&mut self, delta: &str) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = delta.len(),
+            "tui thinking delta rendered"
+        );
+        for cell in self.widget.cells.iter_mut().rev() {
+            if let Some(thinking_cell) = cell.as_any_mut().downcast_mut::<ThinkingHistoryCell>()
+                && thinking_cell.is_streaming
+            {
+                thinking_cell.append(delta);
+                return;
+            }
+        }
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append(delta);
+        self.insert_before_streaming_assistant(Box::new(cell));
+    }
+
+    fn complete_streaming_thinking_cells(&mut self) {
+        for cell in self.widget.cells.iter_mut() {
+            if let Some(thinking_cell) = cell.as_any_mut().downcast_mut::<ThinkingHistoryCell>() {
+                thinking_cell.complete();
+            }
+        }
     }
 
     fn replace_streaming_assistant_cell(&mut self, replacement: Box<dyn HistoryCell>) {
@@ -5096,6 +7358,7 @@ where
 }
 
 enum PendingPlanRevisionCommand<'a> {
+    ContinueAutoRepair { max_attempts: Option<u8> },
     Modify(&'a str),
     Cancel,
     Invalid,
@@ -5103,6 +7366,27 @@ enum PendingPlanRevisionCommand<'a> {
 
 fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand<'_> {
     let trimmed = args.trim();
+    let mut parts = trimmed.split_whitespace();
+    if let Some(command) = parts.next()
+        && matches!(
+            command.to_ascii_lowercase().as_str(),
+            "continue" | "continue-auto" | "auto" | "auto-repair"
+        )
+    {
+        let max_attempts = match parts.next() {
+            Some(value) => match value.parse::<u8>() {
+                Ok(value) if (1..=MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS).contains(&value) => {
+                    Some(value)
+                }
+                _ => return PendingPlanRevisionCommand::Invalid,
+            },
+            None => None,
+        };
+        if parts.next().is_some() {
+            return PendingPlanRevisionCommand::Invalid;
+        }
+        return PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts };
+    }
     if trimmed.eq_ignore_ascii_case("cancel") {
         return PendingPlanRevisionCommand::Cancel;
     }
@@ -5118,11 +7402,14 @@ fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand
 }
 
 fn pending_plan_revision_help_message() -> String {
-    "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    "IntentSpec revise mode is active. Describe changes in plain text, use `/intent modify <changes>` to keep revising, or `/intent cancel` to exit.".to_string()
 }
 
 fn pending_execution_plan_revision_help_message() -> String {
-    "Plan revise mode is active. Describe execution-plan changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    format!(
+        "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts (max {}), use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.",
+        MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+    )
 }
 
 fn append_to_last_tool_group_cell(
@@ -5269,6 +7556,369 @@ fn log_preview_text(text: &str) -> String {
     summarize_llm_output_for_context(text, MAX_CHARS)
 }
 
+fn exec_approval_option_ids(
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> Vec<&'static str> {
+    if allow_all_confirmation_requested {
+        return vec!["confirm_allow_all_commands", "deny", "abort"];
+    }
+    if cache_disabled {
+        return vec!["approve", "deny", "abort"];
+    }
+    vec![
+        "approve",
+        "approve_session",
+        "approve_ttl",
+        "approve_directory_ttl",
+        "approve_pattern_ttl",
+        "allow_all_commands",
+        "deny",
+        "abort",
+    ]
+}
+
+fn exec_approval_deny_selection(
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> usize {
+    if cache_disabled || allow_all_confirmation_requested {
+        1
+    } else {
+        6
+    }
+}
+
+fn exec_approval_interaction_options(cache_disabled: bool) -> Vec<CodeUiInteractionOption> {
+    if cache_disabled {
+        return vec![
+            CodeUiInteractionOption {
+                id: "approve".to_string(),
+                label: "Approve Once".to_string(),
+                description: Some("Run this command once; do not cache the decision".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "deny".to_string(),
+                label: "Deny".to_string(),
+                description: Some("Reject this command".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "abort".to_string(),
+                label: "Abort".to_string(),
+                description: Some("Stop the current turn".to_string()),
+            },
+        ];
+    }
+
+    vec![
+        CodeUiInteractionOption {
+            id: "approve".to_string(),
+            label: "Approve".to_string(),
+            description: Some("Run this command once".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_session".to_string(),
+            label: "Approve Session".to_string(),
+            description: Some("Approve this exact command for this session".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_ttl".to_string(),
+            label: "Approve TTL".to_string(),
+            description: Some("Approve this exact command until the TTL expires".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_directory_ttl".to_string(),
+            label: "Directory TTL".to_string(),
+            description: Some(
+                "Approve matching command families in this directory until TTL expires".to_string(),
+            ),
+        },
+        CodeUiInteractionOption {
+            id: "approve_pattern_ttl".to_string(),
+            label: "Pattern TTL".to_string(),
+            description: Some(
+                "Approve commands with the same argument pattern until TTL expires".to_string(),
+            ),
+        },
+        CodeUiInteractionOption {
+            id: "allow_all_commands".to_string(),
+            label: "Allow All Commands".to_string(),
+            description: Some("Requires a second confirmation".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "deny".to_string(),
+            label: "Deny".to_string(),
+            description: Some("Reject this command".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "abort".to_string(),
+            label: "Abort".to_string(),
+            description: Some("Stop the current turn".to_string()),
+        },
+    ]
+}
+
+fn exec_approval_allow_all_confirmation_options() -> Vec<CodeUiInteractionOption> {
+    vec![
+        CodeUiInteractionOption {
+            id: "confirm_allow_all_commands".to_string(),
+            label: "Confirm Allow All".to_string(),
+            description: Some("Allow every command for this session".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "deny".to_string(),
+            label: "Deny".to_string(),
+            description: Some("Reject this command".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "abort".to_string(),
+            label: "Abort".to_string(),
+            description: Some("Stop the current turn".to_string()),
+        },
+    ]
+}
+
+fn exec_approval_decision_from_selection(
+    selected: usize,
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> ReviewDecision {
+    if allow_all_confirmation_requested {
+        return match selected {
+            0 => ReviewDecision::ApprovedForAllCommands,
+            1 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+    }
+    if cache_disabled {
+        return match selected {
+            0 => ReviewDecision::Approved,
+            1 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+    }
+
+    match selected {
+        0 => ReviewDecision::Approved,
+        1 => ReviewDecision::ApprovedForSession,
+        2 => ReviewDecision::ApprovedForTtl,
+        3 => ReviewDecision::ApprovedForDirectoryTtl,
+        4 => ReviewDecision::ApprovedForPatternTtl,
+        5 => ReviewDecision::ApprovedForAllCommands,
+        6 => ReviewDecision::Denied,
+        _ => ReviewDecision::Abort,
+    }
+}
+
+fn format_approval_memos(memos: &[ApprovalMemo]) -> String {
+    memos
+        .iter()
+        .map(|memo| {
+            let lifetime = memo
+                .expires_at
+                .map(|expires_at| format!("expires {}", expires_at.to_rfc3339()))
+                .unwrap_or_else(|| "session".to_string());
+            format!(
+                "  {}  {:?} {:?} {:?} {}",
+                memo.key, memo.decision, memo.scope, memo.sensitivity_tier, lifetime
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_source_statuses(statuses: &[SourceStatus]) -> String {
+    if statuses.is_empty() {
+        return "No sources registered.".to_string();
+    }
+
+    let mut lines = vec!["Sources:".to_string()];
+    for status in statuses {
+        let state = if status.shared_state {
+            "shared"
+        } else {
+            "session"
+        };
+        lines.push(format!(
+            "  {} enabled={} kind={:?} trust={:?} tools={} resources={} prompts={} state={}",
+            status.slug,
+            status.enablement.label(),
+            status.kind,
+            status.trust_tier,
+            status.tool_count,
+            status.resource_count,
+            status.prompt_count,
+            state
+        ));
+    }
+    lines.join("\n")
+}
+
+fn parse_usage_grouping(args: &str) -> Result<UsageGrouping, String> {
+    let args = args.trim();
+    if args.is_empty() {
+        return Ok(UsageGrouping::ProviderModel);
+    }
+    match args {
+        "--by=model" | "--by=provider-model" => Ok(UsageGrouping::ProviderModel),
+        "--by=agent" => Ok(UsageGrouping::Agent),
+        "--by=agent-model" | "--by=agent-provider-model" => Ok(UsageGrouping::AgentProviderModel),
+        _ => Err(
+            "Usage: /usage [--by=model|--by=provider-model|--by=agent|--by=agent-model]"
+                .to_string(),
+        ),
+    }
+}
+
+fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
+    match grouping {
+        UsageGrouping::ProviderModel => "provider/model",
+        UsageGrouping::Agent => "agent",
+        UsageGrouping::AgentProviderModel => "agent/provider/model",
+    }
+}
+
+fn apply_streaming_usage_delta(
+    snapshot: &mut UsageDisplaySnapshot,
+    delta: &str,
+    pending_stream_output_tokens: &mut u64,
+) {
+    let tokens = estimate_streamed_output_tokens(delta);
+    if tokens == 0 {
+        return;
+    }
+    snapshot.completion_tokens = snapshot.completion_tokens.saturating_add(tokens);
+    *pending_stream_output_tokens = pending_stream_output_tokens.saturating_add(tokens);
+}
+
+fn apply_final_usage_update(
+    snapshot: &mut UsageDisplaySnapshot,
+    usage: &CompletionUsageSummary,
+    wall_clock_ms: u64,
+    pending_stream_output_tokens: &mut u64,
+) {
+    if *pending_stream_output_tokens > 0 {
+        snapshot.completion_tokens = snapshot
+            .completion_tokens
+            .saturating_sub(*pending_stream_output_tokens);
+        *pending_stream_output_tokens = 0;
+    }
+    snapshot.prompt_tokens = snapshot.prompt_tokens.saturating_add(usage.input_tokens);
+    snapshot.completion_tokens = snapshot
+        .completion_tokens
+        .saturating_add(usage.output_tokens);
+    snapshot.wall_clock_ms = snapshot.wall_clock_ms.saturating_add(wall_clock_ms);
+    snapshot.cost_usd = match (snapshot.cost_usd, usage.cost_usd) {
+        (Some(current), Some(next)) => Some(current + next),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    };
+}
+
+fn estimate_streamed_output_tokens(delta: &str) -> u64 {
+    let chars = delta.chars().filter(|ch| !ch.is_whitespace()).count();
+    if chars == 0 {
+        0
+    } else {
+        u64::try_from(chars.div_ceil(4)).unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageTuiProjectConfig {
+    usage: Option<UsageTuiSectionConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageTuiSectionConfig {
+    tui_detail_popup: Option<bool>,
+}
+
+fn usage_detail_popup_enabled(working_dir: &Path) -> bool {
+    let path = working_dir.join(".libra").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    usage_detail_popup_enabled_from_toml(&contents).unwrap_or_else(|error| {
+        tracing::warn!(
+            target: "libra::tui::usage",
+            path = %path.display(),
+            error = %error,
+            "failed to parse usage TUI config; enabling usage detail popup"
+        );
+        true
+    })
+}
+
+fn usage_detail_popup_enabled_from_toml(contents: &str) -> Result<bool, toml::de::Error> {
+    let config: UsageTuiProjectConfig = toml::from_str(contents)?;
+    Ok(config
+        .usage
+        .and_then(|usage| usage.tui_detail_popup)
+        .unwrap_or(true))
+}
+
+fn source_command_usage() -> String {
+    "Usage: /source [list|enable <slug>|disable <slug>|reload <slug>]".to_string()
+}
+
+fn format_memory_anchors(anchors: &[MemoryAnchor]) -> String {
+    if anchors.is_empty() {
+        return "No memory anchors.".to_string();
+    }
+
+    let mut anchors = anchors.to_vec();
+    anchors.sort_by_key(|anchor| {
+        (
+            anchor.review_state,
+            anchor.scope,
+            anchor.kind,
+            anchor.anchor_id,
+        )
+    });
+
+    let mut lines = vec!["Memory anchors:".to_string()];
+    for anchor in anchors {
+        let expires = anchor
+            .expires_at
+            .map(|expires_at| format!(" expires_at={}", expires_at.to_rfc3339()))
+            .unwrap_or_default();
+        let superseded_by = anchor
+            .superseded_by
+            .map(|id| format!(" superseded_by={}", short_anchor_id(id)))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  {} [{}] kind={} scope={} confidence={}{}{}",
+            anchor.short_id(),
+            anchor.review_state,
+            anchor.kind,
+            anchor.scope,
+            anchor.confidence,
+            expires,
+            superseded_by
+        ));
+        lines.push(format!("    {}", anchor.content));
+    }
+    lines.join("\n")
+}
+
+fn short_anchor_id(anchor_id: uuid::Uuid) -> String {
+    anchor_id.to_string().chars().take(8).collect()
+}
+
+fn split_anchor_prefix_and_tail(input: &str) -> (&str, &str) {
+    input
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(prefix, tail)| (prefix, tail.trim()))
+        .unwrap_or((input.trim(), ""))
+}
+
+fn anchor_lookup_message(error: MemoryAnchorLookupError) -> String {
+    format!("Unable to find memory anchor: {error}")
+}
+
 fn summarize_llm_output_for_context(text: &str, max_chars: usize) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.chars().count() <= max_chars {
@@ -5382,6 +8032,13 @@ fn format_orchestrator_result(result: &OrchestratorResult) -> String {
         short_markdown_id(&result.intent_spec_id)
     ));
     if let Some(persistence) = &result.persistence {
+        if let Some(command) = persistence
+            .thread_id
+            .as_deref()
+            .and_then(graph_command_from_thread_id)
+        {
+            lines.push(format!("| Graph | `{command}` |"));
+        }
         lines.push(format!(
             "| Run | `{}` |",
             short_markdown_id(&persistence.run_id)
@@ -5621,39 +8278,73 @@ fn escape_markdown_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        process::Command,
+        sync::{Arc, Mutex},
+    };
+
+    use async_trait::async_trait;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use serde_json::json;
 
     use super::{
-        PendingPlanRevisionCommand, append_to_last_tool_group_cell,
-        append_to_last_tool_group_preview_cell, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        code_ui_response_from_managed_selection, format_decision_stage_note,
-        format_intentspec_target_mismatch, format_orchestrator_result,
+        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision,
+        FirstTurnIntentPolicyUpdate, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep, ReviewScrollAction,
+        append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
+        apply_developer_network_access, apply_final_usage_update, apply_streaming_usage_delta,
+        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, classify_execution_failure_revision,
+        classify_first_turn_task_intent, code_ui_response_from_managed_selection,
+        default_chat_allowed_tools, estimate_streamed_output_tokens,
+        exec_approval_decision_from_selection, execution_failure_report,
+        execution_failure_revision_message, execution_requires_plan_repair,
+        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intentspec_with_llm_plan_objectives, is_global_quit_command_input,
-        mark_visible_tool_call_running, newest_managed_assistant_text,
-        parse_pending_plan_revision_command, pending_execution_plan_revision_help_message,
-        pending_plan_revision_help_message, should_route_plain_message_to_plan,
+        graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
+        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
+        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
+        normalize_terminal_paste_text, parse_pending_plan_revision_command, parse_usage_grouping,
+        pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
+        phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
+        provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
+        session_graph_thread_id, should_auto_classify_first_user_message,
+        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
+        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
+        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
+            agent::{TaskIntent, ToolLoopConfig},
+            completion::{
+                AssistantContent, CompletionError, CompletionModel, CompletionRequest,
+                CompletionResponse, CompletionUsageSummary, Message, Text,
+            },
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
                 resolve_intentspec,
                 types::{
-                    ChangeType, DecompositionMode, IntentSpec, Objective, ObjectiveKind, RiskLevel,
+                    ChangeType, DecompositionMode, IntentSpec, NetworkPolicy, Objective,
+                    ObjectiveKind, RiskLevel,
                 },
             },
             orchestrator::types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+                DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+                PersistedExecution, PolicyViolation, SystemReport, TaskContract, TaskKind,
+                TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
             },
-            tools::context::{
-                PlanStep as ToolPlanStep, StepStatus as ToolStepStatus, UpdatePlanArgs,
+            sandbox::ReviewDecision,
+            session::SessionState,
+            tools::{
+                ToolHandler, ToolRegistry, ToolRegistryBuilder,
+                context::{PlanDraftStep, SubmitPlanDraftArgs},
+                spec::ToolSpec,
             },
+            usage::{UsageDisplaySnapshot, UsageGrouping},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -5679,6 +8370,126 @@ mod tests {
             checks: vec![],
             contract: TaskContract::default(),
         }
+    }
+
+    #[test]
+    fn usage_grouping_parser_accepts_tui_flags() {
+        assert_eq!(
+            parse_usage_grouping("").unwrap(),
+            UsageGrouping::ProviderModel
+        );
+        assert_eq!(
+            parse_usage_grouping("--by=agent").unwrap(),
+            UsageGrouping::Agent
+        );
+        assert_eq!(
+            parse_usage_grouping("--by=agent-model").unwrap(),
+            UsageGrouping::AgentProviderModel
+        );
+        assert!(parse_usage_grouping("--bad").is_err());
+    }
+
+    #[test]
+    fn usage_detail_popup_config_defaults_to_enabled() {
+        assert!(usage_detail_popup_enabled_from_toml("").unwrap());
+        assert!(
+            !usage_detail_popup_enabled_from_toml("[usage]\ntui_detail_popup = false\n").unwrap()
+        );
+        assert!(
+            usage_detail_popup_enabled_from_toml("[usage]\ntui_detail_popup = true\n").unwrap()
+        );
+    }
+
+    #[test]
+    fn streaming_usage_delta_updates_estimate_until_final_usage_arrives() {
+        let mut snapshot = UsageDisplaySnapshot {
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 10,
+            wall_clock_ms: 0,
+            cost_usd: None,
+        };
+        let mut pending = 0;
+
+        apply_streaming_usage_delta(&mut snapshot, "abcdefgh", &mut pending);
+
+        assert_eq!(estimate_streamed_output_tokens("abcdefgh"), 2);
+        assert_eq!(snapshot.completion_tokens, 12);
+        assert_eq!(pending, 2);
+
+        apply_final_usage_update(
+            &mut snapshot,
+            &CompletionUsageSummary {
+                input_tokens: 5,
+                output_tokens: 7,
+                cached_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(12),
+                cost_usd: Some(0.01),
+            },
+            1500,
+            &mut pending,
+        );
+
+        assert_eq!(pending, 0);
+        assert_eq!(snapshot.prompt_tokens, 5);
+        assert_eq!(snapshot.completion_tokens, 17);
+        assert_eq!(snapshot.wall_clock_ms, 1500);
+        assert_eq!(snapshot.cost_usd, Some(0.01));
+    }
+
+    #[test]
+    fn review_scroll_keys_preserve_plain_selection_arrows() {
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Top)
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Bottom)
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Up(10))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Down(10))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(ReviewScrollAction::Up(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)),
+            Some(ReviewScrollAction::Down(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Up(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Down(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git command should run");
+        assert!(status.success(), "git {:?} failed with {status}", args);
     }
 
     fn orchestrator_fixture() -> OrchestratorResult {
@@ -5708,6 +8519,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }],
             system_report: SystemReport {
                 integration: GateReport::empty(),
@@ -5760,28 +8572,27 @@ mod tests {
         )
     }
 
-    fn update_plan_args(steps: &[&str]) -> UpdatePlanArgs {
-        UpdatePlanArgs {
+    fn provider_plan_draft(steps: &[&str]) -> ProviderPlanDraft {
+        ProviderPlanDraft {
             explanation: Some("Plan generated from confirmed IntentSpec".to_string()),
-            plan: steps
+            steps: steps
                 .iter()
-                .map(|step| ToolPlanStep {
-                    step: (*step).to_string(),
-                    status: ToolStepStatus::Pending,
+                .map(|step| ProviderPlanDraftStep {
+                    title: (*step).to_string(),
                 })
                 .collect(),
         }
     }
 
     #[test]
-    fn llm_plan_steps_replace_objectives_for_execution_plan_compile() {
+    fn provider_plan_draft_steps_replace_objectives_for_execution_plan_compile() {
         let spec = minimal_intentspec(vec![Objective {
             title: "original broad objective".to_string(),
             kind: ObjectiveKind::Implementation,
         }]);
-        let plan = update_plan_args(&["Inspect current flow", "Add LLM plan review"]);
+        let plan = provider_plan_draft(&["Inspect current flow", "Add LLM plan review"]);
 
-        let planned_spec = intentspec_with_llm_plan_objectives(&spec, &plan).unwrap();
+        let planned_spec = intentspec_with_plan_draft_objectives(&spec, &plan).unwrap();
 
         let titles = planned_spec
             .intent
@@ -5808,27 +8619,309 @@ mod tests {
     }
 
     #[test]
-    fn execution_plan_prompt_requires_update_plan_after_intentspec_confirmation() {
+    fn developer_network_choice_updates_intentspec_network_policy() {
+        let mut spec = minimal_intentspec(vec![Objective {
+            title: "download dependency metadata".to_string(),
+            kind: ObjectiveKind::Implementation,
+        }]);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Deny
+        );
+
+        apply_developer_network_access(&mut spec, true);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Allow
+        );
+
+        apply_developer_network_access(&mut spec, false);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn execution_plan_prompt_requires_submit_plan_draft_after_intentspec_confirmation() {
         let prompt = build_execution_plan_prompt("{\"kind\":\"IntentSpec\"}");
 
         assert!(prompt.contains("already confirmed IntentSpec"));
-        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("call submit_plan_draft exactly once"));
+        assert!(prompt.contains("web_search"));
+        assert!(prompt.contains("Rust edition 2024 is stable"));
+        assert!(!prompt.contains("call update_plan exactly once"));
         assert!(prompt.contains("Do not call submit_intent_draft"));
     }
 
     #[test]
     fn execution_plan_revision_prompt_includes_existing_plan_and_change_request() {
-        let plan = update_plan_args(&["Inspect current flow"]);
+        let plan = provider_plan_draft(&["Inspect current flow"]);
         let prompt = build_execution_plan_revision_prompt(
             "{\"kind\":\"IntentSpec\"}",
             &plan,
             "split implementation and tests",
+            None,
         );
 
         assert!(prompt.contains("Current execution plan"));
         assert!(prompt.contains("Inspect current flow"));
         assert!(prompt.contains("split implementation and tests"));
-        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("call submit_plan_draft exactly once"));
+        assert!(!prompt.contains("call update_plan exactly once"));
+    }
+
+    #[test]
+    fn execution_plan_revision_prompt_includes_previous_failure_context() {
+        let plan = provider_plan_draft(&["Run failing check"]);
+        let prompt = build_execution_plan_revision_prompt(
+            "{\"kind\":\"IntentSpec\"}",
+            &plan,
+            "repair the plan",
+            Some("Failed tasks: Run failing check.\nFailure details:\n- cargo test failed"),
+        );
+
+        assert!(prompt.contains("Previous execution failure evidence"));
+        assert!(prompt.contains("cargo test failed"));
+        assert!(prompt.contains("Do not start over from the IntentSpec"));
+        assert!(prompt.contains("primary goal is to repair that specific failed execution"));
+        assert!(prompt.contains("addresses the concrete failure"));
+    }
+
+    #[test]
+    fn phase1_plan_draft_tool_is_suppressed_from_generic_transcript() {
+        assert!(is_phase1_plan_draft_tool("submit_plan_draft"));
+        assert!(!is_phase1_plan_draft_tool("update_plan"));
+    }
+
+    #[test]
+    fn phase1_plan_generation_does_not_forward_provider_text() {
+        assert!(!should_forward_phase1_model_text_delta(
+            "provider draft markdown that should stay internal"
+        ));
+    }
+
+    #[test]
+    fn phase0_tool_loop_config_stops_after_submit_intent_draft() {
+        let config = phase0_plan_tool_loop_config(ToolLoopConfig::default());
+
+        assert_eq!(config.max_turns, Some(12));
+        assert_eq!(
+            config.terminal_tools.as_ref().unwrap(),
+            &vec!["submit_intent_draft".to_string()]
+        );
+        assert!(
+            config
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool == "submit_intent_draft"))
+        );
+    }
+
+    #[test]
+    fn phase1_tool_loop_config_stops_after_submit_plan_draft() {
+        let config = phase1_plan_tool_loop_config(ToolLoopConfig::default());
+
+        assert_eq!(config.max_turns, Some(12));
+        assert_eq!(
+            config.terminal_tools.as_ref().unwrap(),
+            &vec!["submit_plan_draft".to_string()]
+        );
+        assert!(
+            config
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool == "submit_plan_draft"))
+        );
+    }
+
+    #[test]
+    fn phase0_intentspec_generation_does_not_forward_provider_text() {
+        assert!(!should_forward_phase0_model_text_delta(
+            "provider draft markdown that should stay internal"
+        ));
+    }
+
+    #[test]
+    fn default_chat_tools_exclude_phase_review_submission_tools() {
+        assert!(!is_default_chat_tool("submit_intent_draft"));
+        assert!(!is_default_chat_tool("submit_plan_draft"));
+        assert!(is_default_chat_tool("update_plan"));
+        assert!(is_default_chat_tool("web_search"));
+    }
+
+    #[test]
+    fn default_chat_allowed_tools_prefers_launch_config_policy() {
+        let registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
+        let config = ToolLoopConfig {
+            allowed_tools: Some(vec!["read_file".to_string(), "list_symbols".to_string()]),
+            ..ToolLoopConfig::default()
+        };
+
+        assert_eq!(
+            default_chat_allowed_tools(&registry, &config),
+            vec!["read_file".to_string(), "list_symbols".to_string()]
+        );
+    }
+
+    #[derive(Clone)]
+    struct IntentTestModel {
+        response: String,
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl IntentTestModel {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<CompletionRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl CompletionModel for IntentTestModel {
+        type Response = serde_json::Value;
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: self.response.clone(),
+                })],
+                reasoning_content: None,
+                raw_response: serde_json::json!({ "provider": "intent-test" }),
+            })
+        }
+    }
+
+    struct NamedToolHandler(&'static str);
+
+    #[async_trait]
+    impl ToolHandler for NamedToolHandler {
+        fn kind(&self) -> crate::internal::ai::tools::context::ToolKind {
+            crate::internal::ai::tools::context::ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: crate::internal::ai::tools::context::ToolInvocation,
+        ) -> crate::internal::ai::tools::error::ToolResult<crate::internal::ai::tools::ToolOutput>
+        {
+            Ok(crate::internal::ai::tools::ToolOutput::success("ok"))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::new(self.0, "test tool")
+        }
+    }
+
+    #[tokio::test]
+    async fn first_turn_classifier_updates_prompt_and_direct_chat_tool_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistryBuilder::with_working_dir(temp.path().to_path_buf())
+            .register("read_file", Arc::new(NamedToolHandler("read_file")))
+            .register("list_symbols", Arc::new(NamedToolHandler("list_symbols")))
+            .register("apply_patch", Arc::new(NamedToolHandler("apply_patch")))
+            .register("shell", Arc::new(NamedToolHandler("shell")))
+            .build();
+        let model = IntentTestModel::new(
+            r#"{"intent":"review","confidence":0.93,"rationale":"user asked for review"}"#,
+        );
+        let mut config = ToolLoopConfig {
+            preamble: Some(
+                crate::internal::ai::prompt::SystemPromptBuilder::new(temp.path())
+                    .with_intent(TaskIntent::Unknown)
+                    .with_dynamic_context()
+                    .build(),
+            ),
+            allowed_tools: Some(registry.filter_by_intent(TaskIntent::Unknown)),
+            ..ToolLoopConfig::default()
+        };
+
+        let decision = classify_first_turn_task_intent(
+            &model,
+            &registry,
+            &mut config,
+            "Please review this change for production risks",
+            FirstTurnIntentPolicyUpdate::PromptAndAllowedTools,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decision.intent, TaskIntent::Review);
+        let allowed_tools = config.allowed_tools.as_ref().unwrap();
+        assert!(allowed_tools.contains(&"read_file".to_string()));
+        assert!(allowed_tools.contains(&"list_symbols".to_string()));
+        assert!(!allowed_tools.contains(&"apply_patch".to_string()));
+        assert!(!allowed_tools.contains(&"shell".to_string()));
+
+        let preamble = config.preamble.as_deref().unwrap();
+        assert!(preamble.contains("## Task Intent"));
+        assert!(preamble.contains("intent=review"));
+        assert!(!preamble.contains("intent=unknown"));
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].tools.is_empty());
+        assert!(
+            requests[0]
+                .preamble
+                .as_deref()
+                .unwrap()
+                .contains("Classify the user's libra code request")
+        );
+    }
+
+    #[test]
+    fn first_turn_auto_classification_is_only_for_unprofiled_empty_history() {
+        assert!(should_auto_classify_first_user_message(true, &[], None));
+        assert!(!should_auto_classify_first_user_message(false, &[], None));
+        assert!(!should_auto_classify_first_user_message(
+            true,
+            &[Message::user("previous turn")],
+            None
+        ));
+        assert!(!should_auto_classify_first_user_message(
+            true,
+            &[],
+            Some(&vec!["read_file".to_string()])
+        ));
+    }
+
+    #[test]
+    fn undo_prefers_vcs_rollback_only_for_clean_committed_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test User"]);
+        run_git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        run_git(repo.path(), &["add", "tracked.txt"]);
+        run_git(repo.path(), &["commit", "-m", "base"]);
+
+        assert!(undo_should_prefer_vcs_rollback(repo.path()));
+
+        std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+        assert!(!undo_should_prefer_vcs_rollback(repo.path()));
+    }
+
+    #[test]
+    fn provider_plan_draft_from_args_rejects_empty_titles() {
+        let result = provider_plan_draft_from_args(SubmitPlanDraftArgs {
+            explanation: None,
+            steps: vec![PlanDraftStep {
+                title: "  ".to_string(),
+            }],
+        });
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -5836,7 +8929,295 @@ mod tests {
         let help = pending_execution_plan_revision_help_message();
 
         assert!(help.contains("Plan revise mode"));
+        assert!(help.contains("/plan continue"));
         assert!(help.contains("/plan modify <changes>"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_request_includes_failure_report_and_attempt() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.tool_calls = vec![ToolCallRecord {
+            tool_name: "shell".to_string(),
+            action: "cargo test".to_string(),
+            arguments_json: None,
+            paths_read: vec![],
+            paths_written: vec![],
+            success: false,
+            summary: Some("error[E0425]: cannot find value `x`".to_string()),
+            diffs: vec![],
+        }];
+
+        let report = execution_failure_report(Some(&result), None);
+        let request = automatic_plan_repair_request_from_report(
+            &report,
+            2,
+            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        );
+
+        assert!(request.contains("Automatic plan repair attempt 2/10"));
+        assert!(request.contains("repair of that failed execution"));
+        assert!(request.contains("not a fresh plan from the original Intent"));
+        assert!(request.contains("concrete repair Step"));
+        assert!(request.contains("preserve successful prior steps only when"));
+        assert!(request.contains("cargo test"));
+        assert!(request.contains("cannot find value"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_default_threshold_is_ten() {
+        assert_eq!(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 10);
+        assert_eq!(DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 0);
+    }
+
+    #[test]
+    fn automatic_plan_repair_stops_at_threshold_for_developer_confirmation() {
+        let result = orchestrator_fixture();
+        let report = execution_failure_report(Some(&result), None);
+        let route = ExecutionFailureRevision::PlanRevision;
+
+        assert!(should_auto_repair_execution_failure(route, 0, 3));
+        assert!(should_auto_repair_execution_failure(route, 2, 3));
+        assert!(!should_auto_repair_execution_failure(route, 3, 3));
+        assert!(should_auto_repair_execution_failure(route, 3, 5));
+        assert!(!should_auto_repair_execution_failure(route, 0, 0));
+
+        let message = automatic_plan_repair_threshold_message(&report, 3, 3);
+        assert!(message.contains("Developer confirmation"));
+        assert!(message.contains("/plan continue"));
+        assert!(message.contains("Plan repair guidance"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_uses_orchestrator_errors_before_a_final_decision() {
+        let summary = "Orchestrator failed: config error: persisted plan not found: 019dbb06-b68c-72f3-b17a-47c46e7b7328";
+        let report = execution_failure_report(None, Some(summary));
+
+        assert!(report.contains("before producing a final decision"));
+        assert!(report.contains("persisted plan not found"));
+        let route = classify_execution_failure_revision(None, Some(summary));
+        assert_eq!(route, ExecutionFailureRevision::ManualAction);
+        assert!(!should_auto_repair_execution_failure(route, 0, 3));
+        assert!(!should_auto_repair_execution_failure(route, 3, 3));
+
+        let request = automatic_plan_repair_request_from_report(&report, 1, 3);
+        assert!(request.contains("persisted plan not found"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_only_runs_for_plan_revision_route() {
+        assert!(should_auto_repair_execution_failure(
+            ExecutionFailureRevision::PlanRevision,
+            0,
+            3
+        ));
+        assert!(!should_auto_repair_execution_failure(
+            ExecutionFailureRevision::IntentSpecRevision,
+            0,
+            3
+        ));
+        assert!(!should_auto_repair_execution_failure(
+            ExecutionFailureRevision::ManualAction,
+            0,
+            3
+        ));
+    }
+
+    #[test]
+    fn execution_failure_classification_routes_plan_repairs_only_for_plan_failures() {
+        let mut result = orchestrator_fixture();
+        result.system_report.missing_artifacts.clear();
+        result.system_report.artifacts_complete = true;
+
+        assert_eq!(
+            classify_execution_failure_revision(Some(&result), None),
+            ExecutionFailureRevision::PlanRevision
+        );
+    }
+
+    #[test]
+    fn execution_failure_classification_routes_artifact_failure_to_intentspec_revision() {
+        let result = orchestrator_fixture();
+
+        assert_eq!(
+            classify_execution_failure_revision(Some(&result), None),
+            ExecutionFailureRevision::IntentSpecRevision
+        );
+    }
+
+    #[test]
+    fn execution_failure_classification_routes_policy_failures_to_intentspec_revision() {
+        for code in [
+            "scope-creep",
+            "network-policy-deny",
+            "tool-acl-deny",
+            "sandbox-escalation-deny",
+        ] {
+            let mut result = orchestrator_fixture();
+            result.system_report.missing_artifacts.clear();
+            result.system_report.artifacts_complete = true;
+            let task_result = result
+                .task_results
+                .first_mut()
+                .expect("fixture should include a failed task result");
+            task_result.policy_violations = vec![PolicyViolation {
+                code: code.to_string(),
+                message: "policy blocked execution".to_string(),
+                tool_name: Some("shell".to_string()),
+                path: None,
+            }];
+
+            assert_eq!(
+                classify_execution_failure_revision(Some(&result), None),
+                ExecutionFailureRevision::IntentSpecRevision,
+                "policy code {code} should revise IntentSpec"
+            );
+        }
+    }
+
+    #[test]
+    fn intentspec_revision_message_uses_intent_commands() {
+        let message = intentspec_failure_revision_message_from_report(
+            "Failed tasks: Gate failed.\nFailure details:\n- network policy denied",
+        );
+
+        assert!(message.contains("IntentSpec constraints"));
+        assert!(message.contains("/intent modify <changes>"));
+        assert!(message.contains("/intent cancel"));
+        assert!(!message.contains("/plan modify"));
+    }
+
+    #[test]
+    fn abandoned_execution_requires_plan_repair_loop() {
+        let result = orchestrator_fixture();
+
+        assert!(execution_requires_plan_repair(Some(&result)));
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("Plan execution failed"));
+        assert!(message.contains("Decision: Abandon"));
+        assert!(message.contains("Inspect sources"));
+        assert!(message.contains("/plan cancel"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_includes_gate_error_evidence() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.gate_report = Some(GateReport {
+            results: vec![GateResult {
+                check_id: "cargo-check".to_string(),
+                kind: "command".to_string(),
+                passed: false,
+                exit_code: 101,
+                stdout: String::new(),
+                stderr: "error[E0432]: unresolved import `clap`".to_string(),
+                duration_ms: 42,
+                timed_out: false,
+            }],
+            all_required_passed: false,
+        });
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("Failure details:"));
+        assert!(message.contains("cargo-check"));
+        assert!(message.contains("unresolved import"));
+        assert!(message.contains("Plan change hints:"));
+        assert!(message.contains("compile error first"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_prioritizes_dependency_network_hint() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.gate_report = Some(GateReport {
+            results: vec![GateResult {
+                check_id: "build".to_string(),
+                kind: "command".to_string(),
+                passed: false,
+                exit_code: 101,
+                stdout: String::new(),
+                stderr: "    Updating crates.io index".to_string(),
+                duration_ms: 42,
+                timed_out: false,
+            }],
+            all_required_passed: false,
+        });
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("std-only implementation"));
+        assert!(message.contains("dependency-policy:no-new"));
+        assert!(!message.contains("compile error first"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_includes_tool_and_policy_evidence() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.tool_calls = vec![ToolCallRecord {
+            tool_name: "run_libra_vcs".to_string(),
+            action: "cargo run -- code".to_string(),
+            arguments_json: None,
+            paths_read: vec![],
+            paths_written: vec![],
+            success: false,
+            summary: Some("command failed\nerror[E0599]: no variant named Code".to_string()),
+            diffs: vec![],
+        }];
+        task_result.policy_violations = vec![PolicyViolation {
+            code: "forbidden_command".to_string(),
+            message: "run_libra_vcs may not execute cargo".to_string(),
+            tool_name: Some("run_libra_vcs".to_string()),
+            path: None,
+        }];
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("tool failed: run_libra_vcs cargo run -- code"));
+        assert!(message.contains("error[E0599]"));
+        assert!(message.contains("policy violation: forbidden_command"));
+        assert!(message.contains("compile error first"));
+    }
+
+    #[test]
+    fn successful_or_reviewable_execution_does_not_force_plan_repair_loop() {
+        let mut result = orchestrator_fixture();
+
+        result.decision = DecisionOutcome::Commit;
+        assert!(!execution_requires_plan_repair(Some(&result)));
+
+        result.decision = DecisionOutcome::HumanReviewRequired;
+        assert!(!execution_requires_plan_repair(Some(&result)));
+
+        assert!(execution_requires_plan_repair(None));
+    }
+
+    #[test]
+    fn failed_execution_revision_uses_latest_plan_tasks_as_draft() {
+        let result = orchestrator_fixture();
+        let draft = provider_plan_draft_from_plan(&result.execution_plan_spec);
+
+        let titles = draft
+            .steps
+            .iter()
+            .map(|step| step.title.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(titles, vec!["Inspect sources", "Run checks"]);
     }
 
     #[test]
@@ -5958,6 +9339,44 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_result_includes_graph_command_for_persisted_thread() {
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+        let mut result = orchestrator_fixture();
+        result.persistence = Some(PersistedExecution {
+            thread_id: Some(thread_id.to_string()),
+            run_id: "run-1".into(),
+            ..PersistedExecution::default()
+        });
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains(&format!("| Graph | `libra graph {thread_id}` |")));
+        assert_eq!(
+            graph_thread_id_from_orchestrator_result(&result).as_deref(),
+            Some(thread_id)
+        );
+    }
+
+    #[test]
+    fn orchestrator_result_thread_id_updates_session_graph_hint() {
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+        let mut session = SessionState::new("/tmp/workspace");
+        let mut result = orchestrator_fixture();
+        result.persistence = Some(PersistedExecution {
+            thread_id: Some(thread_id.to_string()),
+            run_id: "run-1".into(),
+            ..PersistedExecution::default()
+        });
+
+        record_orchestrator_thread_metadata(&mut session, &result);
+
+        assert_eq!(
+            session_graph_thread_id(&session).as_deref(),
+            Some(thread_id)
+        );
+    }
+
+    #[test]
     fn orchestrator_stage_notes_surface_later_phases() {
         let result = orchestrator_fixture();
         let plan = &result.execution_plan_spec;
@@ -6014,6 +9433,8 @@ mod tests {
         assert!(prompt.contains("\"kind\": \"IntentSpec\""));
         assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+        assert!(prompt.contains("dependency-policy:no-new"));
+        assert!(prompt.contains("prefer std::env"));
     }
 
     #[test]
@@ -6034,6 +9455,10 @@ mod tests {
         let prompt = build_plan_prompt("init the project with cargo");
         assert!(prompt.contains("request_user_input"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+        assert!(prompt.contains("web_search"));
+        assert!(prompt.contains("Rust edition 2024 is stable"));
+        assert!(prompt.contains("dependency-policy:no-new"));
+        assert!(prompt.contains("prefer std::env"));
     }
 
     #[test]
@@ -6046,10 +9471,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_paste_normalizes_crlf() {
+        assert_eq!(
+            normalize_terminal_paste_text("first\r\nsecond\rthird"),
+            "first\nsecond\nthird"
+        );
+    }
+
+    #[test]
     fn parses_pending_revision_builtin_commands() {
         assert!(matches!(
             parse_pending_plan_revision_command("modify tighten sandbox"),
             PendingPlanRevisionCommand::Modify("tighten sandbox")
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue"),
+            PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts: None }
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 5"),
+            PendingPlanRevisionCommand::ContinueAutoRepair {
+                max_attempts: Some(5)
+            }
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 10"),
+            PendingPlanRevisionCommand::ContinueAutoRepair {
+                max_attempts: Some(10)
+            }
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 0"),
+            PendingPlanRevisionCommand::Invalid
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 11"),
+            PendingPlanRevisionCommand::Invalid
         ));
         assert!(matches!(
             parse_pending_plan_revision_command("revise add checks"),
@@ -6068,8 +9525,10 @@ mod tests {
     #[test]
     fn pending_revision_help_mentions_escape_hatch() {
         let help = pending_plan_revision_help_message();
-        assert!(help.contains("/plan modify <changes>"));
-        assert!(help.contains("/plan cancel"));
+        assert!(help.contains("IntentSpec revise mode"));
+        assert!(help.contains("/intent modify <changes>"));
+        assert!(help.contains("/intent cancel"));
+        assert!(!help.contains("/plan modify"));
     }
 
     #[test]
@@ -6180,6 +9639,50 @@ mod tests {
         );
         assert_eq!(response.selected_option.as_deref(), Some("approve_all"));
     }
+
+    #[test]
+    fn exec_approval_selection_maps_allow_all_commands() {
+        assert_eq!(
+            exec_approval_decision_from_selection(2, false, false),
+            ReviewDecision::ApprovedForTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(3, false, false),
+            ReviewDecision::ApprovedForDirectoryTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(4, false, false),
+            ReviewDecision::ApprovedForPatternTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(5, false, false),
+            ReviewDecision::ApprovedForAllCommands
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(6, false, false),
+            ReviewDecision::Denied
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(7, false, false),
+            ReviewDecision::Abort
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(0, true, false),
+            ReviewDecision::Approved
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(0, false, true),
+            ReviewDecision::ApprovedForAllCommands
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(1, false, true),
+            ReviewDecision::Denied
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(2, false, true),
+            ReviewDecision::Abort
+        );
+    }
 }
 
 fn assistant_entry_ids(snapshot: &CodeUiSessionSnapshot) -> HashSet<String> {
@@ -6283,6 +9786,97 @@ fn code_ui_response_from_managed_selection(
     }
 }
 
+fn selection_from_interaction_options(
+    options: &[CodeUiInteractionOption],
+    response: &CodeUiInteractionResponse,
+) -> Option<usize> {
+    if let Some(selected_option) = response.selected_option.as_deref() {
+        return options
+            .iter()
+            .position(|option| option.id == selected_option || option.label == selected_option);
+    }
+    let ids = options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect::<Vec<_>>();
+    selection_from_response(&ids, response, Some(0), Some(1))
+}
+
+fn selection_from_response(
+    option_ids: &[&str],
+    response: &CodeUiInteractionResponse,
+    approved_index: Option<usize>,
+    rejected_index: Option<usize>,
+) -> Option<usize> {
+    if let Some(selected_option) = response.selected_option.as_deref()
+        && let Some(index) = option_ids.iter().position(|id| *id == selected_option)
+    {
+        return Some(index);
+    }
+
+    match response.approved {
+        Some(true) => {
+            if response.apply_to_future == Some(CodeUiApplyToFuture::AcceptAll)
+                && let Some(index) = option_ids
+                    .iter()
+                    .position(|id| matches!(*id, "allow_all_commands" | "approve_session"))
+            {
+                return Some(index);
+            }
+            approved_index
+        }
+        Some(false) => rejected_index,
+        None => None,
+    }
+}
+
+fn user_input_answers_from_code_ui(
+    pending: &PendingUserInput,
+    response: CodeUiInteractionResponse,
+) -> Result<HashMap<String, UserInputAnswer>, TuiControlError> {
+    let mut answers = pending.answers.clone();
+    if !response.answers.is_empty() {
+        for (question_id, values) in response.answers {
+            answers.insert(question_id, UserInputAnswer { answers: values });
+        }
+        return Ok(answers);
+    }
+
+    let Some(question) = pending.request.questions.get(pending.current_question) else {
+        return Err(TuiControlError::InteractionNotActive);
+    };
+
+    let mut values = Vec::new();
+    if let Some(selected_option) = response.selected_option.as_deref()
+        && let Some(option_index) = selected_option
+            .strip_prefix("option-")
+            .and_then(|value| value.parse::<usize>().ok())
+        && let Some(options) = question.options.as_ref()
+        && let Some(option) = options.get(option_index)
+    {
+        values.push(option.label.clone());
+    }
+    if values.is_empty()
+        && let Some(note) = response.note.as_deref().map(str::trim)
+        && !note.is_empty()
+    {
+        values.push(note.to_string());
+    }
+    if values.is_empty() {
+        match response.approved {
+            Some(true) => values.push("yes".to_string()),
+            Some(false) => values.push("no".to_string()),
+            None => {}
+        }
+    }
+    if values.is_empty() {
+        return Err(TuiControlError::UnsupportedInteractionKind);
+    }
+
+    answers.insert(question.id.clone(), UserInputAnswer { answers: values });
+    Ok(answers)
+}
+
 fn summarize_retry_error(error: &str) -> String {
     let lowered = error.to_ascii_lowercase();
     if lowered.contains("timeout") {
@@ -6365,59 +9959,13 @@ fn summarize_tool_output(output: &ToolOutput) -> String {
     }
 }
 
-async fn persist_execution_plan(
-    plan: &ExecutionPlanSpec,
-    intent_id: &str,
-    mcp_server: &Arc<LibraMcpServer>,
-) -> Result<String, String> {
-    let git_plan = build_git_plan(
-        parse_object_id(intent_id).map_err(|e| format!("invalid intent id: {e}"))?,
-        plan,
-    )
-    .map_err(|e| format!("failed to build git plan: {e}"))?;
-    let steps = git_plan
-        .steps()
-        .iter()
-        .map(|step| PlanStepParams {
-            description: step.description().to_string(),
-            inputs: step.inputs().cloned(),
-            checks: step.checks().cloned(),
-        })
-        .collect::<Vec<_>>();
-
-    let params = CreatePlanParams {
-        intent_id: intent_id.to_string(),
-        parent_plan_ids: None,
-        context_frame_ids: None,
-        steps: Some(steps),
-        tags: None,
-        external_ids: None,
-        actor_kind: Some("system".to_string()),
-        actor_id: Some("libra-plan".to_string()),
-    };
-
-    let actor = mcp_server
-        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
-        .map_err(|e| format!("failed to resolve plan actor: {e:?}"))?;
-    let result = mcp_server
-        .create_plan_impl(params, actor)
-        .await
-        .map_err(|e| format!("MCP create_plan failed: {e:?}"))?;
-
-    if result.is_error.unwrap_or(false) {
-        return Err(
-            summarize_mcp_content(&result.content).unwrap_or_else(|| "unknown MCP error".into())
-        );
-    }
-
-    parse_created_id(&result).ok_or_else(|| "failed to parse plan id from MCP result".to_string())
-}
-
 fn build_plan_prompt(request: &str) -> String {
     format!(
         "You are running /plan mode.\n\
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 After receiving user choice, analyze the repository and then call submit_intent_draft exactly once.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Default execution uses dependency-policy:no-new. If the user explicitly asks to add a new third-party dependency, make that intent unambiguous in the IntentDraft; Libra will derive dependency-policy:allow-with-review for that request. For simple Rust CLI argument handling without an explicit dependency request, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 User request:\n{request}"
@@ -6429,6 +9977,8 @@ fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
         "You are revising an existing IntentSpec.\n\
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Default execution uses dependency-policy:no-new. If the user explicitly asks to add a new third-party dependency, make that intent unambiguous in the IntentDraft; Libra will derive dependency-policy:allow-with-review for that request. For simple Rust CLI argument handling without an explicit dependency request, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
@@ -6439,61 +9989,668 @@ Requested changes:\n{request}"
 fn build_execution_plan_prompt(spec_json: &str) -> String {
     format!(
         "You are generating an execution plan for an already confirmed IntentSpec.\n\
-Use read-only repository tools if needed, then call update_plan exactly once with the full ordered plan.\n\
-Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Use read-only repository tools if needed, then call submit_plan_draft exactly once with the full ordered draft.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not modify the IntentSpec. Do not execute commands that change files.\n\
-After calling update_plan, stop; the developer must confirm the plan before execution.\n\n\
+After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
 Confirmed IntentSpec:\n```json\n{spec_json}\n```"
     )
 }
 
 fn build_execution_plan_revision_prompt(
     spec_json: &str,
-    current_plan: &UpdatePlanArgs,
+    current_plan: &ProviderPlanDraft,
     request: &str,
+    failure_report: Option<&str>,
 ) -> String {
-    let current_plan_json = update_plan_args_json(current_plan);
+    let current_plan_json = provider_plan_draft_json(current_plan);
+    let failure_context = failure_report
+        .map(str::trim)
+        .filter(|report| !report.is_empty())
+        .map(|report| format!("\n\nPrevious execution failure evidence:\n```text\n{report}\n```"))
+        .unwrap_or_default();
     format!(
         "You are revising an execution plan for an already confirmed IntentSpec.\n\
-Use the current plan as the baseline, apply only the developer's requested changes, then call update_plan exactly once with the complete revised ordered plan.\n\
-Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Use the current draft as the baseline. Do not start over from the IntentSpec unless the evidence proves the current draft is unusable.\n\
+Apply only the developer's requested changes, then call submit_plan_draft exactly once with the complete revised ordered draft.\n\
+When previous execution failure evidence is provided, use it as hard context for the revised plan: the next plan's primary goal is to repair that specific failed execution; it addresses the concrete failure and then continues toward the original Intent.\n\
+Keep successful prior steps only when they are still prerequisites for fixing the failure; add or reorder concrete repair and verification steps around the failing point instead of repeating the same approach.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
-After calling update_plan, stop; the developer must confirm the revised plan before execution.\n\n\
+After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
 Confirmed IntentSpec:\n```json\n{spec_json}\n```\n\n\
 Current execution plan:\n```json\n{current_plan_json}\n```\n\n\
-Requested plan changes:\n{request}"
+Requested plan changes:\n{request}{failure_context}"
     )
 }
 
-fn update_plan_args_json(args: &UpdatePlanArgs) -> serde_json::Value {
+fn provider_plan_draft_from_plan(plan: &ExecutionPlanSpec) -> ProviderPlanDraft {
+    ProviderPlanDraft {
+        explanation: plan
+            .replan_reason
+            .as_ref()
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty()),
+        steps: plan
+            .tasks
+            .iter()
+            .map(|task| ProviderPlanDraftStep {
+                title: task.title().trim().to_string(),
+            })
+            .filter(|step| !step.title.is_empty())
+            .collect(),
+    }
+}
+
+fn provider_plan_draft_from_spec(spec: &IntentSpec) -> ProviderPlanDraft {
+    let mut steps = spec
+        .intent
+        .objectives
+        .iter()
+        .map(|objective| ProviderPlanDraftStep {
+            title: objective.title.trim().to_string(),
+        })
+        .filter(|step| !step.title.is_empty())
+        .collect::<Vec<_>>();
+
+    if steps.is_empty() {
+        let fallback_title = spec.intent.summary.trim();
+        steps.push(ProviderPlanDraftStep {
+            title: if fallback_title.is_empty() {
+                "Revise execution plan".to_string()
+            } else {
+                fallback_title.to_string()
+            },
+        });
+    }
+
+    ProviderPlanDraft {
+        explanation: Some("Recovered from the current IntentSpec.".to_string()),
+        steps,
+    }
+}
+
+fn provider_plan_draft_json(args: &ProviderPlanDraft) -> serde_json::Value {
     serde_json::json!({
         "explanation": args.explanation.clone(),
-        "plan": args.plan.iter().map(|step| {
+        "steps": args.steps.iter().map(|step| {
             serde_json::json!({
-                "step": step.step.as_str(),
-                "status": step_status_label(&step.status),
+                "title": step.title.as_str(),
             })
         }).collect::<Vec<_>>(),
     })
 }
 
-fn step_status_label(status: &StepStatus) -> &'static str {
-    match status {
-        StepStatus::Pending => "pending",
-        StepStatus::InProgress => "in_progress",
-        StepStatus::Completed => "completed",
+fn execution_requires_plan_repair(result: Option<&OrchestratorResult>) -> bool {
+    result.is_none_or(|result| result.decision == DecisionOutcome::Abandon)
+}
+
+#[cfg(test)]
+fn execution_failure_revision_message(result: Option<&OrchestratorResult>) -> String {
+    execution_failure_revision_message_from_report(&execution_failure_report(result, None))
+}
+
+fn execution_failure_revision_message_from_report(report: &str) -> String {
+    let mut lines = vec![
+        "Plan execution failed. Revise the execution plan before running it again.".to_string(),
+    ];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Reply `continue` or `/plan continue <max-attempts>` to allow automatic repair attempts, send plan changes as plain text or `/plan modify <changes>`, or use `/plan cancel` to stop."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn intentspec_failure_revision_message_from_report(report: &str) -> String {
+    let mut lines = vec![
+        "Plan execution failed because the current IntentSpec constraints or required artifacts need revision before another plan repair can help.".to_string(),
+    ];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Revise the IntentSpec scope, network policy, tool ACL, or artifact requirements with plain text or `/intent modify <changes>`. Use `/intent cancel` to stop."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn manual_execution_failure_message_from_report(report: &str) -> String {
+    let mut lines =
+        vec!["Plan execution failed before automatic plan repair can make progress.".to_string()];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Resolve the configuration, MCP, persistence, or external blocker, then rerun `/intent execute` or revise the plan/spec explicitly."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn repair_message_for_execution_failure(
+    route: ExecutionFailureRevision,
+    report: &str,
+    can_auto_repair: bool,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
+) -> String {
+    match route {
+        ExecutionFailureRevision::PlanRevision if can_auto_repair => {
+            automatic_plan_repair_started_message(
+                automatic_repair_attempts.saturating_add(1),
+                automatic_repair_max_attempts,
+            )
+        }
+        ExecutionFailureRevision::PlanRevision
+            if automatic_repair_attempts >= automatic_repair_max_attempts
+                && automatic_repair_max_attempts > 0 =>
+        {
+            automatic_plan_repair_threshold_message(
+                report,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
+            )
+        }
+        ExecutionFailureRevision::PlanRevision => {
+            execution_failure_revision_message_from_report(report)
+        }
+        ExecutionFailureRevision::IntentSpecRevision => {
+            intentspec_failure_revision_message_from_report(report)
+        }
+        ExecutionFailureRevision::ManualAction => {
+            manual_execution_failure_message_from_report(report)
+        }
     }
 }
 
-fn intentspec_with_llm_plan_objectives(
+fn execution_failure_report(
+    result: Option<&OrchestratorResult>,
+    execution_summary: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(result) = result {
+        lines.push(format!(
+            "Decision: {}.",
+            orchestrator_decision_label(&result.decision)
+        ));
+        let failed_tasks = result
+            .task_results
+            .iter()
+            .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+            .filter_map(|task_result| {
+                result
+                    .execution_plan_spec
+                    .tasks
+                    .iter()
+                    .find(|task| task.id() == task_result.task_id)
+                    .map(|task| task.title().trim().to_string())
+            })
+            .filter(|title| !title.is_empty())
+            .take(3)
+            .collect::<Vec<_>>();
+        if !failed_tasks.is_empty() {
+            lines.push(format!("Failed tasks: {}.", failed_tasks.join(", ")));
+        }
+        let diagnostics = execution_failure_diagnostics(result, 3);
+        if !diagnostics.is_empty() {
+            lines.push("Failure details:".to_string());
+            lines.extend(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| format!("- {diagnostic}")),
+            );
+        }
+        let repair_hints = execution_failure_repair_hints(result, 3);
+        if !repair_hints.is_empty() {
+            lines.push("Plan change hints:".to_string());
+            lines.extend(repair_hints.into_iter().map(|hint| format!("- {hint}")));
+        }
+    } else {
+        lines.push("The orchestrator failed before producing a final decision.".to_string());
+        if let Some(error) = orchestrator_failure_detail(execution_summary) {
+            lines.push(format!("Orchestrator error: {error}."));
+            lines.push(
+                "Plan change hints:\n- Add or adjust a repair step that restores the missing precondition before retrying the failed execution stage."
+                    .to_string(),
+            );
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn should_auto_repair_execution_failure(
+    route: ExecutionFailureRevision,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
+) -> bool {
+    automatic_repair_attempts < automatic_repair_max_attempts
+        && route == ExecutionFailureRevision::PlanRevision
+}
+
+fn classify_execution_failure_revision(
+    result: Option<&OrchestratorResult>,
+    execution_summary: Option<&str>,
+) -> ExecutionFailureRevision {
+    if let Some(result) = result {
+        if execution_failure_requires_intentspec_revision(result) {
+            return ExecutionFailureRevision::IntentSpecRevision;
+        }
+        return if result.decision == DecisionOutcome::Abandon {
+            ExecutionFailureRevision::PlanRevision
+        } else {
+            ExecutionFailureRevision::ManualAction
+        };
+    }
+
+    if let Some(detail) = orchestrator_failure_detail(execution_summary)
+        && orchestrator_failure_requires_manual_action(&detail)
+    {
+        return ExecutionFailureRevision::ManualAction;
+    }
+
+    ExecutionFailureRevision::ManualAction
+}
+
+fn execution_failure_requires_intentspec_revision(result: &OrchestratorResult) -> bool {
+    !result.system_report.missing_artifacts.is_empty()
+        || result.task_results.iter().any(|task_result| {
+            task_result
+                .policy_violations
+                .iter()
+                .any(policy_violation_requires_intentspec_revision)
+        })
+}
+
+fn policy_violation_requires_intentspec_revision(violation: &PolicyViolation) -> bool {
+    matches!(
+        violation.code.as_str(),
+        "scope-creep"
+            | "network-policy-deny"
+            | "tool-acl-deny"
+            | "sandbox-escalation-deny"
+            | "git-version-control-deny"
+    )
+}
+
+fn orchestrator_failure_requires_manual_action(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "config error",
+        "configuration",
+        "mcp",
+        "persisted plan",
+        "persistence",
+        "database",
+        "sqlite",
+        "store",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
+fn orchestrator_failure_detail(execution_summary: Option<&str>) -> Option<String> {
+    execution_summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .and_then(|summary| summary.strip_prefix("Orchestrator failed:"))
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_string)
+}
+
+fn automatic_plan_repair_started_message(attempt: u8, max_attempts: u8) -> String {
+    format!(
+        "Plan execution failed. Automatic plan repair attempt {} is feeding the failure evidence back to the planner.",
+        automatic_plan_repair_attempt_label(attempt, max_attempts)
+    )
+}
+
+fn automatic_plan_repair_request_from_report(
+    report: &str,
+    attempt: u8,
+    max_attempts: u8,
+) -> String {
+    format!(
+        "Automatic plan repair attempt {}.\n\
+The previous plan execution failed. The next plan must be a repair of that failed execution, not a fresh plan from the original Intent.\n\
+Revise the execution plan by adding, replacing, or reordering concrete repair Step(s) at the failing point before the failed verification.\n\
+Return a complete ordered execution plan draft, but preserve successful prior steps only when they are still prerequisites for the repair.\n\
+Keep verification steps that can judge success automatically, and add a focused regression check for the observed failure when possible.\n\
+Use this failure evidence as the source of truth:\n{report}",
+        automatic_plan_repair_attempt_label(attempt, max_attempts)
+    )
+}
+
+fn automatic_plan_repair_threshold_message(report: &str, attempts: u8, max_attempts: u8) -> String {
+    format!(
+        "Automatic plan repair stopped after {attempts} failed repair attempts (automatic threshold: {max_attempts}).\n\
+Developer confirmation is required before more automatic correction.\n\
+{report}\n\
+Reply `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts, describe specific Plan repair guidance, or use `/plan cancel` to stop."
+    )
+}
+
+fn automatic_plan_repair_attempt_label(attempt: u8, max_attempts: u8) -> String {
+    if attempt <= max_attempts {
+        format!("{attempt}/{max_attempts}")
+    } else {
+        format!("{attempt} (threshold {max_attempts})")
+    }
+}
+
+fn execution_failure_diagnostics(result: &OrchestratorResult, limit: usize) -> Vec<String> {
+    result
+        .task_results
+        .iter()
+        .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+        .filter_map(|task_result| {
+            let (task_index, title) = execution_task_label(result, task_result.task_id)?;
+            let details = task_failure_details(task_result);
+            if details.is_empty() {
+                return Some(format!(
+                    "{task_index} {title}: no structured failure evidence was captured."
+                ));
+            }
+            Some(format!("{task_index} {title}: {}", details.join("; ")))
+        })
+        .take(limit)
+        .collect()
+}
+
+fn execution_failure_repair_hints(result: &OrchestratorResult, limit: usize) -> Vec<String> {
+    let mut hints = Vec::new();
+    for task_result in result
+        .task_results
+        .iter()
+        .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+    {
+        let Some((task_index, title)) = execution_task_label(result, task_result.task_id) else {
+            continue;
+        };
+        let details = task_failure_details(task_result);
+        let failure_text = format!("{} {}", title, details.join(" "));
+        let Some(hint) = plan_repair_hint_for_failure(&failure_text) else {
+            continue;
+        };
+        let formatted = format!("{task_index}: {hint}");
+        if !hints.contains(&formatted) {
+            hints.push(formatted);
+        }
+        if hints.len() >= limit {
+            break;
+        }
+    }
+
+    if hints.is_empty()
+        && result
+            .task_results
+            .iter()
+            .any(|task_result| task_result.status == TaskNodeStatus::Failed)
+    {
+        hints.push(
+            "Add an explicit required check that captures the failing command output before validation, then split the implementation work so that check can pass."
+                .to_string(),
+        );
+    }
+
+    hints
+}
+
+fn execution_task_label(
+    result: &OrchestratorResult,
+    task_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    result
+        .execution_plan_spec
+        .tasks
+        .iter()
+        .enumerate()
+        .find(|(_, task)| task.id() == task_id)
+        .map(|(idx, task)| {
+            let kind = match task.kind {
+                TaskKind::Implementation => "I",
+                TaskKind::Analysis => "A",
+                TaskKind::Gate => "G",
+            };
+            (
+                format!("{kind}{:02}", idx + 1),
+                task.title().trim().to_string(),
+            )
+        })
+}
+
+fn task_failure_details(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Vec<String> {
+    let mut details = Vec::new();
+    if let Some(reason) = summarize_failed_gate_report(task_result.gate_report.as_ref()) {
+        details.push(format!("gate failed: {reason}"));
+    }
+    if let Some(reason) = summarize_failed_tool_calls(task_result) {
+        details.push(format!("tool failed: {reason}"));
+    }
+    if let Some(reason) = summarize_policy_violations(task_result) {
+        details.push(format!("policy violation: {reason}"));
+    }
+    if let Some(review) = task_result.review.as_ref()
+        && (!review.approved || !review.issues.is_empty())
+    {
+        let issue = review
+            .issues
+            .iter()
+            .find_map(|issue| concise_failure_line(issue))
+            .or_else(|| concise_failure_line(&review.summary));
+        if let Some(issue) = issue {
+            details.push(format!("review: {issue}"));
+        }
+    }
+    if let Some(reason) = task_result
+        .agent_output
+        .as_deref()
+        .and_then(concise_failure_line)
+    {
+        details.push(format!("agent output: {reason}"));
+    }
+
+    dedupe_preserving_order(details)
+}
+
+fn summarize_failed_tool_calls(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Option<String> {
+    let summaries = task_result
+        .tool_calls
+        .iter()
+        .filter(|tool_call| !tool_call.success)
+        .filter_map(|tool_call| {
+            let action = tool_call.action.trim();
+            let label = if action.is_empty() {
+                tool_call.tool_name.trim().to_string()
+            } else {
+                format!("{} {}", tool_call.tool_name.trim(), action)
+            };
+            tool_call
+                .summary
+                .as_deref()
+                .and_then(concise_failure_line)
+                .map(|summary| format!("{label}: {summary}"))
+                .or_else(|| (!label.trim().is_empty()).then_some(label))
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+
+    (!summaries.is_empty()).then(|| summaries.join("; "))
+}
+
+fn summarize_policy_violations(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Option<String> {
+    let summaries = task_result
+        .policy_violations
+        .iter()
+        .filter_map(|violation| {
+            let message = concise_failure_line(&violation.message)?;
+            let mut parts = vec![violation.code.trim().to_string(), message];
+            if let Some(tool_name) = violation
+                .tool_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|tool_name| !tool_name.is_empty())
+            {
+                parts.push(format!("tool {tool_name}"));
+            }
+            if let Some(path) = violation
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                parts.push(format!("path {path}"));
+            }
+            Some(parts.join(" · "))
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+
+    (!summaries.is_empty()).then(|| summaries.join("; "))
+}
+
+fn plan_repair_hint_for_failure(failure_text: &str) -> Option<String> {
+    let lower = failure_text.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "updating crates.io index",
+            "download of config.json failed",
+            "failed to get",
+            "crates.io",
+            "dependency-policy:no-new",
+        ],
+    ) {
+        return Some(
+            "remove any unrequested third-party dependency and prefer a std-only implementation under dependency-policy:no-new; only use networked dependency resolution after the developer explicitly allows network/dependency changes."
+                .to_string(),
+        );
+    }
+    if contains_any(
+        &lower,
+        &[
+            "cargo",
+            "rustc",
+            "compile",
+            "compiles",
+            "compiler",
+            "clippy",
+            "error:",
+            "error[",
+            "cannot find",
+            "unresolved",
+            "mismatched",
+        ],
+    ) {
+        return Some(
+            "make the next plan fix the compile error first, then run the cargo/check gate again before any functional echo checks."
+                .to_string(),
+        );
+    }
+    if contains_any(&lower, &["echo", "subcommand", "command output", "stdout"]) {
+        return Some(
+            "split subcommand implementation from output verification, and make each expected command/output pair explicit."
+                .to_string(),
+        );
+    }
+    if contains_any(
+        &lower,
+        &["policy", "violation", "forbidden", "denied", "network"],
+    ) {
+        return Some(
+            "remove the forbidden tool/path/network access from the plan, or choose an allowed access policy before rerunning."
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn concise_failure_line(text: &str) -> Option<String> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let selected = [
+        &[
+            "error:",
+            "error[",
+            "cannot find",
+            "unresolved",
+            "mismatched",
+        ][..],
+        &["expected", "not found", "denied", "violation"][..],
+        &["failed"][..],
+    ]
+    .iter()
+    .find_map(|markers| {
+        lines.iter().copied().find(|line| {
+            let lower = line.to_lowercase();
+            contains_any(&lower, markers)
+        })
+    })
+    .or_else(|| lines.first().copied())?;
+    Some(truncate_chars(selected, 180))
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for item in items {
+        if seen.insert(item.clone()) {
+            deduped.push(item);
+        }
+    }
+    deduped
+}
+
+fn intentspec_with_plan_draft_objectives(
     spec: &IntentSpec,
-    llm_plan: &UpdatePlanArgs,
+    plan_draft: &ProviderPlanDraft,
 ) -> Result<IntentSpec, String> {
-    let objectives = llm_plan
-        .plan
+    let objectives = plan_draft
+        .steps
         .iter()
         .filter_map(|step| {
-            let title = step.step.trim();
+            let title = step.title.trim();
             (!title.is_empty()).then(|| Objective {
                 title: title.to_string(),
                 kind: if spec.intent.has_implementation_objectives() {
@@ -6528,9 +10685,213 @@ fn intentspec_with_llm_plan_objectives(
     Ok(planned_spec)
 }
 
+fn provider_plan_draft_from_args(args: SubmitPlanDraftArgs) -> Result<ProviderPlanDraft, String> {
+    let steps = args
+        .steps
+        .into_iter()
+        .map(|step| ProviderPlanDraftStep {
+            title: step.title.trim().to_string(),
+        })
+        .collect::<Vec<_>>();
+    if steps.is_empty() || steps.iter().any(|step| step.title.is_empty()) {
+        return Err("plan draft must include at least one non-empty step title".to_string());
+    }
+    Ok(ProviderPlanDraft {
+        explanation: args.explanation.and_then(|explanation| {
+            let trimmed = explanation.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }),
+        steps,
+    })
+}
+
+fn apply_developer_network_access(spec: &mut IntentSpec, network_access: bool) {
+    spec.constraints.security.network_policy = if network_access {
+        NetworkPolicy::Allow
+    } else {
+        NetworkPolicy::Deny
+    };
+}
+
+fn network_policy_interaction_id(plan_id: Option<&str>) -> String {
+    match plan_id {
+        Some(plan_id) => format!("{plan_id}:network-policy"),
+        None => "post-plan-network-policy".to_string(),
+    }
+}
+
+fn is_phase1_plan_draft_tool(tool_name: &str) -> bool {
+    tool_name == "submit_plan_draft"
+}
+
+fn should_forward_phase1_model_text_delta(_delta: &str) -> bool {
+    false
+}
+
+fn phase0_plan_tool_loop_config(mut config: ToolLoopConfig) -> ToolLoopConfig {
+    config.allowed_tools = Some(vec![
+        "read_file".to_string(),
+        "list_dir".to_string(),
+        "grep_files".to_string(),
+        "search_files".to_string(),
+        "web_search".to_string(),
+        "request_user_input".to_string(),
+        "submit_intent_draft".to_string(),
+    ]);
+    config.terminal_tools = Some(vec!["submit_intent_draft".to_string()]);
+    config.max_turns = Some(12);
+    config
+}
+
+fn phase1_plan_tool_loop_config(mut config: ToolLoopConfig) -> ToolLoopConfig {
+    config.allowed_tools = Some(vec![
+        "read_file".to_string(),
+        "list_dir".to_string(),
+        "grep_files".to_string(),
+        "search_files".to_string(),
+        "web_search".to_string(),
+        "submit_plan_draft".to_string(),
+    ]);
+    config.terminal_tools = Some(vec!["submit_plan_draft".to_string()]);
+    config.max_turns = Some(12);
+    config
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstTurnIntentPolicyUpdate {
+    PromptOnly,
+    PromptAndAllowedTools,
+}
+
+fn should_auto_classify_first_user_message(
+    enabled: bool,
+    history: &[Message],
+    requested_allowed_tools: Option<&Vec<String>>,
+) -> bool {
+    enabled && history.is_empty() && requested_allowed_tools.is_none()
+}
+
+async fn classify_first_turn_task_intent<M>(
+    model: &M,
+    registry: &ToolRegistry,
+    config: &mut ToolLoopConfig,
+    user_text: &str,
+    policy_update: FirstTurnIntentPolicyUpdate,
+) -> Result<TaskIntentDecision, TaskIntentClassifierError>
+where
+    M: CompletionModel,
+{
+    let classifier = TaskIntentClassifier::new(model.clone());
+    let decision = classifier
+        .classify(TaskIntentClassificationRequest::new(user_text))
+        .await?;
+    apply_task_intent_prompt(config, registry, decision.intent);
+    if policy_update == FirstTurnIntentPolicyUpdate::PromptAndAllowedTools {
+        config.allowed_tools = Some(registry.filter_by_intent(decision.intent));
+    }
+    Ok(decision)
+}
+
+fn apply_task_intent_prompt(
+    config: &mut ToolLoopConfig,
+    registry: &ToolRegistry,
+    intent: TaskIntent,
+) {
+    config.preamble = Some(
+        SystemPromptBuilder::new(registry.working_dir())
+            .with_intent(intent)
+            .with_dynamic_context()
+            .build(),
+    );
+}
+
+fn attach_memory_anchor_prompt_context(config: &mut ToolLoopConfig) {
+    let Some(session_root) = config.context_frame_session_root.as_deref() else {
+        return;
+    };
+
+    let replay = match SessionJsonlStore::new(session_root.to_path_buf()).load_memory_anchors() {
+        Ok(replay) => replay,
+        Err(error) => {
+            tracing::warn!(
+                session_root = %session_root.display(),
+                error = %error,
+                "failed to load memory anchors for prompt context"
+            );
+            return;
+        }
+    };
+    let anchors = replay.anchors();
+    let Some(section) = build_memory_anchor_prompt_section(&anchors, Utc::now()) else {
+        return;
+    };
+
+    match config.preamble.as_mut() {
+        Some(preamble) if !preamble.trim().is_empty() => {
+            preamble.push_str("\n\n");
+            preamble.push_str(&section);
+        }
+        _ => {
+            config.preamble = Some(section);
+        }
+    }
+}
+
+fn send_task_intent_classified_event(
+    tx: &UnboundedSender<AppEvent>,
+    turn_id: TurnId,
+    decision: TaskIntentDecision,
+    config: &ToolLoopConfig,
+    registry: &ToolRegistry,
+) {
+    let preamble = config.preamble.clone().unwrap_or_else(|| {
+        SystemPromptBuilder::new(registry.working_dir())
+            .with_intent(decision.intent)
+            .with_dynamic_context()
+            .build()
+    });
+    let allowed_tools = registry.filter_by_intent(decision.intent);
+    let _ = tx.send(AppEvent::TaskIntentClassified {
+        turn_id,
+        intent: decision.intent,
+        preamble,
+        allowed_tools,
+    });
+}
+
+fn is_default_chat_tool(tool_name: &str) -> bool {
+    !matches!(tool_name, "submit_intent_draft" | "submit_plan_draft")
+}
+
+fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) -> Vec<String> {
+    config.allowed_tools.clone().unwrap_or_else(|| {
+        registry
+            .tool_specs()
+            .into_iter()
+            .map(|s| s.function.name)
+            .filter(|name| is_default_chat_tool(name))
+            .collect()
+    })
+}
+
+fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {
+    false
+}
+
 fn should_route_plain_message_to_plan(text: &str) -> bool {
     let trimmed = text.trim_start();
     !trimmed.trim().is_empty() && !trimmed.starts_with('/')
+}
+
+/// Build the [`GoalActor`] attribution for actions taken inside the
+/// active session. Today we always attribute to the local user;
+/// once the controller-lease layer threads automation actor metadata
+/// through (P6.6 follow-up for the `Automation` actor variant), this
+/// function will branch on the active controller.
+fn goal_actor_for_session<M: CompletionModel>(
+    _app: &App<M>,
+) -> crate::internal::ai::goal::GoalActor {
+    crate::internal::ai::goal::GoalActor::User { id: None }
 }
 
 fn is_global_quit_command_input(text: &str) -> bool {
@@ -6538,6 +10899,64 @@ fn is_global_quit_command_input(text: &str) -> bool {
         super::slash_command::parse_builtin(text),
         Some((super::slash_command::BuiltinCommand::Quit, _))
     )
+}
+
+fn is_control_reclaim_command_input(text: &str) -> bool {
+    matches!(
+        super::slash_command::parse_builtin(text),
+        Some((super::slash_command::BuiltinCommand::Control, args))
+            if args.eq_ignore_ascii_case("reclaim")
+    )
+}
+
+fn undo_should_prefer_vcs_rollback(working_dir: &std::path::Path) -> bool {
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(working_dir)
+        .output();
+    let Ok(head) = head else {
+        return false;
+    };
+    if !head.status.success() {
+        return false;
+    }
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(working_dir)
+        .output();
+    let Ok(status) = status else {
+        return false;
+    };
+    status.status.success() && String::from_utf8_lossy(&status.stdout).trim().is_empty()
+}
+
+fn apply_automation_approval_scope(config: &mut ToolLoopConfig, turn_id: TurnId) {
+    let Some(runtime_context) = config.runtime_context.as_mut() else {
+        return;
+    };
+    let Some(approval) = runtime_context.approval.as_mut() else {
+        return;
+    };
+    approval.scope_key_prefix = Some(format!("automation:{turn_id}"));
+}
+
+fn attach_file_history_context(
+    config: &mut ToolLoopConfig,
+    session_root: PathBuf,
+    turn_id: TurnId,
+) {
+    let Some(runtime_context) = config.runtime_context.as_mut() else {
+        return;
+    };
+    runtime_context.file_history = Some(FileHistoryRuntimeContext {
+        session_root,
+        batch_id: format!("turn-{turn_id}"),
+    });
+}
+
+fn normalize_terminal_paste_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn parse_value_or_json_string<T: serde::de::DeserializeOwned>(
@@ -6956,16 +11375,23 @@ fn format_task_workspace_note(
     title: &str,
     working_dir: &std::path::Path,
     isolated: bool,
+    backend: TaskWorkspaceBackend,
+    main_working_dir: Option<&std::path::Path>,
 ) -> String {
-    let mode = if isolated {
-        "isolated worktree"
-    } else {
-        "shared workspace"
-    };
+    if isolated {
+        let source = main_working_dir.unwrap_or(working_dir);
+        return format!(
+            "Workspace · {}  \nisolated {} · source {}  \nruntime path hidden · changes sync back after task",
+            title.trim(),
+            backend.label(),
+            source.display()
+        );
+    }
+
     format!(
         "Workspace · {}  \n{} · {}",
         title.trim(),
-        mode,
+        backend.label(),
         working_dir.display()
     )
 }
@@ -7088,7 +11514,7 @@ mod orchestrator_result_tests {
             types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
                 ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
-                TaskSpec,
+                TaskSpec, TaskWorkspaceBackend,
             },
         },
     };
@@ -7268,6 +11694,7 @@ mod orchestrator_result_tests {
                     summary: "response is incomplete".into(),
                     issues: vec!["missing final diagnosis".into()],
                 }),
+                thinking: None,
             },
         );
 
@@ -7289,6 +11716,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         );
 
@@ -7321,6 +11749,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         );
 
@@ -7333,13 +11762,22 @@ mod orchestrator_result_tests {
             "Implement parser",
             std::path::Path::new("/tmp/libra/.libra/worktrees/task-1"),
             true,
+            TaskWorkspaceBackend::Copy,
+            Some(std::path::Path::new("/tmp/libra")),
         );
         assert!(isolated_note.contains("Workspace · Implement parser"));
-        assert!(isolated_note.contains("isolated worktree"));
-        assert!(isolated_note.contains("/tmp/libra/.libra/worktrees/task-1"));
+        assert!(isolated_note.contains("isolated copy worktree"));
+        assert!(isolated_note.contains("source /tmp/libra"));
+        assert!(isolated_note.contains("runtime path hidden"));
+        assert!(!isolated_note.contains(".libra/worktrees/task-1"));
 
-        let shared_note =
-            format_task_workspace_note("Run gate", std::path::Path::new("/tmp/libra"), false);
+        let shared_note = format_task_workspace_note(
+            "Run gate",
+            std::path::Path::new("/tmp/libra"),
+            false,
+            TaskWorkspaceBackend::Shared,
+            None,
+        );
         assert!(shared_note.contains("shared workspace"));
         assert!(shared_note.contains("/tmp/libra"));
     }
@@ -7445,6 +11883,7 @@ mod orchestrator_result_tests {
                         summary: "analysis is complete".into(),
                         issues: vec![],
                     }),
+                    thinking: None,
                 },
                 TaskResult {
                     task_id: failed_task.id(),
@@ -7458,6 +11897,7 @@ mod orchestrator_result_tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
             ],
             system_report: SystemReport {
@@ -7523,6 +11963,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }],
             system_report: SystemReport {
                 integration: GateReport::empty(),

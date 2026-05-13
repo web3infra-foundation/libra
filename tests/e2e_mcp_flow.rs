@@ -1,6 +1,14 @@
 //! End-to-end MCP (Model Context Protocol) flow tests over SSE/HTTP streaming.
 //!
-//! **Layer:** L1 — uses local HTTP server on dynamically allocated ports.
+//! Spawns the real `libra code --web-only` binary on dynamically allocated MCP/Web
+//! ports, walks through the full Streamable HTTP transport handshake (initialize →
+//! initialized notification → tools/call), and verifies a created task is visible
+//! both via `list_tasks` and on disk under `.libra/objects`. This is the canonical
+//! smoke test for the MCP server: TUI-side details may change, but the wire protocol
+//! must keep round-tripping.
+//!
+//! **Layer:** L1 — uses local HTTP server on dynamically allocated ports. Builds
+//! the binary on demand inside the test so the harness picks up local edits.
 
 use std::{
     process::{Command, Stdio},
@@ -11,6 +19,12 @@ use serde_json::json;
 use tokio::time::sleep;
 
 /// Allocate a free MCP/Web port pair `(p, p+1)` on localhost.
+///
+/// Picks a random starting offset in the `[7100, 9799]` range, then linearly probes
+/// for a port pair where both `p` and `p+1` are bindable. The four-digit window
+/// matches existing local conventions and avoids ports that common services hold.
+/// Panics if no pair is free anywhere in the range — at that point the developer's
+/// machine has a problem the test cannot work around.
 fn pick_test_ports() -> (u16, u16) {
     use std::{
         net::TcpListener,
@@ -44,6 +58,11 @@ fn pick_test_ports() -> (u16, u16) {
 }
 
 /// Extract all `data:` values from an SSE event stream body.
+///
+/// Both `data:` (no space) and `data: ` (with space) prefixes are recognised because
+/// MCP servers in the wild emit either. Empty `data:` lines (heartbeats) are
+/// dropped. Whitespace around the value is trimmed so callers can `serde_json`
+/// parse directly.
 fn parse_sse_data(sse_text: &str) -> Vec<String> {
     sse_text
         .lines()
@@ -60,6 +79,10 @@ fn parse_sse_data(sse_text: &str) -> Vec<String> {
 ///
 /// Returns `(status, sse_body)`. On requests (with an `id`), the response is an SSE
 /// stream (`text/event-stream`); on notifications (no `id`), expect `202 Accepted`.
+///
+/// Honours `Mcp-Session-Id` when supplied (every request after `initialize` carries
+/// it). Panics on transport-level failures so the test surfaces them immediately
+/// rather than masking them as silent assertion failures further down.
 async fn mcp_post(
     client: &reqwest::Client,
     url: &str,
@@ -86,6 +109,26 @@ async fn mcp_post(
     (status, text)
 }
 
+/// Scenario: full end-to-end MCP flow over the Streamable HTTP transport.
+///
+/// 1. Build the `libra` binary (so the test runs against current code).
+/// 2. Initialize a temp-dir repo with isolated HOME/XDG_CONFIG_HOME.
+/// 3. Start `libra code --web-only` on dynamically allocated ports.
+/// 4. Wait up to 30 seconds for the MCP TCP listener to accept connections.
+/// 5. Initialize handshake → notifications/initialized → tools/call create_task →
+///    resources/list → tools/call list_tasks.
+/// 6. Verify `.libra/objects` exists and `refs/libra/intent` does NOT (the AI
+///    history ref now lives in SQLite, not on disk).
+///
+/// Boundary conditions guarded:
+/// - Server startup race: poll loop with timeout and explicit child-process
+///   stdout/stderr capture so a startup failure surfaces useful diagnostics.
+/// - Initialize transport flakiness: retry up to 60 times at 250 ms intervals so a
+///   slow first request does not flake the whole test.
+/// - Session ID redaction: the printed log redacts the actual session id length only
+///   so credential-grade strings never end up in CI logs.
+///
+/// Acts as the canonical regression guard for the MCP wire protocol.
 #[tokio::test]
 async fn test_e2e_mcp_flow() {
     // ── 1. Setup ───────────────────────────────────────────────────────────────

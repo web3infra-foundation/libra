@@ -11,7 +11,7 @@ use crate::internal::ai::completion::Message;
 pub type SessionId = String;
 
 /// Persistent session state for save/restore across sessions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionState {
     /// Unique session identifier.
     pub id: SessionId,
@@ -36,7 +36,7 @@ pub struct SessionState {
 }
 
 /// A serializable message in the session history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMessage {
     /// "user", "assistant", or "system".
     pub role: String,

@@ -1,0 +1,29 @@
+# Text normalization
+* text=auto eol=lf
+
+# Shell / scripts
+*.sh   text eol=lf
+*.bash text eol=lf
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Source code
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text
+
+# Binary assets currently in repo
+*.png  binary
+*.gif  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.webp binary
+*.mp4  binary
+*.pdf  binary
+
+# Test fixtures (preserve byte-for-byte)
+tests/data/** -text

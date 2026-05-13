@@ -14,7 +14,7 @@ use crate::internal::ai::{
     providers::{
         openai_compat::{
             ChatErrorResponse, ChatMessage, ChatResponse, ChatToolDefinition, build_messages,
-            parse_choice_content, parse_tools,
+            parse_choice_content_for_provider, parse_tools,
         },
         zhipu::client::Client,
     },
@@ -149,10 +149,11 @@ impl CompletionModelTrait for Model {
             .first()
             .ok_or_else(|| CompletionError::ResponseError("No choices in response".to_string()))?;
 
-        let content = parse_choice_content(choice)?;
+        let content = parse_choice_content_for_provider("zhipu", choice)?;
 
         Ok(CompletionResponse {
             content,
+            reasoning_content: None,
             raw_response: zhipu_response,
         })
     }

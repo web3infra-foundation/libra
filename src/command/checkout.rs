@@ -22,11 +22,18 @@ use crate::{
 };
 
 const CHECKOUT_EXAMPLES: &str = "\
+NOTE:
+    libra checkout is a branch compatibility surface. New code paths
+    should prefer:
+      - `libra switch <branch>` / `libra switch -c <branch>` for branch
+        navigation and creation
+      - `libra restore <path>` to restore files from the index or HEAD
+
 EXAMPLES:
     libra checkout                         Show the current branch
-    libra checkout main                    Switch to an existing local branch
-    libra checkout feature-x               Switch to another branch
-    libra checkout -b feature-x            Create and switch to a new branch
+    libra checkout main                    Switch to a branch (prefer: libra switch main)
+    libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
+    libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
     libra checkout --quiet main            Switch without informational stdout";
 
 #[derive(Parser, Debug)]
@@ -47,8 +54,18 @@ pub async fn execute(args: CheckoutArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates arguments, checks for local changes, then
-/// delegates to branch switching or creation via restore utilities.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Validates target branch names and blocks the internal `intent` branch.
+/// - May create a branch when `-b` is supplied.
+/// - Switches HEAD/current branch and restores the working tree to the target.
+/// - Emits status messages through [`OutputConfig`].
+///
+/// # Errors
+/// Returns [`CliError`] when the target branch is invalid or missing, local
+/// changes would be overwritten, branch creation fails, or checkout/restore
+/// writes fail.
 pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH

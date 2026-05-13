@@ -19,6 +19,7 @@
 
 mod builder;
 pub mod context;
+pub mod dynamic_context;
 mod loader;
 pub mod rules;
 

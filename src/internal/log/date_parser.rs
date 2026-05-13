@@ -1,3 +1,9 @@
+//! Date parsing helpers for log/reflog-style revision filters.
+//!
+//! Boundary: parser accepts Git-like relative and absolute date strings, returning
+//! contextual errors for malformed input instead of silently broadening filters. Log
+//! command tests cover valid aliases, invalid dates, and timezone-sensitive cases.
+
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
