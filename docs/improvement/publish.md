@@ -968,7 +968,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.107) mock R2 + D1 下，snapshot 能 round-trip。
 - [x] (v0.17.108) `publish_refs_test` 固化 all-refs、同 revision 去重和 default-ref latest 的 D1 写入规划契约；完整 D1 写入仍由非 dry-run sync 项承载。
 - [x] (v0.17.121) D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot；全量 sync 成功后删除旧 sync run 遗留的 stale refs。
-- [ ] D1 latest 只指向默认 ref 的完整 published revision。
+- [x] (v0.17.123) D1 latest 只指向默认 ref 的完整 published revision；命令层非 dry-run 测试覆盖 branch/tag 指向不同 revision 时 latest 仍选择默认 ref。
 - [x] (v0.17.96) `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
 
 ### Checkpoint C：Cloudflare clone 可恢复

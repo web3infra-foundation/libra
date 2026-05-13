@@ -2876,6 +2876,21 @@ mod tests {
         }
     }
 
+    fn commit_with_single_file(path: &str, body: &str, message: &str) -> Commit {
+        let blob = Blob::from_content(body);
+        save_object(&blob, &blob.id).expect("blob should save");
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            blob.id,
+            path.to_string(),
+        )])
+        .expect("tree should build");
+        save_object(&tree, &tree.id).expect("tree should save");
+        let commit = Commit::from_tree_id(tree.id, Vec::new(), message);
+        save_object(&commit, &commit.id).expect("commit should save");
+        commit
+    }
+
     #[derive(Default)]
     struct FakePublishWorkerCommandRunner {
         calls: Vec<Vec<String>>,
@@ -3218,6 +3233,49 @@ mod tests {
         assert!(sink.stale_ref_deletes.is_empty());
         assert_eq!(sink.refs.len(), 1);
         assert_eq!(sink.refs[0].ref_name, "refs/heads/main");
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_latest_uses_default_ref_revision() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let main_commit = commit_with_single_file("README.md", "main\n", "main fixture");
+        let tag_commit = commit_with_single_file("README.md", "tag\n", "tag fixture");
+        let main_revision = main_commit.id.to_string();
+        let tag_revision = tag_commit.id.to_string();
+        let refs = vec![
+            publish_local_ref("refs/heads/main", &main_revision, &main_revision),
+            publish_local_ref("refs/tags/v2", &tag_revision, &tag_revision),
+        ];
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            refs,
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("all-refs sync should persist both revisions");
+
+        assert_eq!(output.revision_count, 2);
+        assert_eq!(
+            output.latest_revision_oid.as_deref(),
+            Some(main_revision.as_str())
+        );
+        assert_eq!(sink.latest_updates.len(), 1);
+        assert_eq!(
+            sink.latest_updates[0].latest_revision_oid.as_deref(),
+            Some(main_revision.as_str()),
+            "site latest must follow the default ref revision, not the tag revision",
+        );
+        assert_ne!(main_revision, tag_revision);
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
