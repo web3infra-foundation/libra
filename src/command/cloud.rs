@@ -1498,7 +1498,7 @@ pub(crate) async fn restore_metadata_strict(
         .get_metadata()
         .await
         .map_err(|e| format!("failed to download metadata: {}", e))?;
-    restore_metadata_from_bytes(db_conn, &data).await
+    restore_metadata_from_bytes_strict(db_conn, &data).await
 }
 
 async fn restore_metadata_from_bytes(
@@ -1507,7 +1507,34 @@ async fn restore_metadata_from_bytes(
 ) -> Result<(), String> {
     let references: Vec<reference::Model> = serde_json::from_slice(data)
         .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+    restore_metadata_models(db_conn, references, false).await
+}
 
+async fn restore_metadata_from_bytes_strict(
+    db_conn: &sea_orm::DatabaseConnection,
+    data: &[u8],
+) -> Result<(), String> {
+    let references: Vec<reference::Model> = serde_json::from_slice(data)
+        .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+    validate_strict_refs_metadata(&references)?;
+    restore_metadata_models(db_conn, references, true).await
+}
+
+fn validate_strict_refs_metadata(references: &[reference::Model]) -> Result<(), String> {
+    if !references
+        .iter()
+        .any(|model| model.kind == reference::ConfigKind::Head && model.remote.is_none())
+    {
+        return Err("metadata does not contain local HEAD reference".to_string());
+    }
+    Ok(())
+}
+
+async fn restore_metadata_models(
+    db_conn: &sea_orm::DatabaseConnection,
+    references: Vec<reference::Model>,
+    strict: bool,
+) -> Result<(), String> {
     for ref_model in references {
         // Build query to find matching reference
         let remote_filter = match &ref_model.remote {
@@ -1539,10 +1566,11 @@ async fn restore_metadata_from_bytes(
             active.commit = Set(ref_model.commit.clone());
             active.remote = Set(ref_model.remote.clone());
             if let Err(e) = active.update(db_conn).await {
-                eprintln!(
-                    "warning: failed to update reference {:?}: {}",
-                    ref_model.name, e
-                );
+                let message = format!("failed to update reference {:?}: {}", ref_model.name, e);
+                if strict {
+                    return Err(message);
+                }
+                eprintln!("warning: {message}");
             }
         } else {
             let active = reference::ActiveModel {
@@ -1553,10 +1581,11 @@ async fn restore_metadata_from_bytes(
                 ..Default::default()
             };
             if let Err(e) = active.insert(db_conn).await {
-                eprintln!(
-                    "warning: failed to insert reference {:?}: {}",
-                    ref_model.name, e
-                );
+                let message = format!("failed to insert reference {:?}: {}", ref_model.name, e);
+                if strict {
+                    return Err(message);
+                }
+                eprintln!("warning: {message}");
             }
         }
     }
@@ -1727,6 +1756,41 @@ mod tests {
             assert!(
                 error.contains("failed to download metadata"),
                 "error should explain metadata download failure: {error}",
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn restore_metadata_strict_fails_when_metadata_has_no_local_head() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+            let refs = vec![reference::Model {
+                id: 0,
+                name: Some("main".to_string()),
+                kind: reference::ConfigKind::Branch,
+                commit: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+                remote: None,
+            }];
+            let metadata = serde_json::to_vec(&refs).expect("metadata should serialize");
+            remote.put_metadata(&metadata).await.unwrap();
+
+            let error = restore_metadata_strict(&db_conn, &remote)
+                .await
+                .expect_err("strict metadata restore must reject metadata without HEAD");
+
+            assert!(
+                error.contains("metadata does not contain local HEAD reference"),
+                "error should explain missing HEAD: {error}",
             );
         });
     }

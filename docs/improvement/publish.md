@@ -854,6 +854,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.129) 抽出 indexed Git object restore helper，复用 R2 get、hash verify、LocalStorage put 和 downloaded/skipped/failed report counts；后续 Cloudflare clone restore 可把失败 report 映射到目标目录清理。
 - [x] (v0.17.130) Cloudflare clone resolved-plan restore path 在目标目录内调用 `run_init()`，从 R2 读取完整 indexed Git object 集合，恢复 strict refs metadata，设置 HEAD/remote config，并完成 non-bare checkout；首个回归覆盖 default ref 的 objects/refs/HEAD/worktree 一致性。
 - [x] (v0.17.130) Cloudflare clone 在 refs metadata 缺失时以硬错误失败，并复用 clone cleanup 事务删除本次创建的目标目录；R2 object 缺失继续由 preflight `RepoCorrupt` 阻断，checkout 失败走既有 `CheckoutFailed` cleanup。
+- [x] (v0.17.132) strict refs metadata restore 校验 metadata 至少包含本地 HEAD，缺失时 cloud clone 以 refs metadata restore error 失败并清理本次创建的目标目录，避免不完整 metadata 被当作成功 clone。
 - [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。
 - [x] (v0.17.56) `--branch`、`--depth`、`--single-branch`、`--bare` 与 `libra+cloud://` 的首版兼容策略按 [clone.md](clone.md) 执行：这些首版未支持组合在 clone-domain config 读取和目标目录创建前返回 `LBR-CLI-002`，不得静默降级。
 - [x] (v0.17.131) `--json` / `--machine` 成功输出仍只有一个 clone envelope；Cloudflare clone 通过可选 `source_kind` / `cloud_site` 字段输出 clone domain、site、repo、ref 和 revision，普通 Git clone schema 继续省略这些字段。
@@ -863,7 +864,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.102) `cargo test cloud_clone_source_parse_test`
 - [x] (v0.17.101) `cargo test cloud_clone_domain_resolve_test`
-- [ ] `cargo test cloud_clone_restore_test`
+- [x] (v0.17.132) `LIBRA_SKIP_WEB_BUILD=1 cargo test cloud_clone_restore_test`
 - [x] (v0.17.102) `cargo test --test command_test clone_cloud`
 - [x] (v0.17.105) `cargo test --test command_test publish`
 
@@ -984,7 +985,7 @@ v1 使用 gitignore 子集：
 - [ ] `libra clone libra+cloud://code.example.com/repo/<repo_id>` 在 slug rename 后仍能恢复同一 repo。
 - [x] (v0.17.55/v0.17.78, verified v0.17.91) 未配置 `clone_domains.code.example.com` 时 clone 失败并给出配置 hint，不尝试从 Worker 页面下载。
 - [ ] AI object model、关系图和 projection/query indexes 能从 cloud baseline 恢复，且不依赖 publish redacted 字段。
-- [ ] 缺失 object 或 refs metadata 不完整时 clone 失败并清理目标目录。
+- [x] (v0.17.132) 缺失 object 或 refs metadata 不完整时 clone 失败并清理目标目录：缺失 object 由 R2 preflight 在建目录前阻断，缺失/无 HEAD metadata 在 restore transaction 中硬失败并清理。
 - [x] (v0.17.131 resolved-plan test) `libra clone libra+cloud://code.example.com/kepler-ledger --json` 的输出 schema 已落地为单个 clone envelope 的可选 Cloudflare source 字段；完整 mock D1/R2 CLI 级 JSON 测试仍随后续 D1 注入点补齐。
 
 ### Checkpoint D：Worker 可读

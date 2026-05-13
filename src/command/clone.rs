@@ -2918,6 +2918,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn cloud_clone_restore_test_cleans_destination_when_refs_metadata_has_no_head() {
+        let parent = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let _cwd = ChangeDirGuard::new(parent.path());
+        let source = cloud_source();
+        let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
+        let refs = vec![reference::Model {
+            id: 0,
+            name: Some("main".to_string()),
+            kind: reference::ConfigKind::Branch,
+            commit: Some(commit_id.to_string()),
+            remote: None,
+        }];
+        let metadata = serde_json::to_vec(&refs).expect("metadata should serialize");
+        remote
+            .put_metadata(&metadata)
+            .await
+            .expect("metadata should overwrite in-memory remote");
+        let args = CloneArgs {
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+        };
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        let (error, cleanup_warning) = execute_cloud_publish_clone(
+            &args,
+            &source,
+            restore_plan,
+            remote,
+            parent.path(),
+            &output,
+        )
+        .await
+        .expect_err("incomplete refs metadata must fail cloud clone");
+
+        assert!(cleanup_warning.is_none());
+        match error {
+            CloneError::CloudPublishRefsMetadataRestoreFailed { message, .. } => {
+                assert!(
+                    message.contains("metadata does not contain local HEAD reference"),
+                    "error should explain missing HEAD: {message}",
+                );
+            }
+            other => panic!("expected refs metadata restore failure, got {other}"),
+        }
+        assert!(
+            !parent.path().join("kepler-ledger").exists(),
+            "failed cloud clone should remove the destination it created"
+        );
+    }
+
     fn publish_site_row(
         default_ref: Option<&str>,
         latest_revision_oid: Option<&str>,
