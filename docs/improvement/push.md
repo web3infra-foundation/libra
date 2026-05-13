@@ -36,8 +36,8 @@
 - ✅ 拆分执行层与渲染层：`run_push(args, output) -> Result<PushOutput, PushError>` 纯执行入口
 - ✅ 明确定义并实现本批支持的 refspec 语义（默认同名分支、`<name>`、`<src>:<dst>`；多冒号形态如 `a:b:c` 显式拒绝）
 - ✅ 清理生产路径中的 `panic!`、裸 `println!()` / `eprintln!()`，统一回收到 `OutputConfig` 和 `PushError`
-- ✅ Transport 层空闲超时：HTTPS `connect_timeout(10s)` + `read_timeout(10s)`；SSH 每次 I/O 操作 `tokio::time::timeout(10s)` 包裹
-- ✅ Discovery 阶段 `10s` 连接超时（`tokio::time::timeout` 包裹 `discovery_reference`）
+- ✅ Transport 层空闲超时：HTTPS `connect_timeout(60s)` + `read_timeout(60s)`；SSH 每次 I/O 操作 `tokio::time::timeout(60s)` 包裹
+- ✅ Discovery 阶段 `60s` 连接超时（`tokio::time::timeout` 包裹 `discovery_reference`）
 - ✅ 完善 JSON 输出 schema（`PushOutput`），包含推送详情
 - ✅ 进度输出经过 `ProgressReporter` + `OutputConfig` 管控；`--json` / `--machine` 成功路径 stderr 干净
 - ✅ 执行层 warning 收集（`diff_tree_objs` 不再直接 `emit_warning`，而是收集到 `PushOutput.warnings`）
@@ -63,7 +63,7 @@
 2. **typed error enum 取代散射的 `CliError::fatal()`**：每个失败场景有确定的 `PushError` 变体
 3. **StableErrorCode 显式映射**：消除对 `infer_stable_error_code()` 的依赖
 4. **refspec 语义必须先收敛再实现**：本批只支持三种输入形态：省略（推当前分支）、`<name>`（同名分支）、`<src>:<dst>`（显式映射）；多冒号形态（如 `a:b:c`）和空段（如 `:dst`、`src:`）显式报 `InvalidRefspec`
-5. **超时是空闲超时，不是总时长硬截止**：HTTPS 使用 `reqwest::Client` 的 `connect_timeout(10s)` + `read_timeout(10s)`（socket 级无数据到达即触发）；SSH 使用 `tokio::time::timeout(10s)` 包裹每次 `read_exact` / `write_all` / `wait_with_output`（有数据流就续命）；discovery 阶段额外包裹 `tokio::time::timeout(10s)` 作为整体保险
+5. **超时是空闲超时，不是总时长硬截止**：HTTPS 使用 `reqwest::Client` 的 `connect_timeout(60s)` + `read_timeout(60s)`（socket 级无数据到达即触发）；SSH 使用 `tokio::time::timeout(60s)` 包裹每次 `read_exact` / `write_all` / `wait_with_output`（有数据流就续命）；discovery 阶段额外包裹 `tokio::time::timeout(60s)` 作为整体保险
 6. **结构化模式默认保持 stderr 干净**：`--json` / `--machine` 成功路径只输出一个 envelope；执行层 warning（如 submodule 不支持）收集到 `PushOutput.warnings` 而非直接 `emit_warning`，由渲染层根据模式决定输出方式
 7. **`--dry-run` 可被 Agent 消费**：JSON 模式下返回结构化预览（将推送的 ref 和对象数）
 8. **hint 覆盖常见失败**：网络超时、认证失败、non-fast-forward、missing remote、invalid refspec 等每种场景提供可操作的 hint
@@ -225,12 +225,12 @@ libra push origin local_branch:release
 
 | 阶段 | 超时类型 | 实现位置 | 语义 |
 |------|---------|---------|------|
-| Discovery / 建连 | 连接超时 10s | `push.rs`：`tokio::time::timeout` 包裹 `discovery_reference` | 整体调用超时 |
-| HTTPS 建连 | 连接超时 10s | `https_client.rs`：`reqwest::Client::builder().connect_timeout()` | TCP+TLS 握手超时 |
-| HTTPS 读取 | 空闲超时 10s | `https_client.rs`：`reqwest::Client::builder().read_timeout()` | socket 级无数据到达即触发，有数据流自动续命 |
-| SSH advertisement 读取 | 空闲超时 10s | `ssh_client.rs`：每次 `read_exact` 包裹 `tokio::time::timeout` | 每帧独立计时 |
-| SSH pack 写入 | 空闲超时 10s | `ssh_client.rs`：`write_all` + `shutdown` 包裹 `tokio::time::timeout` | 写入卡住即触发 |
-| SSH receive-pack 等待 | 空闲超时 10s | `ssh_client.rs`：`wait_with_output` 包裹 `tokio::time::timeout` | 远端处理挂起即触发 |
+| Discovery / 建连 | 连接超时 60s | `push.rs`：`tokio::time::timeout` 包裹 `discovery_reference` | 整体调用超时 |
+| HTTPS 建连 | 连接超时 60s | `https_client.rs`：`reqwest::Client::builder().connect_timeout()` | TCP+TLS 握手超时 |
+| HTTPS 读取 | 空闲超时 60s | `https_client.rs`：`reqwest::Client::builder().read_timeout()` | socket 级无数据到达即触发，有数据流自动续命 |
+| SSH advertisement 读取 | 空闲超时 60s | `ssh_client.rs`：每次 `read_exact` 包裹 `tokio::time::timeout` | 每帧独立计时 |
+| SSH pack 写入 | 空闲超时 60s | `ssh_client.rs`：`write_all` + `shutdown` 包裹 `tokio::time::timeout` | 写入卡住即触发 |
+| SSH receive-pack 等待 | 空闲超时 60s | `ssh_client.rs`：`wait_with_output` 包裹 `tokio::time::timeout` | 远端处理挂起即触发 |
 
 超时错误经 `classify_transport_error()` 统一映射为 `PushError::Timeout { phase, seconds: 10 }`。
 
@@ -567,7 +567,7 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/command/push.rs` | **重构** | 新增 `PushError` typed enum（20 变体）；新增 `PushOutput` / `PushRefUpdate` / `IncrementalObjsResult` 结构体；新增 `run_push()` 纯执行入口 + `render_push_output()` 渲染层；`parse_refspec()` 含多冒号拒绝；`suggest_remote_name()` fuzzy match + `levenshtein()`；`classify_transport_error()` 超时分类；`diff_tree_objs()` warning 收集；移除生产路径 `panic!` 和裸 stdout/stderr；`PushError → CliError` 显式 `StableErrorCode` 映射；进度输出改用 `ProgressReporter`；补齐 `--help` EXAMPLES |
-| `src/internal/protocol/https_client.rs` | **超时改造** | `reqwest::Client::builder()` 新增 `connect_timeout(10s)` + `read_timeout(10s)`（空闲超时：无数据到达即触发） |
+| `src/internal/protocol/https_client.rs` | **超时改造** | `reqwest::Client::builder()` 新增 `connect_timeout(60s)` + `read_timeout(60s)`（空闲超时：无数据到达即触发） |
 | `src/internal/protocol/ssh_client.rs` | **超时改造** | 新增 `SSH_IDLE_TIMEOUT` 常量；`read_advertisement()` 每次 `read_exact` 包裹 `tokio::time::timeout`；`send_pack()` 的 `write_all` / `shutdown` / `wait_with_output` 分别包裹 `tokio::time::timeout` |
 | `tests/command/push_test.rs` | **重大扩展** | 新增 explicit refspec、JSON+set-upstream、machine 输出、quiet+force warning 等 11 个集成测试 |
 | `tests/command/push_json_test.rs` | **新增** | JSON/machine 模式错误输出 schema 验证，5 个测试 |

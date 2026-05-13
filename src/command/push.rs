@@ -55,7 +55,7 @@ use crate::{
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
 /// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -668,7 +668,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     data.extend_from_slice(&pack_data);
 
     // Send pack via the appropriate transport.
-    // Idle timeouts (10s) are enforced at the transport layer: SSH wraps each
+    // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
     // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
@@ -1521,7 +1521,7 @@ mod test {
     fn test_push_error_to_cli_error_timeout() {
         let err: CliError = PushError::Timeout {
             phase: "discovery".to_string(),
-            seconds: 10,
+            seconds: PUSH_TIMEOUT.as_secs(),
         }
         .into();
         assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);
