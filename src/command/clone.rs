@@ -2437,6 +2437,7 @@ mod tests {
         tree::{Tree, TreeItem, TreeItemMode},
     };
     use object_store::memory::InMemory;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -2685,6 +2686,41 @@ mod tests {
     }
 
     #[test]
+    fn cloud_clone_restore_plan_resolves_full_tag_ref_selector() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: Some(CloudPublishSelector::Ref("refs/tags/v1.0.0".to_string())),
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let refs = vec![
+            publish_ref_row(
+                "refs/heads/main",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            publish_ref_row(
+                "refs/tags/v1.0.0",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ];
+
+        let checkout = resolve_cloud_publish_checkout_target(&source, &site, &refs)
+            .expect("full tag ref selector should resolve to the tag revision");
+
+        assert_eq!(
+            checkout,
+            CloudPublishCheckoutTarget {
+                revision_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                ref_name: Some("refs/tags/v1.0.0".to_string()),
+                selector_kind: CloudPublishCheckoutSelectorKind::Ref,
+            }
+        );
+    }
+
+    #[test]
     fn cloud_clone_restore_plan_rejects_ambiguous_short_ref_selector() {
         let source = CloudPublishSource {
             clone_domain: "code.example.com".to_string(),
@@ -2868,6 +2904,93 @@ mod tests {
             config_value("cloud.origin.site_id").await.as_deref(),
             Some("site_123")
         );
+
+        let db = get_db_conn_instance().await;
+        let restored_tag = reference::Entity::find()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+            .filter(reference::Column::Name.eq("refs/tags/v1.0.0"))
+            .filter(reference::Column::Remote.is_null())
+            .one(&db)
+            .await
+            .expect("restored tag should be queryable")
+            .expect("tag metadata should be restored");
+        let expected_commit = commit_id.to_string();
+        assert_eq!(
+            restored_tag.commit.as_deref(),
+            Some(expected_commit.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cloud_clone_restore_test_restores_tag_selector_as_detached_head() {
+        let parent = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let _cwd = ChangeDirGuard::new(parent.path());
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: Some(CloudPublishSelector::Ref("refs/tags/v1.0.0".to_string())),
+        };
+        let (mut restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
+        restore_plan.checkout = CloudPublishCheckoutTarget {
+            revision_oid: commit_id.to_string(),
+            ref_name: Some("refs/tags/v1.0.0".to_string()),
+            selector_kind: CloudPublishCheckoutSelectorKind::Ref,
+        };
+        let args = CloneArgs {
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
+                .to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+        };
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        let result = execute_cloud_publish_clone(
+            &args,
+            &source,
+            restore_plan,
+            remote,
+            parent.path(),
+            &output,
+        )
+        .await
+        .expect("cloud clone tag restore should complete");
+
+        let clone_dir = parent.path().join("kepler-ledger");
+        assert_eq!(result.path, clone_dir.to_string_lossy());
+        assert_eq!(result.branch, None);
+        let cloud_site = result
+            .cloud_site
+            .as_ref()
+            .expect("cloud clone output should include cloud site metadata");
+        assert_eq!(cloud_site.ref_name.as_deref(), Some("refs/tags/v1.0.0"));
+        assert_eq!(cloud_site.revision, commit_id.to_string());
+        assert_eq!(
+            fs::read_to_string(clone_dir.join("README.md")).unwrap(),
+            "# cloud\n"
+        );
+
+        let _clone_cwd = ChangeDirGuard::new(&clone_dir);
+        match Head::current_result()
+            .await
+            .expect("restored HEAD should be readable")
+        {
+            Head::Detached(detached) => assert_eq!(detached, commit_id),
+            other => panic!("tag selector should detach HEAD, got {other:?}"),
+        }
+        assert_eq!(
+            config_value("remote.origin.url").await.as_deref(),
+            Some("libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0")
+        );
     }
 
     #[tokio::test]
@@ -3042,6 +3165,13 @@ mod tests {
                     id: 0,
                     name: Some("main".to_string()),
                     kind: reference::ConfigKind::Branch,
+                    commit: Some(commit.id.to_string()),
+                    remote: None,
+                },
+                reference::Model {
+                    id: 0,
+                    name: Some("refs/tags/v1.0.0".to_string()),
+                    kind: reference::ConfigKind::Tag,
                     commit: Some(commit.id.to_string()),
                     remote: None,
                 },

@@ -282,16 +282,16 @@ async fn publish_upload_test_uploads_ai_artifacts_and_builds_d1_rows_idempotentl
             thread_id: Some("thread-1".to_string()),
             ..AiBundleAssociatedIds::default()
         },
-        objects: vec![ai_object(
+        objects: vec![ai_object(AiObjectFixture {
             site_id,
             revision_oid,
-            "Thread",
-            "thread-1",
-            AiObjectLayer::Snapshot,
-            serde_json::json!({ "threadId": "thread-1" }),
-            Vec::new(),
-            Vec::new(),
-        )],
+            object_type: "Thread",
+            object_id: "thread-1",
+            layer: AiObjectLayer::Snapshot,
+            payload: serde_json::json!({ "threadId": "thread-1" }),
+            removed_fields: Vec::new(),
+            relationships: Vec::new(),
+        })],
     })
     .expect("AI export plan should build");
     let storage = PublishStorage::new(Arc::new(InMemory::new()), repo_id, site_id)
@@ -376,31 +376,33 @@ fn revision_plan(
     }
 }
 
-fn ai_object(
-    site_id: &str,
-    revision_oid: &str,
-    object_type: &str,
-    object_id: &str,
+struct AiObjectFixture<'a> {
+    site_id: &'a str,
+    revision_oid: &'a str,
+    object_type: &'a str,
+    object_id: &'a str,
     layer: AiObjectLayer,
     payload: serde_json::Value,
     removed_fields: Vec<String>,
     relationships: Vec<AiObjectRelationship>,
-) -> PublishAiObject {
+}
+
+fn ai_object(fixture: AiObjectFixture<'_>) -> PublishAiObject {
     PublishAiObject {
         schema_version: PUBLISH_SCHEMA_VERSION,
-        site_id: site_id.to_string(),
-        revision_oid: revision_oid.to_string(),
-        object_type: object_type.to_string(),
-        object_id: object_id.to_string(),
-        layer,
-        source_refs: vec![format!("test/{object_id}")],
-        relationships,
-        payload,
+        site_id: fixture.site_id.to_string(),
+        revision_oid: fixture.revision_oid.to_string(),
+        object_type: fixture.object_type.to_string(),
+        object_id: fixture.object_id.to_string(),
+        layer: fixture.layer,
+        source_refs: vec![format!("test/{}", fixture.object_id)],
+        relationships: fixture.relationships,
+        payload: fixture.payload,
         redaction: AiObjectRedaction {
             mode: RedactionMode::Default,
             rules_version: "2026.05.13-1".to_string(),
         },
-        removed_fields,
+        removed_fields: fixture.removed_fields,
     }
 }
 
