@@ -1452,8 +1452,37 @@ async fn restore_metadata(
             return Ok(());
         }
     };
+    restore_metadata_from_bytes(db_conn, &data).await?;
+    println!("Metadata restored.");
+    Ok(())
+}
 
-    let references: Vec<reference::Model> = serde_json::from_slice(&data)
+/// Restore refs metadata and fail hard when the metadata object is missing.
+///
+/// `libra cloud restore` keeps its historical warning-only behavior through
+/// [`restore_metadata`]. Cloud clone restore needs a stricter contract: without
+/// refs metadata it cannot set HEAD/branches safely, so the caller must fail and
+/// clean up the just-created destination.
+#[expect(
+    dead_code,
+    reason = "cloud clone restore will call this strict helper when the local restore path lands"
+)]
+pub(crate) async fn restore_metadata_strict(
+    db_conn: &sea_orm::DatabaseConnection,
+    r2_storage: &RemoteStorage,
+) -> Result<(), String> {
+    let data = r2_storage
+        .get_metadata()
+        .await
+        .map_err(|e| format!("failed to download metadata: {}", e))?;
+    restore_metadata_from_bytes(db_conn, &data).await
+}
+
+async fn restore_metadata_from_bytes(
+    db_conn: &sea_orm::DatabaseConnection,
+    data: &[u8],
+) -> Result<(), String> {
+    let references: Vec<reference::Model> = serde_json::from_slice(data)
         .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
 
     for ref_model in references {
@@ -1508,8 +1537,6 @@ async fn restore_metadata(
             }
         }
     }
-
-    println!("Metadata restored.");
     Ok(())
 }
 
@@ -1640,6 +1667,32 @@ mod tests {
                 .unwrap();
             assert_eq!(intent_refs.len(), 1);
             assert_eq!(intent_refs[0].commit.as_ref(), Some(&restored_commit));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn restore_metadata_strict_fails_when_metadata_object_is_missing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+
+            let error = restore_metadata_strict(&db_conn, &remote)
+                .await
+                .expect_err("strict metadata restore must fail on missing metadata.json");
+
+            assert!(
+                error.contains("failed to download metadata"),
+                "error should explain metadata download failure: {error}",
+            );
         });
     }
 
