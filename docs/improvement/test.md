@@ -111,7 +111,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | TUI 渲染 | TestBackend / inline buffer smoke 已覆盖复杂状态 | 空 transcript、assistant delta、滚动窗口、approval prompt、retry error 与退出键契约均已覆盖；当前未引入 `insta` |
 | Tool ACL × context × policy | 6/6 | 含 MCP bridge 前缀防退化 |
 | Apply-Patch 文件生成(fake) | 3/3 | generation_cases.json 全量 + 失败分支 |
-| Approval / Interaction E2E | 7/7 | accept/reject/apply_to_future + `never` / `on-failure` / `untrusted` / `allow-all`；并发 pending 仍按 P1 拆出 |
+| Approval / Interaction E2E | 7/7 | accept/reject/apply_to_future + `never` / `on-failure` / `untrusted` / `allow-all`；多 pending interaction 请求 ID 路由已覆盖 |
 | Orchestrator gate 边界 | review rejection + max_turns 边界 + workspace/FUSE/network contract tests | 无本地 quick-follow |
 | Codex 旁路运行时 | 静态守卫 | mock WS app-server + plan-first 拦截 |
 | MCP 双入口一致 | done | control.json mcpUrl + --stdio mutex + dual-reachability smoke + web `/messages` → SSE/MCP observe + MCP `create_task` → web SSE observe |
@@ -163,7 +163,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - 已完成：同 client 续约 vs 不同 client conflict 的 token 失效顺序。
   - 已完成：approval 接受/拒绝/`apply_to_future` 三条 P0，以及 `never` / `on-failure` / `untrusted` / `allow-all` policy 行为覆盖。
   - 已完成：多个 pending interaction 同时存在时，Code UI adapter 按请求的 `interaction_id` 转发，不回退到 `activeInteractionId` 或首个 pending interaction。
-- **优先级**：P0（功能已覆盖；长时/lagged soak 降级为 P2）。
+- **优先级**：P0（功能已覆盖；1 小时真网 SSE soak 作为 P2 外部运行项）。
 - **测试位置**：**L2 已扩展** lease matrix 10/10；approval P0 由 `tests/code_ui_remote_approval_matrix.rs` 覆盖；多 pending ID 路由由 [src/internal/tui/code_ui_adapter.rs](../../src/internal/tui/code_ui_adapter.rs) `respond_interaction_routes_requested_id_with_multiple_pending` 覆盖。
 - **AI 落地提示**：新增 lease case 时仍保持“一条 JSON case + 一条 `lease_case!()`”的 cargo 输出定位。
 
@@ -597,14 +597,14 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 | 5.1 | CLI 解析 / 模式分发 | – | done | – | – | ✅ | 持续随 CLI option 增量维护 |
 | 5.2 | Provider boot + flag passthrough | – | done | – | – | ✅ | missing-key / `--api-base` quick-follow closed |
 | 5.3 | HTTP 读路由 + loopback gate | done | done | done | – | ✅ | 新路由需维持 loopback-first 错误顺序 |
-| 5.4 | HTTP 写路由 + lease 状态机 | – | done | done | – | ✅ | pending interaction 并发仍 P1 |
+| 5.4 | HTTP 写路由 + lease 状态机 | – | done | done | – | ✅ | 多 pending interaction 请求 ID 路由已覆盖 |
 | 5.5 | SSE | done | – | done | – | ✅⚠️ | lagged / 1 小时 soak deferred |
 | 5.6 | Local TUI Control 锁/审计 | done | done | done | – | ✅ | 无 |
 | 5.7 | Browser Control | – | – | done | – | ✅ | 无 |
 | 5.8 | TUI 渲染快照 | – | done | done | – | ✅ | 无 |
 | 5.9 | Tool ACL / context / policy | – | done | – | – | ✅ | 持续随 tool registry 增量维护 |
 | 5.10 | Apply-Patch 生成(fake) | – | – | done | – | ✅ | 持续随 fixture schema 增量维护 |
-| 5.11 | Approval / Interaction E2E | – | – | done | – | ✅⚠️ | 并发 pending 仍 P1 |
+| 5.11 | Approval / Interaction E2E | – | done | done | – | ✅ | 多 pending interaction 请求 ID 路由已覆盖 |
 | 5.12 | Orchestrator gate / max_turns | done | done | – | – | ✅ | 持续随 executor/gate contract 增量维护 |
 | 5.13 | Codex 旁路运行时 | – | – | done | – | ✅ | mid-turn process restart 属未来 hardening |
 | 5.14 | MCP 双入口一致 | – | done | smoke + both directions observe | – | ✅ | 无 |
@@ -721,9 +721,9 @@ cargo test --all --all-features
 | 1 | 基础设施 | ✅ closed | 无 | 无 |
 | 2 | CLI / route P0 + 错误码契约 L0 | ✅ closed | 无 | 无 |
 | 3 | Lease 全量 | ✅ closed | 无 | 无 |
-| 4 | SSE 全量 | ✅ closed | 长时/lagged soak deferred | 无 |
+| 4 | SSE 全量 | ✅ closed | 1 小时真网 SSE soak deferred | 无 |
 | 5 | 生成 fake | ✅ closed | 无 | 无 |
-| 6 | Approval flow | ✅ closed | 并发 pending P1 | 无 |
+| 6 | Approval flow | ✅ closed | 无 | 无 |
 | 7 | State / Security 矩阵 | ✅ closed | streaming detach candidate | 无 |
 | 8 | Orchestrator gate / max_turns / Tool ACL | ✅ closed | 无 | 无 |
 | 9 | Codex runtime + MCP 双入口 + resume | ✅ closed | 无 | 无新增依赖 |
@@ -773,7 +773,7 @@ Wave 1–11 与 Wave 12 部分已完成；剩余项均为外部运行条件（Wa
 | 3 | ✅ closed | Lease matrix 9/9 + observe-mode + audit redaction L0 |
 | 4 | ✅ closed | SSE matrix 7/7 |
 | 5 | ✅ closed | Generation matrix 3/3（apply_patch fake fixture） |
-| 6 | ✅ closed | Approval matrix 7/7（accept / reject / `apply_to_future` + `never` / `on-failure` / `untrusted` / `allow-all`），并发 pending 已按 §5.11 P1 拆出 |
+| 6 | ✅ closed | Approval matrix 7/7（accept / reject / `apply_to_future` + `never` / `on-failure` / `untrusted` / `allow-all`），多 pending interaction 请求 ID 路由已由 §5.11 覆盖 |
 | 7 | ✅ closed | State 7/7 + Security 6/6 + diagnostics SecretRedactor wire-up |
 | 8 | ✅ closed | Tool ACL 6/6（含 MCP bridge 前缀防退化）+ executor max_turns / workspace contract / FUSE failure contract |
 | 9 | ✅ closed | `--resume` CLI 表面 4 条（unknown UUID、unknown 非 UUID 字符串、happy-path 跨进程恢复 transcript、SIGTERM-mid-turn 恢复最近提交消息）；§5.16 closure criterion ✅；§5.13 closed — `--codex-port 0` validation smoke + `MockCodexWsServer` helper（tokio-tungstenite，accept WS handshake、回 initialize/thread/start JSON-RPC envelope）+ 端到端 round-trip smoke ✅ + binary 级 boot smoke（`libra code --provider codex` 真实链入 mock，锁定 `initialize` / `thread/start` 和默认 plan-mode payload）✅ + `thread/started` notification persistence ✅ + plan gate smoke（approval pending 前不 resolve）✅ + managed startup reconnect smoke ✅；§5.14 item 1/2/3-smoke ✅（control.json mcpUrl + --stdio mutex + 同进程 web/MCP dual-reachability via `Mcp-Session-Id` 头）；§5.14 web `/messages` → SSE/MCP observe ✅；§5.14 MCP `tools/call create_task` → web SSE observe ✅ |
