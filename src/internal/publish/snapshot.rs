@@ -28,7 +28,10 @@ use chrono::{DateTime, Utc};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
-use crate::internal::publish::preflight::{Preflight, PreflightDecision};
+use crate::internal::publish::{
+    contract::{FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile},
+    preflight::{Preflight, PreflightDecision},
+};
 
 /// Maximum file size that gets a R2 preview blob, in bytes.
 ///
@@ -127,6 +130,100 @@ impl RevisionPlan {
             .filter(|f| matches!(f, FileSnapshot::Text { .. }))
             .count()
     }
+
+    /// Convert this revision snapshot into the JSON manifest shape
+    /// written at
+    /// `{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/code-manifest.json`.
+    pub fn to_code_manifest(&self, repo_id: &str, site_id: &str) -> PublishCodeManifest {
+        PublishCodeManifest {
+            schema_version: PUBLISH_SCHEMA_VERSION,
+            site_id: site_id.to_string(),
+            revision_oid: self.revision_oid.clone(),
+            commit_oid: self.commit_oid.clone(),
+            tree_oid: self.tree_oid.clone(),
+            generated_at: self.generated_at,
+            files: self
+                .files
+                .iter()
+                .map(|file| file.to_publish_file(repo_id, site_id, &self.revision_oid))
+                .collect(),
+        }
+    }
+}
+
+impl FileSnapshot {
+    /// Convert this file snapshot into the `publish_files`/manifest
+    /// contract row. Only text files get a content hash and R2 key;
+    /// binary, too-large, and ignored files stay metadata-only.
+    pub fn to_publish_file(&self, repo_id: &str, site_id: &str, revision_oid: &str) -> PublishFile {
+        match self {
+            Self::Text {
+                path,
+                size_bytes,
+                content_sha256,
+                language,
+            } => PublishFile {
+                site_id: site_id.to_string(),
+                revision_oid: revision_oid.to_string(),
+                path: path.clone(),
+                display_mode: FileDisplayMode::Text,
+                content_sha256: Some(content_sha256.clone()),
+                r2_key: Some(publish_text_file_key(
+                    repo_id,
+                    site_id,
+                    revision_oid,
+                    content_sha256,
+                )),
+                size_bytes: *size_bytes,
+                language: language.clone(),
+            },
+            Self::Binary { path, size_bytes } => PublishFile {
+                site_id: site_id.to_string(),
+                revision_oid: revision_oid.to_string(),
+                path: path.clone(),
+                display_mode: FileDisplayMode::Binary,
+                content_sha256: None,
+                r2_key: None,
+                size_bytes: *size_bytes,
+                language: None,
+            },
+            Self::TooLarge { path, size_bytes } => PublishFile {
+                site_id: site_id.to_string(),
+                revision_oid: revision_oid.to_string(),
+                path: path.clone(),
+                display_mode: FileDisplayMode::TooLarge,
+                content_sha256: None,
+                r2_key: None,
+                size_bytes: *size_bytes,
+                language: None,
+            },
+            Self::Ignored {
+                path, size_bytes, ..
+            } => PublishFile {
+                site_id: site_id.to_string(),
+                revision_oid: revision_oid.to_string(),
+                path: path.clone(),
+                display_mode: FileDisplayMode::Ignored,
+                content_sha256: None,
+                r2_key: None,
+                size_bytes: *size_bytes,
+                language: None,
+            },
+        }
+    }
+}
+
+pub fn publish_code_manifest_key(repo_id: &str, site_id: &str, revision_oid: &str) -> String {
+    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/code-manifest.json")
+}
+
+pub fn publish_text_file_key(
+    repo_id: &str,
+    site_id: &str,
+    revision_oid: &str,
+    content_sha256: &str,
+) -> String {
+    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/files/{content_sha256}.txt")
 }
 
 /// Plan for one ref entry. Mirrors the `publish_refs` row shape +
