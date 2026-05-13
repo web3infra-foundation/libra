@@ -102,7 +102,7 @@
 | Step 1.8 | M5.3 | JSONL Session 存储 | 核心已完成（2026-05-03：CEX-12 `SessionEvent` / `SessionJsonlStore`、append-only `events.jsonl`、legacy `.json` 并发安全迁移、truncate-tail recovery 和 unknown-event skip 均已落地；tail index / perf gate 与大附件外部化收敛到 CEX-13b ContextFrame） |
 | Step 1.0.10 | — | sea-orm schema migration runner（CEX-12.5） | 已完成（2026-05-02：`MigrationRunner` + `Migration` + `schema_versions` 表 + `INSERT OR IGNORE` / `DELETE`+`changes()` 双向并发安全 + 预校验回滚 + fresh/establish 路径收敛 + 22 集成测试） |
 | Step 1.9 | — | Context Budget、Memory Anchor、Compaction 最小闭环 | 核心已完成（2026-05-03：CEX-13a `ContextBudget`、CEX-13b `ContextFrame` JSONL replay / attachment / tool-loop prompt frame、CEX-13c session-scoped `MemoryAnchor` draft / confirm / revoke / supersede 均已落地；automation project-scope auto-promotion policy 归 Step 1.10） |
-| Step 1.10 | M5.1 / M5.2 | Source Pool 与 Automation | Source Pool Phase A + Automation MVP core 已完成（2026-05-03：`Source` / `CapabilityManifest` / `SourcePool`、`McpSource`、legacy MCP shim、source-prefixed naming、trust-tier enablement、session namespace/call-record core；Automation TOML rules、cron simulation、prompt/webhook/shell actions、shell safety preflight、failure isolation、`automation_log` migration + CLI `automation list|run|history` 均已落地）；REST/OpenAPI、`/source` hot reload、旧 MCP config migration 和 runtime hook/VCS event-source wiring 仍是后续收敛 |
+| Step 1.10 | M5.1 / M5.2 | Source Pool 与 Automation | Source Pool Phase A + Automation MVP core 已完成（2026-05-03：`Source` / `CapabilityManifest` / `SourcePool`、`McpSource`、legacy MCP shim、source-prefixed naming、trust-tier enablement、session namespace/call-record core；Automation TOML rules、cron simulation、prompt/webhook/shell actions、shell safety preflight、failure isolation、`automation_log` migration + CLI `automation list|run|history` 均已落地）；OpenAPI fixture tool generation 与 `/source` hot reload 已补齐；旧 MCP config migration 和 runtime hook/VCS event-source wiring 仍是后续收敛 |
 | Step 1.11 | — | 模型用量与耗时统计（SQLite 聚合，按 provider / model 区分） | 核心+schema follow-up 已完成（2026-05-03：`agent_usage_stats` built-in migration、`UsageRecorder`、provider/model aggregate query、`libra usage report --by=model` with `--since` / `--until` / `--session` / `--thread` / `--include-failed` / `--format`、`libra usage prune --retention-days`、tool-loop 调用耗时写入、missing/failure rows、cached/reasoning/total/tool-call 聚合字段、OpenAI/Anthropic/Gemini usage metadata 映射、TUI usage badge formatter、chat-area header usage badge、compact bottom-pane usage line和 built-in `/usage` transcript view 已落地）；pricing table / retention config 已收口，SQLite-backed modal detail panel、streaming 增量 token 仍是 CEX-16 follow-up |
 | Step 2 架构基线 | CEX-S2-00 / 01 / 02 | 不变量、readiness matrix、依赖图（不启动 runtime） | 已完成（audit closure 落于 "Step 2 audit closure" 节，2026-05-02） |
 | Step 2.1 | CEX-S2-10 | Agent contracts / event schema | **Schema 已落地、runtime wiring pending CP-4（2026-05-02）**：`src/internal/ai/agent_run/` 下 `budget.rs` / `context_pack.rs` / `decision.rs` / `event.rs` / `evidence.rs` / `patchset.rs` / `permission.rs` / `run.rs` / `task.rs` 全部存在，**但全部为 schema-only**——尚无 dispatcher、merge pipeline、flag-on 执行路径或 Scheduler 调用入口；runtime wiring 必须等 CP-4 gate 通过后才能启动 |
@@ -209,7 +209,7 @@ flowchart LR
 
 | 步骤 | 目标 | 并发策略 | 状态 |
 |------|------|----------|------|
-| **Step 1** | 按此前方案补齐单 Agent 的代码理解、弱模型兼容、安全底线、意图识别、可恢复编辑和生态基础 | 保持 orchestrator 串行；不启用 sub-agent 并行 | v1 核心基线已落地；pricing / source hot reload / event-source wiring 等为后续扩展 |
+| **Step 1** | 按此前方案补齐单 Agent 的代码理解、弱模型兼容、安全底线、意图识别、可恢复编辑和生态基础 | 保持 orchestrator 串行；不启用 sub-agent 并行 | v1 核心基线已落地；旧 MCP config migration、event-source wiring 和 full TUI usage 仍为后续扩展 |
 | **Step 2** | 在 Step 1 基线之上启用 sub-agent，采用三层架构隔离调度、执行和正式状态 | 先单 sub-agent behind flag，再受控并行 | 方案阶段，等待 Step 2 runtime gate；默认不开启 |
 
 ### 明确暂不做
@@ -419,7 +419,7 @@ flowchart LR
 | 顺序 | 任务 | 为什么现在做 | 完成后解锁 |
 |------|------|--------------|------------|
 | 1 | CEX-16 follow-up：full TUI + usage schema completion | CEX-16 core 已有，failure/cancel rows、pricing/retention、cached/reasoning/tool-call fields 已补齐；L1/L2/L3 实时 TUI、SQLite-backed modal 和 streaming 增量仍未完成 | CP-6 完整通过；Step 2 budget enforcement、parallel cost attribution |
-| 2 | Step 1.10 follow-up：source hot reload + runtime event-source wiring | CEX-14 / CEX-15 core 已有，但 `/source reload`、旧 MCP config migration、hook/VCS event-source runtime 接线仍未完成 | Step 2 capability package / source-triggered workflows |
+| 2 | Step 1.10 follow-up：runtime event-source wiring | CEX-14 / CEX-15 core 已有，OpenAPI fixture tool generation 与 `/source reload` 已补齐；旧 MCP config migration、hook/VCS event-source runtime 接线仍未完成 | Step 2 capability package / source-triggered workflows |
 | 3 | CEX-S2-11 起的 Step 2 runtime | 只有 CP-4 通过后才允许 sub-agent runtime；当前 `agent_run/` 只是 schema-only，且 CEX-16 full gate 仍需补齐后才可做依赖 usage TUI 的 Step 2 observability | sub-agent workspace / single-agent flag / controlled parallel |
 
 **Step 1 Checkpoints：**
