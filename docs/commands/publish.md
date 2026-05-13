@@ -2,7 +2,7 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.53:
+Current implementation status in v0.17.57:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
@@ -15,6 +15,10 @@ Current implementation status in v0.17.53:
   are registered CLI surfaces, but they currently return
   `LBR-UNSUPPORTED-001` with a pointer to
   `docs/improvement/publish.md`.
+- The Worker project uses `wrangler types --env-interface CloudflareEnv
+  cloudflare-env.d.ts` as the binding type source. The committed
+  `env.d.ts` only augments generated types with optional Cloudflare
+  Access secret names.
 - The full code/ref/AI snapshot upload, cloud status comparison, Worker
   deploy, and unpublish flows remain tracked in
   `docs/improvement/publish.md`.

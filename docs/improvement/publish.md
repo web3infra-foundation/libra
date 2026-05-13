@@ -862,7 +862,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.11) 新建根目录 `worker/` Next.js + React + TypeScript 项目，并接入 `@opennextjs/cloudflare`。
 - [x] (v0.17.11) `wrangler.jsonc` 包含 OpenNext `main` / `assets`、D1/R2 bindings、`nodejs_compat` 和 observability。
-- [ ] 运行 `wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts`，服务端代码使用生成类型，不手写 Env。
+- [x] (v0.17.57) 运行 `wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts`，服务端代码使用生成类型：`worker/tsconfig.json` 不再引用 `@cloudflare/workers-types`，`worker/env.d.ts` 只为 Wrangler 不生成的 Cloudflare Access secrets 做最小 augmentation。
 - [x] (v0.17.11) 新增 Worker 模板 manifest，确认 root `worker/` source-only 文件能被 Libra package/binary 嵌入，且生成目录、`.env*` 和凭据文件被排除。
 - [x] (v0.17.11) server-only helper 通过 `getCloudflareContext()` 读取 `LIBRA_PUBLISH_DB` 和 `LIBRA_PUBLISH_BUCKET`。
 - [x] (v0.17.11) API endpoints 按本文 Worker API 表实现。
@@ -878,9 +878,9 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `pnpm --dir worker install`
+- [x] (v0.17.57) `pnpm --dir worker install`
 - [x] (v0.17.14) `pnpm --dir worker lint`
-- [ ] `pnpm --dir worker cf-typegen`
+- [x] (v0.17.57) `pnpm --dir worker cf-typegen`
 - [x] (v0.17.14) `pnpm --dir worker test`
 - [x] (v0.17.14) `pnpm --dir worker exec tsc --noEmit`
 - [x] (v0.17.9) `cargo test --test publish_worker_template_embed_test`
