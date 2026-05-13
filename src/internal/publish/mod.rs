@@ -27,6 +27,7 @@
 
 pub mod ai_export;
 pub mod contract;
+pub mod incremental;
 pub mod preflight;
 pub mod snapshot;
 pub mod worker_template;

@@ -938,7 +938,7 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `cargo test publish_incremental_test`
+- [x] (v0.17.103) `cargo test publish_incremental_test`
 - [x] (v0.17.92) `cargo test publish_redaction_contract_test`
 - [ ] `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
 
