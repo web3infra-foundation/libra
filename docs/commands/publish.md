@@ -7,7 +7,9 @@ Current implementation status:
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
 - `libra publish status` reports the local Worker template state as
-  `missing`, `current`, `modified`, `outdated`, or `conflicted`.
+  `missing`, `current`, `modified`, `outdated`, or `conflicted`, and
+  can compare local branch/tag refs with D1 `publish_refs` when a site
+  id is configured.
 - `libra publish sync --dry-run` scans local branch/tag refs, validates
   `--ref`, reports dirty-tree warnings, and emits the local publish
   plan without Cloudflare credentials.
@@ -34,8 +36,8 @@ Current implementation status:
   bindings when `BASE_URL` is unset, and runs desktop plus mobile
   Chromium assertions for the publish landing page, code browser, file
   viewer, AI model page, refs, status, and empty/non-text states.
-- The full code/ref/AI snapshot upload, cloud status comparison, and Git
-  protocol flows remain tracked in `docs/improvement/publish.md`.
+- The full code/ref/AI snapshot upload and Git protocol flows remain
+  tracked in `docs/improvement/publish.md`.
 
 ## Synopsis
 
@@ -52,9 +54,9 @@ libra publish unpublish [OPTIONS]
 `libra publish` is being developed as the outward-facing counterpart
 to `libra cloud`. The shipped slices are local Worker-template
 initialisation, local Worker-template status, offline sync dry-runs,
-and Worker build/deploy/unpublish orchestration. They do not yet upload
-repository snapshots, implement cloud status comparison, or implement
-Git protocol.
+cloud ref status comparison, and Worker build/deploy/unpublish
+orchestration. They do not yet upload repository snapshots or
+implement Git protocol.
 
 ## Subcommands
 
@@ -128,11 +130,14 @@ Current behavior:
 ### `libra publish status`
 
 ```
-libra publish status [--json]
+libra publish status [--site-id <uuid>] [--json]
 ```
 
-Current behavior: this subcommand inspects only the local Worker
-template and manifest. It does not inspect Cloudflare D1/R2 state.
+Current behavior: this subcommand always inspects the local Worker
+template and manifest. If `--site-id <uuid>` is passed, or
+`publish.site_id` exists in repository config, it also reads D1
+`publish_refs` and compares published branch/tag refs with local
+`refs/heads/*` and `refs/tags/*`.
 
 The status is:
 
@@ -148,7 +153,16 @@ The status is:
   symlink or non-file path.
 
 `--json` returns counts for total, current, missing, modified,
-outdated, and conflicted files.
+outdated, and conflicted files. It also includes `publishedRefs`. When
+no site id is available, `publishedRefs.state` is `unconfigured`. When
+comparison runs, `publishedRefs.state` is `compared` and the object
+contains matching, changed, local-only, and published-only ref counts
+plus the affected ref rows.
+
+D1 comparison requires `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, and
+`LIBRA_D1_DATABASE_ID` using the same env/vault resolution as
+`libra cloud`. Missing or unreachable D1 configuration fails the
+command instead of silently reporting stale publish state.
 
 ### `libra publish deploy`
 

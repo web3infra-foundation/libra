@@ -815,7 +815,7 @@ v1 使用 gitignore 子集：
 - [ ] `sync` 非 dry-run 默认发布所有本地 branch/tag refs；`sync --ref` 只做定向同步，不能更新完整 refs generation。
 - [x] (v0.17.53) `sync --dry-run` 不写 D1/R2，也不创建 `.libra/publish` 本地发布状态。
 - [x] (v0.17.53) `sync --dry-run --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
-- [ ] `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
+- [x] (v0.17.95) `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
 - [x] (v0.17.53) dirty 工作区 warning 和 `--fail-on-dirty` 语义有测试。
 
 **Verification:**
