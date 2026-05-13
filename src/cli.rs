@@ -288,9 +288,7 @@ enum Commands {
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
     Cloud(command::cloud::CloudArgs),
 
-    #[command(
-        about = "Materialise and inspect the read-only Cloudflare Worker template; sync/deploy are not yet implemented"
-    )]
+    #[command(about = "Manage read-only Cloudflare Worker publishing")]
     Publish(command::publish::PublishArgs),
 
     // CEX-EntireIO: external-Agent capture surface.

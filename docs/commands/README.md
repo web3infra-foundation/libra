@@ -91,7 +91,7 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra cloud` | | Cloud backup and restore operations via Cloudflare D1/R2 | [cloud.md](cloud.md) |
-| `libra publish` | | Materialise and inspect the read-only Cloudflare Worker template; sync/deploy are not yet implemented | [publish.md](publish.md) |
+| `libra publish` | | Manage read-only Cloudflare Worker publishing | [publish.md](publish.md) |
 | `libra db` | | Inspect and upgrade the repository SQLite schema | [db.md](db.md) |
 | `libra worktree` | `wt` | Manage multiple working trees attached to the repository | [worktree.md](worktree.md) |
 

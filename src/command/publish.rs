@@ -2,25 +2,26 @@
 //!
 //! Per `docs/improvement/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
-//! materialises the embedded Worker template, `status` reports local
-//! template drift, and `deploy` validates/builds the Worker before
-//! optionally applying D1 migrations and deploying with Wrangler. The
-//! remaining sync upload and unpublish subcommands still surface a
-//! clear "not yet implemented" message until their cloud mutation
-//! plumbing ships.
+//! materialises the embedded Worker template, `sync --dry-run` plans
+//! local refs without cloud writes, `status` reports local template
+//! drift, `deploy` validates/builds the Worker before optionally
+//! applying D1 migrations and deploying with Wrangler, and
+//! `unpublish --yes` disables a site through Wrangler D1 execute. The
+//! remaining full sync upload and cloud status comparison still surface
+//! a clear unsupported error until their cloud mutation plumbing ships.
 //!
-//! Reserved subcommands return a typed unsupported error pointing the
-//! user at:
+//! Unsupported full-sync/cloud-comparison paths return a typed error
+//! pointing the user at:
 //!
 //!   * the relevant `libra cloud sync` baseline that is implemented
 //!     (Phase 1's `run_cloud_sync` helper),
 //!   * the publish.md design doc,
-//!   * the planned Phase 4 release.
+//!   * the remaining publish.md v1 sync/status work.
 //!
 //! Codex pass-7 P1 registered the CLI surface so the `clap` parser
-//! would not reject `libra publish ...`. `init` is the first concrete
-//! slice: it writes only source-template files and a local manifest,
-//! never generated Worker output or credentials.
+//! would not reject `libra publish ...`. Later slices filled in local
+//! template management, dry-run planning, Worker deployment, and
+//! unpublish orchestration without changing the full-upload boundary.
 
 use std::{
     collections::BTreeMap,
@@ -61,7 +62,7 @@ use crate::{
 };
 
 #[derive(Parser, Debug)]
-#[command(about = "Materialise and inspect the read-only Cloudflare Worker template")]
+#[command(about = "Manage read-only Cloudflare Worker publishing")]
 pub struct PublishArgs {
     #[command(subcommand)]
     pub command: PublishCommand,
@@ -71,13 +72,13 @@ pub struct PublishArgs {
 pub enum PublishCommand {
     /// Materialise the local Worker template scaffold.
     Init(InitArgs),
-    /// Reserved for the planned D1/R2 sync implementation.
+    /// Plan publish sync; full D1/R2 upload is still unsupported unless --dry-run is used.
     Sync(SyncArgs),
-    /// Reserved for the planned local/cloud status report.
+    /// Inspect local Worker template status; cloud ref comparison is still pending.
     Status(StatusArgs),
-    /// Reserved for the planned Cloudflare Worker deploy flow.
+    /// Build and optionally deploy the Cloudflare Worker.
     Deploy(DeployArgs),
-    /// Reserved for the planned unpublish flow.
+    /// Disable a published site without deleting D1/R2 data.
     Unpublish(UnpublishArgs),
 }
 
@@ -170,9 +171,10 @@ pub struct UnpublishArgs {
     pub site_id: Option<String>,
 }
 
-const NOT_YET_IMPLEMENTED: &str = "`libra publish` Phase 4 sync/deploy plumbing is not ready yet. \
-     `libra publish init` can materialise the Worker template; track \
-     docs/improvement/publish.md for the remaining v1 release window.";
+const NOT_YET_IMPLEMENTED: &str = "`libra publish sync` full D1/R2 upload is not ready yet. \
+     `libra publish init`, `libra publish sync --dry-run`, `libra publish status`, \
+     `libra publish deploy`, and `libra publish unpublish --yes` are available; track \
+     docs/improvement/publish.md for the remaining v1 sync/status work.";
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
 
