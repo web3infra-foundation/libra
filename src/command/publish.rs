@@ -1077,6 +1077,11 @@ trait PublishSyncSink {
         &mut self,
         update: PublishSiteLatestUpdateRequest<'_>,
     ) -> CliResult<PublishSiteLatestUpdateResult>;
+    async fn delete_stale_refs(
+        &mut self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> CliResult<i64>;
 }
 
 struct CloudPublishSyncSink {
@@ -1158,6 +1163,17 @@ impl PublishSyncSink for CloudPublishSyncSink {
             })
             .await
             .map_err(|source| publish_sync_d1_error("failed to update publish site latest", source))
+    }
+
+    async fn delete_stale_refs(
+        &mut self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> CliResult<i64> {
+        self.d1_client
+            .delete_publish_refs_for_other_sync_runs(site_id, current_sync_run_id)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to delete stale publish refs", source))
     }
 }
 
@@ -1453,6 +1469,8 @@ async fn persist_publish_sync_plan(
                 ));
             }
         }
+        sink.delete_stale_refs(&context.site.site_id, context.sync_run_id)
+            .await?;
     } else {
         let updated_at = context.generated_at.to_rfc3339();
         for publish_ref in context.selected_refs {
@@ -2891,6 +2909,7 @@ mod tests {
         site_index_uploads: usize,
         refs: Vec<PublishRefRow>,
         latest_updates: Vec<FakeLatestUpdate>,
+        stale_ref_deletes: Vec<(String, String)>,
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -2963,6 +2982,16 @@ mod tests {
                 force: update.force,
             });
             Ok(PublishSiteLatestUpdateResult::Updated)
+        }
+
+        async fn delete_stale_refs(
+            &mut self,
+            site_id: &str,
+            current_sync_run_id: &str,
+        ) -> CliResult<i64> {
+            self.stale_ref_deletes
+                .push((site_id.to_string(), current_sync_run_id.to_string()));
+            Ok(1)
         }
     }
 
@@ -3115,6 +3144,11 @@ mod tests {
         assert_eq!(sink.site_index_uploads, 1);
         assert_eq!(sink.refs.len(), 2);
         assert_eq!(
+            sink.stale_ref_deletes,
+            vec![(site.site_id.clone(), sink.sync_runs[0].sync_run_id.clone())],
+            "all-refs sync must remove publish_refs rows from older sync runs after latest CAS",
+        );
+        assert_eq!(
             sink.latest_updates,
             vec![FakeLatestUpdate {
                 site_id: site.site_id.clone(),
@@ -3167,6 +3201,7 @@ mod tests {
         assert!(!output.updates_full_refs_generation);
         assert_eq!(sink.site_index_uploads, 0);
         assert!(sink.latest_updates.is_empty());
+        assert!(sink.stale_ref_deletes.is_empty());
         assert_eq!(sink.refs.len(), 1);
         assert_eq!(sink.refs[0].ref_name, "refs/heads/main");
     }

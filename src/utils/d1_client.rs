@@ -1121,6 +1121,23 @@ impl D1Client {
         Ok(())
     }
 
+    /// Delete stale `publish_refs` rows left by older all-refs sync runs.
+    ///
+    /// Callers run this only after a full sync has upserted every current
+    /// local branch/tag ref with `current_sync_run_id` and after the site
+    /// latest/default CAS succeeds. That order prevents deleting the previous
+    /// default ref while `publish_sites.default_ref` still points at it.
+    pub async fn delete_publish_refs_for_other_sync_runs(
+        &self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> Result<i64, D1Error> {
+        let D1Statement { sql, params } =
+            delete_publish_refs_for_other_sync_runs_statement(site_id, current_sync_run_id);
+        let result = self.execute(&sql, params).await?;
+        Ok(result.meta.and_then(|meta| meta.changes).unwrap_or(0))
+    }
+
     /// Insert or update a `publish_files` row.
     pub async fn upsert_publish_file(&self, row: &PublishFileRow) -> Result<(), D1Error> {
         let sql = r#"
@@ -1385,6 +1402,19 @@ fn publish_site_latest_update_result_from_changes(changes: i64) -> PublishSiteLa
         PublishSiteLatestUpdateResult::Updated
     } else {
         PublishSiteLatestUpdateResult::Conflict
+    }
+}
+
+fn delete_publish_refs_for_other_sync_runs_statement(
+    site_id: &str,
+    current_sync_run_id: &str,
+) -> D1Statement {
+    D1Statement {
+        sql: "DELETE FROM publish_refs WHERE site_id = ?1 AND sync_run_id != ?2".to_string(),
+        params: Some(vec![
+            serde_json::json!(site_id),
+            serde_json::json!(current_sync_run_id),
+        ]),
     }
 }
 
@@ -2020,6 +2050,23 @@ mod tests {
         assert_eq!(
             publish_site_latest_update_result_from_changes(0),
             PublishSiteLatestUpdateResult::Conflict
+        );
+    }
+
+    #[test]
+    fn publish_ref_stale_delete_scopes_to_site_and_current_sync_run() {
+        let statement = delete_publish_refs_for_other_sync_runs_statement("site-1", "sync-current");
+        assert_eq!(
+            statement.sql,
+            "DELETE FROM publish_refs WHERE site_id = ?1 AND sync_run_id != ?2"
+        );
+        let params = statement.params.expect("delete statement must bind params");
+        assert_eq!(
+            params,
+            vec![
+                serde_json::json!("site-1"),
+                serde_json::json!("sync-current")
+            ]
         );
     }
 

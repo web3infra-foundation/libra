@@ -126,7 +126,8 @@ Current behavior:
   revision, uploads text previews and `code-manifest.json` to R2, writes
   binary, too-large, and ignored files as D1 metadata only, uploads
   `refs.json` and `latest.json`, and advances `publish_sites` through a
-  refs-generation CAS.
+  refs-generation CAS. After that CAS succeeds, stale `publish_refs`
+  rows from older sync runs for the same site are deleted.
 - `--ref` on non-dry-run sync writes only the selected ref and its
   revision snapshot. It does not upload `refs.json`/`latest.json` and
   does not advance the complete refs generation.

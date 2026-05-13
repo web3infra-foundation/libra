@@ -820,7 +820,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.120) `src/command/publish.rs` 新增 `status`、离线 `sync --dry-run` 和首个非 dry-run D1/R2 code snapshot sync 路径。
 - [x] (v0.17.51) 顶层 CLI 注册 `Publish` 命令。
 - [x] (v0.17.53) `sync --dry-run` 默认规划所有本地 branch/tag refs；`sync --ref` 只做定向规划，并在 JSON 中标记不会更新完整 refs generation。
-- [x] (v0.17.120) `sync` 非 dry-run 默认发布所有本地 branch/tag refs 并通过 CAS 推进完整 refs generation；`sync --ref` 只写目标 ref/revision，不上传 `refs.json`/`latest.json`，也不更新完整 refs generation。云端 stale refs 删除仍由 Checkpoint B 未完成项承载。
+- [x] (v0.17.121) `sync` 非 dry-run 默认发布所有本地 branch/tag refs，通过 CAS 推进完整 refs generation，并在 CAS 成功后删除同 site 下旧 sync run 遗留的 stale `publish_refs`；`sync --ref` 只写目标 ref/revision，不上传 `refs.json`/`latest.json`，也不更新完整 refs generation。
 - [x] (v0.17.53) `sync --dry-run` 不写 D1/R2，也不创建 `.libra/publish` 本地发布状态。
 - [x] (v0.17.53) `sync --dry-run --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
 - [x] (v0.17.95) `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
@@ -966,7 +966,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.107) mock R2 + D1 下，snapshot 能 round-trip。
 - [x] (v0.17.108) `publish_refs_test` 固化 all-refs、同 revision 去重和 default-ref latest 的 D1 写入规划契约；完整 D1 写入仍由非 dry-run sync 项承载。
-- [ ] D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot。
+- [x] (v0.17.121) D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot；全量 sync 成功后删除旧 sync run 遗留的 stale refs。
 - [ ] D1 latest 只指向默认 ref 的完整 published revision。
 - [x] (v0.17.96) `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
 
