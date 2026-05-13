@@ -51,7 +51,10 @@ use crate::{
         head::Head,
         publish::{
             preflight::{DenyReason, Preflight, PreflightDecision},
-            snapshot::{RefInput, detect_ambiguous_short_refs, validate_oid, validate_ref_name},
+            snapshot::{
+                RefInput, RevisionFileInput, detect_ambiguous_short_refs, validate_oid,
+                validate_ref_name,
+            },
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
         tag::{self, TagObject},
@@ -1206,6 +1209,18 @@ struct RevisionDryRunScan {
     denied_paths: Vec<PreflightDeniedPath>,
 }
 
+// Staged for the full non-dry-run sync orchestrator; unit-tested now
+// so the next slice can wire it into D1/R2 without reworking tree IO.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct MaterializedRevisionFiles {
+    revision_oid: String,
+    commit_oid: String,
+    tree_oid: String,
+    tree_items: Vec<(PathBuf, ObjectHash)>,
+    files: Vec<RevisionFileInput>,
+}
+
 #[derive(Debug)]
 struct PreflightDeniedPath {
     path: String,
@@ -1213,6 +1228,62 @@ struct PreflightDeniedPath {
 }
 
 fn scan_revision_files(revision_oid: &str) -> CliResult<RevisionDryRunScan> {
+    let revision = load_revision_tree_items(revision_oid)?;
+    let preflight = preflight_for_revision_items(&revision.tree_items, revision_oid)?;
+    let mut denied_paths = Vec::new();
+    for (path, _) in &revision.tree_items {
+        if let PreflightDecision::Deny(reason) = preflight.evaluate(path, false) {
+            denied_paths.push(PreflightDeniedPath {
+                path: path.display().to_string(),
+                reason,
+            });
+        }
+    }
+
+    Ok(RevisionDryRunScan {
+        file_count: revision.tree_items.len(),
+        denied_paths,
+    })
+}
+
+#[allow(dead_code)]
+fn materialize_revision_files(revision_oid: &str) -> CliResult<MaterializedRevisionFiles> {
+    let revision = load_revision_tree_items(revision_oid)?;
+    let mut files = Vec::with_capacity(revision.tree_items.len());
+    for (path, blob_oid) in &revision.tree_items {
+        let blob: Blob = load_object(blob_oid).map_err(|source| {
+            CliError::fatal(format!(
+                "failed to load publish blob '{}' at path '{}' for revision '{}': {source}",
+                blob_oid,
+                path.display(),
+                revision_oid
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+        })?;
+        let path = path.to_str().ok_or_else(|| {
+            CliError::failure(format!(
+                "publish revision '{revision_oid}' contains a non-UTF-8 path: {}",
+                path.display()
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("rename the path to valid UTF-8 before publishing.")
+        })?;
+        files.push(RevisionFileInput {
+            path: path.to_string(),
+            bytes: blob.data,
+        });
+    }
+
+    Ok(MaterializedRevisionFiles {
+        revision_oid: revision.revision_oid,
+        commit_oid: revision.commit_oid,
+        tree_oid: revision.tree_oid,
+        tree_items: revision.tree_items,
+        files,
+    })
+}
+
+fn load_revision_tree_items(revision_oid: &str) -> CliResult<MaterializedRevisionFiles> {
     let commit_oid = ObjectHash::from_str(revision_oid).map_err(|source| {
         CliError::fatal(format!(
             "publish revision oid '{revision_oid}' is invalid: {source}"
@@ -1233,20 +1304,13 @@ fn scan_revision_files(revision_oid: &str) -> CliResult<RevisionDryRunScan> {
         .with_stable_code(StableErrorCode::RepoStateInvalid)
     })?;
     let items = tree.get_plain_items();
-    let preflight = preflight_for_revision_items(&items, revision_oid)?;
-    let mut denied_paths = Vec::new();
-    for (path, _) in &items {
-        if let PreflightDecision::Deny(reason) = preflight.evaluate(path, false) {
-            denied_paths.push(PreflightDeniedPath {
-                path: path.display().to_string(),
-                reason,
-            });
-        }
-    }
 
-    Ok(RevisionDryRunScan {
-        file_count: items.len(),
-        denied_paths,
+    Ok(MaterializedRevisionFiles {
+        revision_oid: revision_oid.to_string(),
+        commit_oid: commit_oid.to_string(),
+        tree_oid: commit.tree_id.to_string(),
+        tree_items: items,
+        files: Vec::new(),
     })
 }
 
@@ -2053,9 +2117,11 @@ fn render_policy_name(policy: RenderPolicy) -> &'static str {
 mod tests {
     use std::{collections::VecDeque, fs};
 
+    use git_internal::internal::object::tree::{TreeItem, TreeItemMode};
     use serde_json::Value;
 
     use super::*;
+    use crate::{command::save_object, utils::test};
 
     fn default_init_args() -> InitArgs {
         InitArgs {
@@ -2136,6 +2202,58 @@ mod tests {
             ),
         )
         .expect("wrangler config placeholder should be replaceable");
+    }
+
+    #[tokio::test]
+    async fn publish_sync_materializes_revision_file_inputs_from_commit_tree() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# demo\n");
+        let lib_blob = Blob::from_content("pub fn demo() {}\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        save_object(&lib_blob, &lib_blob.id).expect("lib blob should save");
+
+        let src_tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            lib_blob.id,
+            "lib.rs".to_string(),
+        )])
+        .expect("src tree should build");
+        save_object(&src_tree, &src_tree.id).expect("src tree should save");
+
+        let root_tree = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, readme_blob.id, "README.md".to_string()),
+            TreeItem::new(TreeItemMode::Tree, src_tree.id, "src".to_string()),
+        ])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+
+        let materialized = materialize_revision_files(&commit.id.to_string())
+            .expect("revision files should materialize from committed tree");
+
+        assert_eq!(materialized.revision_oid, commit.id.to_string());
+        assert_eq!(materialized.commit_oid, commit.id.to_string());
+        assert_eq!(materialized.tree_oid, root_tree.id.to_string());
+        assert_eq!(materialized.tree_items.len(), 2);
+
+        let files = materialized
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.bytes.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            files.get("README.md").copied(),
+            Some(b"# demo\n".as_slice())
+        );
+        assert_eq!(
+            files.get("src/lib.rs").copied(),
+            Some(b"pub fn demo() {}\n".as_slice())
+        );
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
