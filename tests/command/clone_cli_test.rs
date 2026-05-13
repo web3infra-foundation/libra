@@ -240,6 +240,11 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
             .status
             .success()
     );
+    assert!(
+        run_git(&["config", "commit.gpgsign", "false"], &work)
+            .status
+            .success()
+    );
     fs::write(work.join("README.md"), "hello\n").unwrap();
     assert!(run_git(&["add", "README.md"], &work).status.success());
     assert!(
@@ -654,6 +659,8 @@ fn json_clone_success_schema() {
     assert_eq!(data["shallow"], false);
     assert!(data["warnings"].is_array());
     assert_eq!(data["warnings"].as_array().unwrap().len(), 0);
+    assert!(data.get("source_kind").is_none());
+    assert!(data.get("cloud_site").is_none());
 }
 
 #[test]

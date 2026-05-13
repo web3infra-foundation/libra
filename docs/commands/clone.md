@@ -237,6 +237,7 @@ Empty remote returns `"branch": null` and a warning:
 
 - `branch` is the actual checked-out branch; `null` when the remote has no refs
 - `shallow` is `true` when `--depth` was used
+- `source_kind` and `cloud_site` are omitted for ordinary Git/local clones; `libra+cloud://` clones add them with clone domain, site id, slug, repo id, selected ref, and restored revision
 - `ref_format` and `converted_from` from init are intentionally excluded
 - `objects_fetched` / `bytes_received` are not exposed until the fetch improvement lands
 

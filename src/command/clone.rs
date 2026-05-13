@@ -136,6 +136,23 @@ pub struct CloneOutput {
     /// Worktree-relative paths of `.libraignore` files written by converting
     /// `.gitignore` files from the source repository.  Empty for bare clones.
     pub gitignore_converted: Vec<String>,
+    /// Source kind for additive clone integrations. Omitted for ordinary Git sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    /// Cloudflare publish metadata for `libra+cloud://` sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_site: Option<CloudCloneSiteOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudCloneSiteOutput {
+    pub clone_domain: String,
+    pub site_id: String,
+    pub slug: String,
+    pub repo_id: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    pub revision: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1354,6 +1371,15 @@ async fn clone_cloud_publish_into_destination(
         shallow: false,
         warnings,
         gitignore_converted,
+        source_kind: Some("cloudflare".to_string()),
+        cloud_site: Some(CloudCloneSiteOutput {
+            clone_domain: source.clone_domain.clone(),
+            site_id: restore_plan.site.site_id.clone(),
+            slug: restore_plan.site.slug.clone(),
+            repo_id: restore_plan.site.repo_id.clone(),
+            ref_name: restore_plan.checkout.ref_name.clone(),
+            revision: restore_plan.checkout.revision_oid.clone(),
+        }),
     })
 }
 
@@ -2258,6 +2284,8 @@ async fn clone_into_destination(
         shallow: args.depth.is_some(),
         warnings,
         gitignore_converted,
+        source_kind: None,
+        cloud_site: None,
     })
 }
 
@@ -2810,6 +2838,17 @@ mod tests {
         assert_eq!(result.path, clone_dir.to_string_lossy());
         assert_eq!(result.remote_url, args.remote_repo);
         assert_eq!(result.branch.as_deref(), Some("main"));
+        assert_eq!(result.source_kind.as_deref(), Some("cloudflare"));
+        let cloud_site = result
+            .cloud_site
+            .as_ref()
+            .expect("cloud clone output should include cloud site metadata");
+        assert_eq!(cloud_site.clone_domain, "code.example.com");
+        assert_eq!(cloud_site.site_id, "site_123");
+        assert_eq!(cloud_site.slug, "kepler-ledger");
+        assert_eq!(cloud_site.repo_id, "repo_456");
+        assert_eq!(cloud_site.ref_name.as_deref(), Some("refs/heads/main"));
+        assert_eq!(cloud_site.revision, commit_id.to_string());
         assert_eq!(
             fs::read_to_string(clone_dir.join("README.md")).unwrap(),
             "# cloud\n"

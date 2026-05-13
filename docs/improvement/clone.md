@@ -99,7 +99,7 @@ libra clone "libra+cloud://<clone-domain>/<slug>?revision=<oid|latest>" [LOCAL_P
 6. non-bare clone 必须完成 checkout 后才返回成功；checkout 失败进入 `CheckoutFailed` 路径并清理本批创建的目标目录。
 7. 如果 D1/R2 中有 AI object model 数据，按 [AI Object Model Reference](../agent/ai-object-model-reference.md) 恢复 snapshot/event/projection objects、关系图和本地 AI 版本索引；不要从已 redaction 的 publish payload 反推被移除字段。
 
-结构化输出后续以加法方式扩展，避免破坏本批 `CloneOutput`：
+结构化输出以加法方式扩展，避免破坏普通 Git/local clone 的 `CloneOutput`；v0.17.131 已让 `libra+cloud://` 成功输出包含可选 Cloudflare source 字段，普通 clone 继续省略这些字段：
 
 ```json
 {
@@ -108,8 +108,9 @@ libra clone "libra+cloud://<clone-domain>/<slug>?revision=<oid|latest>" [LOCAL_P
     "clone_domain": "code.example.com",
     "slug": "libra-main",
     "repo_id": "repo_...",
+    "site_id": "site_...",
     "ref": "refs/heads/main",
-    "revision": "latest"
+    "revision": "9a1f3e2c..."
   }
 }
 ```
