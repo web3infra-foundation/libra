@@ -13,10 +13,12 @@ Current implementation status:
 - `libra publish sync --dry-run` scans local branch/tag refs, validates
   `--ref`, reports dirty-tree warnings, and emits the local publish
   plan without Cloudflare credentials.
-- `libra publish sync` writes code snapshot artifacts to R2, upserts
-  `publish_sync_runs`, `publish_revisions`, `publish_files`, and
-  `publish_refs` in D1, and advances `publish_sites.latest_revision_oid`
-  only for a full all-refs sync.
+- `libra publish sync` writes code snapshot and AI artifacts to R2,
+  upserts `publish_sync_runs`, `publish_revisions`, `publish_files`,
+  `publish_ai_objects`, `publish_ai_versions`, and `publish_refs` in
+  D1, and advances `publish_sites.latest_revision_oid` only for a full
+  all-refs sync. The current built-in AI planner emits an empty bundle
+  until full AI object source extraction lands.
 - `libra publish deploy` validates the local Worker template, requires
   the generated Worker config/bindings, runs `pnpm build`, and, unless
   `--skip-deploy` is set, applies D1 migrations and deploys the Worker
@@ -128,8 +130,9 @@ Current behavior:
   `refs.json` and `latest.json`, and advances `publish_sites` through a
   refs-generation CAS. After that CAS succeeds, stale `publish_refs`
   rows from older sync runs for the same site are deleted.
-- Repeated sync skips existing revision `code-manifest.json` and text
-  preview objects unless `--force` is passed.
+- Repeated sync skips existing revision `code-manifest.json`, text
+  preview objects, `ai/index.json`, AI object JSON, AI graph, and AI
+  bundle objects unless `--force` is passed.
 - `--ref` on non-dry-run sync writes only the selected ref and its
   revision snapshot. It does not upload `refs.json`/`latest.json` and
   does not advance the complete refs generation.

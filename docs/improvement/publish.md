@@ -796,7 +796,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.119) `build_site_index_artifacts()` 从全量 `SnapshotPlan` 生成 `publish_refs` rows、`refs.json` 和 `latest.json` payload，并可写入 `PublishStorage`；实际 D1 upsert/CAS 仍由后续 sync sink 承载。
 - [x] (v0.17.120) 全量非 dry-run `publish sync` 上传 `refs.json`、`latest.json`，并为每个唯一 revision 上传 `code-manifest.json`。
 - [x] (v0.17.124) `upload_ai_export_artifacts()` 可将 `AiExportPlan` 写入 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并生成 `publish_ai_objects` / `publish_ai_versions` D1 rows；重复调用默认跳过已存在对象，`--force` 可重写。
-- [ ] `publish sync` 将 AI exporter 接入每个唯一 revision，生成并上传 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
+- [x] (v0.17.126) `publish sync` orchestration 对每个唯一 revision 调用 AI export planner，生成并上传 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并写入 `publish_ai_objects` / `publish_ai_versions` rows 与 revision/sync-run 计数；默认 planner 暂时输出空 AI bundle，完整对象来源覆盖见下方未完成项。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
 - [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
@@ -941,7 +941,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.122) 重复 sync 会跳过已存在的 revision `code-manifest.json` 和文本预览 R2 objects；`--force` 会重新上传这些 code snapshot artifacts。
 - [x] (v0.17.124) AI artifact upload helper 默认跳过已存在的 AI object JSON、AI graph、AI index 和 AI bundle，`--force` 可重写。
-- [ ] `publish sync` 接入 AI artifact 幂等上传，重复 sync 不重复上传未变化的 AI objects 和 AI bundle。
+- [x] (v0.17.126) `publish sync` 接入 AI artifact 幂等上传，重复 sync 不重复上传未变化的 AI objects 和 AI bundle，`--force` 复用同一路径强制重写。
 - [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。

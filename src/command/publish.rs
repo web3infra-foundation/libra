@@ -42,7 +42,10 @@ use crate::{
         config::ConfigKv,
         head::Head,
         publish::{
-            contract::{PUBLISH_SCHEMA_VERSION, RedactionMode, SiteVisibility},
+            ai_export::{AiExportPlan, AiExportRequest, build_ai_export_plan},
+            contract::{
+                AiBundleAssociatedIds, PUBLISH_SCHEMA_VERSION, RedactionMode, SiteVisibility,
+            },
             preflight::{DenyReason, Preflight, PreflightDecision},
             snapshot::{
                 FileSnapshot, RefInput, RevisionArtifactPlan, RevisionFileInput, SnapshotConfig,
@@ -50,9 +53,11 @@ use crate::{
                 validate_oid, validate_ref_name,
             },
             upload::{
-                RevisionArtifactUploadOptions, RevisionArtifactUploadSummary, RevisionD1Rows,
-                SiteIndexArtifacts, build_revision_d1_rows, build_site_index_artifacts,
-                upload_revision_artifacts_with_options, upload_site_index_artifacts,
+                AiExportArtifactUploadSummary, AiExportD1Rows, RevisionArtifactUploadOptions,
+                RevisionArtifactUploadSummary, RevisionD1Rows, SiteIndexArtifacts,
+                build_ai_export_d1_rows, build_revision_d1_rows, build_site_index_artifacts,
+                upload_ai_export_artifacts_with_options, upload_revision_artifacts_with_options,
+                upload_site_index_artifacts,
             },
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
@@ -60,9 +65,9 @@ use crate::{
     },
     utils::{
         d1_client::{
-            D1Client, D1Error, PublishFileRow, PublishRefRow, PublishRevisionRow,
-            PublishSiteLatestUpdate, PublishSiteLatestUpdateResult, PublishSiteRow,
-            PublishSyncRunRow,
+            D1Client, D1Error, PublishAiObjectRow, PublishAiVersionRow, PublishFileRow,
+            PublishRefRow, PublishRevisionRow, PublishSiteLatestUpdate,
+            PublishSiteLatestUpdateResult, PublishSiteRow, PublishSyncRunRow,
         },
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
@@ -1070,8 +1075,14 @@ trait PublishSyncSink {
         &mut self,
         plan: &RevisionArtifactPlan,
     ) -> CliResult<RevisionArtifactUploadSummary>;
+    async fn upload_ai_export_artifacts(
+        &mut self,
+        plan: &AiExportPlan,
+    ) -> CliResult<AiExportArtifactUploadSummary>;
     async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()>;
     async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()>;
+    async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()>;
+    async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()>;
     async fn upload_site_index_artifacts(
         &mut self,
         artifacts: &SiteIndexArtifacts,
@@ -1137,6 +1148,38 @@ impl PublishSyncSink for CloudPublishSyncSink {
             .map_err(|source| publish_sync_d1_error("failed to upsert publish file", source))
     }
 
+    async fn upload_ai_export_artifacts(
+        &mut self,
+        plan: &AiExportPlan,
+    ) -> CliResult<AiExportArtifactUploadSummary> {
+        upload_ai_export_artifacts_with_options(
+            &self.storage,
+            plan,
+            RevisionArtifactUploadOptions {
+                force: self.force_upload,
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!("failed to upload publish AI artifacts: {source}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+        })
+    }
+
+    async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ai_object(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish AI object", source))
+    }
+
+    async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ai_version(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish AI version", source))
+    }
+
     async fn upload_site_index_artifacts(
         &mut self,
         artifacts: &SiteIndexArtifacts,
@@ -1191,8 +1234,58 @@ impl PublishSyncSink for CloudPublishSyncSink {
 struct PublishRevisionExecutionPlan {
     artifact: RevisionArtifactPlan,
     rows: RevisionD1Rows,
+    ai_plan: AiExportPlan,
+    ai_rows: AiExportD1Rows,
     ref_count: usize,
     preflight_denied_count: usize,
+}
+
+struct PublishAiExportPlanInput {
+    repo_id: String,
+    site_id: String,
+    revision_oid: String,
+    tree_oid: String,
+    generated_at: chrono::DateTime<Utc>,
+    redaction_mode: RedactionMode,
+    redaction_rules_version: String,
+}
+
+#[async_trait]
+trait PublishAiExportPlanner {
+    async fn plan_revision_ai_export(
+        &self,
+        input: PublishAiExportPlanInput,
+    ) -> CliResult<AiExportPlan>;
+}
+
+struct EmptyPublishAiExportPlanner;
+
+#[async_trait]
+impl PublishAiExportPlanner for EmptyPublishAiExportPlanner {
+    async fn plan_revision_ai_export(
+        &self,
+        input: PublishAiExportPlanInput,
+    ) -> CliResult<AiExportPlan> {
+        build_ai_export_plan(AiExportRequest {
+            repo_id: input.repo_id,
+            site_id: input.site_id,
+            revision_oid: input.revision_oid.clone(),
+            ai_version_id: format!("ai-{}", input.revision_oid),
+            generated_at: input.generated_at,
+            ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+            redaction_mode: input.redaction_mode,
+            redaction_rules_version: input.redaction_rules_version,
+            associated_ids: AiBundleAssociatedIds {
+                tree_oid: Some(input.tree_oid),
+                ..AiBundleAssociatedIds::default()
+            },
+            objects: Vec::new(),
+        })
+        .map_err(|source| {
+            CliError::fatal(format!("failed to build publish AI export plan: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })
+    }
 }
 
 async fn run_publish_sync_selected_refs_with_sink(
@@ -1200,8 +1293,30 @@ async fn run_publish_sync_selected_refs_with_sink(
     site: &PublishSyncSiteContext,
     selected_refs: Vec<RefInput>,
     default_ref: Option<String>,
+    warnings: Vec<String>,
+    sink: &mut dyn PublishSyncSink,
+) -> CliResult<PublishSyncOutput> {
+    let ai_planner = EmptyPublishAiExportPlanner;
+    run_publish_sync_selected_refs_with_sink_and_ai_planner(
+        args,
+        site,
+        selected_refs,
+        default_ref,
+        warnings,
+        sink,
+        &ai_planner,
+    )
+    .await
+}
+
+async fn run_publish_sync_selected_refs_with_sink_and_ai_planner(
+    args: &SyncArgs,
+    site: &PublishSyncSiteContext,
+    selected_refs: Vec<RefInput>,
+    default_ref: Option<String>,
     mut warnings: Vec<String>,
     sink: &mut dyn PublishSyncSink,
+    ai_planner: &dyn PublishAiExportPlanner,
 ) -> CliResult<PublishSyncOutput> {
     if selected_refs.is_empty() {
         return Err(
@@ -1269,7 +1384,7 @@ async fn run_publish_sync_selected_refs_with_sink(
             .iter()
             .filter(|file| matches!(file, FileSnapshot::Ignored { .. }))
             .count();
-        let rows = build_revision_d1_rows(
+        let mut rows = build_revision_d1_rows(
             &artifact,
             &sync_run_id,
             redaction_mode,
@@ -1279,9 +1394,30 @@ async fn run_publish_sync_selected_refs_with_sink(
             CliError::fatal(format!("failed to build publish D1 rows: {source}"))
                 .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
+        let ai_plan = ai_planner
+            .plan_revision_ai_export(PublishAiExportPlanInput {
+                repo_id: site.repo_id.clone(),
+                site_id: site.site_id.clone(),
+                revision_oid: materialized.revision_oid.clone(),
+                tree_oid: materialized.tree_oid.clone(),
+                generated_at,
+                redaction_mode,
+                redaction_rules_version: PUBLISH_REDACTION_RULES_VERSION.to_string(),
+            })
+            .await?;
+        let ai_rows = build_ai_export_d1_rows(&ai_plan).map_err(|source| {
+            CliError::fatal(format!("failed to build publish AI D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        rows.revision.ai_index_key = Some(ai_plan.index_key.clone());
+        rows.revision.ai_object_count =
+            usize_to_i64(ai_rows.objects.len(), "publish sync AI object count")?;
+        rows.revision.ai_bundle_count = 1;
         revision_plans.push(PublishRevisionExecutionPlan {
             artifact,
             rows,
+            ai_plan,
+            ai_rows,
             ref_count,
             preflight_denied_count,
         });
@@ -1291,6 +1427,11 @@ async fn run_publish_sync_selected_refs_with_sink(
         .iter()
         .map(|plan| plan.rows.files.len())
         .sum();
+    let ai_object_count: usize = revision_plans
+        .iter()
+        .map(|plan| plan.ai_rows.objects.len())
+        .sum();
+    let ai_bundle_count = revision_plans.len();
     let refs_count = selected_refs.len();
     let revision_count = revision_plans.len();
     let started_at = generated_at.to_rfc3339();
@@ -1298,6 +1439,8 @@ async fn run_publish_sync_selected_refs_with_sink(
         refs: refs_count,
         revisions: revision_count,
         files: file_count,
+        ai_objects: ai_object_count,
+        ai_bundles: ai_bundle_count,
     };
     let running = publish_sync_run_row(PublishSyncRunRowInput {
         site_id: &site.site_id,
@@ -1376,8 +1519,8 @@ async fn run_publish_sync_selected_refs_with_sink(
             ref_count: plan.ref_count,
             file_count: plan.rows.files.len(),
             preflight_denied_count: plan.preflight_denied_count,
-            ai_object_count: 0,
-            ai_bundle_count: 0,
+            ai_object_count: plan.ai_rows.objects.len(),
+            ai_bundle_count: 1,
         })
         .collect::<Vec<_>>();
 
@@ -1390,8 +1533,8 @@ async fn run_publish_sync_selected_refs_with_sink(
         default_ref,
         latest_revision_oid,
         file_count,
-        ai_object_count: 0,
-        ai_bundle_count: 0,
+        ai_object_count,
+        ai_bundle_count,
         updates_full_refs_generation,
         refs,
         revisions,
@@ -1415,10 +1558,15 @@ async fn persist_publish_sync_plan(
 ) -> CliResult<()> {
     for plan in context.revision_plans {
         sink.upload_revision_artifacts(&plan.artifact).await?;
+        sink.upload_ai_export_artifacts(&plan.ai_plan).await?;
         sink.upsert_revision(plan.rows.revision.clone()).await?;
         for file in &plan.rows.files {
             sink.upsert_file(file.clone()).await?;
         }
+        for object in &plan.ai_rows.objects {
+            sink.upsert_ai_object(object.clone()).await?;
+        }
+        sink.upsert_ai_version(plan.ai_rows.version.clone()).await?;
     }
 
     if context.args.r#ref.is_none() {
@@ -1559,6 +1707,8 @@ struct PublishSyncRunCounts {
     refs: usize,
     revisions: usize,
     files: usize,
+    ai_objects: usize,
+    ai_bundles: usize,
 }
 
 struct PublishSyncRunRowInput<'a> {
@@ -1585,8 +1735,8 @@ fn publish_sync_run_row(input: PublishSyncRunRowInput<'_>) -> CliResult<PublishS
         refs_count: usize_to_i64(input.counts.refs, "publish sync refs count")?,
         revision_count: usize_to_i64(input.counts.revisions, "publish sync revision count")?,
         file_count: usize_to_i64(input.counts.files, "publish sync file count")?,
-        ai_object_count: 0,
-        ai_bundle_count: 0,
+        ai_object_count: usize_to_i64(input.counts.ai_objects, "publish sync AI object count")?,
+        ai_bundle_count: usize_to_i64(input.counts.ai_bundles, "publish sync AI bundle count")?,
         warnings_json,
         error_message: input.error_message.map(ToString::to_string),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2841,7 +2991,11 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::{command::save_object, utils::test};
+    use crate::{
+        command::save_object,
+        internal::publish::contract::{AiObjectLayer, AiObjectRedaction, PublishAiObject},
+        utils::test,
+    };
 
     fn default_init_args() -> InitArgs {
         InitArgs {
@@ -2926,12 +3080,47 @@ mod tests {
         }
     }
 
+    struct SingleObjectAiExportPlanner;
+
+    #[async_trait::async_trait]
+    impl PublishAiExportPlanner for SingleObjectAiExportPlanner {
+        async fn plan_revision_ai_export(
+            &self,
+            input: PublishAiExportPlanInput,
+        ) -> CliResult<AiExportPlan> {
+            build_ai_export_plan(AiExportRequest {
+                repo_id: input.repo_id,
+                site_id: input.site_id.clone(),
+                revision_oid: input.revision_oid.clone(),
+                ai_version_id: format!("ai-{}", input.revision_oid),
+                generated_at: input.generated_at,
+                ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+                redaction_mode: input.redaction_mode,
+                redaction_rules_version: input.redaction_rules_version.clone(),
+                associated_ids: AiBundleAssociatedIds {
+                    tree_oid: Some(input.tree_oid),
+                    ..AiBundleAssociatedIds::default()
+                },
+                objects: vec![publish_ai_object(
+                    &input.site_id,
+                    &input.revision_oid,
+                    input.redaction_mode,
+                    &input.redaction_rules_version,
+                )],
+            })
+            .map_err(|source| CliError::internal(format!("test AI export failed: {source}")))
+        }
+    }
+
     #[derive(Default)]
     struct FakePublishSyncSink {
         sync_runs: Vec<PublishSyncRunRow>,
         revision_uploads: Vec<String>,
+        ai_uploads: Vec<String>,
         revisions: Vec<PublishRevisionRow>,
         files: Vec<PublishFileRow>,
+        ai_objects: Vec<PublishAiObjectRow>,
+        ai_versions: Vec<PublishAiVersionRow>,
         site_index_uploads: usize,
         refs: Vec<PublishRefRow>,
         latest_updates: Vec<FakeLatestUpdate>,
@@ -2975,6 +3164,26 @@ mod tests {
             })
         }
 
+        async fn upload_ai_export_artifacts(
+            &mut self,
+            plan: &AiExportPlan,
+        ) -> CliResult<AiExportArtifactUploadSummary> {
+            self.ai_uploads.push(plan.bundle.revision_oid.clone());
+            Ok(AiExportArtifactUploadSummary {
+                index_uploaded: true,
+                graph_uploaded: true,
+                bundle_uploaded: true,
+                object_count: plan.objects.len(),
+                object_uploaded_count: plan.objects.len(),
+                object_skipped_count: 0,
+                object_keys: plan
+                    .objects
+                    .iter()
+                    .map(|object| object.r2_key.clone())
+                    .collect(),
+            })
+        }
+
         async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
             self.revisions.push(row);
             Ok(())
@@ -2982,6 +3191,16 @@ mod tests {
 
         async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()> {
             self.files.push(row);
+            Ok(())
+        }
+
+        async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()> {
+            self.ai_objects.push(row);
+            Ok(())
+        }
+
+        async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()> {
+            self.ai_versions.push(row);
             Ok(())
         }
 
@@ -3276,6 +3495,57 @@ mod tests {
             "site latest must follow the default ref revision, not the tag revision",
         );
         assert_ne!(main_revision, tag_revision);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_persists_ai_artifacts_and_counts() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+        let ai_planner = SingleObjectAiExportPlanner;
+
+        let output = run_publish_sync_selected_refs_with_sink_and_ai_planner(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+            &ai_planner,
+        )
+        .await
+        .expect("non-dry-run sync should persist AI artifacts");
+
+        assert_eq!(output.ai_object_count, 1);
+        assert_eq!(output.ai_bundle_count, 1);
+        assert_eq!(output.revisions[0].ai_object_count, 1);
+        assert_eq!(output.revisions[0].ai_bundle_count, 1);
+        assert_eq!(sink.ai_uploads, vec![revision_oid.clone()]);
+        assert_eq!(sink.ai_objects.len(), 1);
+        assert_eq!(sink.ai_versions.len(), 1);
+        assert_eq!(sink.revisions[0].ai_object_count, 1);
+        assert_eq!(sink.revisions[0].ai_bundle_count, 1);
+        assert!(
+            sink.revisions[0]
+                .ai_index_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with("/ai/index.json")),
+            "revision row must point at the uploaded AI index"
+        );
+        assert_eq!(sink.sync_runs[0].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[0].ai_bundle_count, 1);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[1].ai_bundle_count, 1);
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
@@ -3971,6 +4241,30 @@ mod tests {
             sync_run_id: "sync-1".to_string(),
             schema_version: 1,
             updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn publish_ai_object(
+        site_id: &str,
+        revision_oid: &str,
+        redaction_mode: RedactionMode,
+        redaction_rules_version: &str,
+    ) -> PublishAiObject {
+        PublishAiObject {
+            schema_version: PUBLISH_SCHEMA_VERSION,
+            site_id: site_id.to_string(),
+            revision_oid: revision_oid.to_string(),
+            object_type: "Intent".to_string(),
+            object_id: "intent-1".to_string(),
+            layer: AiObjectLayer::Snapshot,
+            source_refs: vec!["refs/heads/main".to_string()],
+            relationships: Vec::new(),
+            payload: serde_json::json!({ "title": "ship AI publish" }),
+            redaction: AiObjectRedaction {
+                mode: redaction_mode,
+                rules_version: redaction_rules_version.to_string(),
+            },
+            removed_fields: Vec::new(),
         }
     }
 
