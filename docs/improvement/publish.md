@@ -787,6 +787,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
 - [ ] 完整 snapshot upload 路径支持 `.librapublishignore` 和内置 deny 规则，并按 visibility/allowlist 决定 metadata-only、redaction 或失败。
 - [x] (v0.17.113) `Preflight::for_visibility()` 拒绝 public site 使用 `--allow-sensitive-path`，并只在 private site 精确匹配 repo-relative allowlist path；完整 snapshot upload 仍由上方未完成项承载。
+- [x] (v0.17.114) `build_revision_artifact_plan()` 生成单 revision 的 `code-manifest.json` payload、文本 R2 blob 上传清单，并将 binary、too-large、ignored path 保持为 metadata-only；完整非 dry-run sync/D1 写入仍由后续 Phase 4 项承载。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
 - [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。

@@ -120,6 +120,33 @@ pub struct RevisionPlan {
     pub generated_at: DateTime<Utc>,
 }
 
+/// File body supplied by the sync orchestrator before classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionFileInput {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// One text blob that must be materialised in R2.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextBlobUpload {
+    pub path: String,
+    pub content_sha256: String,
+    pub relative_key: String,
+    pub object_key: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Complete code snapshot artefacts for one revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionArtifactPlan {
+    pub revision: RevisionPlan,
+    pub code_manifest_relative_key: String,
+    pub code_manifest_key: String,
+    pub code_manifest: PublishCodeManifest,
+    pub text_blobs: Vec<TextBlobUpload>,
+}
+
 impl RevisionPlan {
     /// Aggregate file count across every kind.
     pub fn total_file_count(&self) -> usize {
@@ -152,6 +179,57 @@ impl RevisionPlan {
                 .collect(),
         }
     }
+}
+
+/// Build the code snapshot artefacts the sync path persists to D1/R2.
+///
+/// Text files become R2 blob uploads and manifest/D1 rows. Binary,
+/// too-large and ignored paths only appear in the manifest/D1 metadata.
+pub fn build_revision_artifact_plan(
+    repo_id: &str,
+    site_id: &str,
+    revision_oid: &str,
+    commit_oid: &str,
+    tree_oid: &str,
+    generated_at: DateTime<Utc>,
+    files: Vec<RevisionFileInput>,
+    config: &SnapshotConfig,
+) -> Result<RevisionArtifactPlan, SnapshotBuildError> {
+    validate_oid(revision_oid)?;
+    validate_oid(commit_oid)?;
+    validate_oid(tree_oid)?;
+
+    let mut snapshots = Vec::with_capacity(files.len());
+    let mut text_blobs = Vec::new();
+    for file in files {
+        let snapshot = classify_file(&file.path, &file.bytes, config)?;
+        if let FileSnapshot::Text { content_sha256, .. } = &snapshot {
+            text_blobs.push(TextBlobUpload {
+                path: file.path.clone(),
+                content_sha256: content_sha256.clone(),
+                relative_key: publish_text_file_relative_key(revision_oid, content_sha256),
+                object_key: publish_text_file_key(repo_id, site_id, revision_oid, content_sha256),
+                bytes: file.bytes,
+            });
+        }
+        snapshots.push(snapshot);
+    }
+
+    let revision = RevisionPlan {
+        revision_oid: revision_oid.to_string(),
+        commit_oid: commit_oid.to_string(),
+        tree_oid: tree_oid.to_string(),
+        files: snapshots,
+        generated_at,
+    };
+    let code_manifest = revision.to_code_manifest(repo_id, site_id);
+    Ok(RevisionArtifactPlan {
+        revision,
+        code_manifest_relative_key: publish_code_manifest_relative_key(revision_oid),
+        code_manifest_key: publish_code_manifest_key(repo_id, site_id, revision_oid),
+        code_manifest,
+        text_blobs,
+    })
 }
 
 impl FileSnapshot {
@@ -216,8 +294,19 @@ impl FileSnapshot {
     }
 }
 
+pub fn publish_code_manifest_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/code-manifest.json")
+}
+
 pub fn publish_code_manifest_key(repo_id: &str, site_id: &str, revision_oid: &str) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/code-manifest.json")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_code_manifest_relative_key(revision_oid)
+    )
+}
+
+pub fn publish_text_file_relative_key(revision_oid: &str, content_sha256: &str) -> String {
+    format!("revisions/{revision_oid}/files/{content_sha256}.txt")
 }
 
 pub fn publish_text_file_key(
@@ -226,7 +315,10 @@ pub fn publish_text_file_key(
     revision_oid: &str,
     content_sha256: &str,
 ) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/files/{content_sha256}.txt")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_text_file_relative_key(revision_oid, content_sha256)
+    )
 }
 
 pub fn publish_refs_index_key(repo_id: &str, site_id: &str) -> String {
