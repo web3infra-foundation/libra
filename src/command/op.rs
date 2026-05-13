@@ -1,13 +1,21 @@
 //! Operation (op) command group for command-level operation history.
 
+use std::str::FromStr;
+
 use clap::{Parser, Subcommand};
+use git_internal::hash::ObjectHash;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
+    command::status,
     internal::{
+        branch::Branch,
         config::ConfigKv,
         db::get_db_conn_instance,
+        head::Head,
         operation::{OperationLogListItem, OperationQueryPage, OperationService, OperationStatus},
+        operation_wrapper::{OperationMeta, OperationScope, with_operation_log},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -92,6 +100,12 @@ pub enum OpOutput {
         end_ts: Option<i64>,
         view_id: String,
     },
+    #[serde(rename = "restore")]
+    Restore {
+        target_op_id: String,
+        new_op_id: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,7 +135,11 @@ pub async fn execute_safe(args: OpArgs, output: &OutputConfig) -> CliResult<()> 
             verbose,
         } => handle_op_log(number, page, command, verbose, output).await,
         OpCommand::Show { op_ref, view } => handle_op_show(op_ref, view, output).await,
-        OpCommand::Restore { .. } => Err(CliError::fatal("op restore is not implemented yet")),
+        OpCommand::Restore {
+            op_ref,
+            force,
+            dry_run,
+        } => handle_op_restore(op_ref, force, dry_run, output).await,
     }
 }
 
@@ -271,6 +289,123 @@ async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) 
     Ok(())
 }
 
+async fn handle_op_restore(
+    op_ref: String,
+    force: bool,
+    dry_run: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let db = get_db_conn_instance().await;
+    let repo_id = current_repo_id().await?;
+    let target_op_id = resolve_op_ref(&db, &repo_id, &op_ref).await?;
+    let target_graph =
+        OperationService::load_restore_view_by_operation_with_conn(&db, &target_op_id)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!("failed to load operation '{target_op_id}': {e}"))
+            })?
+            .ok_or_else(|| {
+                CliError::fatal(format!("operation '{target_op_id}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra op log' to list available operations")
+            })?;
+    let target_op = target_graph.operation.clone();
+
+    if !force && !status::is_clean().await {
+        return Err(CliError::fatal("working tree has uncommitted changes")
+            .with_stable_code(StableErrorCode::ConflictUnresolved)
+            .with_hint("use --force to restore anyway, or commit/stash changes first"));
+    }
+
+    if dry_run {
+        let short_id = &target_op_id[..8.min(target_op_id.len())];
+        println!(
+            "Would restore to operation {} ({})",
+            short_id, target_op.description
+        );
+        println!(
+            "  HEAD would become: {} ({})",
+            target_graph.view.head_target, target_graph.view.head_kind
+        );
+        println!("Refs that would be restored:");
+        for ref_rec in &target_graph.refs {
+            println!(
+                "  {}: {}",
+                ref_rec.ref_name,
+                &ref_rec.target_oid[..7.min(ref_rec.target_oid.len())]
+            );
+        }
+        return Ok(());
+    }
+
+    let restore_meta = OperationMeta {
+        command_name: "op restore".to_string(),
+        description: format!("restore to {}", &target_op_id[..8.min(target_op_id.len())]),
+        actor: operation_actor().await,
+        repo_id,
+        args_digest: Some(target_op_id.clone()),
+    };
+    let restore_graph = target_graph.clone();
+
+    let result = with_operation_log(restore_meta, OperationScope::default(), move |txn| {
+        Box::pin(async move {
+            let new_head = if restore_graph.view.head_kind == "branch" {
+                Head::Branch(restore_graph.view.head_target.clone())
+            } else {
+                Head::Detached(
+                    ObjectHash::from_str(&restore_graph.view.head_target)
+                        .map_err(|e| DbErr::Custom(e.to_string()))?,
+                )
+            };
+            Head::update_with_conn(txn, new_head, None).await;
+
+            for ref_rec in &restore_graph.refs {
+                if ref_rec.ref_kind == "branch" {
+                    Branch::update_branch_with_conn(
+                        txn,
+                        &ref_rec.ref_name,
+                        &ref_rec.target_oid,
+                        None,
+                    )
+                    .await?;
+                }
+            }
+
+            Ok::<(), DbErr>(())
+        })
+    })
+    .await
+    .map_err(|e| CliError::fatal(format!("restore failed: {e}")))?;
+
+    let op_output = OpOutput::Restore {
+        target_op_id: target_op_id.clone(),
+        new_op_id: result.op_id.clone(),
+        message: format!(
+            "Restored to operation {} ({})",
+            &target_op_id[..8.min(target_op_id.len())],
+            target_op.description
+        ),
+    };
+
+    if output.is_json() {
+        return emit_json_data("op", &op_output, output);
+    }
+
+    println!(
+        "{}",
+        match op_output {
+            OpOutput::Restore { message, .. } => message,
+            _ => unreachable!(),
+        }
+    );
+    println!(
+        "New operation recorded: {}",
+        &result.op_id[..8.min(result.op_id.len())]
+    );
+
+    Ok(())
+}
+
 async fn current_repo_id() -> CliResult<String> {
     ConfigKv::get("libra.repoid")
         .await
@@ -282,6 +417,16 @@ async fn current_repo_id() -> CliResult<String> {
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("run 'libra init' to initialize repository metadata")
         })
+}
+
+async fn operation_actor() -> String {
+    ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "libra-user".to_string())
 }
 
 async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
@@ -300,9 +445,10 @@ async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
             page: 1,
             per_page: (index + 1) as u64,
         };
-        let result = OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
-            .await
-            .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+        let result =
+            OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
+                .await
+                .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
 
         return result
             .items
