@@ -850,7 +850,7 @@ v1 使用 gitignore 子集：
 **Verification:**
 
 - [ ] `cargo test cloud_clone_source_parse_test`
-- [ ] `cargo test cloud_clone_domain_resolve_test`
+- [x] (v0.17.101) `cargo test cloud_clone_domain_resolve_test`
 - [ ] `cargo test cloud_clone_restore_test`
 - [ ] `cargo test --test command_test clone_cloud`
 - [ ] `cargo test --test command_test publish`
