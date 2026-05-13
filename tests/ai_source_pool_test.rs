@@ -186,6 +186,55 @@ async fn source_pool_records_calls_with_session_isolated_state_namespaces() {
 }
 
 #[tokio::test]
+async fn source_pool_lists_enablement_and_reload_affects_next_handler_build() {
+    let initial =
+        CapabilityManifest::new("project_docs", SourceKind::LocalDocs, TrustTier::Project)
+            .with_tool(read_tool("lookup"));
+    let pool = SourcePool::new();
+    pool.register_source(Arc::new(FakeSource::new(initial)))
+        .expect("register project source");
+
+    let statuses = pool.source_statuses().expect("list source statuses");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].slug, "project_docs");
+    assert_eq!(statuses[0].enablement, SourceEnablement::ProjectConfig);
+    assert!(statuses[0].enablement.is_enabled());
+    assert_eq!(statuses[0].enablement.label(), "project_config");
+    assert_eq!(statuses[0].tool_count, 1);
+
+    pool.disable_source("project_docs")
+        .expect("disable project source");
+    assert!(
+        pool.tool_handlers_for_session("session-a", SourceToolNaming::Prefixed)
+            .expect("build disabled handlers")
+            .is_empty()
+    );
+    pool.enable_source("project_docs", SourceEnablement::SessionExplicit)
+        .expect("enable project source for this session");
+
+    let reloaded =
+        CapabilityManifest::new("project_docs", SourceKind::LocalDocs, TrustTier::Project)
+            .with_tool(read_tool("lookup"))
+            .with_tool(read_tool("search"));
+    let status = pool
+        .reload_source(Arc::new(FakeSource::new(reloaded)))
+        .expect("reload project source");
+
+    assert_eq!(status.enablement, SourceEnablement::SessionExplicit);
+    assert_eq!(status.tool_count, 2);
+    let handler_names = pool
+        .tool_handlers_for_session("session-a", SourceToolNaming::Prefixed)
+        .expect("build reloaded handlers")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handler_names,
+        vec!["project_docs__lookup", "project_docs__search"]
+    );
+}
+
+#[tokio::test]
 async fn mcp_source_keeps_legacy_bridge_names_and_schema_compatible() {
     let server = Arc::new(LibraMcpServer::new(None, None));
     let legacy_handlers = McpBridgeHandler::all_handlers(server.clone());

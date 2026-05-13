@@ -125,6 +125,7 @@ use crate::{
             },
             session::{SessionState, SessionStore},
             skills::{SkillDispatcher, load_skills},
+            sources::{McpSource, SourcePool},
             tools::{
                 ToolRegistry, ToolRegistryBuilder,
                 context::UserInputRequest,
@@ -2791,6 +2792,12 @@ where
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
+    let source_pool = SourcePool::new();
+    if let Err(error) =
+        source_pool.register_source(Arc::new(McpSource::builtin(params.mcp_server.clone())))
+    {
+        tracing::warn!("failed to register built-in MCP source: {error}");
+    }
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
     let auto_classify_first_user_message =
         params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
@@ -2819,6 +2826,7 @@ where
             managed_code_ui_runtime,
             default_network_access: params.network_access,
             auto_classify_first_user_message,
+            source_pool,
         },
     );
 

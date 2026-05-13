@@ -86,7 +86,7 @@ pub enum SourceEnablement {
 }
 
 impl SourceEnablement {
-    fn is_enabled(self) -> bool {
+    pub fn is_enabled(self) -> bool {
         !matches!(self, Self::Disabled)
     }
 
@@ -103,6 +103,16 @@ impl SourceEnablement {
             TrustTier::Project => Self::ProjectConfig,
             TrustTier::User => Self::UserConfig,
             TrustTier::ThirdParty | TrustTier::Untrusted => Self::Disabled,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Builtin => "builtin",
+            Self::ProjectConfig => "project_config",
+            Self::UserConfig => "user_config",
+            Self::SessionExplicit => "session_explicit",
         }
     }
 }
@@ -585,6 +595,34 @@ struct SourceRegistration {
     enablement: SourceEnablement,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceStatus {
+    pub slug: String,
+    pub kind: SourceKind,
+    pub trust_tier: TrustTier,
+    pub enablement: SourceEnablement,
+    pub tool_count: usize,
+    pub resource_count: usize,
+    pub prompt_count: usize,
+    pub shared_state: bool,
+}
+
+impl SourceStatus {
+    fn from_registration(registration: &SourceRegistration) -> Self {
+        let manifest = registration.source.manifest();
+        Self {
+            slug: manifest.slug.clone(),
+            kind: manifest.kind,
+            trust_tier: manifest.trust_tier,
+            enablement: registration.enablement,
+            tool_count: manifest.tools.len(),
+            resource_count: manifest.resources.len(),
+            prompt_count: manifest.prompts.len(),
+            shared_state: manifest.shared_state,
+        }
+    }
+}
+
 pub type SourceToolHandlers = Vec<(String, Arc<dyn ToolHandler>)>;
 
 #[derive(Clone, Default)]
@@ -646,6 +684,41 @@ impl SourcePool {
 
     pub fn disable_source(&self, slug: &str) -> Result<(), SourcePoolError> {
         self.enable_source(slug, SourceEnablement::Disabled)
+    }
+
+    pub fn reload_source(&self, source: Arc<dyn Source>) -> Result<SourceStatus, SourcePoolError> {
+        let (slug, trust_tier) = {
+            let manifest = source.manifest();
+            manifest.validate()?;
+            (manifest.slug.clone(), manifest.trust_tier)
+        };
+        let mut registrations = self
+            .registrations
+            .lock()
+            .map_err(|_| SourcePoolError::Internal("source registry lock poisoned".to_string()))?;
+        let enablement = registrations
+            .get(&slug)
+            .map(|registration| registration.enablement)
+            .unwrap_or_else(|| SourceEnablement::default_for_trust_tier(trust_tier));
+        validate_enablement(&slug, trust_tier, enablement)?;
+        registrations.insert(slug.clone(), SourceRegistration { source, enablement });
+        let registration = registrations.get(&slug).ok_or_else(|| {
+            SourcePoolError::Internal("reloaded source disappeared from registry".to_string())
+        })?;
+        Ok(SourceStatus::from_registration(registration))
+    }
+
+    pub fn source_statuses(&self) -> Result<Vec<SourceStatus>, SourcePoolError> {
+        let registrations = self
+            .registrations
+            .lock()
+            .map_err(|_| SourcePoolError::Internal("source registry lock poisoned".to_string()))?;
+        let mut statuses = registrations
+            .values()
+            .map(SourceStatus::from_registration)
+            .collect::<Vec<_>>();
+        statuses.sort_by(|left, right| left.slug.cmp(&right.slug));
+        Ok(statuses)
     }
 
     pub fn tool_handlers_for_session(

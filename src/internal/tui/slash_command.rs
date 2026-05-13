@@ -45,6 +45,8 @@ pub enum BuiltinCommand {
     Approvals,
     /// `/anchors` — list or manage memory anchors.
     Anchors,
+    /// `/source` — list, enable, disable, or reload Source Pool entries.
+    Source,
     /// `/undo` — roll back the latest uncommitted AI file-edit batch.
     Undo,
     /// `/agents` — show declarative `[code.agents.<name>]` table from
@@ -86,6 +88,7 @@ impl BuiltinCommand {
             Self::Control => "control",
             Self::Approvals => "approvals",
             Self::Anchors => "anchors",
+            Self::Source => "source",
             Self::Undo => "undo",
             Self::Agents => "agents",
             Self::Budget => "budget",
@@ -115,6 +118,7 @@ impl BuiltinCommand {
             Self::Control => "Local automation control utilities",
             Self::Approvals => "List or revoke cached approvals",
             Self::Anchors => "List, draft, confirm, revoke memory anchors",
+            Self::Source => "List, enable, disable, or reload sources",
             Self::Undo => "Undo latest AI file edit batch",
             Self::Agents => "Show declarative agents.toml table",
             Self::Budget => "Show running budget totals vs configured caps",
@@ -145,6 +149,7 @@ impl BuiltinCommand {
             Self::Control,
             Self::Approvals,
             Self::Anchors,
+            Self::Source,
             Self::Undo,
             Self::Agents,
             Self::Budget,
@@ -256,6 +261,10 @@ mod tests {
             Some((BuiltinCommand::Anchors, "confirm abc123"))
         );
         assert_eq!(
+            parse_builtin("/source reload builtin_mcp"),
+            Some((BuiltinCommand::Source, "reload builtin_mcp"))
+        );
+        assert_eq!(
             parse_builtin("/model gemini"),
             Some((BuiltinCommand::Model, "gemini"))
         );
@@ -333,6 +342,7 @@ mod tests {
                 BuiltinCommand::Control,
                 BuiltinCommand::Approvals,
                 BuiltinCommand::Anchors,
+                BuiltinCommand::Source,
                 BuiltinCommand::Undo,
                 BuiltinCommand::Agents,
                 BuiltinCommand::Budget,
@@ -348,7 +358,7 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 19);
+        assert_eq!(hints.len(), 20);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "run"));
@@ -361,6 +371,7 @@ mod tests {
         assert!(hints.iter().any(|(n, _)| n == "control"));
         assert!(hints.iter().any(|(n, _)| n == "approvals"));
         assert!(hints.iter().any(|(n, _)| n == "anchors"));
+        assert!(hints.iter().any(|(n, _)| n == "source"));
         assert!(hints.iter().any(|(n, _)| n == "undo"));
         assert!(hints.iter().any(|(n, _)| n == "agents"));
         assert!(hints.iter().any(|(n, _)| n == "budget"));

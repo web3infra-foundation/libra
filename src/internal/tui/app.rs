@@ -94,6 +94,7 @@ use crate::{
             jsonl::{SessionEvent, SessionJsonlStore},
         },
         skills::SkillDispatcher,
+        sources::{BUILTIN_MCP_SOURCE_SLUG, McpSource, SourceEnablement, SourcePool, SourceStatus},
         tools::{
             ToolOutput, ToolRegistry,
             context::{
@@ -419,6 +420,8 @@ pub struct AppConfig {
     pub default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
     pub auto_classify_first_user_message: bool,
+    /// Source Pool control surface backing `/source` commands.
+    pub source_pool: SourcePool,
 }
 
 /// The main application struct.
@@ -530,6 +533,8 @@ pub struct App<M: CompletionModel> {
     /// Shared by both the TUI slash-command surface and the Code
     /// Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).
     goal_session: Option<super::goal_session::GoalSession>,
+    /// Source Pool control state for this TUI session.
+    source_pool: SourcePool,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -652,6 +657,7 @@ where
             auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
             goal_session: None,
+            source_pool: app_config.source_pool,
         }
     }
 
@@ -4587,6 +4593,13 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
+            BuiltinCommand::Source => {
+                let message = self.source_command_message(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
             BuiltinCommand::Undo => {
                 let working_dir = self.registry.working_dir();
                 let message = if undo_should_prefer_vcs_rollback(working_dir) {
@@ -4701,6 +4714,56 @@ where
             self.usage_snapshot.wall_clock_ms as f64 / 1000.0,
             cost
         )
+    }
+
+    fn source_command_message(&mut self, args: &str) -> String {
+        let args = args.trim();
+        if args.is_empty() || args.eq_ignore_ascii_case("list") {
+            return match self.source_pool.source_statuses() {
+                Ok(statuses) => format_source_statuses(&statuses),
+                Err(error) => format!("Unable to list sources: {error}"),
+            };
+        }
+
+        let mut parts = args.split_whitespace();
+        let subcommand = parts.next().unwrap_or_default().to_ascii_lowercase();
+        let slug = parts.next();
+        if parts.next().is_some() {
+            return source_command_usage();
+        }
+
+        match (subcommand.as_str(), slug) {
+            ("enable", Some(slug)) => match self
+                .source_pool
+                .enable_source(slug, SourceEnablement::SessionExplicit)
+            {
+                Ok(()) => format!("Enabled source `{slug}` for this session."),
+                Err(error) => format!("Unable to enable source `{slug}`: {error}"),
+            },
+            ("disable", Some(slug)) => match self.source_pool.disable_source(slug) {
+                Ok(()) => format!("Disabled source `{slug}` for this session."),
+                Err(error) => format!("Unable to disable source `{slug}`: {error}"),
+            },
+            ("reload", Some(slug)) if slug == BUILTIN_MCP_SOURCE_SLUG => {
+                let Some(server) = self.mcp_server.clone() else {
+                    return format!("Unable to reload source `{slug}`: MCP server unavailable.");
+                };
+                match self
+                    .source_pool
+                    .reload_source(Arc::new(McpSource::builtin(server)))
+                {
+                    Ok(status) => format!(
+                        "Reloaded source `{}`; next source handler build sees {} tool(s).",
+                        status.slug, status.tool_count
+                    ),
+                    Err(error) => format!("Unable to reload source `{slug}`: {error}"),
+                }
+            }
+            ("reload", Some(slug)) => {
+                format!("Reload is not available for source `{slug}` in this session.")
+            }
+            _ => source_command_usage(),
+        }
     }
 
     async fn approvals_command_message(&self, args: &str) -> String {
@@ -7594,6 +7657,37 @@ fn format_approval_memos(memos: &[ApprovalMemo]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_source_statuses(statuses: &[SourceStatus]) -> String {
+    if statuses.is_empty() {
+        return "No sources registered.".to_string();
+    }
+
+    let mut lines = vec!["Sources:".to_string()];
+    for status in statuses {
+        let state = if status.shared_state {
+            "shared"
+        } else {
+            "session"
+        };
+        lines.push(format!(
+            "  {} enabled={} kind={:?} trust={:?} tools={} resources={} prompts={} state={}",
+            status.slug,
+            status.enablement.label(),
+            status.kind,
+            status.trust_tier,
+            status.tool_count,
+            status.resource_count,
+            status.prompt_count,
+            state
+        ));
+    }
+    lines.join("\n")
+}
+
+fn source_command_usage() -> String {
+    "Usage: /source [list|enable <slug>|disable <slug>|reload <slug>]".to_string()
 }
 
 fn format_memory_anchors(anchors: &[MemoryAnchor]) -> String {
