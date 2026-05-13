@@ -931,7 +931,7 @@ v1 使用 gitignore 子集：
 
 - [ ] 重复 sync 不重复上传未变化文件、AI objects 和 AI bundle。
 - [ ] CAS latest revision 冲突有清晰错误和 `--force` 路径。
-- [ ] public visibility 下 secret/redaction fixture 无泄漏。
+- [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
@@ -983,7 +983,7 @@ v1 使用 gitignore 子集：
 
 - [ ] `libra publish deploy` 输出可访问 URL。
 - [x] (v0.17.87 fixture/local e2e) 页面能按 branch/tag 浏览对应 revision 的目录、文件、AI versions 和 AI object model。
-- [ ] public 页面不出现未 redacted 的敏感 AI 字段、secret-like 值或本机绝对路径。
+- [x] (v0.17.90 API + local e2e fixture) public 页面不出现未 redacted 的敏感 AI 字段、secret-like 值或本机绝对路径。
 
 ## 风险与缓解
 

@@ -255,9 +255,18 @@ function seedE2eAiFixture(db: FakeD1, bucket: FakeR2): void {
     revisionOid: REVISION_OID,
     sourceRefs: ["refs/heads/main"],
     relationships: [],
-    payload: { summary: "Publish demo intent" },
+    payload: {
+      summary: "Publish demo intent",
+      providerRawResponse: "sk-public-page-fixture-1234567890abcdef1234567890",
+      absoluteWorkspacePath: "/Users/alice/work/libra",
+      nested: {
+        visible: "kept",
+        promptText: "private system prompt",
+        logFile: "/Volumes/Data/GitMono/libra/.libra/log.json",
+      },
+    },
     redaction: { mode: "default", rulesVersion: "2026.05.09-1" },
-    removedFields: [],
+    removedFields: ["payload.providerRawResponse", "payload.absoluteWorkspacePath", "payload.promptText"],
   });
   const bundleBody = JSON.stringify({
     schemaVersion: 1,
@@ -279,7 +288,7 @@ function seedE2eAiFixture(db: FakeD1, bucket: FakeR2): void {
     bucket,
     intentKey,
     intentBody,
-    "7ebbf41bd1315af9e1f8731e22d7203056fcdce91a8a853757151ca72bddf790",
+    "8e5d56fb993a69481cf06a13a65d1d3f34430ac7596e2e7815bbb4df6a844511",
   );
   putTextObject(
     bucket,
@@ -296,7 +305,7 @@ function seedE2eAiFixture(db: FakeD1, bucket: FakeR2): void {
     layer: "snapshot",
     r2_key: intentKey,
     redaction_mode: "default",
-    payload_sha256: "7ebbf41bd1315af9e1f8731e22d7203056fcdce91a8a853757151ca72bddf790",
+    payload_sha256: "8e5d56fb993a69481cf06a13a65d1d3f34430ac7596e2e7815bbb4df6a844511",
     schema_version: 1,
     created_at: NOW,
   });

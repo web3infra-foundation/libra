@@ -278,6 +278,31 @@ describe("/api/sites/[slug]/ai/*", () => {
     expect(body.data.payload.payload.summary).toBe("Publish demo intent");
   });
 
+  it("redacts public AI object payload secrets and local paths", async () => {
+    const response = await aiObjectGet(
+      makeRequest(
+        "/api/sites/libra-demo/ai/objects/Intent/intent-2026-05-09-001",
+      ),
+      { params: Promise.resolve({ slug: "libra-demo", type: "Intent", id: "intent-2026-05-09-001" }) },
+    );
+    expect(response.status).toBe(200);
+    const body = await jsonBody<ApiBody>(response);
+    const object = body.data.payload as unknown as {
+      readonly payload: Record<string, unknown>;
+      readonly removedFields: readonly string[];
+    };
+    expect(object.payload.summary).toBe("Publish demo intent");
+    expect(object.payload).not.toHaveProperty("providerRawResponse");
+    expect(object.payload).not.toHaveProperty("absoluteWorkspacePath");
+    expect(object.removedFields).toContain("payload.providerRawResponse");
+
+    const serialised = JSON.stringify(body.data.payload);
+    expect(serialised).not.toContain("sk-public-fixture");
+    expect(serialised).not.toContain("/Users/alice/work/libra");
+    expect(serialised).not.toContain("/Volumes/Data/GitMono/libra");
+    expect(serialised).not.toContain("private system prompt");
+  });
+
   // Codex pass-6 P3: a future regression that drops `bundle_sha256`
   // from the SELECT projection would still pass against FakeD1
   // because the fake returns the seeded row in full. Pin the SQL
@@ -304,6 +329,8 @@ describe("/api/sites/[slug]/ai/*", () => {
     const serialised = JSON.stringify(body.data.bundle);
     expect(serialised).not.toMatch(/r2Key/);
     expect(serialised).not.toMatch(/bundleKey/);
+    expect(serialised).not.toContain("ghp_publicfixture");
+    expect(serialised).not.toContain("/Users/alice/work/libra");
   });
 
   it("returns the AI graph derived from the canonical bundle", async () => {

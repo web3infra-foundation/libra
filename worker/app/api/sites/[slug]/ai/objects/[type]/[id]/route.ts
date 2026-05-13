@@ -6,6 +6,7 @@ import { readPublishedJson } from "@/lib/server/r2";
 import { respondError, respondOk } from "@/lib/server/response";
 import { aiObjectIndexToWire, revisionToWire } from "@/lib/server/wire";
 import { notFound } from "@/lib/server/errors";
+import { redactPublicAiPayload } from "@/lib/server/redaction";
 import {
   parseObjectId,
   parseObjectType,
@@ -51,11 +52,14 @@ export async function GET(
     // `publish_ai_objects.payload_sha256` before parsing/returning.
     // The hash gates the redaction policy recorded alongside the
     // index row; a stale R2 write cannot serve unredacted payloads.
-    const payload = await readPublishedJson<Record<string, unknown>>(
+    const rawPayload = await readPublishedJson<Record<string, unknown>>(
       bindings.bucket,
       objectRow.r2_key,
       objectRow.payload_sha256,
     );
+    const payload = site.visibility === "public"
+      ? redactPublicAiPayload(rawPayload)
+      : rawPayload;
 
     return respondOk(
       {

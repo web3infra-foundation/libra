@@ -200,9 +200,18 @@ export async function seedHappyPath(d1: FakeD1, r2: FakeR2, opts: SeedOptions = 
     revisionOid: REVISION_OID,
     sourceRefs: ["refs/heads/main"],
     relationships: [],
-    payload: { summary: "Publish demo intent" },
+    payload: {
+      summary: "Publish demo intent",
+      providerRawResponse: "sk-public-fixture-1234567890abcdef1234567890",
+      absoluteWorkspacePath: "/Users/alice/work/libra",
+      nested: {
+        visible: "kept",
+        promptText: "private system prompt",
+        logFile: "/Volumes/Data/GitMono/libra/.libra/log.json",
+      },
+    },
     redaction: { mode: "default", rulesVersion: "2026.05.09-1" },
-    removedFields: [],
+    removedFields: ["payload.providerRawResponse", "payload.absoluteWorkspacePath", "payload.promptText"],
   });
   await r2.put(intentKey, intentBody);
   d1.tables["publish_ai_objects"]!.push({
@@ -230,6 +239,11 @@ export async function seedHappyPath(d1: FakeD1, r2: FakeR2, opts: SeedOptions = 
       { objectType: "Intent", objectId: "intent-2026-05-09-001", layer: "snapshot" },
     ],
     edges: [],
+    debug: {
+      note: "public bundle metadata",
+      deploymentToken: "ghp_publicfixture1234567890abcdef",
+      absoluteWorkspacePath: "/Users/alice/work/libra",
+    },
   });
   await r2.put(bundleKey, bundleBody);
   // Real bundle digest so the Worker's pass-4 P2 verification holds

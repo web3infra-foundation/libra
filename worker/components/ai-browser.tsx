@@ -526,7 +526,7 @@ function BundleDetail({
       id="ai-bundle-detail-panel"
       role="region"
       aria-label="AI bundle detail"
-      className="libra-card libra-card-pad space-y-3"
+      className="libra-card libra-card-pad min-w-0 space-y-3"
     >
       <header className="flex items-baseline justify-between gap-3">
         <div>
@@ -551,7 +551,7 @@ function BundleDetail({
         </button>
       </header>
       {detail && (
-        <pre className="libra-codebox max-h-[40vh] overflow-auto text-xs">
+        <pre className="libra-codebox max-h-[40vh] max-w-full overflow-auto text-xs">
           <code>{JSON.stringify(detail.bundle, null, 2)}</code>
         </pre>
       )}
@@ -579,7 +579,7 @@ function ObjectDetail({
     );
   }
   return (
-    <div className="libra-card libra-card-pad space-y-3">
+    <div className="libra-card libra-card-pad min-w-0 space-y-3">
       <header>
         <p className="libra-mono text-sm font-semibold">
           {detail.index.objectType} <span className="libra-text-faint">·</span>{" "}
@@ -590,7 +590,7 @@ function ObjectDetail({
           {detail.index.payloadSha256.slice(0, 12)}
         </p>
       </header>
-      <pre className="libra-codebox max-h-[55vh] overflow-auto text-xs">
+      <pre className="libra-codebox max-h-[55vh] max-w-full overflow-auto text-xs">
         <code>{JSON.stringify(detail.payload, null, 2)}</code>
       </pre>
     </div>

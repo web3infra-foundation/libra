@@ -42,6 +42,21 @@ test.describe("publish site pages", () => {
     await expectNoDocumentOverflow(page);
   });
 
+  test("AI object model page does not expose public redaction leaks", async ({ page }) => {
+    await page.goto(`/sites/${SLUG}/ai`);
+    const objectButton = page.getByRole("button", {
+      name: /Intent[\s\S]*intent-2026-05-09-001/,
+    });
+    await expect(objectButton).toBeVisible();
+    await objectButton.click();
+    await expect(page.getByText("Publish demo intent")).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("sk-public-page-fixture");
+    await expect(page.locator("body")).not.toContainText("/Users/alice/work/libra");
+    await expect(page.locator("body")).not.toContainText("/Volumes/Data/GitMono/libra");
+    await expect(page.locator("body")).not.toContainText("private system prompt");
+    await expectNoDocumentOverflow(page);
+  });
+
   test("status page renders the latest sync run + clone snippet", async ({ page }) => {
     await page.goto(`/sites/${SLUG}/status`);
     await expect(page.getByRole("heading", { name: /Publish status/i })).toBeVisible();

@@ -6,6 +6,7 @@ import { readPublishedJson } from "@/lib/server/r2";
 import { respondError, respondOk } from "@/lib/server/response";
 import { aiVersionIndexToWire, revisionToWire } from "@/lib/server/wire";
 import { notFound } from "@/lib/server/errors";
+import { redactPublicAiPayload } from "@/lib/server/redaction";
 import { parseAiVersionId, parseSlug } from "@/lib/server/validate";
 
 export const runtime = "edge";
@@ -73,7 +74,10 @@ export async function GET(
     // `redactBundleStorageKeys` walks every nested object/array and
     // strips both keys (camelCase + snake_case); everything else
     // passes through unchanged.
-    const bundle = redactBundleStorageKeys(rawBundle);
+    const bundleWithoutStorageKeys = redactBundleStorageKeys(rawBundle);
+    const bundle = site.visibility === "public"
+      ? redactPublicAiPayload(bundleWithoutStorageKeys)
+      : bundleWithoutStorageKeys;
 
     return respondOk(
       {
