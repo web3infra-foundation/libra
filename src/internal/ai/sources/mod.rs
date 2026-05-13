@@ -22,8 +22,10 @@ use crate::internal::ai::tools::{
 };
 
 pub mod mcp;
+pub mod openapi;
 
 pub use mcp::{BUILTIN_MCP_SOURCE_SLUG, McpSource};
+pub use openapi::{OpenApiToolSpecError, openapi_tool_capabilities_from_fixture};
 
 /// Source category. This stays intentionally small for Step 1.10 Phase A.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

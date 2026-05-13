@@ -14,7 +14,8 @@ use libra::internal::ai::{
     sources::{
         BUILTIN_MCP_SOURCE_SLUG, CapabilityManifest, ManifestValidationError, McpSource, Source,
         SourceCallContext, SourceEnablement, SourceKind, SourcePool, SourceToolCapability,
-        SourceToolNaming, TrustTier, source_prefixed_tool_name,
+        SourceToolNaming, TrustTier, openapi_tool_capabilities_from_fixture,
+        source_prefixed_tool_name,
     },
     tools::{
         context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
@@ -224,5 +225,104 @@ async fn mcp_source_keeps_legacy_bridge_names_and_schema_compatible() {
     assert_eq!(
         serde_json::to_value(prefixed_run.schema().function.parameters).expect("prefixed schema"),
         serde_json::to_value(legacy_run.schema().function.parameters).expect("legacy schema")
+    );
+}
+
+#[test]
+fn openapi_fixture_generates_rest_tool_specs() {
+    let fixture = r#"
+    {
+      "openapi": "3.1.0",
+      "info": { "title": "Demo", "version": "1.0.0" },
+      "paths": {
+        "/repos/{owner}/{repo}": {
+          "parameters": [
+            {
+              "name": "owner",
+              "in": "path",
+              "required": true,
+              "schema": { "type": "string" }
+            }
+          ],
+          "get": {
+            "operationId": "getRepo",
+            "summary": "Fetch a repository",
+            "parameters": [
+              {
+                "name": "repo",
+                "in": "path",
+                "required": true,
+                "schema": { "type": "string" }
+              },
+              {
+                "name": "include_stats",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "boolean" }
+              }
+            ]
+          }
+        },
+        "/issues": {
+          "post": {
+            "operationId": "create_issue",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {
+                      "title": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    "#;
+
+    let capabilities =
+        openapi_tool_capabilities_from_fixture(fixture).expect("OpenAPI fixture must parse");
+
+    assert_eq!(
+        capabilities
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["create_issue", "get_repo"]
+    );
+    assert!(capabilities.iter().all(|tool| tool.requires_network));
+
+    let get_repo = capabilities
+        .iter()
+        .find(|tool| tool.name == "get_repo")
+        .expect("getRepo operation should become get_repo");
+    assert_eq!(get_repo.spec.function.description, "Fetch a repository");
+    let serde_json::Value::Object(params) =
+        serde_json::to_value(&get_repo.spec.function.parameters).expect("params json")
+    else {
+        panic!("tool parameters must serialize as an object");
+    };
+    assert_eq!(params["required"], serde_json::json!(["owner", "repo"]));
+    assert_eq!(params["properties"]["include_stats"]["type"], "boolean");
+
+    let create_issue = capabilities
+        .iter()
+        .find(|tool| tool.name == "create_issue")
+        .expect("create issue operation should exist");
+    let serde_json::Value::Object(params) =
+        serde_json::to_value(&create_issue.spec.function.parameters).expect("params json")
+    else {
+        panic!("tool parameters must serialize as an object");
+    };
+    assert_eq!(params["required"], serde_json::json!(["body"]));
+    assert_eq!(
+        params["properties"]["body"]["required"],
+        serde_json::json!(["title"])
     );
 }
