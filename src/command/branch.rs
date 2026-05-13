@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, DbErr};
 use serde::Serialize;
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
+        operation_wrapper::{OperationMeta, OperationScope, with_operation_log},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -216,6 +217,9 @@ enum BranchError {
     #[error("failed to delete branch '{branch}': {detail}")]
     DeleteFailed { branch: String, detail: String },
 
+    #[error("failed to record branch operation: {0}")]
+    OperationLogFailed(String),
+
     #[error("too many arguments")]
     RenameTooManyArgs,
 
@@ -299,6 +303,11 @@ impl From<BranchError> for CliError {
             BranchError::DeleteFailed { branch, detail } => {
                 CliError::fatal(format!("failed to delete branch '{branch}': {detail}"))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            BranchError::OperationLogFailed(detail) => {
+                CliError::fatal(format!("failed to record branch operation: {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check whether the repository database is writable.")
             }
             BranchError::RenameTooManyArgs => CliError::command_usage("too many arguments")
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -403,6 +412,38 @@ fn branch_config_write_error(key: &str, error: impl ToString) -> BranchError {
     }
 }
 
+async fn operation_actor() -> String {
+    ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "libra-user".to_string())
+}
+
+async fn current_repo_id_for_operation() -> Result<String, BranchError> {
+    ConfigKv::get("libra.repoid")
+        .await
+        .map_err(|error| {
+            BranchError::OperationLogFailed(format!(
+                "failed to read repository id from config: {error}"
+            ))
+        })?
+        .map(|entry| entry.value)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BranchError::OperationLogFailed(
+                "repository id is missing; run 'libra init' to initialize metadata".to_string(),
+            )
+        })
+}
+
+fn branch_operation_args_digest(action: &str, branch: &str, commit: &str) -> String {
+    let payload = format!("{action}\0{branch}\0{commit}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, payload.as_bytes());
+    format!("sha256:{}", hex::encode(digest.as_ref()))
+}
 async fn set_upstream_with_conn<C: ConnectionTrait>(
     db: &C,
     branch: &str,
@@ -517,12 +558,46 @@ async fn create_branch_impl(
         )
     })?;
 
-    Branch::update_branch(&new_branch, &commit_id.to_string(), None)
-        .await
-        .map_err(|e| BranchError::CreateFailed {
-            branch: new_branch.clone(),
-            detail: e.to_string(),
-        })?;
+    let meta = OperationMeta {
+        command_name: "branch".to_string(),
+        description: format!("create branch {new_branch}"),
+        actor: operation_actor().await,
+        repo_id: current_repo_id_for_operation().await?,
+        args_digest: Some(branch_operation_args_digest(
+            "create",
+            &new_branch,
+            &commit_id_display,
+        )),
+    };
+
+    let branch_for_operation = new_branch.clone();
+    let commit_for_operation = commit_id_display.clone();
+    with_operation_log(meta, OperationScope::default(), move |txn| {
+        Box::pin(async move {
+            let exists = Branch::exists_result_with_conn(txn, &branch_for_operation, None)
+                .await
+                .map_err(|error| DbErr::Custom(error.to_string()))?;
+            if exists {
+                return Err(DbErr::Custom(format!(
+                    "a branch named '{}' already exists",
+                    branch_for_operation
+                )));
+            }
+            Branch::update_branch_with_conn(
+                txn,
+                &branch_for_operation,
+                &commit_for_operation,
+                None,
+            )
+            .await?;
+            Ok::<(), DbErr>(())
+        })
+    })
+    .await
+    .map_err(|error| BranchError::CreateFailed {
+        branch: new_branch.clone(),
+        detail: error.to_string(),
+    })?;
 
     Ok(BranchOutput::Create {
         name: new_branch,

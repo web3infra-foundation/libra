@@ -9,7 +9,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashSet, fs};
 
 use git_internal::hash::{ObjectHash, get_hash_kind};
-use libra::internal::config::ConfigKv;
+use libra::internal::{
+    config::ConfigKv,
+    db::get_db_conn_instance,
+    operation::{OperationQueryPage, OperationService},
+};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -43,6 +47,52 @@ fn test_branch_json_create_output_reports_branch() {
     assert_eq!(json["data"]["action"], "create");
     assert_eq!(json["data"]["name"], "feature");
     assert!(json["data"]["commit"].as_str().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_create_records_operation_log() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&output, "branch feature");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    let repo_id = ConfigKv::get("libra.repoid").await.unwrap().unwrap().value;
+    let page = OperationService::list_operations_by_repo_paginated_with_conn(
+        &db,
+        &repo_id,
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .await
+    .unwrap();
+    let op = page
+        .items
+        .iter()
+        .find(|item| item.command_name == "branch")
+        .expect("branch create should record an operation");
+
+    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &op.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.operation.command_name, "branch");
+    assert!(
+        graph
+            .operation
+            .description
+            .starts_with("create branch feature")
+    );
+    assert!(
+        graph
+            .refs
+            .iter()
+            .any(|reference| reference.ref_name == "feature")
+    );
 }
 
 #[test]
