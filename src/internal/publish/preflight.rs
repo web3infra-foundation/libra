@@ -24,6 +24,8 @@
 
 use std::path::Path;
 
+use crate::internal::publish::contract::SiteVisibility;
+
 /// Outcome of evaluating a single path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreflightDecision {
@@ -42,6 +44,16 @@ pub enum DenyReason {
     BuiltinCredential,
     /// A user-authored `.librapublishignore` rule.
     UserIgnore,
+}
+
+/// Invalid visibility-sensitive preflight configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PreflightPolicyError {
+    /// Public publish sites must not opt sensitive paths back in.
+    #[error(
+        "--allow-sensitive-path can only be used with private publish sites; public sites must not publish sensitive paths"
+    )]
+    PublicSensitiveAllowlist,
 }
 
 /// Built-in deny patterns (segment-aware, case-insensitive).
@@ -105,6 +117,26 @@ impl Preflight {
     /// [`Self::with_allow_sensitive_paths`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a visibility-scoped evaluator for publish sync.
+    ///
+    /// Public sites cannot override built-in sensitive path denies,
+    /// while private sites can opt in exact repo-relative paths via
+    /// `--allow-sensitive-path`.
+    pub fn for_visibility(
+        visibility: SiteVisibility,
+        allow_sensitive_paths: Vec<String>,
+    ) -> Result<Self, PreflightPolicyError> {
+        match visibility {
+            SiteVisibility::Public if !allow_sensitive_paths.is_empty() => {
+                Err(PreflightPolicyError::PublicSensitiveAllowlist)
+            }
+            SiteVisibility::Public => Ok(Self::new()),
+            SiteVisibility::Private => {
+                Ok(Self::new().with_allow_sensitive_paths(allow_sensitive_paths))
+            }
+        }
     }
 
     /// Parse a `.librapublishignore` file body and extend the rule
