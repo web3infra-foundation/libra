@@ -26,6 +26,7 @@ use super::fetch::{self, RemoteSpecErrorKind};
 use crate::{
     command::{
         self,
+        cloud::{restore_indexed_objects_from_remote, restore_metadata_strict},
         init::InitError,
         restore::{RestoreArgs, RestoreError},
     },
@@ -48,7 +49,8 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
-        storage::{Storage, remote::RemoteStorage},
+        path,
+        storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         util,
     },
 };
@@ -205,17 +207,6 @@ pub enum CloneError {
         hint: &'static str,
     },
     #[error(
-        "libra+cloud:// clone source recognised, but Phase 5 of \
-         docs/improvement/publish.md is not yet implemented; tracking \
-         the v1 release window for `libra clone {input}`"
-    )]
-    CloudPublishSourceNotYetImplemented {
-        input: String,
-        target: String,
-        selector: Option<String>,
-        config_details: Vec<(&'static str, String)>,
-    },
-    #[error(
         "failed to resolve libra+cloud site {target} in clone domain '{domain}' \
          via D1 (code {code}): {message}"
     )]
@@ -301,6 +292,30 @@ pub enum CloneError {
         domain: String,
         target: String,
         object_oid: String,
+    },
+    #[error(
+        "failed to restore R2 objects for libra+cloud site {target} in clone domain '{domain}': {message}"
+    )]
+    CloudPublishObjectRestoreFailed {
+        domain: String,
+        target: String,
+        message: String,
+    },
+    #[error(
+        "failed to restore refs metadata for libra+cloud site {target} in clone domain '{domain}': {message}"
+    )]
+    CloudPublishRefsMetadataRestoreFailed {
+        domain: String,
+        target: String,
+        message: String,
+    },
+    #[error(
+        "failed to configure checkout for libra+cloud site {target} in clone domain '{domain}': {message}"
+    )]
+    CloudPublishCheckoutSetupFailed {
+        domain: String,
+        target: String,
+        message: String,
     },
     #[error(
         "object_index row {object_oid} for libra+cloud site {target} in clone domain '{domain}' is not a valid object id: {reason}"
@@ -438,36 +453,6 @@ impl From<CloneError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_detail("option", option.to_string())
                 .with_hint(hint.to_string()),
-            CloneError::CloudPublishSourceNotYetImplemented {
-                ref target,
-                ref selector,
-                ref config_details,
-                ..
-            } => {
-                // Codex pass-7 P1: surface the recognised but
-                // unimplemented Cloudflare publish clone source as a
-                // fatal CLI error so the user sees a precise message
-                // instead of falling through to the generic remote
-                // discovery path. Phase 5 of
-                // docs/improvement/publish.md lands the actual
-                // implementation; until then this acts as a clean
-                // surface for forward compatibility.
-                let mut cli = CliError::fatal(error.to_string())
-                    .with_stable_code(StableErrorCode::CliInvalidArguments)
-                    .with_detail("cloud_target", target.clone())
-                    .with_hint(
-                        "Phase 5 of docs/improvement/publish.md is in progress; \
-                         use the local CLI's existing `libra cloud restore` flow \
-                         (or wait for the v1 release) to recover the repository.",
-                    );
-                if let Some(selector) = selector {
-                    cli = cli.with_detail("cloud_selector", selector.clone());
-                }
-                for (key, value) in config_details {
-                    cli = cli.with_detail(*key, value.clone());
-                }
-                cli
-            }
             CloneError::CloudPublishSiteLookupFailed {
                 ref domain,
                 ref target,
@@ -630,6 +615,40 @@ impl From<CloneError> for CliError {
                 .with_hint(
                     "run 'libra cloud sync --force' and then 'libra publish sync' again before cloning.",
                 ),
+            CloneError::CloudPublishObjectRestoreFailed {
+                ref domain,
+                ref target,
+                ref message,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("restore_error", message.clone())
+                .with_hint(
+                    "run 'libra cloud sync --force' and then 'libra publish sync' again before cloning.",
+                ),
+            CloneError::CloudPublishRefsMetadataRestoreFailed {
+                ref domain,
+                ref target,
+                ref message,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("restore_error", message.clone())
+                .with_hint(
+                    "run 'libra cloud sync --force' so refs metadata is available in R2.",
+                ),
+            CloneError::CloudPublishCheckoutSetupFailed {
+                ref domain,
+                ref target,
+                ref message,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("checkout_error", message.clone())
+                .with_hint("check that the selected published ref points to a commit."),
             CloneError::CloudPublishObjectIndexInvalid {
                 ref domain,
                 ref target,
@@ -1012,14 +1031,8 @@ async fn execute_clone_inner(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, (CloneError, Option<String>)> {
-    // Codex pass-7 P1: intercept the Cloudflare publish source scheme
-    // before generic remote discovery. Phase 5 of
-    // `docs/improvement/publish.md` lands the actual D1/R2 restore
-    // path; until then we fail with a clear "not yet implemented"
-    // error pointing the user at the Phase 5 release window. This
-    // prevents a `libra+cloud://...` URL from falling into the
-    // generic Git fetch path and emitting a confusing protocol
-    // error.
+    // Intercept Cloudflare publish sources before generic remote discovery.
+    // `libra+cloud://` is a Libra D1/R2 restore source, not a Git transport.
     if args.remote_repo.starts_with("libra+cloud://") {
         let source =
             parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
@@ -1030,17 +1043,19 @@ async fn execute_clone_inner(
         let restore_plan = resolve_cloud_publish_restore_plan(&source, &clone_config)
             .await
             .map_err(|error| (error, None))?;
-        let mut config_details = clone_config.into_error_details(source.clone_domain.clone());
-        config_details.extend(cloud_publish_restore_plan_error_details(&restore_plan));
-        return Err((
-            CloneError::CloudPublishSourceNotYetImplemented {
-                input: args.remote_repo.clone(),
-                target: source.target_label(),
-                selector: source.selector_label(),
-                config_details,
-            },
-            None,
-        ));
+        let r2_storage =
+            create_cloud_clone_remote_storage(&source, &clone_config, &restore_plan.site.repo_id)
+                .await
+                .map_err(|error| (error, None))?;
+        return execute_cloud_publish_clone(
+            args,
+            &source,
+            restore_plan,
+            r2_storage,
+            original_dir,
+            output,
+        )
+        .await;
     }
 
     let mut remote_repo = args.remote_repo.clone();
@@ -1147,6 +1162,201 @@ async fn execute_clone_inner(
     })
 }
 
+async fn execute_cloud_publish_clone(
+    args: &CloneArgs,
+    source: &CloudPublishSource,
+    restore_plan: CloudPublishRestorePlan,
+    r2_storage: RemoteStorage,
+    original_dir: &Path,
+    output: &OutputConfig,
+) -> Result<CloneOutput, (CloneError, Option<String>)> {
+    let local_path = resolve_cloud_clone_local_path(args, original_dir, &restore_plan);
+    let metadata_root = local_path.join(util::ROOT_DIR);
+
+    if metadata_root.exists() && contains_initialized_repo(&metadata_root) {
+        return Err((
+            CloneError::DestinationAlreadyRepo {
+                path: local_path.clone(),
+            },
+            None,
+        ));
+    }
+    if local_path.exists() && !util::is_empty_dir(&local_path) {
+        return Err((
+            CloneError::DestinationExistsNonEmpty {
+                path: local_path.clone(),
+            },
+            None,
+        ));
+    }
+
+    let created_by_clone = if local_path.exists() {
+        false
+    } else {
+        fs::create_dir_all(&local_path).map_err(|source| {
+            (
+                CloneError::CreateDestinationFailed {
+                    path: local_path.clone(),
+                    source,
+                },
+                None,
+            )
+        })?;
+        true
+    };
+
+    clone_cloud_publish_into_destination(
+        args,
+        source,
+        &restore_plan,
+        &r2_storage,
+        &local_path,
+        original_dir,
+        output,
+    )
+    .await
+    .map_err(|error| {
+        if env::current_dir().ok().as_deref() != Some(original_dir) {
+            let _ = env::set_current_dir(original_dir);
+        }
+        let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
+        (error, cleanup_warning)
+    })
+}
+
+fn resolve_cloud_clone_local_path(
+    args: &CloneArgs,
+    original_dir: &Path,
+    restore_plan: &CloudPublishRestorePlan,
+) -> PathBuf {
+    let local_path = args
+        .local_path
+        .clone()
+        .unwrap_or_else(|| restore_plan.site.slug.clone());
+    let local_path = PathBuf::from(local_path);
+    if local_path.is_absolute() {
+        local_path
+    } else {
+        original_dir.join(local_path)
+    }
+}
+
+async fn clone_cloud_publish_into_destination(
+    args: &CloneArgs,
+    source: &CloudPublishSource,
+    restore_plan: &CloudPublishRestorePlan,
+    r2_storage: &RemoteStorage,
+    local_path: &Path,
+    original_dir: &Path,
+    output: &OutputConfig,
+) -> Result<CloneOutput, CloneError> {
+    env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
+        path: local_path.to_path_buf(),
+        source,
+    })?;
+
+    let object_format = cloud_object_format(&restore_plan.object_indexes);
+
+    if !output.quiet && !output.is_json() {
+        eprintln!("Initializing repository ...");
+    }
+    let init_output = command::init::run_init(command::init::InitArgs {
+        bare: false,
+        template: None,
+        initial_branch: cloud_checkout_branch_name(&restore_plan.checkout),
+        repo_directory: local_path.to_string_lossy().into_owned(),
+        quiet: true,
+        shared: None,
+        object_format: Some(object_format.clone()),
+        ref_format: None,
+        from_git_repository: None,
+        vault: true,
+    })
+    .await
+    .map_err(|source| CloneError::InitializeRepository { source })?;
+
+    if !output.quiet && !output.is_json() {
+        eprintln!("Restoring objects from Cloudflare R2 ...");
+    }
+    let local_storage = LocalStorage::new(path::objects());
+    let object_report = restore_indexed_objects_from_remote(
+        &restore_plan.object_indexes,
+        r2_storage,
+        &local_storage,
+    )
+    .await
+    .map_err(|message| CloneError::CloudPublishObjectRestoreFailed {
+        domain: source.clone_domain.clone(),
+        target: site_target_label(source, &restore_plan.site),
+        message,
+    })?;
+    if object_report.failed > 0 {
+        return Err(CloneError::CloudPublishObjectRestoreFailed {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, &restore_plan.site),
+            message: cloud_object_restore_failure_message(&object_report.warnings),
+        });
+    }
+
+    if !output.quiet && !output.is_json() {
+        eprintln!("Restoring refs metadata ...");
+    }
+    let db_conn = get_db_conn_instance().await;
+    restore_metadata_strict(&db_conn, r2_storage)
+        .await
+        .map_err(
+            |message| CloneError::CloudPublishRefsMetadataRestoreFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message,
+            },
+        )?;
+
+    configure_cloud_publish_checkout(source, restore_plan, &args.remote_repo).await?;
+
+    if !output.quiet && !output.is_json() {
+        eprintln!("Checking out working copy ...");
+    }
+    command::restore::execute_checked_typed(RestoreArgs {
+        worktree: true,
+        staged: true,
+        source: None,
+        pathspec: vec![util::working_dir_string()],
+    })
+    .await
+    .map_err(|source| CloneError::CheckoutFailed { source })?;
+
+    let mut warnings = init_output.warnings.clone();
+    warnings.extend(object_report.warnings);
+    let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
+        .map_err(|source| CloneError::IgnoreFile { source })?;
+    warnings.extend(summary.warnings);
+    let gitignore_converted = summary
+        .converted
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+
+    env::set_current_dir(original_dir).map_err(|source| CloneError::RestoreDirectory {
+        path: original_dir.to_path_buf(),
+        source,
+    })?;
+
+    Ok(CloneOutput {
+        path: local_path.to_string_lossy().into_owned(),
+        bare: false,
+        remote_url: args.remote_repo.clone(),
+        branch: cloud_checkout_branch_name(&restore_plan.checkout),
+        object_format,
+        repo_id: init_output.repo_id,
+        vault_signing: init_output.vault_signing,
+        ssh_key_detected: init_output.ssh_key_detected,
+        shallow: false,
+        warnings,
+        gitignore_converted,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CloudPublishSource {
     clone_domain: String,
@@ -1199,21 +1409,6 @@ enum CloudPublishCheckoutSelectorKind {
     Revision,
 }
 
-impl CloudCloneDomainConfig {
-    fn into_error_details(self, clone_domain: String) -> Vec<(&'static str, String)> {
-        let mut details = vec![
-            ("clone_domain", clone_domain),
-            ("cloud_account_id", self.account_id),
-            ("cloud_d1_database_id", self.d1_database_id),
-            ("cloud_r2_bucket", self.r2_bucket),
-        ];
-        if let Some(credential_profile) = self.credential_profile {
-            details.push(("cloud_credential_profile", credential_profile));
-        }
-        details
-    }
-}
-
 impl CloudPublishSource {
     fn target_label(&self) -> String {
         match &self.target {
@@ -1221,13 +1416,99 @@ impl CloudPublishSource {
             CloudPublishTarget::RepoId(repo_id) => format!("repo:{repo_id}"),
         }
     }
+}
 
-    fn selector_label(&self) -> Option<String> {
-        self.selector.as_ref().map(|selector| match selector {
-            CloudPublishSelector::Ref(value) => format!("ref:{value}"),
-            CloudPublishSelector::Revision(value) => format!("revision:{value}"),
-        })
+fn cloud_object_format(object_indexes: &[ObjectIndexRow]) -> String {
+    if object_indexes.iter().any(|row| row.o_id.len() == 64) {
+        "sha256".to_string()
+    } else {
+        "sha1".to_string()
     }
+}
+
+fn cloud_checkout_branch_name(checkout: &CloudPublishCheckoutTarget) -> Option<String> {
+    checkout
+        .ref_name
+        .as_deref()
+        .and_then(|ref_name| ref_name.strip_prefix("refs/heads/"))
+        .map(ToString::to_string)
+}
+
+fn cloud_object_restore_failure_message(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        "one or more indexed objects failed to restore".to_string()
+    } else {
+        warnings.join("; ")
+    }
+}
+
+async fn configure_cloud_publish_checkout(
+    source: &CloudPublishSource,
+    restore_plan: &CloudPublishRestorePlan,
+    remote_url: &str,
+) -> Result<(), CloneError> {
+    let selected_commit = object_hash_from_cloud_index(
+        source,
+        &restore_plan.site,
+        &restore_plan.checkout.revision_oid,
+    )?;
+
+    let db = get_db_conn_instance().await;
+    if let Some(branch_name) = cloud_checkout_branch_name(&restore_plan.checkout) {
+        Branch::update_branch_with_conn(&db, &branch_name, &selected_commit.to_string(), None)
+            .await
+            .map_err(|error| CloneError::CloudPublishCheckoutSetupFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!("failed to update branch '{branch_name}': {error}"),
+            })?;
+        Head::update_result_with_conn(&db, Head::Branch(branch_name.clone()), None)
+            .await
+            .map_err(|error| CloneError::CloudPublishCheckoutSetupFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!("failed to update HEAD to branch '{branch_name}': {error}"),
+            })?;
+
+        let merge_ref = format!("refs/heads/{branch_name}");
+        let _ = ConfigKv::set(&format!("branch.{branch_name}.merge"), &merge_ref, false).await;
+        let _ = ConfigKv::set(&format!("branch.{branch_name}.remote"), "origin", false).await;
+    } else {
+        Head::update_result_with_conn(&db, Head::Detached(selected_commit), None)
+            .await
+            .map_err(|error| CloneError::CloudPublishCheckoutSetupFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!("failed to detach HEAD at selected revision: {error}"),
+            })?;
+    }
+
+    let _ = ConfigKv::set("remote.origin.url", remote_url, false).await;
+    let _ = ConfigKv::set("remote.origin.type", "libra+cloud", false).await;
+    let _ = ConfigKv::set("cloud.origin.clone_domain", &source.clone_domain, false).await;
+    let _ = ConfigKv::set("cloud.origin.site_id", &restore_plan.site.site_id, false).await;
+    let _ = ConfigKv::set("cloud.origin.repo_id", &restore_plan.site.repo_id, false).await;
+    let _ = ConfigKv::set(
+        "cloud.origin.repository_name",
+        &restore_plan.repository.name,
+        false,
+    )
+    .await;
+    let _ = ConfigKv::set("cloud.origin.slug", &restore_plan.site.slug, false).await;
+    let _ = ConfigKv::set(
+        "cloud.origin.revision_status",
+        &restore_plan.revision.status,
+        false,
+    )
+    .await;
+    let _ = ConfigKv::set(
+        "cloud.origin.revision_oid",
+        &restore_plan.checkout.revision_oid,
+        false,
+    )
+    .await;
+
+    Ok(())
 }
 
 fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
@@ -1543,6 +1824,15 @@ async fn create_cloud_clone_object_probe(
     config: &CloudCloneDomainConfig,
     repo_id: &str,
 ) -> Result<Box<dyn CloudCloneObjectProbe + Send + Sync>, CloneError> {
+    let storage = create_cloud_clone_remote_storage(source, config, repo_id).await?;
+    Ok(Box::new(RemoteStorageObjectProbe { storage }))
+}
+
+async fn create_cloud_clone_remote_storage(
+    source: &CloudPublishSource,
+    config: &CloudCloneDomainConfig,
+    repo_id: &str,
+) -> Result<RemoteStorage, CloneError> {
     let endpoint = resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ENDPOINT").await?;
     let access_key =
         resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ACCESS_KEY").await?;
@@ -1566,9 +1856,10 @@ async fn create_cloud_clone_object_probe(
             message: source_error.to_string(),
         })?;
 
-    Ok(Box::new(RemoteStorageObjectProbe {
-        storage: RemoteStorage::new_with_prefix(Arc::new(storage), repo_id.to_string()),
-    }))
+    Ok(RemoteStorage::new_with_prefix(
+        Arc::new(storage),
+        repo_id.to_string(),
+    ))
 }
 
 async fn resolve_required_cloud_clone_r2_env(
@@ -1780,58 +2071,6 @@ fn matching_cloud_publish_refs<'a>(
     refs.iter()
         .filter(|row| row.short_name == selector)
         .collect::<Vec<_>>()
-}
-
-fn cloud_publish_restore_plan_error_details(
-    plan: &CloudPublishRestorePlan,
-) -> Vec<(&'static str, String)> {
-    let mut details = cloud_publish_site_error_details(&plan.site);
-    details.push(("cloud_repository_name", plan.repository.name.clone()));
-    details.push((
-        "cloud_checkout_revision_oid",
-        plan.checkout.revision_oid.clone(),
-    ));
-    details.push((
-        "cloud_checkout_selector_kind",
-        cloud_publish_checkout_selector_kind_label(plan.checkout.selector_kind).to_string(),
-    ));
-    if let Some(ref_name) = &plan.checkout.ref_name {
-        details.push(("cloud_checkout_ref", ref_name.clone()));
-    }
-    details.push(("cloud_revision_status", plan.revision.status.clone()));
-    details.push((
-        "cloud_object_index_count",
-        plan.object_indexes.len().to_string(),
-    ));
-    details
-}
-
-fn cloud_publish_checkout_selector_kind_label(
-    kind: CloudPublishCheckoutSelectorKind,
-) -> &'static str {
-    match kind {
-        CloudPublishCheckoutSelectorKind::DefaultRef => "default_ref",
-        CloudPublishCheckoutSelectorKind::Ref => "ref",
-        CloudPublishCheckoutSelectorKind::LatestRevision => "latest_revision",
-        CloudPublishCheckoutSelectorKind::Revision => "revision",
-    }
-}
-
-fn cloud_publish_site_error_details(site: &PublishSiteRow) -> Vec<(&'static str, String)> {
-    let mut details = vec![
-        ("cloud_site_id", site.site_id.clone()),
-        ("cloud_repo_id", site.repo_id.clone()),
-        ("cloud_slug", site.slug.clone()),
-        ("cloud_site_status", site.status.clone()),
-        ("cloud_refs_generation", site.refs_generation.to_string()),
-    ];
-    if let Some(default_ref) = &site.default_ref {
-        details.push(("cloud_default_ref", default_ref.clone()));
-    }
-    if let Some(latest_revision_oid) = &site.latest_revision_oid {
-        details.push(("cloud_latest_revision_oid", latest_revision_oid.clone()));
-    }
-    details
 }
 
 fn clone_config_local_target() -> LocalIdentityTarget<'static> {
@@ -2161,7 +2400,23 @@ pub(crate) async fn setup_repository(
 /// Unit tests for the clone module
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use git_internal::internal::object::{
+        ObjectTrait,
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItem, TreeItemMode},
+    };
+    use object_store::memory::InMemory;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::{
+        internal::model::reference,
+        utils::test::{ChangeDirGuard, ScopedEnvVar},
+    };
 
     #[test]
     fn discover_remote_unauthorized_maps_to_auth_permission_denied() {
@@ -2367,39 +2622,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_clone_domain_resolve_test_site_details_are_carried_to_restore_stub() {
-        let site = PublishSiteRow {
-            site_id: "site_123".to_string(),
-            repo_id: "repo_456".to_string(),
-            clone_domain: "code.example.com".to_string(),
-            slug: "kepler-ledger".to_string(),
-            display_origin: "https://code.example.com".to_string(),
-            name: "Kepler Ledger".to_string(),
-            visibility: "public".to_string(),
-            status: "active".to_string(),
-            worker_name: "libra-publish".to_string(),
-            default_ref: Some("refs/heads/main".to_string()),
-            latest_revision_oid: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-            refs_generation: 7,
-            max_preview_bytes: 1024,
-            schema_version: 1,
-            created_at: "2026-05-13T00:00:00Z".to_string(),
-            updated_at: "2026-05-13T00:00:00Z".to_string(),
-        };
-
-        let details = cloud_publish_site_error_details(&site);
-        assert!(details.contains(&("cloud_site_id", "site_123".to_string())));
-        assert!(details.contains(&("cloud_repo_id", "repo_456".to_string())));
-        assert!(details.contains(&("cloud_slug", "kepler-ledger".to_string())));
-        assert!(details.contains(&("cloud_default_ref", "refs/heads/main".to_string())));
-        assert!(details.contains(&(
-            "cloud_latest_revision_oid",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        )));
-        assert!(details.contains(&("cloud_refs_generation", "7".to_string())));
-    }
-
-    #[test]
     fn cloud_clone_restore_plan_resolves_default_ref_checkout_revision() {
         let source = CloudPublishSource {
             clone_domain: "code.example.com".to_string(),
@@ -2550,6 +2772,113 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn cloud_clone_restore_test_restores_default_ref_objects_refs_head_and_worktree() {
+        let parent = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let _cwd = ChangeDirGuard::new(parent.path());
+        let source = cloud_source();
+        let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
+        let args = CloneArgs {
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+        };
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        let result = execute_cloud_publish_clone(
+            &args,
+            &source,
+            restore_plan,
+            remote,
+            parent.path(),
+            &output,
+        )
+        .await
+        .expect("cloud clone restore should complete");
+
+        let clone_dir = parent.path().join("kepler-ledger");
+        assert_eq!(result.path, clone_dir.to_string_lossy());
+        assert_eq!(result.remote_url, args.remote_repo);
+        assert_eq!(result.branch.as_deref(), Some("main"));
+        assert_eq!(
+            fs::read_to_string(clone_dir.join("README.md")).unwrap(),
+            "# cloud\n"
+        );
+
+        let _clone_cwd = ChangeDirGuard::new(&clone_dir);
+        let head = Head::current_commit_result()
+            .await
+            .expect("restored HEAD should be readable")
+            .expect("restored HEAD should point at a commit");
+        assert_eq!(head.to_string(), commit_id.to_string());
+        assert_eq!(
+            config_value("remote.origin.url").await.as_deref(),
+            Some("libra+cloud://code.example.com/kepler-ledger")
+        );
+        assert_eq!(
+            config_value("cloud.origin.site_id").await.as_deref(),
+            Some("site_123")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cloud_clone_restore_test_cleans_destination_when_refs_metadata_missing() {
+        let parent = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let _cwd = ChangeDirGuard::new(parent.path());
+        let source = cloud_source();
+        let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
+        let args = CloneArgs {
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+        };
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        let (error, cleanup_warning) = execute_cloud_publish_clone(
+            &args,
+            &source,
+            restore_plan,
+            remote,
+            parent.path(),
+            &output,
+        )
+        .await
+        .expect_err("missing refs metadata must fail cloud clone");
+
+        assert!(cleanup_warning.is_none());
+        assert!(
+            matches!(
+                error,
+                CloneError::CloudPublishRefsMetadataRestoreFailed { .. }
+            ),
+            "expected refs metadata restore failure, got {error}",
+        );
+        assert!(
+            !parent.path().join("kepler-ledger").exists(),
+            "failed cloud clone should remove the destination it created"
+        );
+    }
+
     fn publish_site_row(
         default_ref: Option<&str>,
         latest_revision_oid: Option<&str>,
@@ -2574,11 +2903,134 @@ mod tests {
         }
     }
 
+    fn cloud_source() -> CloudPublishSource {
+        CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: None,
+        }
+    }
+
+    async fn cloud_restore_fixture(
+        include_metadata: bool,
+    ) -> (CloudPublishRestorePlan, RemoteStorage, ObjectHash) {
+        let blob = Blob::from_content("# cloud\n");
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            blob.id,
+            "README.md".to_string(),
+        )])
+        .expect("tree should build");
+        let commit = Commit::from_tree_id(tree.id, Vec::new(), "cloud clone fixture");
+
+        let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+        put_remote_object(&remote, &blob).await;
+        put_remote_object(&remote, &tree).await;
+        put_remote_object(&remote, &commit).await;
+
+        if include_metadata {
+            let refs = vec![
+                reference::Model {
+                    id: 0,
+                    name: Some("main".to_string()),
+                    kind: reference::ConfigKind::Head,
+                    commit: None,
+                    remote: None,
+                },
+                reference::Model {
+                    id: 0,
+                    name: Some("main".to_string()),
+                    kind: reference::ConfigKind::Branch,
+                    commit: Some(commit.id.to_string()),
+                    remote: None,
+                },
+            ];
+            let metadata = serde_json::to_vec(&refs).expect("refs metadata should serialize");
+            remote
+                .put_metadata(&metadata)
+                .await
+                .expect("metadata should upload to in-memory remote");
+        }
+
+        let plan = CloudPublishRestorePlan {
+            site: publish_site_row(Some("refs/heads/main"), Some(&commit.id.to_string())),
+            repository: RepositoryRow {
+                repo_id: "repo_456".to_string(),
+                name: "Kepler Ledger".to_string(),
+                created_at: 1778620800,
+                updated_at: 1778620800,
+            },
+            checkout: CloudPublishCheckoutTarget {
+                revision_oid: commit.id.to_string(),
+                ref_name: Some("refs/heads/main".to_string()),
+                selector_kind: CloudPublishCheckoutSelectorKind::DefaultRef,
+            },
+            revision: PublishRevisionRow {
+                site_id: "site_123".to_string(),
+                revision_oid: commit.id.to_string(),
+                status: "published".to_string(),
+                code_manifest_key: None,
+                ai_index_key: None,
+                file_count: 1,
+                ai_object_count: 0,
+                ai_bundle_count: 0,
+                redaction_mode: "default".to_string(),
+                redaction_rules_version: "1".to_string(),
+                sync_run_id: "sync_123".to_string(),
+                schema_version: 1,
+                created_at: "2026-05-13T00:00:00Z".to_string(),
+                updated_at: "2026-05-13T00:00:00Z".to_string(),
+            },
+            object_indexes: vec![
+                object_index_row_with_type(
+                    &blob.id.to_string(),
+                    "blob",
+                    blob.to_data().unwrap().len(),
+                ),
+                object_index_row_with_type(
+                    &tree.id.to_string(),
+                    "tree",
+                    tree.to_data().unwrap().len(),
+                ),
+                object_index_row_with_type(
+                    &commit.id.to_string(),
+                    "commit",
+                    commit.to_data().unwrap().len(),
+                ),
+            ],
+        };
+
+        (plan, remote, commit.id)
+    }
+
+    async fn put_remote_object<T>(remote: &RemoteStorage, object: &T)
+    where
+        T: ObjectTrait,
+    {
+        let data = object.to_data().expect("object data should serialize");
+        let hash = object.object_hash().expect("object hash should compute");
+        remote
+            .put(&hash, &data, object.get_type())
+            .await
+            .expect("object should upload to in-memory remote");
+    }
+
+    async fn config_value(key: &str) -> Option<String> {
+        ConfigKv::get(key)
+            .await
+            .expect("config lookup should succeed")
+            .map(|entry| entry.value)
+    }
+
     fn object_index_row(o_id: &str) -> ObjectIndexRow {
+        object_index_row_with_type(o_id, "commit", 123)
+    }
+
+    fn object_index_row_with_type(o_id: &str, o_type: &str, o_size: usize) -> ObjectIndexRow {
         ObjectIndexRow {
             o_id: o_id.to_string(),
-            o_type: "commit".to_string(),
-            o_size: 123,
+            o_type: o_type.to_string(),
+            o_size: o_size as i64,
             repo_id: "repo_456".to_string(),
             created_at: 1778620800,
             is_synced: 1,

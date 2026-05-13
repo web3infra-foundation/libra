@@ -852,9 +852,8 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.127) Cloudflare clone restore plan 对 D1 `object_index` 中的 Git object 逐项校验 R2 存在性；缺失对象以 `RepoCorrupt` 失败，避免进入后续本地恢复。
 - [x] (v0.17.128) 抽出 strict refs metadata restore helper，缺失 `metadata.json` 时硬失败，供后续 Cloudflare clone 在创建目标目录后执行失败清理。
 - [x] (v0.17.129) 抽出 indexed Git object restore helper，复用 R2 get、hash verify、LocalStorage put 和 downloaded/skipped/failed report counts；后续 Cloudflare clone restore 可把失败 report 映射到目标目录清理。
-- [ ] 通过 R2 读取完整 Git object 集合；refs metadata 仍需接入实际本地 restore 写入。
-- [ ] 使用 `run_init()` 初始化本地仓库，再恢复 objects、refs、HEAD、remote config，并完成 non-bare checkout。
-- [ ] 缺失 R2 object、refs metadata 不完整或 checkout 失败时，命令必须失败并清理本次 clone 创建的目标目录，不得输出成功。
+- [x] (v0.17.130) Cloudflare clone resolved-plan restore path 在目标目录内调用 `run_init()`，从 R2 读取完整 indexed Git object 集合，恢复 strict refs metadata，设置 HEAD/remote config，并完成 non-bare checkout；首个回归覆盖 default ref 的 objects/refs/HEAD/worktree 一致性。
+- [x] (v0.17.130) Cloudflare clone 在 refs metadata 缺失时以硬错误失败，并复用 clone cleanup 事务删除本次创建的目标目录；R2 object 缺失继续由 preflight `RepoCorrupt` 阻断，checkout 失败走既有 `CheckoutFailed` cleanup。
 - [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。
 - [x] (v0.17.56) `--branch`、`--depth`、`--single-branch`、`--bare` 与 `libra+cloud://` 的首版兼容策略按 [clone.md](clone.md) 执行：这些首版未支持组合在 clone-domain config 读取和目标目录创建前返回 `LBR-CLI-002`，不得静默降级。
 - [ ] `--json` / `--machine` 输出仍只有一个 clone envelope；Cloudflare 字段使用可选加法字段，不破坏普通 Git clone schema。

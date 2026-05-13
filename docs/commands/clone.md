@@ -33,9 +33,11 @@ HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem path
 domain must be configured locally before restore starts; otherwise Libra returns
 `LBR-AUTH-001` and does not create the destination directory. Configured cloud
 sources resolve the D1 site, repository row, published refs, selected/default
-revision, object index, and R2 object availability before returning the Phase 5
-not-implemented error. Full R2 object download and local restore are not
-implemented yet; cloud sources never fall through to generic Git discovery.
+revision, object index, and R2 object availability before creating the target
+directory. Restore then initializes a local Libra repo, downloads indexed Git
+objects from R2, restores refs metadata, writes origin cloud config, and checks
+out the selected/default revision. Cloud sources never fall through to generic
+Git discovery.
 
 ```bash
 libra clone git@github.com:user/repo.git

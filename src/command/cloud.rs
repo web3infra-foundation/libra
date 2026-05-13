@@ -1490,13 +1490,6 @@ async fn restore_metadata(
 /// [`restore_metadata`]. Cloud clone restore needs a stricter contract: without
 /// refs metadata it cannot set HEAD/branches safely, so the caller must fail and
 /// clean up the just-created destination.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "cloud clone restore will call this strict helper when the local restore path lands"
-    )
-)]
 pub(crate) async fn restore_metadata_strict(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
