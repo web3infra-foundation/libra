@@ -2,7 +2,10 @@ use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
 use uuid::Uuid;
 
-use crate::internal::ai::{completion::CompletionUsageSummary, usage::pricing::UsagePriceTable};
+use crate::internal::ai::{
+    completion::CompletionUsageSummary,
+    usage::{pricing::UsagePriceTable, query::UsageQuery},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageContext {
@@ -38,6 +41,10 @@ impl UsageRecorder {
 
     pub fn with_pricing(conn: DatabaseConnection, pricing: UsagePriceTable) -> Self {
         Self { conn, pricing }
+    }
+
+    pub fn query(&self) -> UsageQuery {
+        UsageQuery::new(self.conn.clone())
     }
 
     pub async fn record_optional_summary(

@@ -13,7 +13,7 @@ use std::{
 // 3. Test code uses unwrap for test assertions
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -105,6 +105,8 @@ pub struct BottomPane {
     input_hint: Option<String>,
     /// Optional compact usage line shown between composer and status.
     usage_line: Option<String>,
+    /// Optional usage detail popup shown above the bottom pane.
+    usage_detail_panel: Option<String>,
 }
 
 impl BottomPane {
@@ -136,6 +138,7 @@ impl BottomPane {
             input_context_label: None,
             input_hint: None,
             usage_line: None,
+            usage_detail_panel: None,
         }
     }
 
@@ -376,6 +379,18 @@ impl BottomPane {
         self.usage_line = usage_line;
     }
 
+    pub fn set_usage_detail_panel(&mut self, details: Option<String>) {
+        self.usage_detail_panel = details;
+    }
+
+    pub fn dismiss_usage_detail_panel(&mut self) {
+        self.usage_detail_panel = None;
+    }
+
+    pub fn is_usage_detail_panel_visible(&self) -> bool {
+        self.usage_detail_panel.is_some()
+    }
+
     // ── Slash-command autocomplete popup ────────────────────────────
 
     /// Set the known slash commands (called once at startup).
@@ -601,6 +616,9 @@ impl BottomPane {
         // Render command popup (floats above the bottom pane)
         if self.command_popup.visible && self.status == AgentStatus::Idle {
             self.render_command_popup(area, buf);
+        }
+        if self.usage_detail_panel.is_some() && !self.command_popup.visible {
+            self.render_usage_detail_panel(area, buf);
         }
 
         cursor_pos
@@ -1099,6 +1117,36 @@ impl BottomPane {
         .render(area, buf);
     }
 
+    fn render_usage_detail_panel(&self, bottom_area: Rect, buf: &mut Buffer) {
+        let Some(details) = self.usage_detail_panel.as_deref() else {
+            return;
+        };
+        let buf_area = *buf.area();
+        let width = bottom_area.width.min(buf_area.width).max(1);
+        let line_count = details.lines().count() as u16;
+        let height = line_count.saturating_add(2).clamp(4, 12);
+        let popup_area = Rect {
+            x: bottom_area.x,
+            y: bottom_area.y.saturating_sub(height),
+            width,
+            height,
+        }
+        .intersection(buf_area);
+        if popup_area.width == 0 || popup_area.height == 0 {
+            return;
+        }
+
+        Clear.render(popup_area, buf);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::border::idle())
+            .title(Line::styled(" Usage ", theme::interactive::title()));
+        Paragraph::new(details.to_string())
+            .block(block)
+            .wrap(Wrap { trim: true })
+            .render(popup_area, buf);
+    }
+
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
         let phase = animation_phase(120);
         let status_line = match self.status {
@@ -1509,6 +1557,28 @@ mod tests {
 
         pane.status = AgentStatus::AwaitingApproval;
         assert_ne!(pane.desired_height(), 7);
+    }
+
+    #[test]
+    fn usage_detail_panel_renders_above_bottom_pane() {
+        let mut pane = BottomPane::new();
+        pane.set_usage_detail_panel(Some(
+            "Usage Details\nCurrent: openai/gpt-test\nRows:\nopenai/gpt-test | req 1".to_string(),
+        ));
+
+        let area = Rect::new(0, 13, 80, 7);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..20)
+            .map(|y| row_text(&buf, y, 80))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Usage Details"));
+        assert!(rendered.contains("openai/gpt-test | req 1"));
+        assert!(pane.is_usage_detail_panel_visible());
+        pane.dismiss_usage_detail_panel();
+        assert!(!pane.is_usage_detail_panel_visible());
     }
 
     #[test]

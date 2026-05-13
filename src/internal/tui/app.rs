@@ -103,7 +103,10 @@ use crate::{
             },
             handlers::submit_intent_draft::parse_submit_intent_draft_value,
         },
-        usage::{UsageDisplaySnapshot, format_usage_badge},
+        usage::{
+            UsageDisplaySnapshot, UsageGrouping, UsageQueryFilter, format_usage_badge,
+            format_usage_detail_panel,
+        },
         web::code_ui::{
             CodeUiApplyToFuture, CodeUiEventEnvelope, CodeUiInteractionKind,
             CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
@@ -496,6 +499,8 @@ pub struct App<M: CompletionModel> {
     provider_name: String,
     /// Session-level model usage rendered in the compact bottom-pane line.
     usage_snapshot: UsageDisplaySnapshot,
+    /// Arguments used to render the currently open usage detail panel.
+    usage_detail_args: Option<String>,
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// Latest execution plan ID for attaching new turn runs.
@@ -640,6 +645,7 @@ where
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             usage_snapshot,
+            usage_detail_args: None,
             mcp_server: app_config.mcp_server,
             mcp_plan_id,
             mcp_run_id: None,
@@ -1397,6 +1403,11 @@ where
         // Handle input based on agent status
         match self.widget.bottom_pane.status {
             AgentStatus::Idle => match key.code {
+                KeyCode::Esc if self.widget.bottom_pane.is_usage_detail_panel_visible() => {
+                    self.widget.bottom_pane.dismiss_usage_detail_panel();
+                    self.usage_detail_args = None;
+                    self.schedule_draw();
+                }
                 // ── Command popup intercepts (when visible) ──────────
                 KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.complete_command();
@@ -2964,6 +2975,7 @@ where
                             .bottom_pane
                             .set_usage_line(Some(usage_badge.clone()));
                         self.widget.set_usage_header(Some(usage_badge));
+                        self.refresh_usage_detail_panel().await;
                         self.schedule_draw();
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
@@ -4462,9 +4474,12 @@ where
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Usage => {
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    self.usage_report_text(),
-                )));
+                self.usage_detail_args = Some(args.trim().to_string());
+                let details = self.usage_detail_panel_text(args).await;
+                self.widget
+                    .bottom_pane
+                    .set_usage_detail_panel(Some(details));
+                self.schedule_draw();
             }
             BuiltinCommand::Plan => {
                 if let Some(pending) = self.pending_execution_plan_revision.take() {
@@ -4691,6 +4706,46 @@ where
                  envelope path, which lands once `run_tool_loop` integrates."
             ),
             Err(err) => err.to_string(),
+        }
+    }
+
+    async fn refresh_usage_detail_panel(&mut self) {
+        if !self.widget.bottom_pane.is_usage_detail_panel_visible() {
+            return;
+        }
+        let args = self.usage_detail_args.clone().unwrap_or_default();
+        let details = self.usage_detail_panel_text(&args).await;
+        self.widget
+            .bottom_pane
+            .set_usage_detail_panel(Some(details));
+    }
+
+    async fn usage_detail_panel_text(&self, args: &str) -> String {
+        let grouping = match parse_usage_grouping(args) {
+            Ok(grouping) => grouping,
+            Err(message) => return format!("{}\n\n{message}", self.usage_report_text()),
+        };
+        let Some(recorder) = self.config.usage_recorder.as_ref() else {
+            return self.usage_report_text();
+        };
+        let filter = UsageQueryFilter {
+            session_id: self
+                .config
+                .usage_context
+                .as_ref()
+                .and_then(|context| context.session_id.clone()),
+            ..Default::default()
+        };
+        match recorder.query().aggregate_filtered(grouping, &filter).await {
+            Ok(rows) => format_usage_detail_panel(
+                &self.usage_snapshot,
+                usage_grouping_label(grouping),
+                &rows,
+            ),
+            Err(error) => format!(
+                "{}\n\nFailed to load SQLite usage details: {error}",
+                self.usage_report_text()
+            ),
         }
     }
 
@@ -7684,6 +7739,30 @@ fn format_source_statuses(statuses: &[SourceStatus]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn parse_usage_grouping(args: &str) -> Result<UsageGrouping, String> {
+    let args = args.trim();
+    if args.is_empty() {
+        return Ok(UsageGrouping::ProviderModel);
+    }
+    match args {
+        "--by=model" | "--by=provider-model" => Ok(UsageGrouping::ProviderModel),
+        "--by=agent" => Ok(UsageGrouping::Agent),
+        "--by=agent-model" | "--by=agent-provider-model" => Ok(UsageGrouping::AgentProviderModel),
+        _ => Err(
+            "Usage: /usage [--by=model|--by=provider-model|--by=agent|--by=agent-model]"
+                .to_string(),
+        ),
+    }
+}
+
+fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
+    match grouping {
+        UsageGrouping::ProviderModel => "provider/model",
+        UsageGrouping::Agent => "agent",
+        UsageGrouping::AgentProviderModel => "agent/provider/model",
+    }
 }
 
 fn source_command_usage() -> String {
