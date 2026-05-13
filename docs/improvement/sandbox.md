@@ -81,7 +81,14 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **阶段 4 macOS 基线已落地**：`sensitive_read_paths()` 定义默认敏感读取清单，覆盖 HOME 下的 `.ssh`、`.aws`、`.gnupg`、`.netrc`、`.config/gcloud`、`.kube`、`.config/libra/vault` 以及 `/etc/shadow`。
 - **Seatbelt 拒读已接线**：`create_seatbelt_command_args()` 在 `(allow file-read*)` 后追加参数化 `(deny file-read* (subpath ...))`，保持项目文件可读，同时默认挡住常见 credential 目录。
 - **回归覆盖**：策略层测试验证默认清单；macOS runtime 测试验证 Seatbelt deny policy 与参数表包含 HOME credential 路径和 `/etc/shadow`。
-- **仍待收口**：Linux bwrap `--tmpfs` 遮蔽、更广泛的浏览器/token 默认路径清单仍是阶段 4 后续工作。
+- **当时仍待收口**：Linux bwrap `--tmpfs` 遮蔽仍是阶段 4 后续工作；更广泛的浏览器/token 默认路径清单已在 0.17.76 扩展。
+
+## 0.17.76 增量收口（2026-05-13）
+
+- **阶段 4 macOS 默认拒读清单继续扩展**：`sensitive_read_paths()` 除 SSH/AWS/GPG/netrc/gcloud/kube/Libra vault 外，新增常见 token 与浏览器 profile 路径，包括 `.azure`、`.docker`、`.npmrc`、`.pypirc`、Cargo/Gem credentials、GitHub/Hub config、Firefox/Chrome/Chromium/Brave profile、Flatpak Firefox profile 和 macOS `Library/Cookies`。
+- **Seatbelt 自动继承**：macOS Seatbelt policy 继续通过同一个 `sensitive_read_paths()` 入口生成参数化 `(deny file-read* ...)`，不需要额外配置即可挡住这些默认路径。
+- **回归覆盖**：`sensitive_read_paths_include_home_credentials_and_system_shadow` 扩展断言 token 与浏览器路径。
+- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
 
 ## 0.17.47 增量收口（2026-05-12）
 
@@ -130,7 +137,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 ### 基于当前代码的 Review 结论
 
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，`PreferStrict` 在 approval shell 路径会要求用户确认降级，不再无感知降级。
-- Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `~/.config/gcloud` / `~/.kube` / `.config/libra/vault` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径；浏览器 cookie 等更广的默认清单仍可继续扩展。
+- Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `.azure` / `.docker` / `.npmrc` / `.pypirc` / Cargo/Gem credentials / `~/.config/gcloud` / `~/.config/gh` / `~/.config/hub` / `~/.kube` / `.config/libra/vault` / Firefox、Chrome、Chromium、Brave profile / macOS `Library/Cookies` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径。
 - `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
 - `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
@@ -238,7 +245,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **目标**：AI 默认无法读敏感路径，即使被提示词注入或模型越权。
 
 1. **引入 `sensitive_read_paths()`**（`policy.rs`）
-   - 已新增默认清单：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gcloud`、`~/.kube`、`~/.config/libra/vault`、`/etc/shadow`
+   - 已新增默认清单：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`.azure`、`.docker`、`.npmrc`、`.pypirc`、Cargo/Gem credentials、`~/.config/gcloud`、`~/.config/gh`、`~/.config/hub`、`~/.kube`、`~/.config/libra/vault`、Firefox/Chrome/Chromium/Brave profile、macOS `Library/Cookies`、`/etc/shadow`
    - 已支持用户在 `.libra/sandbox.toml` 的 `deny_read` 字段追加自定义路径（与 Claude Code `denyRead` 语义对齐）
 2. **macOS Seatbelt 策略**
    - 已在 `create_seatbelt_command_args` 的 `file_read_policy` 之后追加 `(deny file-read* (subpath "..."))`，对每个敏感路径做参数化拒绝

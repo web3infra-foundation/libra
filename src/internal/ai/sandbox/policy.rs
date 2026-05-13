@@ -97,9 +97,28 @@ pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
             ".aws",
             ".gnupg",
             ".netrc",
+            ".azure",
+            ".docker",
+            ".npmrc",
+            ".pypirc",
+            ".cargo/credentials",
+            ".cargo/credentials.toml",
+            ".gem/credentials",
             ".config/gcloud",
+            ".config/gh",
+            ".config/hub",
             ".kube",
             ".config/libra/vault",
+            ".mozilla/firefox",
+            ".config/google-chrome",
+            ".config/chromium",
+            ".config/BraveSoftware/Brave-Browser",
+            ".var/app/org.mozilla.firefox",
+            "Library/Application Support/Google/Chrome",
+            "Library/Application Support/Chromium",
+            "Library/Application Support/BraveSoftware/Brave-Browser",
+            "Library/Application Support/Firefox",
+            "Library/Cookies",
         ] {
             paths.push(home.join(relative));
         }
@@ -378,6 +397,12 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("/home/tester/.ssh")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.aws")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.netrc")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.config/gh")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.docker")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.cargo/credentials.toml")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.config/google-chrome")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.mozilla/firefox")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/Library/Cookies")));
         assert!(paths.contains(&PathBuf::from("/etc/shadow")));
     }
 

@@ -21,6 +21,15 @@ available, and unsupported or unconfigured hosts report warnings instead of
 claiming isolation. Set `LIBRA_SANDBOX_ENFORCEMENT=required` to fail commands
 that request Libra's internal sandbox when no supported backend can be applied.
 
+On macOS, the default Seatbelt policy keeps project files readable but denies
+common credential, token, and browser profile paths. The built-in deny list
+includes `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `.azure`, `.docker`,
+`.npmrc`, `.pypirc`, Cargo/Gem credentials, `~/.config/gcloud`, `~/.config/gh`,
+`~/.config/hub`, `~/.kube`, `~/.config/libra/vault`, Firefox, Chrome,
+Chromium, and Brave profile directories, macOS `Library/Cookies`, and
+`/etc/shadow`. Repos can append project-specific paths with
+`.libra/sandbox.toml` `deny_read = [...]`.
+
 ## Human Output
 
 ```text
