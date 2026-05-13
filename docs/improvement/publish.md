@@ -849,7 +849,8 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.78) Cloudflare clone 复用 cascaded local/global config 读取 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket` 和可选 `.credential_profile`，配置存在后进入 D1/R2 restore stub 并在结构化错误中保留已解析的 D1/R2 参数。
 - [x] (v0.17.109) 通过 D1 用 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 解析 site；slug rename 不影响 `repo/<repo_id>` 稳定入口。
 - [x] (v0.17.125) Cloudflare clone restore stub 前通过 D1 解析 `repositories`、`publish_refs`、default/latest/指定 ref 或 revision、`publish_revisions` 和 `object_index` 基线；branch/tag 短名冲突要求完整 ref。
-- [ ] 通过 R2 校验并读取完整 Git object 集合；refs metadata 仍需接入实际本地 restore 写入。
+- [x] (v0.17.127) Cloudflare clone restore plan 对 D1 `object_index` 中的 Git object 逐项校验 R2 存在性；缺失对象以 `RepoCorrupt` 失败，避免进入后续本地恢复。
+- [ ] 通过 R2 读取完整 Git object 集合；refs metadata 仍需接入实际本地 restore 写入。
 - [ ] 使用 `run_init()` 初始化本地仓库，再恢复 objects、refs、HEAD、remote config，并完成 non-bare checkout。
 - [ ] 缺失 R2 object、refs metadata 不完整或 checkout 失败时，命令必须失败并清理本次 clone 创建的目标目录，不得输出成功。
 - [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。

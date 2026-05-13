@@ -8,13 +8,16 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use async_trait::async_trait;
 use clap::Parser;
 use git_internal::{
     errors::GitError,
     hash::{ObjectHash, get_hash_kind},
 };
+use object_store::aws::AmazonS3Builder;
 use sea_orm::DatabaseTransaction;
 use serde::Serialize;
 use url::Url;
@@ -45,6 +48,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
+        storage::{Storage, remote::RemoteStorage},
         util,
     },
 };
@@ -175,6 +179,19 @@ pub enum CloneError {
     },
     #[error("D1 API token is not configured for clone domain '{domain}'")]
     CloudCloneD1ApiTokenNotConfigured { domain: String },
+    #[error("R2 credentials are not configured for clone domain '{domain}'")]
+    CloudCloneR2CredentialsNotConfigured {
+        domain: String,
+        missing_keys: String,
+    },
+    #[error("failed to read R2 configuration for clone domain '{domain}': {source}")]
+    CloudCloneR2ConfigRead {
+        domain: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("failed to build R2 client for clone domain '{domain}': {message}")]
+    CloudCloneR2ClientBuildFailed { domain: String, message: String },
     #[error("failed to read clone domain '{domain}' configuration: {source}")]
     CloudCloneDomainConfigRead {
         domain: String,
@@ -277,6 +294,23 @@ pub enum CloneError {
         target: String,
         repo_id: String,
     },
+    #[error(
+        "R2 object {object_oid} for libra+cloud site {target} in clone domain '{domain}' is missing"
+    )]
+    CloudPublishObjectMissing {
+        domain: String,
+        target: String,
+        object_oid: String,
+    },
+    #[error(
+        "object_index row {object_oid} for libra+cloud site {target} in clone domain '{domain}' is not a valid object id: {reason}"
+    )]
+    CloudPublishObjectIndexInvalid {
+        domain: String,
+        target: String,
+        object_oid: String,
+        reason: String,
+    },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
 }
@@ -365,6 +399,31 @@ impl From<CloneError> for CliError {
                          the CLI can query the configured D1 database.",
                     )
             }
+            CloneError::CloudCloneR2CredentialsNotConfigured {
+                ref domain,
+                ref missing_keys,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("missing_keys", missing_keys.clone())
+                .with_hint(
+                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_ACCESS_KEY, and \
+                     LIBRA_STORAGE_SECRET_KEY in the environment or Libra vault config.",
+                ),
+            CloneError::CloudCloneR2ConfigRead { ref domain, .. } => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_hint("check the local/global Libra config database and vault state.")
+            }
+            CloneError::CloudCloneR2ClientBuildFailed {
+                ref domain,
+                ref message,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("r2_error_message", message.clone())
+                .with_hint("check the R2 endpoint, bucket, region, and access credentials."),
             CloneError::CloudCloneDomainConfigRead { ref domain, .. } => {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -559,6 +618,30 @@ impl From<CloneError> for CliError {
                 .with_detail("cloud_target", target.clone())
                 .with_detail("cloud_repo_id", repo_id.clone())
                 .with_hint("run 'libra cloud sync --force' so D1 object_index contains git objects."),
+            CloneError::CloudPublishObjectMissing {
+                ref domain,
+                ref target,
+                ref object_oid,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("object_oid", object_oid.clone())
+                .with_hint(
+                    "run 'libra cloud sync --force' and then 'libra publish sync' again before cloning.",
+                ),
+            CloneError::CloudPublishObjectIndexInvalid {
+                ref domain,
+                ref target,
+                ref object_oid,
+                ref reason,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("object_oid", object_oid.clone())
+                .with_detail("reason", reason.clone())
+                .with_hint("repair the D1 object_index row before cloud clone can restore it."),
             CloneError::InvalidCloudPublishSource { .. } => {
                 CliError::command_usage(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -1422,10 +1505,13 @@ async fn resolve_cloud_publish_restore_plan(
     if object_indexes.is_empty() {
         return Err(CloneError::CloudPublishObjectIndexMissing {
             domain: source.clone_domain.clone(),
-            target,
+            target: target.clone(),
             repo_id: site.repo_id.clone(),
         });
     }
+    let object_probe = create_cloud_clone_object_probe(source, config, &site.repo_id).await?;
+    validate_cloud_publish_objects_available(source, &site, &object_indexes, object_probe.as_ref())
+        .await?;
 
     Ok(CloudPublishRestorePlan {
         site,
@@ -1434,6 +1520,129 @@ async fn resolve_cloud_publish_restore_plan(
         revision,
         object_indexes,
     })
+}
+
+#[async_trait]
+trait CloudCloneObjectProbe {
+    async fn exists(&self, hash: &ObjectHash) -> Result<bool, CloneError>;
+}
+
+struct RemoteStorageObjectProbe {
+    storage: RemoteStorage,
+}
+
+#[async_trait]
+impl CloudCloneObjectProbe for RemoteStorageObjectProbe {
+    async fn exists(&self, hash: &ObjectHash) -> Result<bool, CloneError> {
+        Ok(self.storage.exist(hash).await)
+    }
+}
+
+async fn create_cloud_clone_object_probe(
+    source: &CloudPublishSource,
+    config: &CloudCloneDomainConfig,
+    repo_id: &str,
+) -> Result<Box<dyn CloudCloneObjectProbe + Send + Sync>, CloneError> {
+    let endpoint = resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ENDPOINT").await?;
+    let access_key =
+        resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ACCESS_KEY").await?;
+    let secret_key =
+        resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_SECRET_KEY").await?;
+    let region = resolve_optional_cloud_clone_r2_env(source, "LIBRA_STORAGE_REGION")
+        .await?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+
+    let storage = AmazonS3Builder::new()
+        .with_bucket_name(&config.r2_bucket)
+        .with_region(&region)
+        .with_endpoint(&endpoint)
+        .with_access_key_id(&access_key)
+        .with_secret_access_key(&secret_key)
+        .with_virtual_hosted_style_request(false)
+        .build()
+        .map_err(|source_error| CloneError::CloudCloneR2ClientBuildFailed {
+            domain: source.clone_domain.clone(),
+            message: source_error.to_string(),
+        })?;
+
+    Ok(Box::new(RemoteStorageObjectProbe {
+        storage: RemoteStorage::new_with_prefix(Arc::new(storage), repo_id.to_string()),
+    }))
+}
+
+async fn resolve_required_cloud_clone_r2_env(
+    source: &CloudPublishSource,
+    name: &'static str,
+) -> Result<String, CloneError> {
+    resolve_optional_cloud_clone_r2_env(source, name)
+        .await?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CloneError::CloudCloneR2CredentialsNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: name.to_string(),
+        })
+}
+
+async fn resolve_optional_cloud_clone_r2_env(
+    source: &CloudPublishSource,
+    name: &'static str,
+) -> Result<Option<String>, CloneError> {
+    resolve_env_for_target(name, clone_config_local_target())
+        .await
+        .map_err(|source_error| CloneError::CloudCloneR2ConfigRead {
+            domain: source.clone_domain.clone(),
+            source: source_error,
+        })
+}
+
+async fn validate_cloud_publish_objects_available(
+    source: &CloudPublishSource,
+    site: &PublishSiteRow,
+    object_indexes: &[ObjectIndexRow],
+    object_probe: &(dyn CloudCloneObjectProbe + Send + Sync),
+) -> Result<(), CloneError> {
+    for object in object_indexes {
+        let hash = object_hash_from_cloud_index(source, site, &object.o_id)?;
+        if !object_probe.exists(&hash).await? {
+            return Err(CloneError::CloudPublishObjectMissing {
+                domain: source.clone_domain.clone(),
+                target: source.target_label(),
+                object_oid: object.o_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn object_hash_from_cloud_index(
+    source: &CloudPublishSource,
+    site: &PublishSiteRow,
+    object_oid: &str,
+) -> Result<ObjectHash, CloneError> {
+    let bytes = hex::decode(object_oid).map_err(|source_error| {
+        CloneError::CloudPublishObjectIndexInvalid {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, site),
+            object_oid: object_oid.to_string(),
+            reason: source_error.to_string(),
+        }
+    })?;
+    ObjectHash::from_bytes(&bytes).map_err(|source_error| {
+        CloneError::CloudPublishObjectIndexInvalid {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, site),
+            object_oid: object_oid.to_string(),
+            reason: source_error.to_string(),
+        }
+    })
+}
+
+fn site_target_label(source: &CloudPublishSource, site: &PublishSiteRow) -> String {
+    match &source.target {
+        CloudPublishTarget::Slug(_) => format!("slug:{}", site.slug),
+        CloudPublishTarget::RepoId(_) => format!("repo:{}", site.repo_id),
+    }
 }
 
 async fn resolve_cloud_publish_site(
@@ -2291,6 +2500,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cloud_clone_restore_plan_validates_r2_object_availability() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: None,
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let object_indexes = vec![object_index_row("1111111111111111111111111111111111111111")];
+        let probe = FakeObjectProbe::default();
+
+        validate_cloud_publish_objects_available(&source, &site, &object_indexes, &probe)
+            .await
+            .expect("all indexed objects should exist in R2");
+    }
+
+    #[tokio::test]
+    async fn cloud_clone_restore_plan_fails_when_r2_object_is_missing() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: None,
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let object_oid = "1111111111111111111111111111111111111111";
+        let object_indexes = vec![object_index_row(object_oid)];
+        let probe = FakeObjectProbe {
+            missing: std::collections::BTreeSet::from([object_oid.to_string()]),
+        };
+
+        let error =
+            validate_cloud_publish_objects_available(&source, &site, &object_indexes, &probe)
+                .await
+                .expect_err("missing R2 objects must block cloud clone restore");
+
+        match error {
+            CloneError::CloudPublishObjectMissing {
+                object_oid: missing,
+                ..
+            } => assert_eq!(missing, object_oid),
+            other => panic!("expected missing object error, got {other}"),
+        }
+    }
+
     fn publish_site_row(
         default_ref: Option<&str>,
         latest_revision_oid: Option<&str>,
@@ -2312,6 +2571,29 @@ mod tests {
             schema_version: 1,
             created_at: "2026-05-13T00:00:00Z".to_string(),
             updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn object_index_row(o_id: &str) -> ObjectIndexRow {
+        ObjectIndexRow {
+            o_id: o_id.to_string(),
+            o_type: "commit".to_string(),
+            o_size: 123,
+            repo_id: "repo_456".to_string(),
+            created_at: 1778620800,
+            is_synced: 1,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeObjectProbe {
+        missing: std::collections::BTreeSet<String>,
+    }
+
+    #[async_trait]
+    impl CloudCloneObjectProbe for FakeObjectProbe {
+        async fn exists(&self, hash: &ObjectHash) -> Result<bool, CloneError> {
+            Ok(!self.missing.contains(&hash.to_string()))
         }
     }
 
