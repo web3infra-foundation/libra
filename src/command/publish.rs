@@ -2,27 +2,17 @@
 //!
 //! Per `docs/improvement/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
-//! materialises the embedded Worker template, `sync --dry-run` plans
-//! local refs without cloud writes, `status` reports local template
+//! materialises the embedded Worker template, `sync` plans and writes
+//! local refs to publish D1/R2 storage, `status` reports local template
 //! drift and can compare local refs with D1 `publish_refs`, `deploy`
 //! validates/builds the Worker before optionally
 //! applying D1 migrations and deploying with Wrangler, and
-//! `unpublish --yes` disables a site through Wrangler D1 execute. The
-//! remaining full sync upload still surfaces a clear unsupported error
-//! until the cloud mutation plumbing ships.
-//!
-//! Unsupported full-sync/cloud-comparison paths return a typed error
-//! pointing the user at:
-//!
-//!   * the relevant `libra cloud sync` baseline that is implemented
-//!     (Phase 1's `run_cloud_sync` helper),
-//!   * the publish.md design doc,
-//!   * the remaining publish.md v1 sync/status work.
+//! `unpublish --yes` disables a site through Wrangler D1 execute.
 //!
 //! Codex pass-7 P1 registered the CLI surface so the `clap` parser
 //! would not reject `libra publish ...`. Later slices filled in local
-//! template management, dry-run planning, Worker deployment, and
-//! unpublish orchestration without changing the full-upload boundary.
+//! template management, dry-run planning, Worker deployment,
+//! unpublish orchestration, and the first D1/R2 publish sync path.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,6 +25,8 @@ use std::{
     str::FromStr,
 };
 
+use async_trait::async_trait;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use git_internal::{
     hash::ObjectHash,
@@ -44,26 +36,38 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    command::{load_object, status},
+    command::{cloud, load_object, status},
     internal::{
         branch::Branch,
         config::ConfigKv,
         head::Head,
         publish::{
+            contract::{PUBLISH_SCHEMA_VERSION, RedactionMode, SiteVisibility},
             preflight::{DenyReason, Preflight, PreflightDecision},
             snapshot::{
-                RefInput, RevisionFileInput, detect_ambiguous_short_refs, validate_oid,
-                validate_ref_name,
+                FileSnapshot, RefInput, RevisionArtifactPlan, RevisionFileInput, SnapshotConfig,
+                build_revision_artifact_plan, build_snapshot_plan, detect_ambiguous_short_refs,
+                validate_oid, validate_ref_name,
+            },
+            upload::{
+                RevisionArtifactUploadSummary, RevisionD1Rows, SiteIndexArtifacts,
+                build_revision_d1_rows, build_site_index_artifacts, upload_revision_artifacts,
+                upload_site_index_artifacts,
             },
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
         tag::{self, TagObject},
     },
     utils::{
-        d1_client::{D1Client, D1Error, PublishRefRow, PublishRevisionRow},
+        d1_client::{
+            D1Client, D1Error, PublishFileRow, PublishRefRow, PublishRevisionRow,
+            PublishSiteLatestUpdate, PublishSiteLatestUpdateResult, PublishSiteRow,
+            PublishSyncRunRow,
+        },
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
+        storage::publish_storage::PublishStorage,
         util,
     },
 };
@@ -79,7 +83,7 @@ pub struct PublishArgs {
 pub enum PublishCommand {
     /// Materialise the local Worker template scaffold.
     Init(InitArgs),
-    /// Plan publish sync; full D1/R2 upload is still unsupported unless --dry-run is used.
+    /// Sync publish snapshots to D1/R2, or plan them with --dry-run.
     Sync(SyncArgs),
     /// Inspect local Worker template status and optionally compare D1 refs.
     Status(StatusArgs),
@@ -182,12 +186,9 @@ pub struct UnpublishArgs {
     pub site_id: Option<String>,
 }
 
-const NOT_YET_IMPLEMENTED: &str = "`libra publish sync` full D1/R2 upload is not ready yet. \
-     `libra publish init`, `libra publish sync --dry-run`, `libra publish status`, \
-     `libra publish deploy`, and `libra publish unpublish --yes` are available; track \
-     docs/improvement/publish.md for the remaining v1 sync/status work.";
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
+const PUBLISH_REDACTION_RULES_VERSION: &str = "2026.05.13-1";
 
 /// clap value parser for `--max-preview-bytes`.
 ///
@@ -211,21 +212,6 @@ fn parse_max_preview_bytes(raw: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
-fn unsupported_publish_subcommand(subcommand: &'static str) -> CliResult<()> {
-    // Codex pass-8 P2: tag the typed error with `Unsupported` so the
-    // stable-code surface is `LBR-UNSUPPORTED-001`, not the generic
-    // internal-invariant fallback. Downstream tooling that classifies
-    // errors by stable code (CI matrix, telemetry) can match on
-    // "feature not yet implemented" rather than treating this as a
-    // crash bug.
-    Err(CliError::fatal(NOT_YET_IMPLEMENTED)
-        .with_stable_code(StableErrorCode::Unsupported)
-        .with_detail("operation", "publish")
-        .with_detail("component", "publish")
-        .with_detail("subcommand", subcommand)
-        .with_detail("phase", "4"))
-}
-
 pub async fn execute(args: PublishArgs) -> CliResult<()> {
     execute_safe(args, &OutputConfig::default()).await
 }
@@ -242,10 +228,11 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             output::emit(&result, output)
         }
         PublishCommand::Sync(sync_args) => {
-            if !sync_args.dry_run {
-                return unsupported_publish_subcommand("sync");
-            }
-            let result = run_publish_sync_dry_run(&sync_args).await?;
+            let result = if sync_args.dry_run {
+                run_publish_sync_dry_run(&sync_args).await?
+            } else {
+                run_publish_sync_non_dry_run(&sync_args).await?
+            };
             output::emit(&result, output)
         }
         PublishCommand::Status(status_args) => {
@@ -335,7 +322,7 @@ impl CommandOutput for PublishInitOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PublishSyncDryRunOutput {
+struct PublishSyncOutput {
     dry_run: bool,
     site_id: Option<String>,
     selected_ref: Option<String>,
@@ -352,12 +339,16 @@ struct PublishSyncDryRunOutput {
     warnings: Vec<String>,
 }
 
-impl CommandOutput for PublishSyncDryRunOutput {
+impl CommandOutput for PublishSyncOutput {
     fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
         if output.quiet {
             return Ok(());
         }
-        writeln!(writer, "Publish dry-run plan")?;
+        if self.dry_run {
+            writeln!(writer, "Publish dry-run plan")?;
+        } else {
+            writeln!(writer, "Publish sync complete")?;
+        }
         writeln!(writer, "  refs: {}", self.refs_count)?;
         writeln!(writer, "  revisions: {}", self.revision_count)?;
         writeln!(
@@ -872,7 +863,7 @@ struct PublishSyncRevisionOutput {
     ai_bundle_count: usize,
 }
 
-async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRunOutput> {
+async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncOutput> {
     validate_publish_sync_args(args)?;
 
     let all_refs = collect_publish_refs().await?;
@@ -973,7 +964,7 @@ async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRu
         })
         .collect::<Vec<_>>();
 
-    Ok(PublishSyncDryRunOutput {
+    Ok(PublishSyncOutput {
         dry_run: true,
         site_id: None,
         selected_ref,
@@ -989,6 +980,674 @@ async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRu
         revisions,
         warnings,
     })
+}
+
+async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncOutput> {
+    validate_publish_sync_args(args)?;
+
+    let site_id = resolve_publish_sync_site_id().await?;
+    let d1_client = D1Client::from_env()
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to initialize D1 client", source))?;
+    d1_client
+        .ensure_publish_schema()
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to ensure publish D1 schema", source))?;
+    let site = d1_client
+        .find_publish_site(&site_id)
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to load D1 publish site", source))?
+        .ok_or_else(|| {
+            CliError::failure(format!("publish site '{site_id}' was not found in D1"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint(
+                    "create the publish_sites row for this site or configure publish.site_id to \
+                     an existing site before running 'libra publish sync'.",
+                )
+        })?;
+    let site = publish_sync_site_context_from_row(&site)?;
+    let storage = cloud::create_publish_storage(&site.repo_id, &site.site_id)
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!("failed to initialize publish R2 storage: {source}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_BUCKET, \
+                     LIBRA_STORAGE_ACCESS_KEY, and LIBRA_STORAGE_SECRET_KEY.",
+                )
+        })?;
+
+    let all_refs = collect_publish_refs().await?;
+    if all_refs.is_empty() {
+        return Err(
+            CliError::failure("no local branch or tag refs are available to publish")
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("create a commit on a local branch or tag a commit before publishing."),
+        );
+    }
+    let selected_refs = select_publish_refs(&all_refs, args.r#ref.as_deref())?;
+    let default_ref = resolve_publish_default_ref(&all_refs).await?;
+    let warnings = inspect_publish_dirty(args.fail_on_dirty).await?;
+    let mut sink = CloudPublishSyncSink { d1_client, storage };
+    run_publish_sync_selected_refs_with_sink(
+        args,
+        &site,
+        selected_refs,
+        default_ref,
+        warnings,
+        &mut sink,
+    )
+    .await
+}
+
+#[derive(Clone, Debug)]
+struct PublishSyncSiteContext {
+    repo_id: String,
+    site_id: String,
+    visibility: SiteVisibility,
+    max_preview_bytes: u64,
+    refs_generation: i64,
+}
+
+struct PublishSiteLatestUpdateRequest<'a> {
+    site_id: &'a str,
+    default_ref: Option<&'a str>,
+    latest_revision_oid: Option<&'a str>,
+    next_refs_generation: i64,
+    expected_refs_generation: i64,
+    updated_at: &'a str,
+    force: bool,
+}
+
+#[async_trait]
+trait PublishSyncSink {
+    async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()>;
+    async fn upload_revision_artifacts(
+        &mut self,
+        plan: &RevisionArtifactPlan,
+    ) -> CliResult<RevisionArtifactUploadSummary>;
+    async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()>;
+    async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()>;
+    async fn upload_site_index_artifacts(
+        &mut self,
+        artifacts: &SiteIndexArtifacts,
+    ) -> CliResult<()>;
+    async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()>;
+    async fn update_site_latest(
+        &mut self,
+        update: PublishSiteLatestUpdateRequest<'_>,
+    ) -> CliResult<PublishSiteLatestUpdateResult>;
+}
+
+struct CloudPublishSyncSink {
+    d1_client: D1Client,
+    storage: PublishStorage,
+}
+
+#[async_trait]
+impl PublishSyncSink for CloudPublishSyncSink {
+    async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_sync_run(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish sync run", source))
+    }
+
+    async fn upload_revision_artifacts(
+        &mut self,
+        plan: &RevisionArtifactPlan,
+    ) -> CliResult<RevisionArtifactUploadSummary> {
+        upload_revision_artifacts(&self.storage, plan)
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to upload publish revision artifacts: {source}"
+                ))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+            })
+    }
+
+    async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_revision(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish revision", source))
+    }
+
+    async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_file(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish file", source))
+    }
+
+    async fn upload_site_index_artifacts(
+        &mut self,
+        artifacts: &SiteIndexArtifacts,
+    ) -> CliResult<()> {
+        upload_site_index_artifacts(&self.storage, artifacts)
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to upload publish site index artifacts: {source}"
+                ))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+            })
+    }
+
+    async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ref(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish ref", source))
+    }
+
+    async fn update_site_latest(
+        &mut self,
+        update: PublishSiteLatestUpdateRequest<'_>,
+    ) -> CliResult<PublishSiteLatestUpdateResult> {
+        self.d1_client
+            .update_publish_site_latest(PublishSiteLatestUpdate {
+                site_id: update.site_id,
+                default_ref: update.default_ref,
+                latest_revision_oid: update.latest_revision_oid,
+                next_refs_generation: update.next_refs_generation,
+                expected_refs_generation: update.expected_refs_generation,
+                updated_at: update.updated_at,
+                force: update.force,
+            })
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to update publish site latest", source))
+    }
+}
+
+struct PublishRevisionExecutionPlan {
+    artifact: RevisionArtifactPlan,
+    rows: RevisionD1Rows,
+    ref_count: usize,
+    preflight_denied_count: usize,
+}
+
+async fn run_publish_sync_selected_refs_with_sink(
+    args: &SyncArgs,
+    site: &PublishSyncSiteContext,
+    selected_refs: Vec<RefInput>,
+    default_ref: Option<String>,
+    mut warnings: Vec<String>,
+    sink: &mut dyn PublishSyncSink,
+) -> CliResult<PublishSyncOutput> {
+    if selected_refs.is_empty() {
+        return Err(
+            CliError::failure("no local branch or tag refs are available to publish")
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
+    }
+
+    let updates_full_refs_generation = args.r#ref.is_none();
+    let selected_ref = if updates_full_refs_generation {
+        None
+    } else {
+        selected_refs
+            .first()
+            .map(|publish_ref| publish_ref.ref_name.clone())
+    };
+    if selected_ref.is_some() {
+        warnings.push(
+            "targeted --ref sync will not update the complete published refs generation"
+                .to_string(),
+        );
+    }
+    let generated_at = Utc::now();
+    let sync_run_id = uuid::Uuid::new_v4().to_string();
+    let redaction_mode = publish_redaction_mode(args)?;
+
+    let revision_ref_counts = revision_ref_counts(&selected_refs);
+    let mut revision_plans = Vec::with_capacity(revision_ref_counts.len());
+    for (revision_oid, ref_count) in revision_ref_counts {
+        let materialized = materialize_revision_files(&revision_oid)?;
+        let preflight = preflight_for_revision_items_with_visibility(
+            &materialized.tree_items,
+            &revision_oid,
+            site.visibility,
+            args.allow_sensitive_path.clone(),
+        )?;
+        let config = SnapshotConfig {
+            max_preview_bytes: site.max_preview_bytes,
+            preflight,
+        };
+        let artifact = build_revision_artifact_plan(
+            &site.repo_id,
+            &site.site_id,
+            &materialized.revision_oid,
+            &materialized.commit_oid,
+            &materialized.tree_oid,
+            generated_at,
+            materialized.files,
+            &config,
+        )
+        .map_err(snapshot_ref_error)?;
+        for file in &artifact.revision.files {
+            if let FileSnapshot::Ignored { path, reason, .. } = file {
+                warnings.push(format!(
+                    "publish preflight kept '{}' as metadata-only in revision {} ({})",
+                    path,
+                    artifact.revision.revision_oid,
+                    ignored_reason_label(*reason)
+                ));
+            }
+        }
+        let preflight_denied_count = artifact
+            .revision
+            .files
+            .iter()
+            .filter(|file| matches!(file, FileSnapshot::Ignored { .. }))
+            .count();
+        let rows = build_revision_d1_rows(
+            &artifact,
+            &sync_run_id,
+            redaction_mode,
+            PUBLISH_REDACTION_RULES_VERSION,
+        )
+        .map_err(|source| {
+            CliError::fatal(format!("failed to build publish D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        revision_plans.push(PublishRevisionExecutionPlan {
+            artifact,
+            rows,
+            ref_count,
+            preflight_denied_count,
+        });
+    }
+
+    let file_count: usize = revision_plans
+        .iter()
+        .map(|plan| plan.rows.files.len())
+        .sum();
+    let refs_count = selected_refs.len();
+    let revision_count = revision_plans.len();
+    let started_at = generated_at.to_rfc3339();
+    let counts = PublishSyncRunCounts {
+        refs: refs_count,
+        revisions: revision_count,
+        files: file_count,
+    };
+    let running = publish_sync_run_row(PublishSyncRunRowInput {
+        site_id: &site.site_id,
+        sync_run_id: &sync_run_id,
+        status: "running",
+        started_at: &started_at,
+        finished_at: None,
+        counts,
+        warnings: &warnings,
+        error_message: None,
+    })?;
+    sink.upsert_sync_run(running).await?;
+
+    let persist_result = persist_publish_sync_plan(
+        PublishSyncPersistContext {
+            args,
+            site,
+            selected_refs: &selected_refs,
+            default_ref: default_ref.as_deref(),
+            generated_at,
+            sync_run_id: &sync_run_id,
+            revision_plans: &revision_plans,
+        },
+        sink,
+    )
+    .await;
+    if let Err(error) = persist_result {
+        let finished_at = Utc::now().to_rfc3339();
+        let failed = publish_sync_run_row(PublishSyncRunRowInput {
+            site_id: &site.site_id,
+            sync_run_id: &sync_run_id,
+            status: "failed",
+            started_at: &started_at,
+            finished_at: Some(&finished_at),
+            counts,
+            warnings: &warnings,
+            error_message: Some(error.message()),
+        })?;
+        let _ = sink.upsert_sync_run(failed).await;
+        return Err(error);
+    }
+
+    let finished_at = Utc::now().to_rfc3339();
+    let succeeded = publish_sync_run_row(PublishSyncRunRowInput {
+        site_id: &site.site_id,
+        sync_run_id: &sync_run_id,
+        status: "succeeded",
+        started_at: &started_at,
+        finished_at: Some(&finished_at),
+        counts,
+        warnings: &warnings,
+        error_message: None,
+    })?;
+    sink.upsert_sync_run(succeeded).await?;
+
+    let latest_revision_oid =
+        latest_revision_oid_for_selected_refs(default_ref.as_deref(), &selected_refs);
+    let refs = selected_refs
+        .into_iter()
+        .map(|publish_ref| {
+            let is_default = default_ref
+                .as_ref()
+                .is_some_and(|name| name == &publish_ref.ref_name);
+            PublishSyncRefOutput {
+                ref_name: publish_ref.ref_name,
+                target_oid: publish_ref.target_oid,
+                revision_oid: publish_ref.revision_oid,
+                is_default,
+            }
+        })
+        .collect::<Vec<_>>();
+    let revisions = revision_plans
+        .iter()
+        .map(|plan| PublishSyncRevisionOutput {
+            revision_oid: plan.artifact.revision.revision_oid.clone(),
+            ref_count: plan.ref_count,
+            file_count: plan.rows.files.len(),
+            preflight_denied_count: plan.preflight_denied_count,
+            ai_object_count: 0,
+            ai_bundle_count: 0,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PublishSyncOutput {
+        dry_run: false,
+        site_id: Some(site.site_id.clone()),
+        selected_ref,
+        refs_count: refs.len(),
+        revision_count: revisions.len(),
+        default_ref,
+        latest_revision_oid,
+        file_count,
+        ai_object_count: 0,
+        ai_bundle_count: 0,
+        updates_full_refs_generation,
+        refs,
+        revisions,
+        warnings,
+    })
+}
+
+struct PublishSyncPersistContext<'a> {
+    args: &'a SyncArgs,
+    site: &'a PublishSyncSiteContext,
+    selected_refs: &'a [RefInput],
+    default_ref: Option<&'a str>,
+    generated_at: chrono::DateTime<Utc>,
+    sync_run_id: &'a str,
+    revision_plans: &'a [PublishRevisionExecutionPlan],
+}
+
+async fn persist_publish_sync_plan(
+    context: PublishSyncPersistContext<'_>,
+    sink: &mut dyn PublishSyncSink,
+) -> CliResult<()> {
+    for plan in context.revision_plans {
+        sink.upload_revision_artifacts(&plan.artifact).await?;
+        sink.upsert_revision(plan.rows.revision.clone()).await?;
+        for file in &plan.rows.files {
+            sink.upsert_file(file.clone()).await?;
+        }
+    }
+
+    if context.args.r#ref.is_none() {
+        let revision_snapshots = context
+            .revision_plans
+            .iter()
+            .map(|plan| plan.artifact.revision.clone())
+            .collect::<Vec<_>>();
+        let snapshot_plan = build_snapshot_plan(
+            context.selected_refs,
+            revision_snapshots,
+            context.default_ref,
+        )
+        .map_err(snapshot_ref_error)?;
+        let next_refs_generation =
+            context.site.refs_generation.checked_add(1).ok_or_else(|| {
+                CliError::fatal("publish refs_generation overflowed while planning sync")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+            })?;
+        let artifacts = build_site_index_artifacts(
+            &snapshot_plan,
+            &context.site.site_id,
+            context.sync_run_id,
+            u64::try_from(next_refs_generation).map_err(|_| {
+                CliError::fatal("publish refs_generation cannot be negative")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+            })?,
+            context.generated_at,
+        )
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to build publish refs/latest artifacts: {source}"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        sink.upload_site_index_artifacts(&artifacts).await?;
+        for row in artifacts.ref_rows {
+            sink.upsert_ref(row).await?;
+        }
+        let updated_at = context.generated_at.to_rfc3339();
+        let update = PublishSiteLatestUpdateRequest {
+            site_id: &context.site.site_id,
+            default_ref: Some(&artifacts.latest.default_ref),
+            latest_revision_oid: Some(&artifacts.latest.latest_revision_oid),
+            next_refs_generation,
+            expected_refs_generation: context.site.refs_generation,
+            updated_at: &updated_at,
+            force: context.args.force,
+        };
+        match sink.update_site_latest(update).await? {
+            PublishSiteLatestUpdateResult::Updated => {}
+            PublishSiteLatestUpdateResult::Conflict => {
+                return Err(CliError::conflict(
+                    "publish site refs_generation changed while syncing",
+                )
+                .with_hint(
+                    "rerun 'libra publish sync' to rebuild from the latest site row, or pass \
+                     '--force' if you intentionally want to overwrite the pointer.",
+                ));
+            }
+        }
+    } else {
+        let updated_at = context.generated_at.to_rfc3339();
+        for publish_ref in context.selected_refs {
+            sink.upsert_ref(build_publish_ref_row(
+                &context.site.site_id,
+                context.sync_run_id,
+                &updated_at,
+                context.default_ref,
+                publish_ref,
+            ))
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn revision_ref_counts(selected_refs: &[RefInput]) -> BTreeMap<String, usize> {
+    let mut revision_ref_counts = BTreeMap::new();
+    for publish_ref in selected_refs {
+        *revision_ref_counts
+            .entry(publish_ref.revision_oid.clone())
+            .or_default() += 1;
+    }
+    revision_ref_counts
+}
+
+fn latest_revision_oid_for_selected_refs(
+    default_ref: Option<&str>,
+    selected_refs: &[RefInput],
+) -> Option<String> {
+    default_ref
+        .and_then(|name| {
+            selected_refs
+                .iter()
+                .find(|publish_ref| publish_ref.ref_name == name)
+        })
+        .or_else(|| selected_refs.first())
+        .map(|publish_ref| publish_ref.revision_oid.clone())
+}
+
+fn build_publish_ref_row(
+    site_id: &str,
+    sync_run_id: &str,
+    updated_at: &str,
+    default_ref: Option<&str>,
+    publish_ref: &RefInput,
+) -> PublishRefRow {
+    PublishRefRow {
+        site_id: site_id.to_string(),
+        ref_name: publish_ref.ref_name.clone(),
+        ref_type: if publish_ref.ref_name.starts_with("refs/tags/") {
+            "tag".to_string()
+        } else {
+            "branch".to_string()
+        },
+        short_name: publish_short_ref_name(&publish_ref.ref_name)
+            .unwrap_or(&publish_ref.ref_name)
+            .to_string(),
+        target_oid: publish_ref.target_oid.clone(),
+        revision_oid: publish_ref.revision_oid.clone(),
+        is_default: if default_ref.is_some_and(|name| name == publish_ref.ref_name) {
+            1
+        } else {
+            0
+        },
+        sync_run_id: sync_run_id.to_string(),
+        schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+        updated_at: updated_at.to_string(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PublishSyncRunCounts {
+    refs: usize,
+    revisions: usize,
+    files: usize,
+}
+
+struct PublishSyncRunRowInput<'a> {
+    site_id: &'a str,
+    sync_run_id: &'a str,
+    status: &'a str,
+    started_at: &'a str,
+    finished_at: Option<&'a str>,
+    counts: PublishSyncRunCounts,
+    warnings: &'a [String],
+    error_message: Option<&'a str>,
+}
+
+fn publish_sync_run_row(input: PublishSyncRunRowInput<'_>) -> CliResult<PublishSyncRunRow> {
+    let warnings_json = serde_json::to_string(input.warnings).map_err(|source| {
+        CliError::internal(format!("failed to encode publish sync warnings: {source}"))
+    })?;
+    Ok(PublishSyncRunRow {
+        sync_run_id: input.sync_run_id.to_string(),
+        site_id: input.site_id.to_string(),
+        status: input.status.to_string(),
+        started_at: input.started_at.to_string(),
+        finished_at: input.finished_at.map(ToString::to_string),
+        refs_count: usize_to_i64(input.counts.refs, "publish sync refs count")?,
+        revision_count: usize_to_i64(input.counts.revisions, "publish sync revision count")?,
+        file_count: usize_to_i64(input.counts.files, "publish sync file count")?,
+        ai_object_count: 0,
+        ai_bundle_count: 0,
+        warnings_json,
+        error_message: input.error_message.map(ToString::to_string),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+    })
+}
+
+fn usize_to_i64(value: usize, label: &str) -> CliResult<i64> {
+    i64::try_from(value).map_err(|_| {
+        CliError::fatal(format!("{label} exceeds D1 integer range"))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+    })
+}
+
+async fn resolve_publish_sync_site_id() -> CliResult<String> {
+    let entry = ConfigKv::get("publish.site_id").await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read publish.site_id from repository config: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let Some(entry) = entry else {
+        return Err(
+            CliError::failure("publish sync requires publish.site_id config")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("configure publish.site_id before running 'libra publish sync'."),
+        );
+    };
+    validate_publish_site_id(&entry.value)
+}
+
+fn publish_sync_site_context_from_row(row: &PublishSiteRow) -> CliResult<PublishSyncSiteContext> {
+    let visibility = match row.visibility.as_str() {
+        "public" => SiteVisibility::Public,
+        "private" => SiteVisibility::Private,
+        value => {
+            return Err(CliError::failure(format!(
+                "publish site '{}' has invalid visibility '{value}'",
+                row.site_id
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("set publish_sites.visibility to 'public' or 'private'."));
+        }
+    };
+    let max_preview_bytes = u64::try_from(row.max_preview_bytes).map_err(|_| {
+        CliError::failure(format!(
+            "publish site '{}' has negative max_preview_bytes {}",
+            row.site_id, row.max_preview_bytes
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    if max_preview_bytes == 0 {
+        return Err(CliError::failure(format!(
+            "publish site '{}' has max_preview_bytes 0",
+            row.site_id
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("set publish_sites.max_preview_bytes to a positive byte count."));
+    }
+    Ok(PublishSyncSiteContext {
+        repo_id: row.repo_id.clone(),
+        site_id: row.site_id.clone(),
+        visibility,
+        max_preview_bytes,
+        refs_generation: row.refs_generation,
+    })
+}
+
+fn publish_redaction_mode(args: &SyncArgs) -> CliResult<RedactionMode> {
+    match args.ai_redaction.as_str() {
+        "default" => Ok(RedactionMode::Default),
+        "strict" => Ok(RedactionMode::Strict),
+        value => Err(CliError::command_usage(format!(
+            "invalid --ai-redaction value '{value}'; expected 'default' or 'strict'"
+        ))),
+    }
+}
+
+fn publish_sync_d1_error(operation: &str, source: D1Error) -> CliError {
+    let stable_code = match source.code {
+        1001..=1003 => StableErrorCode::AuthMissingCredentials,
+        2001..=2003 | 2005..=2006 => StableErrorCode::NetworkUnavailable,
+        _ => StableErrorCode::NetworkProtocol,
+    };
+    CliError::fatal(format!("{operation}: {}", source.message))
+        .with_stable_code(stable_code)
+        .with_hint(
+            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, LIBRA_D1_DATABASE_ID, and \
+             publish.site_id before running 'libra publish sync'.",
+        )
 }
 
 fn validate_publish_sync_args(args: &SyncArgs) -> CliResult<()> {
@@ -1190,7 +1849,7 @@ async fn inspect_publish_dirty(fail_on_dirty: bool) -> CliResult<Vec<String>> {
 
     let message = format!(
         "dirty working tree has {staged_count} staged path(s) and {unstaged_count} unstaged or \
-         untracked path(s); dry-run plans committed refs only"
+         untracked path(s); publish sync plans committed refs only"
     );
     if fail_on_dirty {
         Err(CliError::fatal(message)
@@ -1319,9 +1978,32 @@ fn preflight_for_revision_items(
     revision_oid: &str,
 ) -> CliResult<Preflight> {
     let mut preflight = Preflight::new();
+    extend_preflight_with_revision_ignore(&mut preflight, items, revision_oid)?;
+    Ok(preflight)
+}
+
+fn preflight_for_revision_items_with_visibility(
+    items: &[(PathBuf, ObjectHash)],
+    revision_oid: &str,
+    visibility: SiteVisibility,
+    allow_sensitive_paths: Vec<String>,
+) -> CliResult<Preflight> {
+    let mut preflight =
+        Preflight::for_visibility(visibility, allow_sensitive_paths).map_err(|source| {
+            CliError::command_usage(format!("invalid publish preflight policy: {source}"))
+        })?;
+    extend_preflight_with_revision_ignore(&mut preflight, items, revision_oid)?;
+    Ok(preflight)
+}
+
+fn extend_preflight_with_revision_ignore(
+    preflight: &mut Preflight,
+    items: &[(PathBuf, ObjectHash)],
+    revision_oid: &str,
+) -> CliResult<()> {
     let ignore_path = Path::new(".librapublishignore");
     let Some((_, ignore_oid)) = items.iter().find(|(path, _)| path == ignore_path) else {
-        return Ok(preflight);
+        return Ok(());
     };
 
     let blob: Blob = load_object(ignore_oid).map_err(|source| {
@@ -1339,13 +2021,22 @@ fn preflight_for_revision_items(
         .with_hint("commit .librapublishignore as UTF-8 text before publishing.")
     })?;
     preflight.extend_with_ignore_text(text);
-    Ok(preflight)
+    Ok(())
 }
 
 fn preflight_reason_label(reason: DenyReason) -> &'static str {
     match reason {
         DenyReason::BuiltinCredential => "builtin_credential",
         DenyReason::UserIgnore => "user_ignore",
+    }
+}
+
+fn ignored_reason_label(reason: crate::internal::publish::snapshot::IgnoredReason) -> &'static str {
+    match reason {
+        crate::internal::publish::snapshot::IgnoredReason::BuiltinCredential => {
+            "builtin_credential"
+        }
+        crate::internal::publish::snapshot::IgnoredReason::UserIgnore => "user_ignore",
     }
 }
 
@@ -1740,7 +2431,7 @@ async fn run_publish_status_command_at_root(
     run_publish_status_command_at_root_with_loaders(
         repo_root,
         args,
-        || collect_publish_refs(),
+        collect_publish_refs,
         |site_id| async move {
             let d1_client = D1Client::from_env().await.map_err(|source| {
                 publish_status_d1_error(
@@ -2135,6 +2826,27 @@ mod tests {
         }
     }
 
+    fn sync_args(targeted: bool) -> SyncArgs {
+        SyncArgs {
+            r#ref: targeted.then(|| "main".to_string()),
+            dry_run: false,
+            fail_on_dirty: false,
+            ai_redaction: "default".to_string(),
+            allow_sensitive_path: Vec::new(),
+            force: false,
+        }
+    }
+
+    fn publish_sync_site_context() -> PublishSyncSiteContext {
+        PublishSyncSiteContext {
+            repo_id: "repo-1".to_string(),
+            site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            visibility: SiteVisibility::Public,
+            max_preview_bytes: 1024 * 1024,
+            refs_generation: 7,
+        }
+    }
+
     #[derive(Default)]
     struct FakePublishWorkerCommandRunner {
         calls: Vec<Vec<String>>,
@@ -2167,6 +2879,90 @@ mod tests {
                 .outputs
                 .pop_front()
                 .unwrap_or_else(successful_deploy_command_output))
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePublishSyncSink {
+        sync_runs: Vec<PublishSyncRunRow>,
+        revision_uploads: Vec<String>,
+        revisions: Vec<PublishRevisionRow>,
+        files: Vec<PublishFileRow>,
+        site_index_uploads: usize,
+        refs: Vec<PublishRefRow>,
+        latest_updates: Vec<FakeLatestUpdate>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeLatestUpdate {
+        site_id: String,
+        default_ref: Option<String>,
+        latest_revision_oid: Option<String>,
+        next_refs_generation: i64,
+        expected_refs_generation: i64,
+        force: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl PublishSyncSink for FakePublishSyncSink {
+        async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()> {
+            self.sync_runs.push(row);
+            Ok(())
+        }
+
+        async fn upload_revision_artifacts(
+            &mut self,
+            plan: &RevisionArtifactPlan,
+        ) -> CliResult<RevisionArtifactUploadSummary> {
+            self.revision_uploads
+                .push(plan.revision.revision_oid.clone());
+            Ok(RevisionArtifactUploadSummary {
+                code_manifest_key: plan.code_manifest_key.clone(),
+                text_blob_count: plan.text_blobs.len(),
+                text_blob_keys: plan
+                    .text_blobs
+                    .iter()
+                    .map(|blob| blob.object_key.clone())
+                    .collect(),
+            })
+        }
+
+        async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
+            self.revisions.push(row);
+            Ok(())
+        }
+
+        async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()> {
+            self.files.push(row);
+            Ok(())
+        }
+
+        async fn upload_site_index_artifacts(
+            &mut self,
+            _artifacts: &SiteIndexArtifacts,
+        ) -> CliResult<()> {
+            self.site_index_uploads += 1;
+            Ok(())
+        }
+
+        async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()> {
+            self.refs.push(row);
+            Ok(())
+        }
+
+        async fn update_site_latest(
+            &mut self,
+            update: PublishSiteLatestUpdateRequest<'_>,
+        ) -> CliResult<PublishSiteLatestUpdateResult> {
+            self.latest_updates.push(FakeLatestUpdate {
+                site_id: update.site_id.to_string(),
+                default_ref: update.default_ref.map(ToString::to_string),
+                latest_revision_oid: update.latest_revision_oid.map(ToString::to_string),
+                next_refs_generation: update.next_refs_generation,
+                expected_refs_generation: update.expected_refs_generation,
+                force: update.force,
+            });
+            Ok(PublishSiteLatestUpdateResult::Updated)
         }
     }
 
@@ -2254,6 +3050,125 @@ mod tests {
             files.get("src/lib.rs").copied(),
             Some(b"pub fn demo() {}\n".as_slice())
         );
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_all_refs_persists_revision_rows_and_site_index() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# demo\n");
+        let secret_blob = Blob::from_content("TOKEN=secret\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        save_object(&secret_blob, &secret_blob.id).expect("secret blob should save");
+
+        let root_tree = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, readme_blob.id, "README.md".to_string()),
+            TreeItem::new(TreeItemMode::Blob, secret_blob.id, ".env.local".to_string()),
+        ])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+        let revision_oid = commit.id.to_string();
+        let refs = vec![
+            publish_local_ref("refs/heads/main", &revision_oid, &revision_oid),
+            publish_local_ref("refs/tags/v1", &revision_oid, &revision_oid),
+        ];
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            refs,
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("non-dry-run sync should persist through the sink");
+
+        assert!(!output.dry_run);
+        assert_eq!(output.refs_count, 2);
+        assert_eq!(output.revision_count, 1);
+        assert_eq!(
+            output.latest_revision_oid.as_deref(),
+            Some(revision_oid.as_str())
+        );
+        assert!(output.updates_full_refs_generation);
+        assert_eq!(sink.sync_runs.len(), 2);
+        assert_eq!(sink.sync_runs[0].status, "running");
+        assert_eq!(sink.sync_runs[1].status, "succeeded");
+        assert_eq!(sink.revision_uploads, vec![revision_oid.clone()]);
+        assert_eq!(sink.revisions.len(), 1);
+        assert_eq!(sink.files.len(), 2);
+        assert!(
+            sink.files
+                .iter()
+                .any(|row| row.path == ".env.local" && row.display_mode == "ignored"),
+            "built-in sensitive paths should become metadata-only rows",
+        );
+        assert_eq!(sink.site_index_uploads, 1);
+        assert_eq!(sink.refs.len(), 2);
+        assert_eq!(
+            sink.latest_updates,
+            vec![FakeLatestUpdate {
+                site_id: site.site_id.clone(),
+                default_ref: Some("refs/heads/main".to_string()),
+                latest_revision_oid: Some(revision_oid),
+                next_refs_generation: 8,
+                expected_refs_generation: 7,
+                force: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_targeted_ref_does_not_advance_full_refs_generation() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# targeted\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        let root_tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            readme_blob.id,
+            "README.md".to_string(),
+        )])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(true);
+        let mut sink = FakePublishSyncSink::default();
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("targeted sync should still persist the selected ref");
+
+        assert!(!output.updates_full_refs_generation);
+        assert_eq!(sink.site_index_uploads, 0);
+        assert!(sink.latest_updates.is_empty());
+        assert_eq!(sink.refs.len(), 1);
+        assert_eq!(sink.refs[0].ref_name, "refs/heads/main");
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser

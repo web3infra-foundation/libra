@@ -13,6 +13,10 @@ Current implementation status:
 - `libra publish sync --dry-run` scans local branch/tag refs, validates
   `--ref`, reports dirty-tree warnings, and emits the local publish
   plan without Cloudflare credentials.
+- `libra publish sync` writes code snapshot artifacts to R2, upserts
+  `publish_sync_runs`, `publish_revisions`, `publish_files`, and
+  `publish_refs` in D1, and advances `publish_sites.latest_revision_oid`
+  only for a full all-refs sync.
 - `libra publish deploy` validates the local Worker template, requires
   the generated Worker config/bindings, runs `pnpm build`, and, unless
   `--skip-deploy` is set, applies D1 migrations and deploys the Worker
@@ -22,9 +26,6 @@ Current implementation status:
   Worker already returns HTTP 410 for disabled sites.
 - Worker API route tests cover private-site 403, disabled-site 410, and
   typed 404 envelopes for missing D1 file rows or missing R2 content.
-- `libra publish sync` without `--dry-run` is registered, but it
-  currently returns `LBR-UNSUPPORTED-001` with a pointer to
-  `docs/improvement/publish.md`.
 - The Worker project uses `wrangler types --env-interface CloudflareEnv
   cloudflare-env.d.ts` as the binding type source. The committed
   `env.d.ts` only augments generated types with optional Cloudflare
@@ -36,7 +37,7 @@ Current implementation status:
   bindings when `BASE_URL` is unset, and runs desktop plus mobile
   Chromium assertions for the publish landing page, code browser, file
   viewer, AI model page, refs, status, and empty/non-text states.
-- The full code/ref/AI snapshot upload and Git protocol flows remain
+- The AI snapshot upload and Git protocol restore flows remain
   tracked in `docs/improvement/publish.md`.
 
 ## Synopsis
@@ -115,17 +116,28 @@ Current behavior:
   tag. If a short name exists as both a branch and a tag, the command
   fails with `LBR-CLI-003` and asks for `refs/heads/<name>` or
   `refs/tags/<name>`.
-- Dirty worktrees emit a warning because the dry-run plans committed
-  refs only. `--fail-on-dirty` converts that condition into
+- Without `--dry-run`, the command requires `publish.site_id` plus
+  `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, `LIBRA_D1_DATABASE_ID`,
+  `LIBRA_STORAGE_ENDPOINT`, `LIBRA_STORAGE_BUCKET`,
+  `LIBRA_STORAGE_ACCESS_KEY`, and `LIBRA_STORAGE_SECRET_KEY`. It loads
+  the matching `publish_sites` row from D1 for `repo_id`, visibility,
+  max preview bytes, and `refs_generation`.
+- Full sync writes one code snapshot per unique local branch/tag
+  revision, uploads text previews and `code-manifest.json` to R2, writes
+  binary, too-large, and ignored files as D1 metadata only, uploads
+  `refs.json` and `latest.json`, and advances `publish_sites` through a
+  refs-generation CAS.
+- `--ref` on non-dry-run sync writes only the selected ref and its
+  revision snapshot. It does not upload `refs.json`/`latest.json` and
+  does not advance the complete refs generation.
+- Dirty worktrees emit a warning because sync plans committed refs
+  only. `--fail-on-dirty` converts that condition into
   `LBR-REPO-003`.
-- `--json` returns `siteId` (`null` until cloud config lands),
-  `refsCount`, `revisionCount`, `defaultRef`, `latestRevisionOid`,
-  `fileCount`, `aiObjectCount`, `aiBundleCount`, `warnings`, and the
-  selected ref/revision details. Each revision entry also includes
+- `--json` returns `siteId`, `refsCount`, `revisionCount`,
+  `defaultRef`, `latestRevisionOid`, `fileCount`, `aiObjectCount`,
+  `aiBundleCount`, `warnings`, and the selected ref/revision details.
+  During dry-run `siteId` is `null`; each revision entry also includes
   `preflightDeniedCount`.
-- Without `--dry-run`, this subcommand still exits with
-  `LBR-UNSUPPORTED-001`; the D1/R2 upload path remains tracked in
-  `docs/improvement/publish.md`.
 
 ### `libra publish status`
 

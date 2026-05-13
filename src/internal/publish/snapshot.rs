@@ -185,6 +185,7 @@ impl RevisionPlan {
 ///
 /// Text files become R2 blob uploads and manifest/D1 rows. Binary,
 /// too-large and ignored paths only appear in the manifest/D1 metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn build_revision_artifact_plan(
     repo_id: &str,
     site_id: &str,

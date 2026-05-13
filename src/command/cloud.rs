@@ -35,7 +35,9 @@ use crate::{
         error::{CliError, CliResult, emit_warning},
         output::OutputConfig,
         path,
-        storage::{Storage, local::LocalStorage, remote::RemoteStorage},
+        storage::{
+            Storage, local::LocalStorage, publish_storage::PublishStorage, remote::RemoteStorage,
+        },
         util,
     },
 };
@@ -898,6 +900,25 @@ async fn create_r2_storage_for_db_path(
     repo_id: &str,
     local_db_path: &std::path::Path,
 ) -> Result<RemoteStorage, String> {
+    let store = create_r2_object_store_for_db_path(local_db_path).await?;
+    Ok(RemoteStorage::new_with_prefix(store, repo_id.to_string()))
+}
+
+/// Create publish arbitrary-object storage from the same R2
+/// environment/config surface used by `libra cloud sync`.
+pub(crate) async fn create_publish_storage(
+    repo_id: &str,
+    site_id: &str,
+) -> Result<PublishStorage, String> {
+    let local_db_path = cloud_local_db_path()?;
+    let store = create_r2_object_store_for_db_path(&local_db_path).await?;
+    PublishStorage::new(store, repo_id, site_id)
+        .map_err(|e| format!("failed to build publish storage prefix: {e}"))
+}
+
+async fn create_r2_object_store_for_db_path(
+    local_db_path: &std::path::Path,
+) -> Result<Arc<dyn object_store::ObjectStore>, String> {
     let endpoint =
         resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT", Some(local_db_path)).await?;
     let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET", Some(local_db_path)).await?;
@@ -920,10 +941,7 @@ async fn create_r2_storage_for_db_path(
         .build()
         .map_err(|e| format!("Failed to build R2 client: {}", e))?;
 
-    Ok(RemoteStorage::new_with_prefix(
-        Arc::new(s3),
-        repo_id.to_string(),
-    ))
+    Ok(Arc::new(s3))
 }
 
 async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {

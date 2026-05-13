@@ -785,16 +785,17 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.53 dry-run planner) `sync --dry-run` 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重；完整 upload 路径仍由本 Phase 后续 snapshot/upload 项承载。
 - [x] (v0.17.53 dry-run planner) `sync --dry-run --ref <branch|tag|full-ref>` 支持定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。非 dry-run 的定向同步仍归 Phase 4 未完成项。
 - [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
-- [ ] 完整 snapshot upload 路径支持 `.librapublishignore` 和内置 deny 规则，并按 visibility/allowlist 决定 metadata-only、redaction 或失败。
+- [x] (v0.17.120) 非 dry-run snapshot upload 路径读取 committed `.librapublishignore` 和内置 deny 规则；public site 拒绝 `--allow-sensitive-path`，private site 精确 allowlist，命中 deny 的文件保持 metadata-only D1 rows。
 - [x] (v0.17.113) `Preflight::for_visibility()` 拒绝 public site 使用 `--allow-sensitive-path`，并只在 private site 精确匹配 repo-relative allowlist path；完整 snapshot upload 仍由上方未完成项承载。
 - [x] (v0.17.114) `build_revision_artifact_plan()` 生成单 revision 的 `code-manifest.json` payload、文本 R2 blob 上传清单，并将 binary、too-large、ignored path 保持为 metadata-only；完整非 dry-run sync/D1 写入仍由后续 Phase 4 项承载。
 - [x] (v0.17.115) `publish sync` 命令层可从 committed revision tree materialize repo-relative path + blob bytes 为 `RevisionFileInput`，供后续非 dry-run sync 写入 artifact/D1/R2。
 - [x] (v0.17.116) `upload_revision_artifacts()` 将单 revision 的 `code-manifest.json` 和文本预览 blob 写入 `PublishStorage`，并保持 binary、too-large、ignored path 不产生 R2 blob；D1 `publish_files` metadata rows 仍由后续 sync sink 承载。
 - [x] (v0.17.118) `build_revision_d1_rows()` 为单 revision 生成 `publish_revisions` 和 `publish_files` rows；text rows 保留 `content_sha256`/`r2_key`，binary、too-large、ignored rows 保持 metadata-only。
-- [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
+- [x] (v0.17.120) 非 dry-run `publish sync` 对每个唯一 revision 上传文本预览和 `code-manifest.json` 到 R2，并将 binary、too_large、ignored 文件写为 D1 metadata-only `publish_files` rows。
 - [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
 - [x] (v0.17.119) `build_site_index_artifacts()` 从全量 `SnapshotPlan` 生成 `publish_refs` rows、`refs.json` 和 `latest.json` payload，并可写入 `PublishStorage`；实际 D1 upsert/CAS 仍由后续 sync sink 承载。
-- [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
+- [x] (v0.17.120) 全量非 dry-run `publish sync` 上传 `refs.json`、`latest.json`，并为每个唯一 revision 上传 `code-manifest.json`。
+- [ ] 生成 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
 - [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
@@ -816,10 +817,10 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [x] (v0.17.53) `src/command/publish.rs` 新增 `status` 和离线 `sync --dry-run`；非 dry-run 的 D1/R2 sync 仍返回 `LBR-UNSUPPORTED-001`。
+- [x] (v0.17.120) `src/command/publish.rs` 新增 `status`、离线 `sync --dry-run` 和首个非 dry-run D1/R2 code snapshot sync 路径。
 - [x] (v0.17.51) 顶层 CLI 注册 `Publish` 命令。
 - [x] (v0.17.53) `sync --dry-run` 默认规划所有本地 branch/tag refs；`sync --ref` 只做定向规划，并在 JSON 中标记不会更新完整 refs generation。
-- [ ] `sync` 非 dry-run 默认发布所有本地 branch/tag refs；`sync --ref` 只做定向同步，不能更新完整 refs generation。
+- [x] (v0.17.120) `sync` 非 dry-run 默认发布所有本地 branch/tag refs 并通过 CAS 推进完整 refs generation；`sync --ref` 只写目标 ref/revision，不上传 `refs.json`/`latest.json`，也不更新完整 refs generation。云端 stale refs 删除仍由 Checkpoint B 未完成项承载。
 - [x] (v0.17.53) `sync --dry-run` 不写 D1/R2，也不创建 `.libra/publish` 本地发布状态。
 - [x] (v0.17.53) `sync --dry-run --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
 - [x] (v0.17.95) `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
