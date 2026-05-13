@@ -11,7 +11,6 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
     for args in [
         &["publish", "sync"][..],
         &["--json", "publish", "sync"][..],
-        &["publish", "deploy"][..],
         &["publish", "unpublish"][..],
     ] {
         let output = run_libra_command(args, repo.path());
@@ -32,6 +31,26 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
             "{args:?} should explain that publish plumbing is not ready: {stderr}"
         );
     }
+}
+
+#[test]
+fn publish_deploy_requires_worker_template_before_cloud_steps() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["publish", "deploy", "--skip-deploy"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "publish deploy should fail fast when the Worker template is missing"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        report.message.contains("Worker template"),
+        "error should explain that publish init is required: {:?}",
+        report.message
+    );
 }
 
 #[test]

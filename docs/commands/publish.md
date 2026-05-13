@@ -2,7 +2,7 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.60:
+Current implementation status in v0.17.61:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
@@ -11,8 +11,12 @@ Current implementation status in v0.17.60:
 - `libra publish sync --dry-run` scans local branch/tag refs, validates
   `--ref`, reports dirty-tree warnings, and emits the local publish
   plan without Cloudflare credentials.
-- `libra publish sync` without `--dry-run`, `deploy`, and `unpublish`
-  are registered CLI surfaces, but they currently return
+- `libra publish deploy` validates the local Worker template, requires
+  the generated Worker config/bindings, runs `pnpm build`, and, unless
+  `--skip-deploy` is set, applies D1 migrations and deploys the Worker
+  through Wrangler/OpenNext.
+- `libra publish sync` without `--dry-run` and `unpublish` are
+  registered CLI surfaces, but they currently return
   `LBR-UNSUPPORTED-001` with a pointer to
   `docs/improvement/publish.md`.
 - The Worker project uses `wrangler types --env-interface CloudflareEnv
@@ -44,9 +48,10 @@ libra publish unpublish [OPTIONS]
 
 `libra publish` is being developed as the outward-facing counterpart
 to `libra cloud`. The shipped slices are local Worker-template
-initialisation, local Worker-template status, and offline sync
-dry-runs; they do not upload repository snapshots, mutate Cloudflare
-D1/R2 state, deploy a Worker, or implement Git protocol.
+initialisation, local Worker-template status, offline sync dry-runs,
+and Worker build/deploy orchestration. They do not yet upload
+repository snapshots, implement cloud status comparison, unpublish a
+site, or implement Git protocol.
 
 ## Subcommands
 
@@ -148,9 +153,25 @@ outdated, and conflicted files.
 libra publish deploy [--skip-deploy]
 ```
 
-Current behavior: this subcommand is not implemented. It exits with
-`LBR-UNSUPPORTED-001` and does not run `pnpm`, `wrangler`, or D1
-migrations.
+Current behavior:
+
+- Requires `worker/` and `.libra/publish/worker-template-manifest.json`
+  from `libra publish init`.
+- Fails before running commands when the template is missing,
+  conflicted, outdated, or when `worker/wrangler.jsonc` still contains
+  `REPLACE_WITH_D1_DATABASE_ID`.
+- Allows a `modified` template status so user-owned Worker edits can be
+  deployed intentionally.
+- Runs `pnpm build` from `worker/`.
+- Without `--skip-deploy`, runs
+  `pnpm exec wrangler d1 migrations apply LIBRA_PUBLISH_DB --remote`
+  and then `pnpm exec opennextjs-cloudflare deploy`.
+- Parses the deploy output and prints/returns the first deployment URL.
+  If deploy succeeds but no URL is present, the command fails so scripts
+  do not silently lose the published endpoint.
+- With `--skip-deploy`, only the local build runs; D1 migrations and the
+  Worker deploy step are skipped. This is the safe CI smoke path when
+  Cloudflare credentials are not available.
 
 ### `libra publish unpublish`
 
@@ -215,8 +236,8 @@ The publish D1 schema source already lives under `sql/publish/`, and
 each `.sql` file has a byte-equal mirror under `worker/migrations/`
 (the `publish_schema_contract_worker_mirror_is_byte_equal` Rust test
 walks both directories and refuses any drift). Current
-`libra publish deploy` does not apply these migrations yet; that
-behavior remains part of the Phase 4 deploy plan.
+`libra publish deploy` applies these migrations through Wrangler before
+the Worker deploy step unless `--skip-deploy` is set.
 
 Current chain:
 

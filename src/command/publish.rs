@@ -2,12 +2,15 @@
 //!
 //! Per `docs/improvement/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
-//! materialises the embedded Worker template, and `status` reports local
-//! template drift. The remaining subcommands still surface a clear "not
-//! yet implemented" message until their sync/deploy plumbing ships.
+//! materialises the embedded Worker template, `status` reports local
+//! template drift, and `deploy` validates/builds the Worker before
+//! optionally applying D1 migrations and deploying with Wrangler. The
+//! remaining sync upload and unpublish subcommands still surface a
+//! clear "not yet implemented" message until their cloud mutation
+//! plumbing ships.
 //!
-//! Each subcommand returns a `CliInvalidArguments`-style error
-//! pointing the user at:
+//! Reserved subcommands return a typed unsupported error pointing the
+//! user at:
 //!
 //!   * the relevant `libra cloud sync` baseline that is implemented
 //!     (Phase 1's `run_cloud_sync` helper),
@@ -24,6 +27,7 @@ use std::{
     fs, io,
     io::Write,
     path::{Component, Path, PathBuf},
+    process::Command,
     str::FromStr,
 };
 
@@ -149,7 +153,7 @@ pub struct StatusArgs {}
 
 #[derive(Parser, Debug)]
 pub struct DeployArgs {
-    /// Skip the Wrangler deploy step (useful for CI smoke tests).
+    /// Skip Cloudflare mutation steps after the local Worker build.
     #[arg(long)]
     pub skip_deploy: bool,
 }
@@ -234,7 +238,15 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             let result = run_publish_status_at_root(&repo_root)?;
             output::emit(&result, output)
         }
-        PublishCommand::Deploy(_) => unsupported_publish_subcommand("deploy"),
+        PublishCommand::Deploy(deploy_args) => {
+            let repo_root = util::try_working_dir().map_err(|source| {
+                CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            })?;
+            let mut runner = ProcessPublishDeployRunner;
+            let result = run_publish_deploy_at_root(&repo_root, &deploy_args, &mut runner)?;
+            output::emit(&result, output)
+        }
         PublishCommand::Unpublish(_) => unsupported_publish_subcommand("unpublish"),
     }
 }
@@ -341,6 +353,306 @@ impl CommandOutput for PublishSyncDryRunOutput {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PublishDeployStepState {
+    Completed,
+    Skipped,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishDeployStepSummary {
+    name: String,
+    command: Vec<String>,
+    state: PublishDeployStepState,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishDeployOutput {
+    worker_dir: String,
+    template_status: WorkerTemplateStatus,
+    steps: Vec<PublishDeployStepSummary>,
+    deploy_url: Option<String>,
+}
+
+impl CommandOutput for PublishDeployOutput {
+    fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
+        if output.quiet {
+            return Ok(());
+        }
+        writeln!(writer, "Publish Worker deploy")?;
+        writeln!(writer, "  worker: {}", self.worker_dir)?;
+        writeln!(
+            writer,
+            "  template status: {}",
+            self.template_status.as_str()
+        )?;
+        for step in &self.steps {
+            let status = match step.state {
+                PublishDeployStepState::Completed => "completed",
+                PublishDeployStepState::Skipped => "skipped",
+            };
+            writeln!(writer, "  {status}: {}", step.command.join(" "))?;
+        }
+        writeln!(
+            writer,
+            "  deploy URL: {}",
+            self.deploy_url.as_deref().unwrap_or("<skipped>")
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PublishDeployCommandOutput {
+    success: bool,
+    status_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+trait PublishDeployCommandRunner {
+    fn run(
+        &mut self,
+        worker_dir: &Path,
+        program: &str,
+        args: &[&str],
+    ) -> io::Result<PublishDeployCommandOutput>;
+}
+
+struct ProcessPublishDeployRunner;
+
+impl PublishDeployCommandRunner for ProcessPublishDeployRunner {
+    fn run(
+        &mut self,
+        worker_dir: &Path,
+        program: &str,
+        args: &[&str],
+    ) -> io::Result<PublishDeployCommandOutput> {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(worker_dir)
+            .env("CI", "1")
+            .output()?;
+        Ok(PublishDeployCommandOutput {
+            success: output.status.success(),
+            status_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+fn run_publish_deploy_at_root(
+    repo_root: &Path,
+    args: &DeployArgs,
+    runner: &mut dyn PublishDeployCommandRunner,
+) -> CliResult<PublishDeployOutput> {
+    let status = run_publish_status_at_root(repo_root)?;
+    ensure_publish_deploy_template_ready(&status)?;
+    let worker_dir = repo_root.join("worker");
+    ensure_publish_deploy_files(&worker_dir)?;
+
+    let mut steps = Vec::new();
+    run_publish_deploy_step(runner, &worker_dir, "build", "pnpm", &["build"], &mut steps)?;
+
+    let mut deploy_url = None;
+    if args.skip_deploy {
+        steps.push(PublishDeployStepSummary {
+            name: "d1_migrations".to_string(),
+            command: command_summary(
+                "pnpm",
+                &[
+                    "exec",
+                    "wrangler",
+                    "d1",
+                    "migrations",
+                    "apply",
+                    "LIBRA_PUBLISH_DB",
+                    "--remote",
+                ],
+            ),
+            state: PublishDeployStepState::Skipped,
+        });
+        steps.push(PublishDeployStepSummary {
+            name: "deploy".to_string(),
+            command: command_summary("pnpm", &["exec", "opennextjs-cloudflare", "deploy"]),
+            state: PublishDeployStepState::Skipped,
+        });
+    } else {
+        run_publish_deploy_step(
+            runner,
+            &worker_dir,
+            "d1_migrations",
+            "pnpm",
+            &[
+                "exec",
+                "wrangler",
+                "d1",
+                "migrations",
+                "apply",
+                "LIBRA_PUBLISH_DB",
+                "--remote",
+            ],
+            &mut steps,
+        )?;
+        let output = run_publish_deploy_step(
+            runner,
+            &worker_dir,
+            "deploy",
+            "pnpm",
+            &["exec", "opennextjs-cloudflare", "deploy"],
+            &mut steps,
+        )?;
+        let combined = format!("{}\n{}", output.stdout, output.stderr);
+        deploy_url = extract_first_url(&combined);
+        if deploy_url.is_none() {
+            return Err(CliError::fatal(
+                "publish deploy completed but no deployment URL was found in Wrangler output",
+            )
+            .with_stable_code(StableErrorCode::NetworkProtocol)
+            .with_hint("inspect the deploy output and verify the Worker route/domain."));
+        }
+    }
+
+    Ok(PublishDeployOutput {
+        worker_dir: "worker".to_string(),
+        template_status: status.status,
+        steps,
+        deploy_url,
+    })
+}
+
+fn ensure_publish_deploy_template_ready(status: &PublishStatusOutput) -> CliResult<()> {
+    match status.status {
+        WorkerTemplateStatus::Current | WorkerTemplateStatus::Modified => Ok(()),
+        WorkerTemplateStatus::Missing => Err(CliError::failure(
+            "publish deploy requires a local Worker template, but it is missing",
+        )
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("run 'libra publish init' before deploying.")),
+        WorkerTemplateStatus::Outdated => Err(CliError::failure(
+            "publish deploy requires the Worker template to be current or intentionally modified",
+        )
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("rerun 'libra publish init' and review any Worker template changes.")),
+        WorkerTemplateStatus::Conflicted => Err(CliError::conflict(
+            "publish deploy cannot continue while Worker template paths are conflicted",
+        )
+        .with_hint("resolve symlinks or non-file paths under worker/, then rerun deploy.")),
+    }
+}
+
+fn ensure_publish_deploy_files(worker_dir: &Path) -> CliResult<()> {
+    for relative in [
+        "package.json",
+        "pnpm-lock.yaml",
+        "wrangler.jsonc",
+        "migrations/0001_publish.sql",
+    ] {
+        let path = worker_dir.join(relative);
+        if !path.is_file() {
+            return Err(
+                CliError::failure(format!("publish deploy requires '{}'", path.display()))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_hint("run 'libra publish init' to materialize the Worker template."),
+            );
+        }
+    }
+
+    let wrangler_path = worker_dir.join("wrangler.jsonc");
+    let wrangler = fs::read_to_string(&wrangler_path).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read Worker Wrangler config '{}': {source}",
+            wrangler_path.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for required in ["LIBRA_PUBLISH_DB", "LIBRA_PUBLISH_BUCKET", "ASSETS"] {
+        if !wrangler.contains(required) {
+            return Err(CliError::failure(format!(
+                "publish deploy requires Worker binding '{required}' in '{}'",
+                wrangler_path.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("restore the Worker bindings generated by 'libra publish init'."));
+        }
+    }
+    if wrangler.contains("REPLACE_WITH_D1_DATABASE_ID") {
+        return Err(CliError::failure(format!(
+            "publish deploy requires a real D1 database_id in '{}' instead of \
+             REPLACE_WITH_D1_DATABASE_ID",
+            wrangler_path.display(),
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("create a Cloudflare D1 database and replace REPLACE_WITH_D1_DATABASE_ID."));
+    }
+    Ok(())
+}
+
+fn run_publish_deploy_step(
+    runner: &mut dyn PublishDeployCommandRunner,
+    worker_dir: &Path,
+    name: &str,
+    program: &str,
+    args: &[&str],
+    steps: &mut Vec<PublishDeployStepSummary>,
+) -> CliResult<PublishDeployCommandOutput> {
+    let output = runner.run(worker_dir, program, args).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to start publish deploy step '{name}' ({}): {source}",
+            command_summary(program, args).join(" ")
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if !output.success {
+        return Err(CliError::fatal(format!(
+            "publish deploy step '{name}' failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string()),
+            output.stdout.trim(),
+            output.stderr.trim(),
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("fix the Worker build/deploy error and rerun 'libra publish deploy'."));
+    }
+    steps.push(PublishDeployStepSummary {
+        name: name.to_string(),
+        command: command_summary(program, args),
+        state: PublishDeployStepState::Completed,
+    });
+    Ok(output)
+}
+
+fn command_summary(program: &str, args: &[&str]) -> Vec<String> {
+    std::iter::once(program.to_string())
+        .chain(args.iter().map(|arg| (*arg).to_string()))
+        .collect()
+}
+
+fn extract_first_url(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']' | ','
+                )
+            })
+        })
+        .find(|token| token.starts_with("https://") || token.starts_with("http://"))
+        .map(|token| {
+            token
+                .trim_end_matches(['.', ',', ';', ')', ']', '>'])
+                .to_string()
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -1203,7 +1515,7 @@ fn render_policy_name(policy: RenderPolicy) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::VecDeque, fs};
 
     use serde_json::Value;
 
@@ -1219,6 +1531,75 @@ mod tests {
             worker_name: None,
             max_preview_bytes: None,
         }
+    }
+
+    #[derive(Default)]
+    struct FakePublishDeployRunner {
+        calls: Vec<Vec<String>>,
+        outputs: VecDeque<PublishDeployCommandOutput>,
+    }
+
+    impl FakePublishDeployRunner {
+        fn with_outputs(outputs: impl IntoIterator<Item = PublishDeployCommandOutput>) -> Self {
+            Self {
+                calls: Vec::new(),
+                outputs: outputs.into_iter().collect(),
+            }
+        }
+    }
+
+    impl PublishDeployCommandRunner for FakePublishDeployRunner {
+        fn run(
+            &mut self,
+            worker_dir: &Path,
+            program: &str,
+            args: &[&str],
+        ) -> io::Result<PublishDeployCommandOutput> {
+            assert!(
+                worker_dir.ends_with("worker"),
+                "deploy commands must run from worker/: {}",
+                worker_dir.display()
+            );
+            self.calls.push(command_summary(program, args));
+            Ok(self
+                .outputs
+                .pop_front()
+                .unwrap_or_else(successful_deploy_command_output))
+        }
+    }
+
+    fn successful_deploy_command_output() -> PublishDeployCommandOutput {
+        PublishDeployCommandOutput {
+            success: true,
+            status_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn successful_deploy_command_output_with_stdout(stdout: &str) -> PublishDeployCommandOutput {
+        PublishDeployCommandOutput {
+            success: true,
+            status_code: Some(0),
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    fn materialize_deployable_worker(repo_root: &Path) {
+        run_publish_init_at_root(repo_root, &default_init_args())
+            .expect("publish init must materialize the template");
+        let wrangler_path = repo_root.join("worker/wrangler.jsonc");
+        let wrangler =
+            fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
+        fs::write(
+            &wrangler_path,
+            wrangler.replace(
+                "REPLACE_WITH_D1_DATABASE_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
+        )
+        .expect("wrangler config placeholder should be replaceable");
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
@@ -1448,6 +1829,110 @@ mod tests {
         assert_eq!(output.files_outdated, 0);
         assert_eq!(output.files_conflicted, 0);
         assert_eq!(output.files_current, output.files_total);
+    }
+
+    #[test]
+    fn publish_deploy_skip_deploy_builds_worker_and_skips_cloud_mutations() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        materialize_deployable_worker(temp.path());
+        let args = DeployArgs { skip_deploy: true };
+        let mut runner =
+            FakePublishDeployRunner::with_outputs([successful_deploy_command_output()]);
+
+        let output = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
+            .expect("deploy --skip-deploy should build and skip cloud mutations");
+
+        assert_eq!(runner.calls, vec![command_summary("pnpm", &["build"])]);
+        assert_eq!(output.deploy_url, None);
+        assert_eq!(output.steps.len(), 3);
+        assert_eq!(output.steps[0].state, PublishDeployStepState::Completed);
+        assert_eq!(output.steps[1].state, PublishDeployStepState::Skipped);
+        assert_eq!(output.steps[2].state, PublishDeployStepState::Skipped);
+        assert_eq!(
+            output.steps[1].command,
+            command_summary(
+                "pnpm",
+                &[
+                    "exec",
+                    "wrangler",
+                    "d1",
+                    "migrations",
+                    "apply",
+                    "LIBRA_PUBLISH_DB",
+                    "--remote",
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn publish_deploy_applies_migrations_deploys_and_extracts_url() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        materialize_deployable_worker(temp.path());
+        let args = DeployArgs { skip_deploy: false };
+        let mut runner = FakePublishDeployRunner::with_outputs([
+            successful_deploy_command_output(),
+            successful_deploy_command_output(),
+            successful_deploy_command_output_with_stdout(
+                "Uploaded libra-publish\nPublished at https://libra-publish.example.workers.dev.",
+            ),
+        ]);
+
+        let output = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
+            .expect("deploy should run build, migrations, and Worker deploy");
+
+        assert_eq!(
+            runner.calls,
+            vec![
+                command_summary("pnpm", &["build"]),
+                command_summary(
+                    "pnpm",
+                    &[
+                        "exec",
+                        "wrangler",
+                        "d1",
+                        "migrations",
+                        "apply",
+                        "LIBRA_PUBLISH_DB",
+                        "--remote",
+                    ],
+                ),
+                command_summary("pnpm", &["exec", "opennextjs-cloudflare", "deploy"]),
+            ],
+        );
+        assert_eq!(
+            output.deploy_url.as_deref(),
+            Some("https://libra-publish.example.workers.dev")
+        );
+        assert!(
+            output
+                .steps
+                .iter()
+                .all(|step| step.state == PublishDeployStepState::Completed)
+        );
+    }
+
+    #[test]
+    fn publish_deploy_requires_configured_d1_database_id_before_commands() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        run_publish_init_at_root(temp.path(), &default_init_args())
+            .expect("publish init must materialize the template");
+        let args = DeployArgs { skip_deploy: true };
+        let mut runner = FakePublishDeployRunner::default();
+
+        let err = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
+            .expect_err("deploy must fail before running commands with placeholder D1 config");
+
+        assert_eq!(err.stable_code(), StableErrorCode::RepoStateInvalid);
+        assert!(
+            err.message().contains("REPLACE_WITH_D1_DATABASE_ID"),
+            "error must identify the placeholder config: {}",
+            err.message()
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "deploy must not run build or cloud commands before config validation"
+        );
     }
 
     #[test]
