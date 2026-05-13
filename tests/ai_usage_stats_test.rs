@@ -3,7 +3,9 @@
 use libra::internal::{
     ai::{
         completion::CompletionUsageSummary,
-        usage::{UsageContext, UsageQuery, UsageQueryFilter, UsageRecorder},
+        usage::{
+            UsageContext, UsagePrice, UsagePriceTable, UsageQuery, UsageQueryFilter, UsageRecorder,
+        },
     },
     db::migration::run_builtin_migrations,
 };
@@ -115,6 +117,80 @@ async fn usage_recorder_ignores_absent_or_zero_usage() {
         .await
         .expect("aggregate usage");
     assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn usage_recorder_estimates_cost_from_builtin_price_table() {
+    let conn = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    run_builtin_migrations(&conn).await.expect("run migrations");
+    let recorder = UsageRecorder::new(conn.clone());
+    let context = usage_context("openai", "gpt-4o-mini");
+
+    recorder
+        .record_summary(
+            &context,
+            &CompletionUsageSummary {
+                input_tokens: 1_000_000,
+                output_tokens: 2_000_000,
+                cached_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(3_000_000),
+                cost_usd: None,
+            },
+            Some(100),
+        )
+        .await
+        .expect("record estimated cost usage");
+
+    let rows = UsageQuery::new(conn)
+        .aggregate_by_model()
+        .await
+        .expect("aggregate usage");
+
+    assert_eq!(rows[0].cost_usd, None);
+    assert_eq!(rows[0].cost_estimate_micro_dollars, Some(1_350_000));
+}
+
+#[tokio::test]
+async fn usage_recorder_allows_project_price_overrides() {
+    let conn = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    run_builtin_migrations(&conn).await.expect("run migrations");
+    let pricing = UsagePriceTable::new().with_override(
+        "custom",
+        "model",
+        UsagePrice::new(10, 20)
+            .with_cached_micro_dollars_per_mtok(2)
+            .with_reasoning_micro_dollars_per_mtok(30),
+    );
+    let recorder = UsageRecorder::with_pricing(conn.clone(), pricing);
+    let context = usage_context("custom", "model");
+
+    recorder
+        .record_summary(
+            &context,
+            &CompletionUsageSummary {
+                input_tokens: 2_000_000,
+                output_tokens: 1_000_000,
+                cached_tokens: Some(500_000),
+                reasoning_tokens: Some(1_000_000),
+                total_tokens: Some(4_000_000),
+                cost_usd: None,
+            },
+            Some(100),
+        )
+        .await
+        .expect("record override cost usage");
+
+    let rows = UsageQuery::new(conn)
+        .aggregate_by_model()
+        .await
+        .expect("aggregate usage");
+
+    assert_eq!(rows[0].cost_estimate_micro_dollars, Some(66));
 }
 
 #[tokio::test]

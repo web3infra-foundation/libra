@@ -135,7 +135,7 @@ use crate::{
                     SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
                 },
             },
-            usage::{UsageContext, UsageRecorder},
+            usage::{UsageContext, UsagePriceTable, UsageRecorder},
             web::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
@@ -3238,10 +3238,32 @@ async fn build_usage_recorder(storage_root: &Path) -> Option<UsageRecorder> {
         return None;
     };
     match establish_connection(db_path).await {
-        Ok(conn) => Some(UsageRecorder::new(conn)),
+        Ok(conn) => {
+            let pricing = usage_price_table_from_project_config(storage_root);
+            Some(UsageRecorder::with_pricing(conn, pricing))
+        }
         Err(error) => {
             tracing::warn!("usage stats disabled because database open failed: {error}");
             None
+        }
+    }
+}
+
+fn usage_price_table_from_project_config(storage_root: &Path) -> UsagePriceTable {
+    let path = storage_root.join("config.toml");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return UsagePriceTable::new();
+    };
+    match UsagePriceTable::from_project_config_toml(&contents) {
+        Ok(pricing) => pricing,
+        Err(error) => {
+            tracing::warn!(
+                target: "libra::command::code",
+                path = %path.display(),
+                error = %error,
+                "failed to parse usage pricing config; using built-in pricing table"
+            );
+            UsagePriceTable::new()
         }
     }
 }

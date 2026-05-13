@@ -14,6 +14,9 @@ libra usage prune [--retention-days <days>]
 `libra usage` reads usage rows recorded by Libra's AI provider runtime and
 aggregates them by provider/model. Reports can be filtered by time range,
 session id, thread id, and whether failed provider requests should be included.
+When a provider reports an exact `cost_usd`, Libra stores and displays that
+value. Otherwise it estimates `cost_estimate_micro_dollars` from the built-in
+model capability pricing table or a repository override in `.libra/config.toml`.
 
 ## Subcommands
 
@@ -45,11 +48,29 @@ session id, thread id, and whether failed provider requests should be included.
 Human reports print one tab-separated row per provider/model:
 
 ```text
-<provider>	<model>	requests=<n>	failed=<n>	tokens=<n>	cached=<n>	reasoning=<n>	tool_calls=<n>	wall_ms=<n>
+<provider>	<model>	requests=<n>	failed=<n>	tokens=<n>	cached=<n>	reasoning=<n>	tool_calls=<n>	wall_ms=<n> [ $<actual>| ~$<estimate>]
 ```
 
 CSV mode prints a header row followed by comma-separated rows suitable for
-spreadsheet import.
+spreadsheet import. The CSV columns include both `cost_usd` and
+`cost_estimate_micro_dollars`; estimated human output is prefixed with `~$`.
+
+## Pricing Overrides
+
+Repository-local price overrides live in `.libra/config.toml` and are keyed by
+provider and model. Values are micro-dollars per million tokens:
+
+```toml
+[usage.pricing.openai."gpt-4o-mini"]
+input_micro_dollars_per_mtok = 150000
+output_micro_dollars_per_mtok = 600000
+cached_micro_dollars_per_mtok = 75000
+reasoning_micro_dollars_per_mtok = 600000
+```
+
+If the config is missing or a provider/model has no built-in or overridden
+price, the usage row is still written and `cost_estimate_micro_dollars` remains
+empty.
 
 ## JSON Output
 

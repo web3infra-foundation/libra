@@ -2,7 +2,7 @@ use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
 use uuid::Uuid;
 
-use crate::internal::ai::completion::CompletionUsageSummary;
+use crate::internal::ai::{completion::CompletionUsageSummary, usage::pricing::UsagePriceTable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageContext {
@@ -25,11 +25,19 @@ pub struct UsageContext {
 #[derive(Clone, Debug)]
 pub struct UsageRecorder {
     conn: DatabaseConnection,
+    pricing: UsagePriceTable,
 }
 
 impl UsageRecorder {
     pub fn new(conn: DatabaseConnection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            pricing: UsagePriceTable::new(),
+        }
+    }
+
+    pub fn with_pricing(conn: DatabaseConnection, pricing: UsagePriceTable) -> Self {
+        Self { conn, pricing }
     }
 
     pub async fn record_optional_summary(
@@ -135,7 +143,13 @@ impl UsageRecorder {
                 .saturating_add(summary.output_tokens)
                 .saturating_add(summary.reasoning_tokens.unwrap_or(0))
         });
-        let cost_micro_dollars = cost_micro_dollars(summary.cost_usd);
+        let cost_micro_dollars = cost_micro_dollars(summary.cost_usd).or_else(|| {
+            self.pricing.estimate_micro_dollars(
+                &input.context.provider,
+                &input.context.model,
+                &summary,
+            )
+        });
         let backend = self.conn.get_database_backend();
         self.conn
             .execute(Statement::from_sql_and_values(

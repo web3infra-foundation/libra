@@ -171,10 +171,7 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
         } else {
             row.prompt_tokens.saturating_add(row.completion_tokens)
         };
-        let cost = row
-            .cost_usd
-            .map(|cost| format!(" ${cost:.4}"))
-            .unwrap_or_default();
+        let cost = usage_human_cost(row);
         info_println!(
             output,
             "{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
@@ -225,7 +222,7 @@ fn emit_usage_csv(
 ) -> CliResult<()> {
     info_println!(
         output,
-        "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd"
+        "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
     );
     for row in rows {
         let total = if row.total_tokens > 0 {
@@ -237,9 +234,13 @@ fn emit_usage_csv(
             .cost_usd
             .map(|cost| format!("{cost:.6}"))
             .unwrap_or_default();
+        let cost_estimate = row
+            .cost_estimate_micro_dollars
+            .map(|cost| cost.to_string())
+            .unwrap_or_default();
         info_println!(
             output,
-            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape(&row.provider),
             csv_escape(&row.model),
             row.request_count,
@@ -251,10 +252,20 @@ fn emit_usage_csv(
             total,
             row.tool_call_count,
             row.wall_clock_ms,
-            cost
+            cost,
+            cost_estimate
         );
     }
     Ok(())
+}
+
+fn usage_human_cost(row: &crate::internal::ai::usage::UsageAggregate) -> String {
+    if let Some(cost) = row.cost_usd {
+        return format!(" ${cost:.4}");
+    }
+    row.cost_estimate_micro_dollars
+        .map(|micro| format!(" ~${:.4}", micro as f64 / 1_000_000.0))
+        .unwrap_or_default()
 }
 
 fn csv_escape(value: &str) -> String {
@@ -320,6 +331,7 @@ async fn open_repo_db() -> CliResult<sea_orm::DatabaseConnection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::ai::usage::UsageAggregate;
 
     #[test]
     fn parses_usage_report_relative_duration() {
@@ -337,5 +349,33 @@ mod tests {
     fn rejects_invalid_usage_report_time() {
         let error = parse_usage_time_filter("soonish", "--since").unwrap_err();
         assert!(error.to_string().contains("invalid --since value"));
+    }
+
+    #[test]
+    fn human_usage_cost_marks_estimates() {
+        let actual = UsageAggregate {
+            agent_name: None,
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            request_count: 1,
+            failed_count: 0,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 2,
+            tool_call_count: 0,
+            wall_clock_ms: 1,
+            cost_usd: Some(0.25),
+            cost_estimate_micro_dollars: Some(250_000),
+        };
+        assert_eq!(usage_human_cost(&actual), " $0.2500");
+
+        let estimated = UsageAggregate {
+            cost_usd: None,
+            cost_estimate_micro_dollars: Some(1_350_000),
+            ..actual
+        };
+        assert_eq!(usage_human_cost(&estimated), " ~$1.3500");
     }
 }
