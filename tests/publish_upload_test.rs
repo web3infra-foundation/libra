@@ -3,7 +3,13 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use libra::{
     internal::publish::{
-        contract::{PublishCodeManifest, PublishRefsIndex, PublishSiteLatest, RedactionMode},
+        ai_export::{AiExportRequest, build_ai_export_plan},
+        contract::{
+            AiBundleAssociatedIds, AiObjectLayer, AiObjectRedaction, AiObjectRelationship,
+            PUBLISH_SCHEMA_VERSION, PublishAiBundle, PublishAiGraph, PublishAiIndex,
+            PublishAiObject, PublishCodeManifest, PublishRefsIndex, PublishSiteLatest,
+            RedactionMode,
+        },
         snapshot::{
             FileSnapshot, RefInput, RevisionFileInput, RevisionPlan, SnapshotConfig,
             build_revision_artifact_plan, build_snapshot_plan, publish_code_manifest_relative_key,
@@ -11,9 +17,10 @@ use libra::{
         },
         upload::{
             PUBLISH_REFS_INDEX_RELATIVE_KEY, PUBLISH_SITE_LATEST_RELATIVE_KEY,
-            RevisionArtifactUploadOptions, build_revision_d1_rows, build_site_index_artifacts,
-            upload_revision_artifacts, upload_revision_artifacts_with_options,
-            upload_site_index_artifacts,
+            RevisionArtifactUploadOptions, build_ai_export_d1_rows, build_revision_d1_rows,
+            build_site_index_artifacts, upload_ai_export_artifacts,
+            upload_ai_export_artifacts_with_options, upload_revision_artifacts,
+            upload_revision_artifacts_with_options, upload_site_index_artifacts,
         },
     },
     utils::storage::publish_storage::{PublishStorage, PublishStorageError},
@@ -253,6 +260,108 @@ async fn publish_upload_test_builds_and_uploads_site_index_artifacts() {
     assert_eq!(latest, artifacts.latest);
 }
 
+#[tokio::test]
+async fn publish_upload_test_uploads_ai_artifacts_and_builds_d1_rows_idempotently() {
+    let site_id = "00000000-0000-0000-0000-0000publish01";
+    let repo_id = "11111111-2222-3333-4444-555555555555";
+    let revision_oid = "abcdef0123456789abcdef0123456789abcdef01";
+    let generated_at = Utc
+        .with_ymd_and_hms(2026, 5, 13, 12, 0, 0)
+        .single()
+        .expect("test timestamp must be valid");
+    let plan = build_ai_export_plan(AiExportRequest {
+        repo_id: repo_id.to_string(),
+        site_id: site_id.to_string(),
+        revision_oid: revision_oid.to_string(),
+        ai_version_id: "ai-version-1".to_string(),
+        generated_at,
+        ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+        redaction_mode: RedactionMode::Default,
+        redaction_rules_version: "2026.05.13-1".to_string(),
+        associated_ids: AiBundleAssociatedIds {
+            thread_id: Some("thread-1".to_string()),
+            ..AiBundleAssociatedIds::default()
+        },
+        objects: vec![ai_object(
+            site_id,
+            revision_oid,
+            "Thread",
+            "thread-1",
+            AiObjectLayer::Snapshot,
+            serde_json::json!({ "threadId": "thread-1" }),
+            Vec::new(),
+            Vec::new(),
+        )],
+    })
+    .expect("AI export plan should build");
+    let storage = PublishStorage::new(Arc::new(InMemory::new()), repo_id, site_id)
+        .expect("mock R2 storage should be constructed");
+
+    let first = upload_ai_export_artifacts(&storage, &plan)
+        .await
+        .expect("AI artifacts should upload");
+    assert!(first.index_uploaded);
+    assert!(first.graph_uploaded);
+    assert!(first.bundle_uploaded);
+    assert_eq!(first.object_count, 1);
+    assert_eq!(first.object_uploaded_count, 1);
+    assert_eq!(first.object_skipped_count, 0);
+
+    let index: PublishAiIndex = storage
+        .get_json("revisions/abcdef0123456789abcdef0123456789abcdef01/ai/index.json")
+        .await
+        .expect("AI index should be written");
+    assert_eq!(index, plan.index);
+    let graph: PublishAiGraph = storage
+        .get_json("revisions/abcdef0123456789abcdef0123456789abcdef01/ai/graph.json")
+        .await
+        .expect("AI graph should be written");
+    assert_eq!(graph, plan.graph);
+    let bundle: PublishAiBundle = storage
+        .get_json("revisions/abcdef0123456789abcdef0123456789abcdef01/ai/bundles/ai-version-1.json")
+        .await
+        .expect("AI bundle should be written");
+    assert_eq!(bundle, plan.bundle);
+    let object: PublishAiObject = storage
+        .get_json(
+            "revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Thread/thread-1.json",
+        )
+        .await
+        .expect("AI object should be written");
+    assert_eq!(object, plan.objects[0].object);
+
+    let rows = build_ai_export_d1_rows(&plan).expect("AI D1 rows should build");
+    assert_eq!(rows.objects.len(), 1);
+    assert_eq!(rows.objects[0].object_type, "Thread");
+    assert_eq!(rows.objects[0].layer, "snapshot");
+    assert_eq!(rows.objects[0].r2_key, plan.objects[0].r2_key);
+    assert_eq!(rows.version.ai_version_id, "ai-version-1");
+    assert_eq!(rows.version.object_count, 1);
+    assert_eq!(rows.version.bundle_key, plan.bundle_key);
+
+    let second = upload_ai_export_artifacts(&storage, &plan)
+        .await
+        .expect("second AI upload should skip existing artifacts");
+    assert!(!second.index_uploaded);
+    assert!(!second.graph_uploaded);
+    assert!(!second.bundle_uploaded);
+    assert_eq!(second.object_uploaded_count, 0);
+    assert_eq!(second.object_skipped_count, 1);
+
+    let forced = upload_ai_export_artifacts_with_options(
+        &storage,
+        &plan,
+        RevisionArtifactUploadOptions { force: true },
+    )
+    .await
+    .expect("forced AI upload should rewrite existing artifacts");
+    assert!(forced.index_uploaded);
+    assert!(forced.graph_uploaded);
+    assert!(forced.bundle_uploaded);
+    assert_eq!(forced.object_uploaded_count, 1);
+    assert_eq!(forced.object_skipped_count, 0);
+}
+
 fn revision_plan(
     revision_oid: &str,
     tree_oid: &str,
@@ -264,6 +373,34 @@ fn revision_plan(
         tree_oid: tree_oid.to_string(),
         files: Vec::<FileSnapshot>::new(),
         generated_at,
+    }
+}
+
+fn ai_object(
+    site_id: &str,
+    revision_oid: &str,
+    object_type: &str,
+    object_id: &str,
+    layer: AiObjectLayer,
+    payload: serde_json::Value,
+    removed_fields: Vec<String>,
+    relationships: Vec<AiObjectRelationship>,
+) -> PublishAiObject {
+    PublishAiObject {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        site_id: site_id.to_string(),
+        revision_oid: revision_oid.to_string(),
+        object_type: object_type.to_string(),
+        object_id: object_id.to_string(),
+        layer,
+        source_refs: vec![format!("test/{object_id}")],
+        relationships,
+        payload,
+        redaction: AiObjectRedaction {
+            mode: RedactionMode::Default,
+            rules_version: "2026.05.13-1".to_string(),
+        },
+        removed_fields,
     }
 }
 

@@ -7,14 +7,21 @@
 
 use crate::{
     internal::publish::{
+        ai_export::{
+            AiExportPlan, publish_ai_bundle_relative_key, publish_ai_graph_relative_key,
+            publish_ai_index_relative_key, publish_ai_object_relative_key,
+        },
         contract::{
-            FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishRefsIndex, PublishSiteLatest,
-            RedactionMode, RefType,
+            AiObjectLayer, FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishRefsIndex,
+            PublishSiteLatest, RedactionMode, RefType,
         },
         snapshot::{RevisionArtifactPlan, SnapshotBuildError, SnapshotPlan},
     },
     utils::{
-        d1_client::{PublishFileRow, PublishRefRow, PublishRevisionRow},
+        d1_client::{
+            PublishAiObjectRow, PublishAiVersionRow, PublishFileRow, PublishRefRow,
+            PublishRevisionRow,
+        },
         storage::publish_storage::{PublishStorage, PublishStorageError},
     },
 };
@@ -55,6 +62,25 @@ pub struct SiteIndexArtifacts {
     pub ref_rows: Vec<PublishRefRow>,
 }
 
+/// Summary of AI object-model artefacts written for one revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiExportArtifactUploadSummary {
+    pub index_uploaded: bool,
+    pub graph_uploaded: bool,
+    pub bundle_uploaded: bool,
+    pub object_count: usize,
+    pub object_uploaded_count: usize,
+    pub object_skipped_count: usize,
+    pub object_keys: Vec<String>,
+}
+
+/// D1 rows generated for one AI export plan.
+#[derive(Clone, Debug)]
+pub struct AiExportD1Rows {
+    pub objects: Vec<PublishAiObjectRow>,
+    pub version: PublishAiVersionRow,
+}
+
 /// Errors surfaced while converting artefact plans into D1 row values.
 #[derive(Debug, thiserror::Error)]
 pub enum RevisionD1RowsError {
@@ -73,6 +99,15 @@ pub enum SiteIndexArtifactError {
     MissingDefaultRef,
     #[error("site index requires the default ref to resolve to a latest revision")]
     MissingLatestRevision,
+}
+
+/// Errors surfaced while converting AI artefact plans into D1 row values.
+#[derive(Debug, thiserror::Error)]
+pub enum AiExportD1RowsError {
+    #[error("AI export object count {count} exceeds D1 integer range")]
+    ObjectCountTooLarge { count: usize },
+    #[error("AI export plan does not contain a bundle entry")]
+    MissingBundle,
 }
 
 /// Write a revision code snapshot to publish storage.
@@ -137,6 +172,70 @@ pub async fn upload_site_index_artifacts(
         .put_json(PUBLISH_SITE_LATEST_RELATIVE_KEY, &artifacts.latest)
         .await?;
     Ok(())
+}
+
+/// Write AI object-model artefacts to publish storage.
+pub async fn upload_ai_export_artifacts(
+    storage: &PublishStorage,
+    plan: &AiExportPlan,
+) -> Result<AiExportArtifactUploadSummary, PublishStorageError> {
+    upload_ai_export_artifacts_with_options(storage, plan, RevisionArtifactUploadOptions::default())
+        .await
+}
+
+/// Write AI object-model artefacts with explicit idempotency controls.
+pub async fn upload_ai_export_artifacts_with_options(
+    storage: &PublishStorage,
+    plan: &AiExportPlan,
+    options: RevisionArtifactUploadOptions,
+) -> Result<AiExportArtifactUploadSummary, PublishStorageError> {
+    let mut object_keys = Vec::with_capacity(plan.objects.len());
+    let mut object_uploaded_count = 0usize;
+    let mut object_skipped_count = 0usize;
+    for object in &plan.objects {
+        let relative_key = publish_ai_object_relative_key(
+            &plan.bundle.revision_oid,
+            ai_layer_label(object.object.layer),
+            &object.object.object_type,
+            &object.object.object_id,
+        );
+        if options.force || !storage.head(&relative_key).await? {
+            storage.put_json(&relative_key, &object.object).await?;
+            object_uploaded_count += 1;
+        } else {
+            object_skipped_count += 1;
+        }
+        object_keys.push(object.r2_key.clone());
+    }
+
+    let index_relative_key = publish_ai_index_relative_key(&plan.index.revision_oid);
+    let index_uploaded = options.force || !storage.head(&index_relative_key).await?;
+    if index_uploaded {
+        storage.put_json(&index_relative_key, &plan.index).await?;
+    }
+
+    let graph_relative_key = publish_ai_graph_relative_key(&plan.graph.revision_oid);
+    let graph_uploaded = options.force || !storage.head(&graph_relative_key).await?;
+    if graph_uploaded {
+        storage.put_json(&graph_relative_key, &plan.graph).await?;
+    }
+
+    let bundle_relative_key =
+        publish_ai_bundle_relative_key(&plan.bundle.revision_oid, &plan.bundle.ai_version_id);
+    let bundle_uploaded = options.force || !storage.head(&bundle_relative_key).await?;
+    if bundle_uploaded {
+        storage.put_json(&bundle_relative_key, &plan.bundle).await?;
+    }
+
+    Ok(AiExportArtifactUploadSummary {
+        index_uploaded,
+        graph_uploaded,
+        bundle_uploaded,
+        object_count: object_keys.len(),
+        object_uploaded_count,
+        object_skipped_count,
+        object_keys,
+    })
 }
 
 /// Build the D1 `publish_revisions` and `publish_files` rows for a
@@ -248,6 +347,51 @@ pub fn build_site_index_artifacts(
     })
 }
 
+/// Build D1 `publish_ai_objects` and `publish_ai_versions` rows for
+/// one AI export plan.
+pub fn build_ai_export_d1_rows(plan: &AiExportPlan) -> Result<AiExportD1Rows, AiExportD1RowsError> {
+    let created_at = plan.index.generated_at.to_rfc3339();
+    let objects = plan
+        .objects
+        .iter()
+        .map(|object| PublishAiObjectRow {
+            site_id: object.object.site_id.clone(),
+            revision_oid: object.object.revision_oid.clone(),
+            object_type: object.object.object_type.clone(),
+            object_id: object.object.object_id.clone(),
+            layer: ai_layer_label(object.object.layer).to_string(),
+            r2_key: object.r2_key.clone(),
+            redaction_mode: redaction_mode_label(object.object.redaction.mode).to_string(),
+            payload_sha256: object.payload_sha256.clone(),
+            schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+            created_at: created_at.clone(),
+        })
+        .collect::<Vec<_>>();
+    let bundle = plan
+        .index
+        .bundles
+        .first()
+        .ok_or(AiExportD1RowsError::MissingBundle)?;
+    let object_count =
+        i64::try_from(objects.len()).map_err(|_| AiExportD1RowsError::ObjectCountTooLarge {
+            count: objects.len(),
+        })?;
+    let version = PublishAiVersionRow {
+        site_id: plan.bundle.site_id.clone(),
+        ai_version_id: plan.bundle.ai_version_id.clone(),
+        revision_oid: plan.bundle.revision_oid.clone(),
+        bundle_key: plan.bundle_key.clone(),
+        bundle_sha256: bundle.bundle_sha256.clone(),
+        object_count,
+        redaction_mode: redaction_mode_label(plan.bundle.redaction.mode).to_string(),
+        redaction_rules_version: plan.bundle.redaction.rules_version.clone(),
+        schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+        created_at,
+    };
+
+    Ok(AiExportD1Rows { objects, version })
+}
+
 fn redaction_mode_label(mode: RedactionMode) -> &'static str {
     match mode {
         RedactionMode::Default => "default",
@@ -268,5 +412,13 @@ fn ref_type_label(ref_type: RefType) -> &'static str {
     match ref_type {
         RefType::Branch => "branch",
         RefType::Tag => "tag",
+    }
+}
+
+fn ai_layer_label(layer: AiObjectLayer) -> &'static str {
+    match layer {
+        AiObjectLayer::Snapshot => "snapshot",
+        AiObjectLayer::Event => "event",
+        AiObjectLayer::Projection => "projection",
     }
 }

@@ -263,11 +263,17 @@ pub fn build_ai_export_plan(request: AiExportRequest) -> Result<AiExportPlan, Ai
 }
 
 pub fn publish_ai_index_key(repo_id: &str, site_id: &str, revision_oid: &str) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/ai/index.json")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_ai_index_relative_key(revision_oid)
+    )
 }
 
 pub fn publish_ai_graph_key(repo_id: &str, site_id: &str, revision_oid: &str) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/ai/graph.json")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_ai_graph_relative_key(revision_oid)
+    )
 }
 
 pub fn publish_ai_bundle_key(
@@ -277,7 +283,8 @@ pub fn publish_ai_bundle_key(
     ai_version_id: &str,
 ) -> String {
     format!(
-        "{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/ai/bundles/{ai_version_id}.json"
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_ai_bundle_relative_key(revision_oid, ai_version_id)
     )
 }
 
@@ -295,8 +302,30 @@ pub fn publish_ai_object_key(
         AiObjectLayer::Projection => "projection",
     };
     format!(
-        "{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/ai/objects/{layer}/{object_type}/{object_id}.json"
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_ai_object_relative_key(revision_oid, layer, object_type, object_id)
     )
+}
+
+pub fn publish_ai_index_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/index.json")
+}
+
+pub fn publish_ai_graph_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/graph.json")
+}
+
+pub fn publish_ai_bundle_relative_key(revision_oid: &str, ai_version_id: &str) -> String {
+    format!("revisions/{revision_oid}/ai/bundles/{ai_version_id}.json")
+}
+
+pub fn publish_ai_object_relative_key(
+    revision_oid: &str,
+    layer: &str,
+    object_type: &str,
+    object_id: &str,
+) -> String {
+    format!("revisions/{revision_oid}/ai/objects/{layer}/{object_type}/{object_id}.json")
 }
 
 fn validate_object(
