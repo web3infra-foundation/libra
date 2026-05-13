@@ -296,7 +296,7 @@ fn test_fsck_with_zero_hash() {
     let repo = create_committed_repo_via_cli();
 
     let zero_hash = "0000000000000000000000000000000000000000";
-    let output = run_libra_command(&["fsck", &zero_hash], repo.path());
+    let output = run_libra_command(&["fsck", zero_hash], repo.path());
     // Zero hash should be invalid or not found, but should not crash
     assert!(
         !output.status.success() || output.status.success(),
