@@ -853,7 +853,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.101) `cargo test cloud_clone_domain_resolve_test`
 - [ ] `cargo test cloud_clone_restore_test`
 - [x] (v0.17.102) `cargo test --test command_test clone_cloud`
-- [ ] `cargo test --test command_test publish`
+- [x] (v0.17.105) `cargo test --test command_test publish`
 
 **Dependencies:** Phase 1, Phase 2, Phase 4, and the clone output/error baseline in [clone.md](clone.md)
 
