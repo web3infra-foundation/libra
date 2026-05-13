@@ -183,7 +183,11 @@ pub enum CloneError {
          docs/improvement/publish.md is not yet implemented; tracking \
          the v1 release window for `libra clone {input}`"
     )]
-    CloudPublishSourceNotYetImplemented { input: String },
+    CloudPublishSourceNotYetImplemented {
+        input: String,
+        target: String,
+        selector: Option<String>,
+    },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
 }
@@ -275,7 +279,11 @@ impl From<CloneError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_detail("option", option.to_string())
                 .with_hint(hint.to_string()),
-            CloneError::CloudPublishSourceNotYetImplemented { .. } => {
+            CloneError::CloudPublishSourceNotYetImplemented {
+                ref target,
+                ref selector,
+                ..
+            } => {
                 // Codex pass-7 P1: surface the recognised but
                 // unimplemented Cloudflare publish clone source as a
                 // fatal CLI error so the user sees a precise message
@@ -284,13 +292,18 @@ impl From<CloneError> for CliError {
                 // docs/improvement/publish.md lands the actual
                 // implementation; until then this acts as a clean
                 // surface for forward compatibility.
-                CliError::fatal(error.to_string())
+                let mut cli = CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_detail("cloud_target", target.clone())
                     .with_hint(
                         "Phase 5 of docs/improvement/publish.md is in progress; \
                          use the local CLI's existing `libra cloud restore` flow \
                          (or wait for the v1 release) to recover the repository.",
-                    )
+                    );
+                if let Some(selector) = selector {
+                    cli = cli.with_detail("cloud_selector", selector.clone());
+                }
+                cli
             }
             CloneError::InvalidCloudPublishSource { .. } => {
                 CliError::command_usage(error.to_string())
@@ -680,6 +693,8 @@ async fn execute_clone_inner(
         return Err((
             CloneError::CloudPublishSourceNotYetImplemented {
                 input: args.remote_repo.clone(),
+                target: source.target_label(),
+                selector: source.selector_label(),
             },
             None,
         ));
@@ -792,6 +807,36 @@ async fn execute_clone_inner(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CloudPublishSource {
     clone_domain: String,
+    target: CloudPublishTarget,
+    selector: Option<CloudPublishSelector>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CloudPublishTarget {
+    Slug(String),
+    RepoId(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CloudPublishSelector {
+    Ref(String),
+    Revision(String),
+}
+
+impl CloudPublishSource {
+    fn target_label(&self) -> String {
+        match &self.target {
+            CloudPublishTarget::Slug(slug) => format!("slug:{slug}"),
+            CloudPublishTarget::RepoId(repo_id) => format!("repo:{repo_id}"),
+        }
+    }
+
+    fn selector_label(&self) -> Option<String> {
+        self.selector.as_ref().map(|selector| match selector {
+            CloudPublishSelector::Ref(value) => format!("ref:{value}"),
+            CloudPublishSelector::Revision(value) => format!("revision:{value}"),
+        })
+    }
 }
 
 fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
@@ -813,17 +858,23 @@ fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneEr
         .path_segments()
         .map(|segments| segments.collect::<Vec<_>>())
         .unwrap_or_default();
-    match segments.as_slice() {
+    let target = match segments.as_slice() {
         [] | [""] => return Err(invalid_cloud_source(input, "slug or repo_id is required")),
-        [slug] => validate_cloud_slug(input, slug, "slug")?,
-        ["repo", repo_id] => validate_cloud_slug(input, repo_id, "repo_id")?,
+        [slug] => {
+            validate_cloud_slug(input, slug, "slug")?;
+            CloudPublishTarget::Slug((*slug).to_string())
+        }
+        ["repo", repo_id] => {
+            validate_cloud_slug(input, repo_id, "repo_id")?;
+            CloudPublishTarget::RepoId((*repo_id).to_string())
+        }
         _ => {
             return Err(invalid_cloud_source(
                 input,
                 "path must be /<slug> or /repo/<repo_id>",
             ));
         }
-    }
+    };
 
     let mut ref_selector: Option<String> = None;
     let mut revision_selector: Option<String> = None;
@@ -859,14 +910,21 @@ fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneEr
             "ref and revision selectors are mutually exclusive",
         ));
     }
-    if let Some(selector) = ref_selector {
+    let selector = if let Some(selector) = ref_selector {
         validate_cloud_ref_selector(input, &selector)?;
-    }
-    if let Some(selector) = revision_selector {
+        Some(CloudPublishSelector::Ref(selector))
+    } else if let Some(selector) = revision_selector {
         validate_cloud_revision_selector(input, &selector)?;
-    }
+        Some(CloudPublishSelector::Revision(selector))
+    } else {
+        None
+    };
 
-    Ok(CloudPublishSource { clone_domain })
+    Ok(CloudPublishSource {
+        clone_domain,
+        target,
+        selector,
+    })
 }
 
 fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), CloneError> {
@@ -1367,17 +1425,63 @@ mod tests {
 
     #[test]
     fn cloud_publish_source_accepts_slug_repo_and_selectors() {
-        for input in [
-            "libra+cloud://code.example.com/kepler-ledger",
-            "libra+cloud://code.example.com/repo/rp_8f4c1b",
-            "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
-            "libra+cloud://code.example.com/kepler-ledger?ref=feature/branch",
-            "libra+cloud://code.example.com/kepler-ledger?revision=latest",
-            "libra+cloud://code.example.com/kepler-ledger?revision=9a1f3e2c",
+        for (input, expected) in [
+            (
+                "libra+cloud://code.example.com/kepler-ledger",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: None,
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/repo/rp_8f4c1b",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::RepoId("rp_8f4c1b".to_string()),
+                    selector: None,
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Ref("refs/tags/v1.0.0".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?ref=feature/branch",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Ref("feature/branch".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://code.example.com/kepler-ledger?revision=latest",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Revision("latest".to_string())),
+                },
+            ),
+            (
+                "libra+cloud://CODE.EXAMPLE.COM/kepler-ledger?revision=9a1f3e2c",
+                CloudPublishSource {
+                    clone_domain: "code.example.com".to_string(),
+                    target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+                    selector: Some(CloudPublishSelector::Revision("9a1f3e2c".to_string())),
+                },
+            ),
         ] {
-            parse_cloud_publish_source(input).unwrap_or_else(|error| {
+            let parsed = parse_cloud_publish_source(input).unwrap_or_else(|error| {
                 panic!("{input} should parse as a valid cloud publish source: {error}")
             });
+            assert_eq!(
+                parsed, expected,
+                "{input} should preserve restore selectors"
+            );
         }
     }
 
