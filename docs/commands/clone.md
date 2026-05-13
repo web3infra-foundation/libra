@@ -31,10 +31,11 @@ The remote repository URL to clone from. Supports SSH (`git@host:user/repo.git`)
 HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem paths.
 `libra+cloud://` publish sources are recognized and strictly validated. The clone
 domain must be configured locally before restore starts; otherwise Libra returns
-`LBR-AUTH-001` and does not create the destination directory. Full Cloudflare
-D1/R2 restore is not implemented yet; valid, configured cloud sources currently
-return the Phase 5 not-implemented error instead of falling through to generic
-Git discovery.
+`LBR-AUTH-001` and does not create the destination directory. Configured cloud
+sources resolve the D1 site, repository row, published refs, selected/default
+revision, and object index before returning the Phase 5 not-implemented error.
+Full R2 object download and local restore are not implemented yet; cloud sources
+never fall through to generic Git discovery.
 
 ```bash
 libra clone git@github.com:user/repo.git

@@ -598,6 +598,20 @@ impl D1Client {
         Ok(result.into_iter().next().map(|r| r.repo_id))
     }
 
+    /// Look up a repository row by stable `repo_id`.
+    ///
+    /// Cloudflare clone restore uses the `publish_sites.repo_id`
+    /// binding to verify that the backing backup metadata exists
+    /// before it starts creating a local repository.
+    pub async fn find_repository(&self, repo_id: &str) -> Result<Option<RepositoryRow>, D1Error> {
+        let sql =
+            "SELECT repo_id, name, created_at, updated_at FROM repositories WHERE repo_id = ?1";
+        let rows: Vec<RepositoryRow> = self
+            .query(sql, Some(vec![serde_json::json!(repo_id)]))
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
     // ── CEX-EntireIO §10.2: agent_session / agent_checkpoint mirroring ──
 
     /// Create the `agent_session` table on the D1 side.

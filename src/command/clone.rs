@@ -38,7 +38,10 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
-        d1_client::{D1Client, PublishSiteRow},
+        d1_client::{
+            D1Client, ObjectIndexRow, PublishRefRow, PublishRevisionRow, PublishSiteRow,
+            RepositoryRow,
+        },
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
@@ -213,6 +216,67 @@ pub enum CloneError {
         target: String,
         status: String,
     },
+    #[error(
+        "failed to resolve libra+cloud metadata for site {site_id} in clone domain '{domain}' during {operation} (code {code}): {message}"
+    )]
+    CloudPublishMetadataLookupFailed {
+        domain: String,
+        site_id: String,
+        operation: &'static str,
+        code: i32,
+        message: String,
+    },
+    #[error(
+        "libra+cloud site {target} in clone domain '{domain}' has no repositories row for repo_id {repo_id}"
+    )]
+    CloudPublishRepositoryNotFound {
+        domain: String,
+        target: String,
+        repo_id: String,
+    },
+    #[error("libra+cloud site {target} in clone domain '{domain}' has no published refs")]
+    CloudPublishRefsMissing { domain: String, target: String },
+    #[error(
+        "libra+cloud ref selector '{selector}' did not match a published branch or tag for site {target} in clone domain '{domain}'"
+    )]
+    CloudPublishRefNotFound {
+        domain: String,
+        target: String,
+        selector: String,
+    },
+    #[error(
+        "libra+cloud ref selector '{selector}' is ambiguous for site {target} in clone domain '{domain}'; matches: {matches}"
+    )]
+    CloudPublishRefAmbiguous {
+        domain: String,
+        target: String,
+        selector: String,
+        matches: String,
+    },
+    #[error(
+        "libra+cloud site {target} in clone domain '{domain}' has no default_ref for clone checkout"
+    )]
+    CloudPublishDefaultRefMissing { domain: String, target: String },
+    #[error(
+        "libra+cloud site {target} in clone domain '{domain}' has no latest_revision_oid for revision=latest"
+    )]
+    CloudPublishLatestRevisionMissing { domain: String, target: String },
+    #[error(
+        "published revision {revision_oid} for libra+cloud site {target} in clone domain '{domain}' was not found"
+    )]
+    CloudPublishRevisionNotFound {
+        domain: String,
+        target: String,
+        revision_oid: String,
+    },
+    #[error(
+        "libra+cloud site {target} in clone domain '{domain}' has no object_index rows for repo_id {repo_id}"
+    )]
+    CloudPublishObjectIndexMissing {
+        domain: String,
+        target: String,
+        repo_id: String,
+    },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
 }
@@ -386,6 +450,115 @@ impl From<CloneError> for CliError {
                 .with_detail("cloud_target", target.clone())
                 .with_detail("cloud_site_status", status.clone())
                 .with_hint("enable the publish site before cloning it from libra+cloud://."),
+            CloneError::CloudPublishMetadataLookupFailed {
+                ref domain,
+                ref site_id,
+                ref operation,
+                code,
+                ref message,
+            } => {
+                let stable_code = if matches!(code, 401 | 403 | 1002) {
+                    StableErrorCode::AuthPermissionDenied
+                } else {
+                    StableErrorCode::NetworkUnavailable
+                };
+                CliError::fatal(error.to_string())
+                    .with_stable_code(stable_code)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_detail("cloud_site_id", site_id.clone())
+                    .with_detail("cloud_lookup", operation.to_string())
+                    .with_detail("d1_error_code", code.to_string())
+                    .with_detail("d1_error_message", message.clone())
+                    .with_hint(
+                        "check the D1 database id, API token, account id, and publish schema.",
+                    )
+            }
+            CloneError::CloudPublishRepositoryNotFound {
+                ref domain,
+                ref target,
+                ref repo_id,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoNotFound)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_repo_id", repo_id.clone())
+                .with_hint("run 'libra cloud sync' for this repository before cloud clone."),
+            CloneError::CloudPublishRefsMissing {
+                ref domain,
+                ref target,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_hint("run a full 'libra publish sync' so D1 publish_refs are available."),
+            CloneError::CloudPublishRefNotFound {
+                ref domain,
+                ref target,
+                ref selector,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_selector", format!("ref:{selector}"))
+                .with_hint(
+                    "use a published full ref such as 'refs/heads/main' or 'refs/tags/v1.0.0'.",
+                ),
+            CloneError::CloudPublishRefAmbiguous {
+                ref domain,
+                ref target,
+                ref selector,
+                ref matches,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_selector", format!("ref:{selector}"))
+                .with_detail("cloud_ref_matches", matches.clone())
+                .with_hint(
+                    "branch and tag short names conflict; use the complete ref name in ?ref=.",
+                ),
+            CloneError::CloudPublishDefaultRefMissing {
+                ref domain,
+                ref target,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_hint(
+                    "run a full 'libra publish sync' so publish_sites.default_ref is populated.",
+                ),
+            CloneError::CloudPublishLatestRevisionMissing {
+                ref domain,
+                ref target,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_hint(
+                    "run a full 'libra publish sync' so publish_sites.latest_revision_oid is populated.",
+                ),
+            CloneError::CloudPublishRevisionNotFound {
+                ref domain,
+                ref target,
+                ref revision_oid,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_revision_oid", revision_oid.clone())
+                .with_hint(
+                    "rerun 'libra publish sync' so the selected revision is marked published.",
+                ),
+            CloneError::CloudPublishObjectIndexMissing {
+                ref domain,
+                ref target,
+                ref repo_id,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_repo_id", repo_id.clone())
+                .with_hint("run 'libra cloud sync --force' so D1 object_index contains git objects."),
             CloneError::InvalidCloudPublishSource { .. } => {
                 CliError::command_usage(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -771,11 +944,11 @@ async fn execute_clone_inner(
         let clone_config = load_cloud_clone_domain_config(&source)
             .await
             .map_err(|error| (error, None))?;
-        let publish_site = resolve_cloud_publish_site(&source, &clone_config)
+        let restore_plan = resolve_cloud_publish_restore_plan(&source, &clone_config)
             .await
             .map_err(|error| (error, None))?;
         let mut config_details = clone_config.into_error_details(source.clone_domain.clone());
-        config_details.extend(cloud_publish_site_error_details(&publish_site));
+        config_details.extend(cloud_publish_restore_plan_error_details(&restore_plan));
         return Err((
             CloneError::CloudPublishSourceNotYetImplemented {
                 input: args.remote_repo.clone(),
@@ -917,6 +1090,30 @@ struct CloudCloneDomainConfig {
     d1_database_id: String,
     r2_bucket: String,
     credential_profile: Option<String>,
+}
+
+#[derive(Debug)]
+struct CloudPublishRestorePlan {
+    site: PublishSiteRow,
+    repository: RepositoryRow,
+    checkout: CloudPublishCheckoutTarget,
+    revision: PublishRevisionRow,
+    object_indexes: Vec<ObjectIndexRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CloudPublishCheckoutTarget {
+    revision_oid: String,
+    ref_name: Option<String>,
+    selector_kind: CloudPublishCheckoutSelectorKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloudPublishCheckoutSelectorKind {
+    DefaultRef,
+    Ref,
+    LatestRevision,
+    Revision,
 }
 
 impl CloudCloneDomainConfig {
@@ -1147,15 +1344,102 @@ async fn load_cloud_clone_domain_config(
     })
 }
 
-async fn resolve_cloud_publish_site(
+async fn resolve_cloud_publish_restore_plan(
     source: &CloudPublishSource,
     config: &CloudCloneDomainConfig,
-) -> Result<PublishSiteRow, CloneError> {
+) -> Result<CloudPublishRestorePlan, CloneError> {
     let d1_client = D1Client::new(
         config.account_id.clone(),
         config.api_token.clone(),
         config.d1_database_id.clone(),
     );
+    let site = resolve_cloud_publish_site(source, &d1_client).await?;
+    let target = source.target_label();
+
+    let repository = d1_client
+        .find_repository(&site.repo_id)
+        .await
+        .map_err(
+            |source_error| CloneError::CloudPublishMetadataLookupFailed {
+                domain: source.clone_domain.clone(),
+                site_id: site.site_id.clone(),
+                operation: "repositories lookup",
+                code: source_error.code,
+                message: source_error.message,
+            },
+        )?
+        .ok_or_else(|| CloneError::CloudPublishRepositoryNotFound {
+            domain: source.clone_domain.clone(),
+            target: target.clone(),
+            repo_id: site.repo_id.clone(),
+        })?;
+
+    let refs = d1_client
+        .list_publish_refs(&site.site_id)
+        .await
+        .map_err(
+            |source_error| CloneError::CloudPublishMetadataLookupFailed {
+                domain: source.clone_domain.clone(),
+                site_id: site.site_id.clone(),
+                operation: "publish_refs lookup",
+                code: source_error.code,
+                message: source_error.message,
+            },
+        )?;
+    let checkout = resolve_cloud_publish_checkout_target(source, &site, &refs)?;
+
+    let revision = d1_client
+        .find_published_revision(&site.site_id, &checkout.revision_oid)
+        .await
+        .map_err(
+            |source_error| CloneError::CloudPublishMetadataLookupFailed {
+                domain: source.clone_domain.clone(),
+                site_id: site.site_id.clone(),
+                operation: "publish_revisions lookup",
+                code: source_error.code,
+                message: source_error.message,
+            },
+        )?
+        .ok_or_else(|| CloneError::CloudPublishRevisionNotFound {
+            domain: source.clone_domain.clone(),
+            target: target.clone(),
+            revision_oid: checkout.revision_oid.clone(),
+        })?;
+
+    let object_indexes =
+        d1_client
+            .get_object_indexes(&site.repo_id)
+            .await
+            .map_err(
+                |source_error| CloneError::CloudPublishMetadataLookupFailed {
+                    domain: source.clone_domain.clone(),
+                    site_id: site.site_id.clone(),
+                    operation: "object_index lookup",
+                    code: source_error.code,
+                    message: source_error.message,
+                },
+            )?;
+    if object_indexes.is_empty() {
+        return Err(CloneError::CloudPublishObjectIndexMissing {
+            domain: source.clone_domain.clone(),
+            target,
+            repo_id: site.repo_id.clone(),
+        });
+    }
+
+    Ok(CloudPublishRestorePlan {
+        site,
+        repository,
+        checkout,
+        revision,
+        object_indexes,
+    })
+}
+
+async fn resolve_cloud_publish_site(
+    source: &CloudPublishSource,
+    d1_client: &D1Client,
+) -> Result<PublishSiteRow, CloneError> {
     let target = source.target_label();
     let result = match &source.target {
         CloudPublishTarget::Slug(slug) => {
@@ -1188,6 +1472,140 @@ async fn resolve_cloud_publish_site(
         });
     }
     Ok(site)
+}
+
+fn resolve_cloud_publish_checkout_target(
+    source: &CloudPublishSource,
+    site: &PublishSiteRow,
+    refs: &[PublishRefRow],
+) -> Result<CloudPublishCheckoutTarget, CloneError> {
+    if refs.is_empty() {
+        return Err(CloneError::CloudPublishRefsMissing {
+            domain: source.clone_domain.clone(),
+            target: source.target_label(),
+        });
+    }
+
+    match source.selector.as_ref() {
+        None => {
+            let default_ref = site.default_ref.as_ref().ok_or_else(|| {
+                CloneError::CloudPublishDefaultRefMissing {
+                    domain: source.clone_domain.clone(),
+                    target: source.target_label(),
+                }
+            })?;
+            let row = refs
+                .iter()
+                .find(|row| row.ref_name == *default_ref)
+                .ok_or_else(|| CloneError::CloudPublishRefNotFound {
+                    domain: source.clone_domain.clone(),
+                    target: source.target_label(),
+                    selector: default_ref.clone(),
+                })?;
+            Ok(CloudPublishCheckoutTarget {
+                revision_oid: row.revision_oid.clone(),
+                ref_name: Some(row.ref_name.clone()),
+                selector_kind: CloudPublishCheckoutSelectorKind::DefaultRef,
+            })
+        }
+        Some(CloudPublishSelector::Ref(selector)) => {
+            let matches = matching_cloud_publish_refs(refs, selector);
+            match matches.as_slice() {
+                [] => Err(CloneError::CloudPublishRefNotFound {
+                    domain: source.clone_domain.clone(),
+                    target: source.target_label(),
+                    selector: selector.clone(),
+                }),
+                [row] => Ok(CloudPublishCheckoutTarget {
+                    revision_oid: row.revision_oid.clone(),
+                    ref_name: Some(row.ref_name.clone()),
+                    selector_kind: CloudPublishCheckoutSelectorKind::Ref,
+                }),
+                rows => {
+                    let mut names = rows
+                        .iter()
+                        .map(|row| row.ref_name.clone())
+                        .collect::<Vec<_>>();
+                    names.sort();
+                    Err(CloneError::CloudPublishRefAmbiguous {
+                        domain: source.clone_domain.clone(),
+                        target: source.target_label(),
+                        selector: selector.clone(),
+                        matches: names.join(", "),
+                    })
+                }
+            }
+        }
+        Some(CloudPublishSelector::Revision(selector)) if selector == "latest" => {
+            let revision_oid = site.latest_revision_oid.clone().ok_or_else(|| {
+                CloneError::CloudPublishLatestRevisionMissing {
+                    domain: source.clone_domain.clone(),
+                    target: source.target_label(),
+                }
+            })?;
+            Ok(CloudPublishCheckoutTarget {
+                revision_oid,
+                ref_name: None,
+                selector_kind: CloudPublishCheckoutSelectorKind::LatestRevision,
+            })
+        }
+        Some(CloudPublishSelector::Revision(selector)) => Ok(CloudPublishCheckoutTarget {
+            revision_oid: selector.clone(),
+            ref_name: None,
+            selector_kind: CloudPublishCheckoutSelectorKind::Revision,
+        }),
+    }
+}
+
+fn matching_cloud_publish_refs<'a>(
+    refs: &'a [PublishRefRow],
+    selector: &str,
+) -> Vec<&'a PublishRefRow> {
+    let exact = refs
+        .iter()
+        .filter(|row| row.ref_name == selector)
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return exact;
+    }
+    refs.iter()
+        .filter(|row| row.short_name == selector)
+        .collect::<Vec<_>>()
+}
+
+fn cloud_publish_restore_plan_error_details(
+    plan: &CloudPublishRestorePlan,
+) -> Vec<(&'static str, String)> {
+    let mut details = cloud_publish_site_error_details(&plan.site);
+    details.push(("cloud_repository_name", plan.repository.name.clone()));
+    details.push((
+        "cloud_checkout_revision_oid",
+        plan.checkout.revision_oid.clone(),
+    ));
+    details.push((
+        "cloud_checkout_selector_kind",
+        cloud_publish_checkout_selector_kind_label(plan.checkout.selector_kind).to_string(),
+    ));
+    if let Some(ref_name) = &plan.checkout.ref_name {
+        details.push(("cloud_checkout_ref", ref_name.clone()));
+    }
+    details.push(("cloud_revision_status", plan.revision.status.clone()));
+    details.push((
+        "cloud_object_index_count",
+        plan.object_indexes.len().to_string(),
+    ));
+    details
+}
+
+fn cloud_publish_checkout_selector_kind_label(
+    kind: CloudPublishCheckoutSelectorKind,
+) -> &'static str {
+    match kind {
+        CloudPublishCheckoutSelectorKind::DefaultRef => "default_ref",
+        CloudPublishCheckoutSelectorKind::Ref => "ref",
+        CloudPublishCheckoutSelectorKind::LatestRevision => "latest_revision",
+        CloudPublishCheckoutSelectorKind::Revision => "revision",
+    }
 }
 
 fn cloud_publish_site_error_details(site: &PublishSiteRow) -> Vec<(&'static str, String)> {
@@ -1770,5 +2188,155 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         )));
         assert!(details.contains(&("cloud_refs_generation", "7".to_string())));
+    }
+
+    #[test]
+    fn cloud_clone_restore_plan_resolves_default_ref_checkout_revision() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: None,
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let refs = vec![
+            publish_ref_row(
+                "refs/heads/main",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            publish_ref_row(
+                "refs/tags/v1.0.0",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ];
+
+        let checkout = resolve_cloud_publish_checkout_target(&source, &site, &refs)
+            .expect("default ref should resolve to a checkout revision");
+
+        assert_eq!(
+            checkout,
+            CloudPublishCheckoutTarget {
+                revision_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                ref_name: Some("refs/heads/main".to_string()),
+                selector_kind: CloudPublishCheckoutSelectorKind::DefaultRef,
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_clone_restore_plan_rejects_ambiguous_short_ref_selector() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: Some(CloudPublishSelector::Ref("release".to_string())),
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let refs = vec![
+            publish_ref_row(
+                "refs/heads/release",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            publish_ref_row(
+                "refs/tags/release",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ];
+
+        let error = resolve_cloud_publish_checkout_target(&source, &site, &refs)
+            .expect_err("branch/tag short-name collision must require a full ref");
+
+        match error {
+            CloneError::CloudPublishRefAmbiguous {
+                selector, matches, ..
+            } => {
+                assert_eq!(selector, "release");
+                assert!(matches.contains("refs/heads/release"));
+                assert!(matches.contains("refs/tags/release"));
+            }
+            other => panic!("expected ambiguous ref error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn cloud_clone_restore_plan_resolves_revision_latest_from_site_row() {
+        let source = CloudPublishSource {
+            clone_domain: "code.example.com".to_string(),
+            target: CloudPublishTarget::Slug("kepler-ledger".to_string()),
+            selector: Some(CloudPublishSelector::Revision("latest".to_string())),
+        };
+        let site = publish_site_row(
+            Some("refs/heads/main"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let refs = vec![publish_ref_row(
+            "refs/heads/main",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )];
+
+        let checkout = resolve_cloud_publish_checkout_target(&source, &site, &refs)
+            .expect("revision=latest should resolve from publish_sites.latest_revision_oid");
+
+        assert_eq!(
+            checkout,
+            CloudPublishCheckoutTarget {
+                revision_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                ref_name: None,
+                selector_kind: CloudPublishCheckoutSelectorKind::LatestRevision,
+            }
+        );
+    }
+
+    fn publish_site_row(
+        default_ref: Option<&str>,
+        latest_revision_oid: Option<&str>,
+    ) -> PublishSiteRow {
+        PublishSiteRow {
+            site_id: "site_123".to_string(),
+            repo_id: "repo_456".to_string(),
+            clone_domain: "code.example.com".to_string(),
+            slug: "kepler-ledger".to_string(),
+            display_origin: "https://code.example.com".to_string(),
+            name: "Kepler Ledger".to_string(),
+            visibility: "public".to_string(),
+            status: "active".to_string(),
+            worker_name: "libra-publish".to_string(),
+            default_ref: default_ref.map(ToString::to_string),
+            latest_revision_oid: latest_revision_oid.map(ToString::to_string),
+            refs_generation: 7,
+            max_preview_bytes: 1024,
+            schema_version: 1,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn publish_ref_row(ref_name: &str, revision_oid: &str) -> PublishRefRow {
+        let short_name = ref_name
+            .strip_prefix("refs/heads/")
+            .or_else(|| ref_name.strip_prefix("refs/tags/"))
+            .unwrap_or(ref_name)
+            .to_string();
+        let ref_type = if ref_name.starts_with("refs/tags/") {
+            "tag"
+        } else {
+            "branch"
+        };
+        PublishRefRow {
+            site_id: "site_123".to_string(),
+            ref_name: ref_name.to_string(),
+            ref_type: ref_type.to_string(),
+            short_name,
+            target_oid: revision_oid.to_string(),
+            revision_oid: revision_oid.to_string(),
+            is_default: if ref_name == "refs/heads/main" { 1 } else { 0 },
+            sync_run_id: "sync_123".to_string(),
+            schema_version: 1,
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
     }
 }
