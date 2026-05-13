@@ -94,6 +94,14 @@ fn publish_status_reports_local_template_state() {
         stdout.contains("\"status\": \"missing\""),
         "status before publish init should be missing: {stdout}"
     );
+    assert!(
+        stdout.contains("\"publishedRefs\":"),
+        "status JSON should include the cloud ref comparison envelope: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"state\": \"unconfigured\""),
+        "status without a site id should make the cloud ref comparison state explicit: {stdout}"
+    );
 }
 
 #[test]

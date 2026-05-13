@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_publish_source_accepts_slug_repo_and_selectors() {
+    fn cloud_clone_source_parse_test_accepts_slug_repo_and_selectors() {
         for (input, expected) in [
             (
                 "libra+cloud://code.example.com/kepler-ledger",
@@ -1555,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_publish_source_rejects_invalid_inputs() {
+    fn cloud_clone_source_parse_test_rejects_invalid_inputs() {
         for (input, needle) in [
             ("libra+cloud://bad_domain/repo", "clone domain"),
             ("libra+cloud://code.example.com/", "slug or repo_id"),

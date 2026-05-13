@@ -1259,16 +1259,67 @@ impl D1Client {
         &self,
         site_id: &str,
     ) -> Result<Option<PublishSiteRow>, D1Error> {
-        let sql = "SELECT site_id, repo_id, clone_domain, slug, display_origin, \
-                          name, visibility, status, worker_name, default_ref, \
-                          latest_revision_oid, refs_generation, max_preview_bytes, \
-                          schema_version, created_at, updated_at \
-                   FROM publish_sites WHERE site_id = ?1";
+        let sql = publish_site_select_sql("site_id = ?1");
         let rows: Vec<PublishSiteRow> = self
-            .query(sql, Some(vec![serde_json::json!(site_id)]))
+            .query(&sql, Some(vec![serde_json::json!(site_id)]))
             .await?;
         Ok(rows.into_iter().next())
     }
+
+    /// Resolve a publish site by its clone-domain slug.
+    ///
+    /// The schema pins `(clone_domain, slug)` as unique, so callers
+    /// receive at most one row. Slug lookup is the human-facing
+    /// `libra+cloud://<clone-domain>/<slug>` path.
+    pub async fn find_publish_site_by_clone_slug(
+        &self,
+        clone_domain: &str,
+        slug: &str,
+    ) -> Result<Option<PublishSiteRow>, D1Error> {
+        let sql = publish_site_select_sql("clone_domain = ?1 AND slug = ?2");
+        let rows: Vec<PublishSiteRow> = self
+            .query(
+                &sql,
+                Some(vec![
+                    serde_json::json!(clone_domain),
+                    serde_json::json!(slug),
+                ]),
+            )
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Resolve a publish site by its stable repo id.
+    ///
+    /// The `repo/<repo_id>` URL form survives slug renames because
+    /// the schema pins `(clone_domain, repo_id)` as unique.
+    pub async fn find_publish_site_by_clone_repo_id(
+        &self,
+        clone_domain: &str,
+        repo_id: &str,
+    ) -> Result<Option<PublishSiteRow>, D1Error> {
+        let sql = publish_site_select_sql("clone_domain = ?1 AND repo_id = ?2");
+        let rows: Vec<PublishSiteRow> = self
+            .query(
+                &sql,
+                Some(vec![
+                    serde_json::json!(clone_domain),
+                    serde_json::json!(repo_id),
+                ]),
+            )
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+}
+
+fn publish_site_select_sql(where_clause: &str) -> String {
+    format!(
+        "SELECT site_id, repo_id, clone_domain, slug, display_origin, \
+                name, visibility, status, worker_name, default_ref, \
+                latest_revision_oid, refs_generation, max_preview_bytes, \
+                schema_version, created_at, updated_at \
+         FROM publish_sites WHERE {where_clause} LIMIT 1"
+    )
 }
 
 /// Split a multi-statement SQL script into individual statements.
@@ -1818,6 +1869,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cloud_clone_domain_resolve_test_uses_unique_slug_and_repo_id_lookups() {
+        let slug_sql = publish_site_select_sql("clone_domain = ?1 AND slug = ?2");
+        assert!(
+            slug_sql.contains("FROM publish_sites WHERE clone_domain = ?1 AND slug = ?2 LIMIT 1"),
+            "slug lookup must use the clone-domain unique key: {slug_sql}"
+        );
+        assert!(
+            slug_sql.contains("site_id, repo_id, clone_domain, slug"),
+            "slug lookup must return the restore identity columns: {slug_sql}"
+        );
+        assert!(
+            slug_sql.contains("default_ref"),
+            "slug lookup must return default ref metadata: {slug_sql}"
+        );
+        assert!(
+            slug_sql.contains("latest_revision_oid"),
+            "slug lookup must return latest revision metadata: {slug_sql}"
+        );
+        assert!(
+            slug_sql.contains("refs_generation"),
+            "slug lookup must return refs generation metadata: {slug_sql}"
+        );
+
+        let repo_sql = publish_site_select_sql("clone_domain = ?1 AND repo_id = ?2");
+        assert!(
+            repo_sql
+                .contains("FROM publish_sites WHERE clone_domain = ?1 AND repo_id = ?2 LIMIT 1"),
+            "repo lookup must use the slug-rename-proof unique key: {repo_sql}"
+        );
+        assert!(
+            !repo_sql.contains("slug = ?2"),
+            "repo lookup must not depend on the current slug: {repo_sql}"
+        );
     }
 
     /// Codex Phase 2 P2 (closed): the `ensure_publish_schema`

@@ -794,10 +794,10 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `cargo test publish_snapshot_test`
-- [ ] `cargo test publish_preflight_test`
-- [ ] `cargo test publish_ai_object_model_contract_test`
-- [ ] `cargo test publish_ai_export_test`
+- [x] (v0.17.97) `cargo test publish_snapshot_test`
+- [x] (v0.17.98) `cargo test publish_preflight_test`
+- [x] (v0.17.99) `cargo test publish_ai_object_model_contract_test`
+- [x] (v0.17.100) `cargo test publish_ai_export_test`
 
 **Dependencies:** Phase 1, Phase 2
 
@@ -815,13 +815,13 @@ v1 使用 gitignore 子集：
 - [ ] `sync` 非 dry-run 默认发布所有本地 branch/tag refs；`sync --ref` 只做定向同步，不能更新完整 refs generation。
 - [x] (v0.17.53) `sync --dry-run` 不写 D1/R2，也不创建 `.libra/publish` 本地发布状态。
 - [x] (v0.17.53) `sync --dry-run --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
-- [ ] `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
+- [x] (v0.17.95) `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
 - [x] (v0.17.53) dirty 工作区 warning 和 `--fail-on-dirty` 语义有测试。
 
 **Verification:**
 
-- [ ] `cargo test --test command_test publish`
-- [ ] `cargo test publish`
+- [x] (v0.17.94) `cargo test --test command_test publish`
+- [x] (v0.17.94) `cargo test publish`
 
 **Dependencies:** Phase 3
 
@@ -849,10 +849,10 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `cargo test cloud_clone_source_parse_test`
-- [ ] `cargo test cloud_clone_domain_resolve_test`
+- [x] (v0.17.102) `cargo test cloud_clone_source_parse_test`
+- [x] (v0.17.101) `cargo test cloud_clone_domain_resolve_test`
 - [ ] `cargo test cloud_clone_restore_test`
-- [ ] `cargo test --test command_test clone_cloud`
+- [x] (v0.17.102) `cargo test --test command_test clone_cloud`
 - [ ] `cargo test --test command_test publish`
 
 **Dependencies:** Phase 1, Phase 2, Phase 4, and the clone output/error baseline in [clone.md](clone.md)
@@ -879,7 +879,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.11) private visibility 缺少或无法验证 `Cf-Access-Jwt-Assertion` 时返回 403。
 - [x] (v0.17.11) disabled site 返回 410，不读取 R2 bundle。
 - [x] (v0.17.11) FakeD1/FakeR2 route fixture 能通过 API round-trip。
-- [ ] Miniflare D1/R2 fixture round-trip 尚未落地。
+- [x] (v0.17.93) Miniflare D1/R2 fixture round-trip 使用专用 workers-pool Vitest config 覆盖 site、refs、tree、file、AI versions、AI objects 和 AI graph。
 
 **Verification:**
 
@@ -938,7 +938,7 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `cargo test publish_incremental_test`
+- [x] (v0.17.103) `cargo test publish_incremental_test`
 - [x] (v0.17.92) `cargo test publish_redaction_contract_test`
 - [ ] `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
 
@@ -959,7 +959,7 @@ v1 使用 gitignore 子集：
 - [ ] mock R2 + D1 下，snapshot 能 round-trip。
 - [ ] D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot。
 - [ ] D1 latest 只指向默认 ref 的完整 published revision。
-- [ ] `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
+- [x] (v0.17.96) `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
 
 ### Checkpoint C：Cloudflare clone 可恢复
 
@@ -974,7 +974,7 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint D：Worker 可读
 
-- [ ] Miniflare 能通过 API 读回 site、refs、tree、file、AI versions、AI objects 和 AI graph。
+- [x] (v0.17.93) Miniflare 能通过 API 读回 site、refs、tree、file、AI versions、AI objects 和 AI graph。
 - [x] (v0.17.63) private 缺 Access JWT 或 JWT 校验失败返回 403。
 - [x] (v0.17.63) disabled site 返回 410。
 - [x] (v0.17.63) R2 miss 和 D1 miss 返回 typed 404。
@@ -1028,6 +1028,7 @@ cargo test cloud_storage_backup_test
 pnpm --dir worker cf-typegen
 pnpm --dir worker lint
 pnpm --dir worker test
+pnpm --dir worker test:miniflare
 pnpm --dir worker exec tsc --noEmit
 pnpm --dir worker build
 cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|playwright.config|wrangler.jsonc|tsconfig.json)'

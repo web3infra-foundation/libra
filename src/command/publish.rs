@@ -4,11 +4,12 @@
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
 //! materialises the embedded Worker template, `sync --dry-run` plans
 //! local refs without cloud writes, `status` reports local template
-//! drift, `deploy` validates/builds the Worker before optionally
+//! drift and can compare local refs with D1 `publish_refs`, `deploy`
+//! validates/builds the Worker before optionally
 //! applying D1 migrations and deploying with Wrangler, and
 //! `unpublish --yes` disables a site through Wrangler D1 execute. The
-//! remaining full sync upload and cloud status comparison still surface
-//! a clear unsupported error until their cloud mutation plumbing ships.
+//! remaining full sync upload still surfaces a clear unsupported error
+//! until the cloud mutation plumbing ships.
 //!
 //! Unsupported full-sync/cloud-comparison paths return a typed error
 //! pointing the user at:
@@ -24,8 +25,10 @@
 //! unpublish orchestration without changing the full-upload boundary.
 
 use std::{
-    collections::BTreeMap,
-    fs, io,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    future::Future,
+    io,
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -54,6 +57,7 @@ use crate::{
         tag::{self, TagObject},
     },
     utils::{
+        d1_client::{D1Client, D1Error, PublishRefRow, PublishRevisionRow},
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
@@ -74,7 +78,7 @@ pub enum PublishCommand {
     Init(InitArgs),
     /// Plan publish sync; full D1/R2 upload is still unsupported unless --dry-run is used.
     Sync(SyncArgs),
-    /// Inspect local Worker template status; cloud ref comparison is still pending.
+    /// Inspect local Worker template status and optionally compare D1 refs.
     Status(StatusArgs),
     /// Build and optionally deploy the Cloudflare Worker.
     Deploy(DeployArgs),
@@ -151,7 +155,11 @@ pub struct SyncArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct StatusArgs {}
+pub struct StatusArgs {
+    /// Published site UUID. Defaults to `publish.site_id` config when present.
+    #[arg(long)]
+    pub site_id: Option<String>,
+}
 
 #[derive(Parser, Debug)]
 pub struct DeployArgs {
@@ -237,12 +245,12 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             let result = run_publish_sync_dry_run(&sync_args).await?;
             output::emit(&result, output)
         }
-        PublishCommand::Status(_) => {
+        PublishCommand::Status(status_args) => {
             let repo_root = util::try_working_dir().map_err(|source| {
                 CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
                     .with_stable_code(StableErrorCode::RepoStateInvalid)
             })?;
-            let result = run_publish_status_at_root(&repo_root)?;
+            let result = run_publish_status_command_at_root(&repo_root, &status_args).await?;
             output::emit(&result, output)
         }
         PublishCommand::Deploy(deploy_args) => {
@@ -592,6 +600,23 @@ async fn resolve_unpublish_site_id(args: &UnpublishArgs) -> CliResult<String> {
     validate_publish_site_id(&entry.value)
 }
 
+async fn resolve_publish_status_site_id(args: &StatusArgs) -> CliResult<Option<String>> {
+    if let Some(site_id) = args.site_id.as_deref() {
+        return validate_publish_site_id(site_id).map(Some);
+    }
+
+    let entry = ConfigKv::get("publish.site_id").await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read publish.site_id from repository config: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    validate_publish_site_id(&entry.value).map(Some)
+}
+
 fn validate_publish_site_id(site_id: &str) -> CliResult<String> {
     uuid::Uuid::parse_str(site_id)
         .map(|uuid| uuid.to_string())
@@ -602,6 +627,20 @@ fn validate_publish_site_id(site_id: &str) -> CliResult<String> {
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("use the UUID stored in publish.site_id or the D1 publish_sites row.")
         })
+}
+
+fn publish_status_d1_error(operation: &str, source: D1Error) -> CliError {
+    let stable_code = match source.code {
+        1001..=1003 => StableErrorCode::AuthMissingCredentials,
+        2001..=2003 | 2005..=2006 => StableErrorCode::NetworkUnavailable,
+        _ => StableErrorCode::NetworkProtocol,
+    };
+    CliError::fatal(format!("{operation}: {}", source.message))
+        .with_stable_code(stable_code)
+        .with_hint(
+            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, and LIBRA_D1_DATABASE_ID for cloud \
+             comparison, or omit --site-id/publish.site_id to inspect only the local template.",
+        )
 }
 
 fn run_publish_unpublish_at_root(
@@ -1274,6 +1313,115 @@ impl WorkerTemplateStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PublishRefComparisonState {
+    Unconfigured,
+    Compared,
+}
+
+impl PublishRefComparisonState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unconfigured => "unconfigured",
+            Self::Compared => "compared",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PublishSnapshotIssueState {
+    Missing,
+    Unpublished,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishLocalRefOutput {
+    ref_name: String,
+    target_oid: String,
+    revision_oid: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishPublishedRefOutput {
+    ref_name: String,
+    target_oid: String,
+    revision_oid: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishChangedRefOutput {
+    ref_name: String,
+    local_target_oid: String,
+    published_target_oid: String,
+    local_revision_oid: String,
+    published_revision_oid: String,
+    published_updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishRefSnapshotIssueOutput {
+    ref_name: String,
+    revision_oid: String,
+    state: PublishSnapshotIssueState,
+    revision_status: Option<String>,
+    revision_updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishRefComparisonOutput {
+    state: PublishRefComparisonState,
+    site_id: Option<String>,
+    local_count: usize,
+    published_count: usize,
+    matching_count: usize,
+    local_only_count: usize,
+    published_only_count: usize,
+    changed_count: usize,
+    snapshot_issue_count: usize,
+    snapshot_missing_count: usize,
+    snapshot_unpublished_count: usize,
+    local_only: Vec<PublishLocalRefOutput>,
+    published_only: Vec<PublishPublishedRefOutput>,
+    changed: Vec<PublishChangedRefOutput>,
+    snapshot_issues: Vec<PublishRefSnapshotIssueOutput>,
+}
+
+impl PublishRefComparisonOutput {
+    fn unconfigured() -> Self {
+        Self {
+            state: PublishRefComparisonState::Unconfigured,
+            site_id: None,
+            local_count: 0,
+            published_count: 0,
+            matching_count: 0,
+            local_only_count: 0,
+            published_only_count: 0,
+            changed_count: 0,
+            snapshot_issue_count: 0,
+            snapshot_missing_count: 0,
+            snapshot_unpublished_count: 0,
+            local_only: Vec::new(),
+            published_only: Vec::new(),
+            changed: Vec::new(),
+            snapshot_issues: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublishCloudStatusRows {
+    refs: Vec<PublishRefRow>,
+    revisions: BTreeMap<String, Option<PublishRevisionRow>>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishStatusOutput {
@@ -1287,6 +1435,7 @@ struct PublishStatusOutput {
     files_modified: usize,
     files_outdated: usize,
     files_conflicted: usize,
+    published_refs: PublishRefComparisonOutput,
 }
 
 impl CommandOutput for PublishStatusOutput {
@@ -1305,6 +1454,43 @@ impl CommandOutput for PublishStatusOutput {
         writeln!(writer, "  files modified: {}", self.files_modified)?;
         writeln!(writer, "  files outdated: {}", self.files_outdated)?;
         writeln!(writer, "  files conflicted: {}", self.files_conflicted)?;
+        writeln!(
+            writer,
+            "  published refs: {}",
+            self.published_refs.state.as_str()
+        )?;
+        if self.published_refs.state == PublishRefComparisonState::Compared {
+            writeln!(
+                writer,
+                "  local/published refs: {}/{}",
+                self.published_refs.local_count, self.published_refs.published_count
+            )?;
+            writeln!(
+                writer,
+                "  matching refs: {}",
+                self.published_refs.matching_count
+            )?;
+            writeln!(
+                writer,
+                "  changed refs: {}",
+                self.published_refs.changed_count
+            )?;
+            writeln!(
+                writer,
+                "  local-only refs: {}",
+                self.published_refs.local_only_count
+            )?;
+            writeln!(
+                writer,
+                "  published-only refs: {}",
+                self.published_refs.published_only_count
+            )?;
+            writeln!(
+                writer,
+                "  snapshot issues: {}",
+                self.published_refs.snapshot_issue_count
+            )?;
+        }
         Ok(())
     }
 }
@@ -1479,7 +1665,202 @@ fn run_publish_status_at_root(repo_root: &Path) -> CliResult<PublishStatusOutput
         files_modified,
         files_outdated,
         files_conflicted,
+        published_refs: PublishRefComparisonOutput::unconfigured(),
     })
+}
+
+async fn run_publish_status_command_at_root(
+    repo_root: &Path,
+    args: &StatusArgs,
+) -> CliResult<PublishStatusOutput> {
+    run_publish_status_command_at_root_with_loaders(
+        repo_root,
+        args,
+        || collect_publish_refs(),
+        |site_id| async move {
+            let d1_client = D1Client::from_env().await.map_err(|source| {
+                publish_status_d1_error(
+                    "failed to initialize D1 client for publish status ref comparison",
+                    source,
+                )
+            })?;
+            let refs = d1_client
+                .list_publish_refs(&site_id)
+                .await
+                .map_err(|source| {
+                    publish_status_d1_error(
+                        "failed to list D1 publish_refs for publish status",
+                        source,
+                    )
+                })?;
+            let revisions = load_publish_status_revisions(&d1_client, &site_id, &refs).await?;
+            Ok(PublishCloudStatusRows { refs, revisions })
+        },
+    )
+    .await
+}
+
+async fn run_publish_status_command_at_root_with_loaders<
+    LocalRefs,
+    LocalRefsFuture,
+    CloudRows,
+    CloudRowsFuture,
+>(
+    repo_root: &Path,
+    args: &StatusArgs,
+    load_local_refs: LocalRefs,
+    load_cloud_rows: CloudRows,
+) -> CliResult<PublishStatusOutput>
+where
+    LocalRefs: FnOnce() -> LocalRefsFuture,
+    LocalRefsFuture: Future<Output = CliResult<Vec<RefInput>>>,
+    CloudRows: FnOnce(String) -> CloudRowsFuture,
+    CloudRowsFuture: Future<Output = CliResult<PublishCloudStatusRows>>,
+{
+    let mut output = run_publish_status_at_root(repo_root)?;
+    let Some(site_id) = resolve_publish_status_site_id(args).await? else {
+        return Ok(output);
+    };
+
+    let local_refs = load_local_refs().await?;
+    let cloud_rows = load_cloud_rows(site_id.clone()).await?;
+    output.published_refs = compare_publish_refs(
+        &site_id,
+        &local_refs,
+        &cloud_rows.refs,
+        &cloud_rows.revisions,
+    );
+    Ok(output)
+}
+
+async fn load_publish_status_revisions(
+    d1_client: &D1Client,
+    site_id: &str,
+    refs: &[PublishRefRow],
+) -> CliResult<BTreeMap<String, Option<PublishRevisionRow>>> {
+    let mut revisions = BTreeMap::new();
+    let revision_oids = refs
+        .iter()
+        .map(|publish_ref| publish_ref.revision_oid.as_str())
+        .collect::<BTreeSet<_>>();
+    for revision_oid in revision_oids {
+        let revision = d1_client
+            .find_publish_revision_any(site_id, revision_oid)
+            .await
+            .map_err(|source| {
+                publish_status_d1_error(
+                    "failed to read D1 publish_revisions for publish status",
+                    source,
+                )
+            })?;
+        revisions.insert(revision_oid.to_string(), revision);
+    }
+    Ok(revisions)
+}
+
+fn compare_publish_refs(
+    site_id: &str,
+    local_refs: &[RefInput],
+    published_refs: &[PublishRefRow],
+    published_revisions: &BTreeMap<String, Option<PublishRevisionRow>>,
+) -> PublishRefComparisonOutput {
+    let local_by_ref = local_refs
+        .iter()
+        .map(|publish_ref| (publish_ref.ref_name.as_str(), publish_ref))
+        .collect::<BTreeMap<_, _>>();
+    let mut published_by_ref = published_refs
+        .iter()
+        .map(|publish_ref| (publish_ref.ref_name.as_str(), publish_ref))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut matching_count = 0usize;
+    let mut local_only = Vec::new();
+    let mut changed = Vec::new();
+    let mut snapshot_issues = Vec::new();
+
+    for published_ref in published_refs {
+        match published_revisions.get(&published_ref.revision_oid) {
+            Some(Some(revision)) if revision.status == "published" => {}
+            Some(Some(revision)) => {
+                snapshot_issues.push(PublishRefSnapshotIssueOutput {
+                    ref_name: published_ref.ref_name.clone(),
+                    revision_oid: published_ref.revision_oid.clone(),
+                    state: PublishSnapshotIssueState::Unpublished,
+                    revision_status: Some(revision.status.clone()),
+                    revision_updated_at: Some(revision.updated_at.clone()),
+                });
+            }
+            Some(None) | None => {
+                snapshot_issues.push(PublishRefSnapshotIssueOutput {
+                    ref_name: published_ref.ref_name.clone(),
+                    revision_oid: published_ref.revision_oid.clone(),
+                    state: PublishSnapshotIssueState::Missing,
+                    revision_status: None,
+                    revision_updated_at: None,
+                });
+            }
+        }
+    }
+
+    for (ref_name, local_ref) in local_by_ref {
+        let Some(published_ref) = published_by_ref.remove(ref_name) else {
+            local_only.push(PublishLocalRefOutput {
+                ref_name: local_ref.ref_name.clone(),
+                target_oid: local_ref.target_oid.clone(),
+                revision_oid: local_ref.revision_oid.clone(),
+            });
+            continue;
+        };
+
+        if local_ref.target_oid == published_ref.target_oid
+            && local_ref.revision_oid == published_ref.revision_oid
+        {
+            matching_count += 1;
+        } else {
+            changed.push(PublishChangedRefOutput {
+                ref_name: local_ref.ref_name.clone(),
+                local_target_oid: local_ref.target_oid.clone(),
+                published_target_oid: published_ref.target_oid.clone(),
+                local_revision_oid: local_ref.revision_oid.clone(),
+                published_revision_oid: published_ref.revision_oid.clone(),
+                published_updated_at: published_ref.updated_at.clone(),
+            });
+        }
+    }
+
+    let published_only = published_by_ref
+        .into_values()
+        .map(|publish_ref| PublishPublishedRefOutput {
+            ref_name: publish_ref.ref_name.clone(),
+            target_oid: publish_ref.target_oid.clone(),
+            revision_oid: publish_ref.revision_oid.clone(),
+            updated_at: publish_ref.updated_at.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    PublishRefComparisonOutput {
+        state: PublishRefComparisonState::Compared,
+        site_id: Some(site_id.to_string()),
+        local_count: local_refs.len(),
+        published_count: published_refs.len(),
+        matching_count,
+        local_only_count: local_only.len(),
+        published_only_count: published_only.len(),
+        changed_count: changed.len(),
+        snapshot_issue_count: snapshot_issues.len(),
+        snapshot_missing_count: snapshot_issues
+            .iter()
+            .filter(|issue| issue.state == PublishSnapshotIssueState::Missing)
+            .count(),
+        snapshot_unpublished_count: snapshot_issues
+            .iter()
+            .filter(|issue| issue.state == PublishSnapshotIssueState::Unpublished)
+            .count(),
+        local_only,
+        published_only,
+        changed,
+        snapshot_issues,
+    }
 }
 
 fn read_worker_template_manifest(path: &Path) -> CliResult<Option<WorkerTemplateManifest>> {
@@ -1909,6 +2290,27 @@ mod tests {
     }
 
     #[test]
+    fn clap_status_accepts_site_id() {
+        use clap::Parser;
+        let parsed = PublishArgs::try_parse_from([
+            "publish",
+            "status",
+            "--site-id",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .expect("clap must accept the status cloud comparison site id");
+        match parsed.command {
+            PublishCommand::Status(args) => {
+                assert_eq!(
+                    args.site_id.as_deref(),
+                    Some("00000000-0000-0000-0000-000000000001")
+                );
+            }
+            _ => panic!("expected `status` subcommand"),
+        }
+    }
+
+    #[test]
     fn publish_init_materializes_worker_template_and_manifest() {
         let temp = tempfile::tempdir().expect("temp dir must be created");
 
@@ -1967,6 +2369,10 @@ mod tests {
         assert_eq!(output.status, WorkerTemplateStatus::Missing);
         assert_eq!(output.files_current, 0);
         assert!(output.files_missing > 0);
+        assert_eq!(
+            output.published_refs.state,
+            PublishRefComparisonState::Unconfigured
+        );
     }
 
     #[test]
@@ -1984,6 +2390,233 @@ mod tests {
         assert_eq!(output.files_outdated, 0);
         assert_eq!(output.files_conflicted, 0);
         assert_eq!(output.files_current, output.files_total);
+    }
+
+    #[test]
+    fn publish_status_ref_comparison_reports_d1_drift() {
+        let local_refs = vec![
+            publish_local_ref(
+                "refs/heads/main",
+                "1111111111111111111111111111111111111111",
+                "1111111111111111111111111111111111111111",
+            ),
+            publish_local_ref(
+                "refs/heads/dev",
+                "2222222222222222222222222222222222222222",
+                "2222222222222222222222222222222222222222",
+            ),
+            publish_local_ref(
+                "refs/tags/v1.0.0",
+                "3333333333333333333333333333333333333333",
+                "4444444444444444444444444444444444444444",
+            ),
+        ];
+        let published_refs = vec![
+            publish_ref_row(
+                "refs/heads/main",
+                "1111111111111111111111111111111111111111",
+                "1111111111111111111111111111111111111111",
+            ),
+            publish_ref_row(
+                "refs/tags/v1.0.0",
+                "3333333333333333333333333333333333333333",
+                "5555555555555555555555555555555555555555",
+            ),
+            publish_ref_row(
+                "refs/tags/remote-only",
+                "6666666666666666666666666666666666666666",
+                "6666666666666666666666666666666666666666",
+            ),
+        ];
+
+        let comparison = compare_publish_refs(
+            "00000000-0000-0000-0000-000000000001",
+            &local_refs,
+            &published_refs,
+            &publish_revision_map_for_refs(&published_refs),
+        );
+
+        assert_eq!(comparison.state, PublishRefComparisonState::Compared);
+        assert_eq!(
+            comparison.site_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(comparison.local_count, 3);
+        assert_eq!(comparison.published_count, 3);
+        assert_eq!(comparison.matching_count, 1);
+        assert_eq!(comparison.local_only_count, 1);
+        assert_eq!(comparison.local_only[0].ref_name, "refs/heads/dev");
+        assert_eq!(comparison.changed_count, 1);
+        assert_eq!(comparison.changed[0].ref_name, "refs/tags/v1.0.0");
+        assert_eq!(
+            comparison.changed[0].published_revision_oid,
+            "5555555555555555555555555555555555555555"
+        );
+        assert_eq!(comparison.published_only_count, 1);
+        assert_eq!(
+            comparison.published_only[0].ref_name,
+            "refs/tags/remote-only"
+        );
+        assert_eq!(comparison.snapshot_issue_count, 0);
+    }
+
+    #[test]
+    fn publish_status_ref_comparison_reports_snapshot_issues() {
+        let published_refs = vec![
+            publish_ref_row(
+                "refs/heads/main",
+                "1111111111111111111111111111111111111111",
+                "1111111111111111111111111111111111111111",
+            ),
+            publish_ref_row(
+                "refs/heads/syncing",
+                "2222222222222222222222222222222222222222",
+                "2222222222222222222222222222222222222222",
+            ),
+        ];
+        let revisions = publish_revision_map([(
+            "2222222222222222222222222222222222222222",
+            Some(publish_revision_row(
+                "2222222222222222222222222222222222222222",
+                "syncing",
+            )),
+        )]);
+
+        let comparison = compare_publish_refs(
+            "00000000-0000-0000-0000-000000000001",
+            &[],
+            &published_refs,
+            &revisions,
+        );
+
+        assert_eq!(comparison.snapshot_issue_count, 2);
+        assert_eq!(comparison.snapshot_missing_count, 1);
+        assert_eq!(comparison.snapshot_unpublished_count, 1);
+        assert_eq!(
+            comparison.snapshot_issues[0].state,
+            PublishSnapshotIssueState::Missing
+        );
+        assert_eq!(comparison.snapshot_issues[0].ref_name, "refs/heads/main");
+        assert_eq!(
+            comparison.snapshot_issues[1].state,
+            PublishSnapshotIssueState::Unpublished
+        );
+        assert_eq!(
+            comparison.snapshot_issues[1].revision_status.as_deref(),
+            Some("syncing")
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_status_command_outputs_compared_ref_json() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        let args = StatusArgs {
+            site_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+        };
+
+        let output = run_publish_status_command_at_root_with_loaders(
+            temp.path(),
+            &args,
+            || async {
+                Ok::<Vec<RefInput>, CliError>(vec![
+                    publish_local_ref(
+                        "refs/heads/main",
+                        "1111111111111111111111111111111111111111",
+                        "1111111111111111111111111111111111111111",
+                    ),
+                    publish_local_ref(
+                        "refs/heads/dev",
+                        "2222222222222222222222222222222222222222",
+                        "2222222222222222222222222222222222222222",
+                    ),
+                ])
+            },
+            |site_id| async move {
+                assert_eq!(site_id, "00000000-0000-0000-0000-000000000001");
+                let refs = vec![
+                    publish_ref_row(
+                        "refs/heads/main",
+                        "9999999999999999999999999999999999999999",
+                        "9999999999999999999999999999999999999999",
+                    ),
+                    publish_ref_row(
+                        "refs/tags/remote-only",
+                        "3333333333333333333333333333333333333333",
+                        "3333333333333333333333333333333333333333",
+                    ),
+                ];
+                let revisions = publish_revision_map([(
+                    "9999999999999999999999999999999999999999",
+                    Some(publish_revision_row(
+                        "9999999999999999999999999999999999999999",
+                        "published",
+                    )),
+                )]);
+                Ok::<PublishCloudStatusRows, CliError>(PublishCloudStatusRows { refs, revisions })
+            },
+        )
+        .await
+        .expect("status should compare injected D1 refs");
+
+        let json = serde_json::to_value(&output).expect("status output must serialize");
+        assert_eq!(json["publishedRefs"]["state"], "compared");
+        assert_eq!(json["publishedRefs"]["siteId"], args.site_id.unwrap());
+        assert_eq!(json["publishedRefs"]["localCount"], 2);
+        assert_eq!(json["publishedRefs"]["publishedCount"], 2);
+        assert_eq!(json["publishedRefs"]["changedCount"], 1);
+        assert_eq!(
+            json["publishedRefs"]["changed"][0]["refName"],
+            "refs/heads/main"
+        );
+        assert_eq!(json["publishedRefs"]["localOnlyCount"], 1);
+        assert_eq!(
+            json["publishedRefs"]["localOnly"][0]["refName"],
+            "refs/heads/dev"
+        );
+        assert_eq!(json["publishedRefs"]["publishedOnlyCount"], 1);
+        assert_eq!(
+            json["publishedRefs"]["publishedOnly"][0]["refName"],
+            "refs/tags/remote-only"
+        );
+        assert_eq!(json["publishedRefs"]["snapshotIssueCount"], 1);
+        assert_eq!(json["publishedRefs"]["snapshotMissingCount"], 1);
+        assert_eq!(
+            json["publishedRefs"]["snapshotIssues"][0]["refName"],
+            "refs/tags/remote-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_status_command_fails_when_d1_comparison_is_unavailable() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        let args = StatusArgs {
+            site_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+        };
+
+        let err = run_publish_status_command_at_root_with_loaders(
+            temp.path(),
+            &args,
+            || async { Ok::<Vec<RefInput>, CliError>(Vec::new()) },
+            |site_id| async move {
+                assert_eq!(site_id, "00000000-0000-0000-0000-000000000001");
+                Err::<PublishCloudStatusRows, CliError>(publish_status_d1_error(
+                    "failed to initialize D1 client for publish status ref comparison",
+                    D1Error {
+                        code: 1001,
+                        message: "LIBRA_D1_ACCOUNT_ID not set (env or vault)".to_string(),
+                    },
+                ))
+            },
+        )
+        .await
+        .expect_err("configured cloud comparison must fail instead of returning stale state");
+
+        assert_eq!(err.stable_code(), StableErrorCode::AuthMissingCredentials);
+        assert!(
+            err.message().contains("LIBRA_D1_ACCOUNT_ID"),
+            "error should explain which D1 credential is missing: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -2169,6 +2802,77 @@ mod tests {
             "error must echo the bad site id: {}",
             err.message()
         );
+    }
+
+    fn publish_local_ref(ref_name: &str, target_oid: &str, revision_oid: &str) -> RefInput {
+        RefInput {
+            ref_name: ref_name.to_string(),
+            target_oid: target_oid.to_string(),
+            revision_oid: revision_oid.to_string(),
+        }
+    }
+
+    fn publish_ref_row(ref_name: &str, target_oid: &str, revision_oid: &str) -> PublishRefRow {
+        let short_name = publish_short_ref_name(ref_name)
+            .expect("test ref names must be publishable")
+            .to_string();
+        PublishRefRow {
+            site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            ref_name: ref_name.to_string(),
+            ref_type: if ref_name.starts_with("refs/heads/") {
+                "branch".to_string()
+            } else {
+                "tag".to_string()
+            },
+            short_name,
+            target_oid: target_oid.to_string(),
+            revision_oid: revision_oid.to_string(),
+            is_default: 0,
+            sync_run_id: "sync-1".to_string(),
+            schema_version: 1,
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn publish_revision_map_for_refs(
+        refs: &[PublishRefRow],
+    ) -> BTreeMap<String, Option<PublishRevisionRow>> {
+        refs.iter()
+            .map(|publish_ref| {
+                (
+                    publish_ref.revision_oid.clone(),
+                    Some(publish_revision_row(&publish_ref.revision_oid, "published")),
+                )
+            })
+            .collect()
+    }
+
+    fn publish_revision_map<const N: usize>(
+        entries: [(&str, Option<PublishRevisionRow>); N],
+    ) -> BTreeMap<String, Option<PublishRevisionRow>> {
+        entries
+            .into_iter()
+            .map(|(revision_oid, row)| (revision_oid.to_string(), row))
+            .collect()
+    }
+
+    fn publish_revision_row(revision_oid: &str, status: &str) -> PublishRevisionRow {
+        PublishRevisionRow {
+            site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            revision_oid: revision_oid.to_string(),
+            status: status.to_string(),
+            code_manifest_key: Some(format!("repo/publish/revisions/{revision_oid}/code.json")),
+            ai_index_key: None,
+            file_count: 1,
+            ai_object_count: 0,
+            ai_bundle_count: 0,
+            redaction_mode: "default".to_string(),
+            redaction_rules_version: "2026-05-13".to_string(),
+            sync_run_id: "sync-1".to_string(),
+            schema_version: 1,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
     }
 
     #[test]
