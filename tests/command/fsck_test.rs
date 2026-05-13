@@ -191,7 +191,9 @@ fn test_fsck_with_empty_object_id() {
     let output = run_libra_command(&["fsck", ""], repo.path());
     // Should return non-zero exit code for invalid input, but not crash
     assert!(
-        output.status.code() == Some(1) || output.status.code() == Some(128) || output.status.code() == Some(0),
+        output.status.code() == Some(1)
+            || output.status.code() == Some(128)
+            || output.status.code() == Some(0),
         "fsck with empty arg should return valid exit code, got: {:?}",
         output.status.code()
     );
@@ -269,7 +271,13 @@ fn test_fsck_with_mixed_case_object_id() {
     let mixed_hash: String = commit_hash
         .chars()
         .enumerate()
-        .map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c })
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
         .collect();
 
     let output = run_libra_command(&["fsck", &mixed_hash], repo.path());
@@ -440,7 +448,9 @@ fn test_fsck_corrupted_object() {
         );
         // fsck reports "unknown type" for corrupted objects
         assert!(
-            combined.contains("unknown") || combined.contains("corrupt") || combined.contains("error"),
+            combined.contains("unknown")
+                || combined.contains("corrupt")
+                || combined.contains("error"),
             "should report corruption, got: {}",
             combined
         );
@@ -512,8 +522,8 @@ fn test_fsck_broken_head_reference() {
 
     // Store original HEAD
     let head_path = repo.path().join(".libra").join("HEAD");
-    let original_head = fs::read_to_string(&head_path)
-        .unwrap_or_else(|_| "ref: refs/heads/main".to_string());
+    let original_head =
+        fs::read_to_string(&head_path).unwrap_or_else(|_| "ref: refs/heads/main".to_string());
 
     // Corrupt HEAD to point to non-existent branch
     fs::write(&head_path, "ref: refs/heads/nonexistent").unwrap();
@@ -661,7 +671,10 @@ fn test_fsck_broken_tag_reference() {
     );
     // fsck may report "unknown" for invalid commit hashes in tags
     assert!(
-        combined.contains("unknown") || combined.contains("error") || combined.contains("not found") || output.status.success(),
+        combined.contains("unknown")
+            || combined.contains("error")
+            || combined.contains("not found")
+            || output.status.success(),
         "should handle broken tag reference, got: {}",
         combined
     );

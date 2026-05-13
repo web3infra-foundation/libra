@@ -7,7 +7,11 @@
 //! - `dangling <type> <object>`: Object exists but is not referenced
 //! - `unreachable <type> <object>`: Object is not reachable from any ref
 
-use std::{collections::HashSet, fs, io, io::{Read, Seek}};
+use std::{
+    collections::HashSet,
+    fs, io,
+    io::{Read, Seek},
+};
 
 use clap::Parser;
 use git_internal::{
@@ -19,12 +23,17 @@ use git_internal::{
 };
 use hex;
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
-use sea_orm::{EntityTrait};
+use sea_orm::EntityTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{load_object},
-    internal::{branch::Branch, db, head::Head, model::reference, model::reflog},
+    command::load_object,
+    internal::{
+        branch::Branch,
+        db,
+        head::Head,
+        model::{reference, reflog},
+    },
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
@@ -74,7 +83,7 @@ pub enum FsckMsgId {
     // ===== Error messages - Pathname checks =====
     HasDot,
     HasDotdot,
-    HasDotlibra,  // Libra-specific: renamed from hasDotgit
+    HasDotlibra, // Libra-specific: renamed from hasDotgit
     EmptyName,
     FullPathname,
     // ===== Error messages - Libra specific =====
@@ -145,7 +154,9 @@ impl FsckMsgId {
             FsckMsgId::IndexCorruption => format!("index corruption: {}", obj_id),
             FsckMsgId::InvalidIndexMode => format!("invalid index mode: {} {}", obj_type, obj_id),
             FsckMsgId::InvalidIndexStage => format!("invalid index stage: {} {}", obj_type, obj_id),
-            FsckMsgId::IndexEntryWrongType => format!("index entry wrong type: {} is {}", obj_id, obj_type),
+            FsckMsgId::IndexEntryWrongType => {
+                format!("index entry wrong type: {} is {}", obj_id, obj_type)
+            }
         }
     }
 }
@@ -257,7 +268,7 @@ impl FsckArgs {
             return false;
         }
         match &self.dangling {
-            None => true,  // default
+            None => true, // default
             Some(s) => s != "false" && s != "no" && s != "0",
         }
     }
@@ -296,9 +307,8 @@ pub struct FsckResult {
     pub reflog_issues: usize,
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
-    pub has_errors: bool,  // Track if any error was printed to stderr
+    pub has_errors: bool, // Track if any error was printed to stderr
 }
-
 
 /// Result of checking the index file
 #[derive(Debug, Clone)]
@@ -393,7 +403,6 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     Ok(hashes)
 }
 
-
 async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
@@ -460,7 +469,14 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     sorted_hashes.sort();
 
     // Stage 2: Check each object (sorted by hash)
-    check_objects(&sorted_hashes, storage, &mut result, args.verbose, args.connectivity_only).await?;
+    check_objects(
+        &sorted_hashes,
+        storage,
+        &mut result,
+        args.verbose,
+        args.connectivity_only,
+    )
+    .await?;
 
     // Stage 3: Check HEAD link
     let head_is_unborn = check_head().await;
@@ -477,10 +493,26 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     check_index(storage, &mut result, args.verbose)?;
 
     // Stage 7: Check connectivity (re-verify all objects in storage order)
-    check_connectivity(&all_hashes, storage, &mut result, args.verbose, args.name_objects, args.connectivity_only).await?;
+    check_connectivity(
+        &all_hashes,
+        storage,
+        &mut result,
+        args.verbose,
+        args.name_objects,
+        args.connectivity_only,
+    )
+    .await?;
 
     // Stage 8: Find dangling and unreachable objects
-    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled(), args.lost_found).await?;
+    find_dangling_unreachable(
+        storage,
+        &mut result,
+        args.unreachable,
+        args.no_reflogs,
+        args.dangling_enabled(),
+        args.lost_found,
+    )
+    .await?;
 
     // Stage 9: Report root commits
     if args.root {
@@ -499,7 +531,11 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
 }
 
 /// Check all 256 object directories and print progress
-fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash], verbose: bool) -> CliResult<()> {
+fn check_directories(
+    storage: &ClientStorage,
+    all_hashes: &[ObjectHash],
+    verbose: bool,
+) -> CliResult<()> {
     // Count objects per prefix directory
     let mut prefix_counts = vec![0usize; 256];
     for hash in all_hashes {
@@ -538,7 +574,10 @@ fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash], verbose
 
     // Print pack objects if any
     if pack_count > 0 {
-        println!("Checking objects: 100% ({}/{}), done.", pack_count, pack_count);
+        println!(
+            "Checking objects: 100% ({}/{}), done.",
+            pack_count, pack_count
+        );
     }
 
     Ok(())
@@ -596,7 +635,8 @@ async fn check_objects(
             }
         }
 
-        let (check_result, reported_errors) = verify_object(&hash, storage, connectivity_only, true).await?;
+        let (check_result, reported_errors) =
+            verify_object(&hash, storage, connectivity_only, true).await?;
         result.objects_checked += 1;
         result.has_errors |= reported_errors;
 
@@ -632,13 +672,13 @@ async fn check_head() -> bool {
         Ok(Head::Branch(name)) => {
             // HEAD points to a branch, check if that branch exists
             match Branch::find_branch_result(&name, None).await {
-                Ok(Some(_)) => false,    // Branch exists, not unborn
-                Ok(None) => true,        // Branch doesn't exist, unborn
-                Err(_) => true,          // Error, treat as unborn
+                Ok(Some(_)) => false, // Branch exists, not unborn
+                Ok(None) => true,     // Branch doesn't exist, unborn
+                Err(_) => true,       // Error, treat as unborn
             }
         }
         Ok(Head::Detached(_)) => false, // Detached HEAD, not unborn
-        Err(_) => true,                  // Error, treat as unborn
+        Err(_) => true,                 // Error, treat as unborn
     }
 }
 
@@ -686,7 +726,7 @@ async fn build_object_name_map() -> std::collections::HashMap<String, String> {
 
     // For each hash, format the reflog names with timestamps and positions
     for (hash, mut entries) in reflog_by_hash {
-    // Sort by timestamp descending (most recent first)
+        // Sort by timestamp descending (most recent first)
         entries.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let names: Vec<String> = entries
@@ -775,11 +815,7 @@ async fn check_reflogs(
 }
 
 /// Check index
-fn check_index(
-    storage: &ClientStorage,
-    result: &mut FsckResult,
-    verbose: bool,
-) -> CliResult<()> {
+fn check_index(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) -> CliResult<()> {
     if verbose {
         println!("Checking cache tree of .libra/index");
     }
@@ -818,13 +854,17 @@ async fn check_connectivity(
         if verbose {
             let hash_str = hash.to_string();
             if name_objects {
-                let name = object_names.get(hash_str.as_str()).map(|s| s.as_str()).unwrap_or(":");
+                let name = object_names
+                    .get(hash_str.as_str())
+                    .map(|s| s.as_str())
+                    .unwrap_or(":");
                 println!("Checking {} ({})", hash, name);
             } else {
                 println!("Checking {}", hash);
             }
         }
-        let (check_result, reported_errors) = verify_object(hash, storage, connectivity_only, false).await?;
+        let (check_result, reported_errors) =
+            verify_object(hash, storage, connectivity_only, false).await?;
         result.has_errors |= reported_errors;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
             result.overall_status = check_result.status.clone();
@@ -857,9 +897,7 @@ impl ReachabilityContext {
 }
 
 /// Collect all starting points for reachability analysis
-async fn collect_reachability_context(
-    storage: &ClientStorage,
-) -> CliResult<ReachabilityContext> {
+async fn collect_reachability_context(storage: &ClientStorage) -> CliResult<ReachabilityContext> {
     let mut ctx = ReachabilityContext::new();
 
     // Collect all objects in storage
@@ -952,7 +990,8 @@ fn bfs_mark_reachable(
     storage: &ClientStorage,
 ) -> HashSet<ObjectHash> {
     let mut reachable = HashSet::new();
-    let mut queue: std::collections::VecDeque<ObjectHash> = starting_points.iter().copied().collect();
+    let mut queue: std::collections::VecDeque<ObjectHash> =
+        starting_points.iter().copied().collect();
 
     while let Some(current) = queue.pop_front() {
         if reachable.contains(&current) {
@@ -1008,7 +1047,7 @@ async fn find_dangling_unreachable(
     let all_reachable = bfs_mark_reachable(&starting_points, storage);
 
     // Collect dangling/unreachable objects for lost-found
-    let mut lost_found_objects: Vec<(ObjectHash, String)> = Vec::new();  // (hash, obj_type)
+    let mut lost_found_objects: Vec<(ObjectHash, String)> = Vec::new(); // (hash, obj_type)
 
     // Find objects not reachable from any starting point
     for hash in &ctx.all_objects {
@@ -1081,8 +1120,9 @@ async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
 /// Output format matches git fsck --tags:
 /// - For annotated tags: "tagged commit <commit-hash> (<tag-name>) in <tag-object-hash>"
 async fn find_and_report_tags() -> CliResult<()> {
-    use crate::internal::model::reference;
     use sea_orm::EntityTrait;
+
+    use crate::internal::model::reference;
 
     let db_conn = db::get_db_conn_instance().await;
 
@@ -1122,24 +1162,23 @@ async fn find_and_report_tags() -> CliResult<()> {
 /// - blob objects: written to lost-found/other/<hash> with blob content
 async fn write_lost_found_objects(
     storage: &ClientStorage,
-    objects: &[(ObjectHash, String)],  // (hash, object_type)
+    objects: &[(ObjectHash, String)], // (hash, object_type)
 ) -> CliResult<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
+    use std::{fs::OpenOptions, io::Write};
 
-    let lost_found_dir = storage.base_path().parent()
+    let lost_found_dir = storage
+        .base_path()
+        .parent()
         .expect("storage should have parent")
         .join("lost-found");
 
     // Create lost-found directory structure
     let commit_dir = lost_found_dir.join("commit");
     let other_dir = lost_found_dir.join("other");
-    fs::create_dir_all(&commit_dir).map_err(|e| {
-        CliError::fatal(format!("failed to create lost-found/commit: {}", e))
-    })?;
-    fs::create_dir_all(&other_dir).map_err(|e| {
-        CliError::fatal(format!("failed to create lost-found/other: {}", e))
-    })?;
+    fs::create_dir_all(&commit_dir)
+        .map_err(|e| CliError::fatal(format!("failed to create lost-found/commit: {}", e)))?;
+    fs::create_dir_all(&other_dir)
+        .map_err(|e| CliError::fatal(format!("failed to create lost-found/other: {}", e)))?;
 
     for (hash, obj_type) in objects {
         let hash_str = hash.to_string();
@@ -1156,10 +1195,9 @@ async fn write_lost_found_objects(
                     .map_err(|e| {
                         CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
                     })?;
-                writeln!(file, "{}", hash_str)
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
-                    })?;
+                writeln!(file, "{}", hash_str).map_err(|e| {
+                    CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                })?;
             }
             "tree" => {
                 // Write tree hash to lost-found/other/<hash>
@@ -1172,10 +1210,9 @@ async fn write_lost_found_objects(
                     .map_err(|e| {
                         CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
                     })?;
-                writeln!(file, "{}", hash_str)
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
-                    })?;
+                writeln!(file, "{}", hash_str).map_err(|e| {
+                    CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                })?;
             }
             "blob" => {
                 // Write blob content to lost-found/other/<hash>
@@ -1191,10 +1228,9 @@ async fn write_lost_found_objects(
                     .map_err(|e| {
                         CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
                     })?;
-                file.write_all(&data)
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
-                    })?;
+                file.write_all(&data).map_err(|e| {
+                    CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                })?;
             }
             _ => {
                 // Unknown type: write hash to other
@@ -1207,10 +1243,9 @@ async fn write_lost_found_objects(
                     .map_err(|e| {
                         CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
                     })?;
-                writeln!(file, "{}", hash_str)
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
-                    })?;
+                writeln!(file, "{}", hash_str).map_err(|e| {
+                    CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                })?;
             }
         }
     }
@@ -1234,7 +1269,7 @@ async fn check_and_fix_refs(
         if result.overall_status == CheckStatus::Ok {
             result.overall_status = CheckStatus::Missing;
         }
-        result.has_errors = true;  // Broken refs (missing objects) should cause failure
+        result.has_errors = true; // Broken refs (missing objects) should cause failure
     }
     Ok(())
 }
@@ -1243,7 +1278,12 @@ async fn check_and_fix_refs(
 /// If connectivity_only is true, only checks that objects exist (not their content)
 /// If report_errors is true, reports errors immediately; otherwise just returns status
 /// Returns (ObjectCheckResult, has_error)
-async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_only: bool, report_errors: bool) -> CliResult<(ObjectCheckResult, bool)> {
+async fn verify_object(
+    hash: &ObjectHash,
+    storage: &ClientStorage,
+    connectivity_only: bool,
+    report_errors: bool,
+) -> CliResult<(ObjectCheckResult, bool)> {
     let mut has_error = false;
 
     // Check if object exists
@@ -1251,13 +1291,16 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
         if report_errors {
             has_error |= report(FsckMsgId::Missing, "unknown", &hash.to_string());
         }
-        return Ok((ObjectCheckResult {
-            object_id: hash.to_string(),
-            object_type: "unknown".to_string(),
-            status: CheckStatus::Missing,
-            error_message: Some("Object not found in storage".to_string()),
-            size: 0,
-        }, has_error));
+        return Ok((
+            ObjectCheckResult {
+                object_id: hash.to_string(),
+                object_type: "unknown".to_string(),
+                status: CheckStatus::Missing,
+                error_message: Some("Object not found in storage".to_string()),
+                size: 0,
+            },
+            has_error,
+        ));
     }
 
     // Get object type
@@ -1268,25 +1311,31 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
             if report_errors {
                 has_error |= report(FsckMsgId::UnknownType, "unknown", &hash.to_string());
             }
-            return Ok((ObjectCheckResult {
-                object_id: hash.to_string(),
-                object_type: "unknown".to_string(),
-                status: CheckStatus::InvalidFormat,
-                error_message: Some(format!("Object {} has unknown type", hash)),
-                size: 0,
-            }, has_error));
+            return Ok((
+                ObjectCheckResult {
+                    object_id: hash.to_string(),
+                    object_type: "unknown".to_string(),
+                    status: CheckStatus::InvalidFormat,
+                    error_message: Some(format!("Object {} has unknown type", hash)),
+                    size: 0,
+                },
+                has_error,
+            ));
         }
     };
 
     // --connectivity-only: only check that objects exist, skip content validation
     if connectivity_only {
-        return Ok((ObjectCheckResult {
-            object_id: hash.to_string(),
-            object_type: obj_type.to_string(),
-            status: CheckStatus::Ok,
-            error_message: None,
-            size: 0,
-        }, false));
+        return Ok((
+            ObjectCheckResult {
+                object_id: hash.to_string(),
+                object_type: obj_type.to_string(),
+                status: CheckStatus::Ok,
+                error_message: None,
+                size: 0,
+            },
+            false,
+        ));
     }
 
     // Get raw data for full validation
@@ -1294,15 +1343,22 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
         Ok(d) => d,
         Err(e) => {
             if report_errors {
-                has_error |= report(FsckMsgId::HashMismatch, &obj_type.to_string(), &hash.to_string());
+                has_error |= report(
+                    FsckMsgId::HashMismatch,
+                    &obj_type.to_string(),
+                    &hash.to_string(),
+                );
             }
-            return Ok((ObjectCheckResult {
-                object_id: hash.to_string(),
-                object_type: obj_type.to_string(),
-                status: CheckStatus::HashMismatch,
-                error_message: Some(format!("Failed to read object: {}", e)),
-                size: 0,
-            }, has_error));
+            return Ok((
+                ObjectCheckResult {
+                    object_id: hash.to_string(),
+                    object_type: obj_type.to_string(),
+                    status: CheckStatus::HashMismatch,
+                    error_message: Some(format!("Failed to read object: {}", e)),
+                    size: 0,
+                },
+                has_error,
+            ));
         }
     };
 
@@ -1327,32 +1383,42 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
     let hash_bytes = hash.as_ref();
     if computed_bytes != hash_bytes {
         if report_errors {
-            has_error |= report(FsckMsgId::HashMismatch, &obj_type.to_string(), &hash.to_string());
+            has_error |= report(
+                FsckMsgId::HashMismatch,
+                &obj_type.to_string(),
+                &hash.to_string(),
+            );
         }
-        return Ok((ObjectCheckResult {
-            object_id: hash.to_string(),
-            object_type: obj_type.to_string(),
-            status: CheckStatus::HashMismatch,
-            error_message: Some(format!(
-                "Hash mismatch: expected {}, computed {}",
-                hash,
-                hex::encode(computed_bytes)
-            )),
-            size,
-        }, has_error));
+        return Ok((
+            ObjectCheckResult {
+                object_id: hash.to_string(),
+                object_type: obj_type.to_string(),
+                status: CheckStatus::HashMismatch,
+                error_message: Some(format!(
+                    "Hash mismatch: expected {}, computed {}",
+                    hash,
+                    hex::encode(computed_bytes)
+                )),
+                size,
+            },
+            has_error,
+        ));
     }
 
     // Verify object format and run type-specific checks
     match obj_type {
         ObjectType::Blob => {
             if Blob::from_bytes(&data, *hash).is_err() {
-                return Ok((ObjectCheckResult {
-                    object_id: hash.to_string(),
-                    object_type: obj_type.to_string(),
-                    status: CheckStatus::InvalidFormat,
-                    error_message: Some(format!("Object {} has invalid blob format", hash)),
-                    size,
-                }, false));
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!("Object {} has invalid blob format", hash)),
+                        size,
+                    },
+                    false,
+                ));
             }
         }
         ObjectType::Tree => {
@@ -1384,15 +1450,19 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                 }
                 Err(_) => {
                     if report_errors {
-                        has_error |= report(FsckMsgId::BadTree, &obj_type.to_string(), &hash.to_string());
+                        has_error |=
+                            report(FsckMsgId::BadTree, &obj_type.to_string(), &hash.to_string());
                     }
-                    return Ok((ObjectCheckResult {
-                        object_id: hash.to_string(),
-                        object_type: obj_type.to_string(),
-                        status: CheckStatus::InvalidFormat,
-                        error_message: Some(format!("Object {} has invalid tree format", hash)),
-                        size,
-                    }, has_error));
+                    return Ok((
+                        ObjectCheckResult {
+                            object_id: hash.to_string(),
+                            object_type: obj_type.to_string(),
+                            status: CheckStatus::InvalidFormat,
+                            error_message: Some(format!("Object {} has invalid tree format", hash)),
+                            size,
+                        },
+                        has_error,
+                    ));
                 }
             }
         }
@@ -1407,7 +1477,8 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                         has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
                     }
                     if commit.committer.name.is_empty() && report_errors {
-                        has_error |= report(FsckMsgId::MissingCommitter, "commit", &hash.to_string());
+                        has_error |=
+                            report(FsckMsgId::MissingCommitter, "commit", &hash.to_string());
                     }
                     if commit.committer.email.is_empty() && report_errors {
                         has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
@@ -1418,13 +1489,19 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                     if report_errors {
                         has_error |= report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
                     }
-                    return Ok((ObjectCheckResult {
-                        object_id: hash.to_string(),
-                        object_type: obj_type.to_string(),
-                        status: CheckStatus::InvalidFormat,
-                        error_message: Some(format!("Object {} has invalid commit format", hash)),
-                        size,
-                    }, has_error));
+                    return Ok((
+                        ObjectCheckResult {
+                            object_id: hash.to_string(),
+                            object_type: obj_type.to_string(),
+                            status: CheckStatus::InvalidFormat,
+                            error_message: Some(format!(
+                                "Object {} has invalid commit format",
+                                hash
+                            )),
+                            size,
+                        },
+                        has_error,
+                    ));
                 }
             }
         }
@@ -1435,30 +1512,40 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                 if report_errors {
                     has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
                 }
-                return Ok((ObjectCheckResult {
-                    object_id: hash.to_string(),
-                    object_type: obj_type.to_string(),
-                    status: CheckStatus::InvalidFormat,
-                    error_message: Some(format!("Object {} has invalid tag format", hash)),
-                    size,
-                }, has_error));
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!("Object {} has invalid tag format", hash)),
+                        size,
+                    },
+                    has_error,
+                ));
             }
             // TODO: Parse tag and check for missing tagger, object, type, tag entry
         }
         _ => {
             if report_errors {
-                has_error |= report(FsckMsgId::UnknownType, &obj_type.to_string(), &hash.to_string());
+                has_error |= report(
+                    FsckMsgId::UnknownType,
+                    &obj_type.to_string(),
+                    &hash.to_string(),
+                );
             }
         }
     }
 
-    Ok((ObjectCheckResult {
-        object_id: hash.to_string(),
-        object_type: obj_type.to_string(),
-        status: CheckStatus::Ok,
-        error_message: None,
-        size,
-    }, has_error))
+    Ok((
+        ObjectCheckResult {
+            object_id: hash.to_string(),
+            object_type: obj_type.to_string(),
+            status: CheckStatus::Ok,
+            error_message: None,
+            size,
+        },
+        has_error,
+    ))
 }
 
 /// Result of checking refs
@@ -1630,4 +1717,3 @@ fn validate_index_entry(
 
     None
 }
-
