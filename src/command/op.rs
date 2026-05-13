@@ -1,4 +1,4 @@
-//! Operation (op) command group for command-level operation history.
+//! Operation (op) command group for viewing and restoring command-level operation history.
 
 use std::str::FromStr;
 
@@ -14,7 +14,10 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
-        operation::{OperationLogListItem, OperationQueryPage, OperationService, OperationStatus},
+        operation::{
+            OperationGraphRecord, OperationLogListItem, OperationQueryPage, OperationService,
+            OperationStatus,
+        },
         operation_wrapper::{OperationMeta, OperationScope, with_operation_log},
     },
     utils::{
@@ -224,14 +227,7 @@ async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) 
     let repo_id = current_repo_id().await?;
     let op_id = resolve_op_ref(&db, &repo_id, &op_ref).await?;
 
-    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &op_id)
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to load operation '{op_id}': {e}")))?
-        .ok_or_else(|| {
-            CliError::fatal(format!("operation '{op_id}' not found"))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_hint("use 'libra op log' to list available operations")
-        })?;
+    let graph = load_operation_graph(&db, &op_id).await?;
     let op_record = &graph.operation;
     let op_output = OpOutput::Show {
         op_id: op_record.op_id.clone(),
@@ -298,17 +294,7 @@ async fn handle_op_restore(
     let db = get_db_conn_instance().await;
     let repo_id = current_repo_id().await?;
     let target_op_id = resolve_op_ref(&db, &repo_id, &op_ref).await?;
-    let target_graph =
-        OperationService::load_restore_view_by_operation_with_conn(&db, &target_op_id)
-            .await
-            .map_err(|e| {
-                CliError::fatal(format!("failed to load operation '{target_op_id}': {e}"))
-            })?
-            .ok_or_else(|| {
-                CliError::fatal(format!("operation '{target_op_id}' not found"))
-                    .with_stable_code(StableErrorCode::CliInvalidTarget)
-                    .with_hint("use 'libra op log' to list available operations")
-            })?;
+    let target_graph = load_operation_graph(&db, &target_op_id).await?;
     let target_op = target_graph.operation.clone();
 
     if !force && !status::is_clean().await {
@@ -429,37 +415,51 @@ async fn operation_actor() -> String {
         .unwrap_or_else(|| "libra-user".to_string())
 }
 
+async fn load_operation_graph<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    op_id: &str,
+) -> CliResult<OperationGraphRecord> {
+    OperationService::load_restore_view_by_operation_with_conn(db, op_id)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load operation '{op_id}': {e}")))?
+        .ok_or_else(|| {
+            CliError::fatal(format!("operation '{op_id}' not found"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra op log' to list available operations")
+        })
+}
+
 async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
     db: &C,
     repo_id: &str,
     op_ref: &str,
 ) -> CliResult<String> {
-    if let Some(index_str) = op_ref.strip_prefix("@{")
-        && let Some(index_end) = index_str.find('}')
-    {
-        let index: usize = index_str[..index_end].parse().map_err(|_| {
-            CliError::fatal(format!("invalid operation index: {op_ref}"))
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-        })?;
-        let page = OperationQueryPage {
-            page: 1,
-            per_page: (index + 1) as u64,
-        };
-        let result =
-            OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
-                .await
-                .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+    if let Some(index_str) = op_ref.strip_prefix("@{") {
+        if let Some(index_end) = index_str.find('}') {
+            let index: usize = index_str[..index_end].parse().map_err(|_| {
+                CliError::fatal(format!("invalid operation index: {op_ref}"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            })?;
+            let page = OperationQueryPage {
+                page: 1,
+                per_page: (index + 1) as u64,
+            };
+            let result =
+                OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
 
-        return result
-            .items
-            .into_iter()
-            .nth(index)
-            .map(|op| op.op_id)
-            .ok_or_else(|| {
-                CliError::fatal(format!("operation index {index} out of range"))
-                    .with_stable_code(StableErrorCode::CliInvalidTarget)
-                    .with_hint("use 'libra op log' to see available operations")
-            });
+            return result
+                .items
+                .into_iter()
+                .nth(index)
+                .map(|op| op.op_id)
+                .ok_or_else(|| {
+                    CliError::fatal(format!("operation index {index} out of range"))
+                        .with_stable_code(StableErrorCode::CliInvalidTarget)
+                        .with_hint("use 'libra op log' to see available operations")
+                });
+        }
     }
 
     Ok(op_ref.to_string())
