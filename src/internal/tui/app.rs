@@ -6,7 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +17,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
+use serde::Deserialize;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
@@ -4474,11 +4475,17 @@ where
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Usage => {
-                self.usage_detail_args = Some(args.trim().to_string());
-                let details = self.usage_detail_panel_text(args).await;
-                self.widget
-                    .bottom_pane
-                    .set_usage_detail_panel(Some(details));
+                if usage_detail_popup_enabled(self.registry.working_dir()) {
+                    self.usage_detail_args = Some(args.trim().to_string());
+                    let details = self.usage_detail_panel_text(args).await;
+                    self.widget
+                        .bottom_pane
+                        .set_usage_detail_panel(Some(details));
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        self.usage_report_text(),
+                    )));
+                }
                 self.schedule_draw();
             }
             BuiltinCommand::Plan => {
@@ -7765,6 +7772,40 @@ fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct UsageTuiProjectConfig {
+    usage: Option<UsageTuiSectionConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageTuiSectionConfig {
+    tui_detail_popup: Option<bool>,
+}
+
+fn usage_detail_popup_enabled(working_dir: &Path) -> bool {
+    let path = working_dir.join(".libra").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    usage_detail_popup_enabled_from_toml(&contents).unwrap_or_else(|error| {
+        tracing::warn!(
+            target: "libra::tui::usage",
+            path = %path.display(),
+            error = %error,
+            "failed to parse usage TUI config; enabling usage detail popup"
+        );
+        true
+    })
+}
+
+fn usage_detail_popup_enabled_from_toml(contents: &str) -> Result<bool, toml::de::Error> {
+    let config: UsageTuiProjectConfig = toml::from_str(contents)?;
+    Ok(config
+        .usage
+        .and_then(|usage| usage.tui_detail_popup)
+        .unwrap_or(true))
+}
+
 fn source_command_usage() -> String {
     "Usage: /source [list|enable <slug>|disable <slug>|reload <slug>]".to_string()
 }
@@ -8212,14 +8253,14 @@ mod tests {
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
         is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
-        normalize_terminal_paste_text, parse_pending_plan_revision_command,
+        normalize_terminal_paste_text, parse_pending_plan_revision_command, parse_usage_grouping,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
         provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
         session_graph_thread_id, should_auto_classify_first_user_message,
         should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
         should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
-        undo_should_prefer_vcs_rollback,
+        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
@@ -8249,6 +8290,7 @@ mod tests {
                 context::{PlanDraftStep, SubmitPlanDraftArgs},
                 spec::ToolSpec,
             },
+            usage::UsageGrouping,
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -8274,6 +8316,34 @@ mod tests {
             checks: vec![],
             contract: TaskContract::default(),
         }
+    }
+
+    #[test]
+    fn usage_grouping_parser_accepts_tui_flags() {
+        assert_eq!(
+            parse_usage_grouping("").unwrap(),
+            UsageGrouping::ProviderModel
+        );
+        assert_eq!(
+            parse_usage_grouping("--by=agent").unwrap(),
+            UsageGrouping::Agent
+        );
+        assert_eq!(
+            parse_usage_grouping("--by=agent-model").unwrap(),
+            UsageGrouping::AgentProviderModel
+        );
+        assert!(parse_usage_grouping("--bad").is_err());
+    }
+
+    #[test]
+    fn usage_detail_popup_config_defaults_to_enabled() {
+        assert!(usage_detail_popup_enabled_from_toml("").unwrap());
+        assert!(
+            !usage_detail_popup_enabled_from_toml("[usage]\ntui_detail_popup = false\n").unwrap()
+        );
+        assert!(
+            usage_detail_popup_enabled_from_toml("[usage]\ntui_detail_popup = true\n").unwrap()
+        );
     }
 
     #[test]
