@@ -2,7 +2,7 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.61:
+Current implementation status in v0.17.62:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
@@ -15,9 +15,11 @@ Current implementation status in v0.17.61:
   the generated Worker config/bindings, runs `pnpm build`, and, unless
   `--skip-deploy` is set, applies D1 migrations and deploys the Worker
   through Wrangler/OpenNext.
-- `libra publish sync` without `--dry-run` and `unpublish` are
-  registered CLI surfaces, but they currently return
-  `LBR-UNSUPPORTED-001` with a pointer to
+- `libra publish unpublish --yes` disables a published site by setting
+  `publish_sites.status = 'disabled'` through Wrangler D1 execute. The
+  Worker already returns HTTP 410 for disabled sites.
+- `libra publish sync` without `--dry-run` is registered, but it
+  currently returns `LBR-UNSUPPORTED-001` with a pointer to
   `docs/improvement/publish.md`.
 - The Worker project uses `wrangler types --env-interface CloudflareEnv
   cloudflare-env.d.ts` as the binding type source. The committed
@@ -30,9 +32,8 @@ Current implementation status in v0.17.61:
   bindings when `BASE_URL` is unset, and runs desktop plus mobile
   Chromium assertions for the publish landing page, code browser, file
   viewer, AI model page, refs, status, and empty/non-text states.
-- The full code/ref/AI snapshot upload, cloud status comparison, Worker
-  deploy, and unpublish flows remain tracked in
-  `docs/improvement/publish.md`.
+- The full code/ref/AI snapshot upload, cloud status comparison, and Git
+  protocol flows remain tracked in `docs/improvement/publish.md`.
 
 ## Synopsis
 
@@ -49,9 +50,9 @@ libra publish unpublish [OPTIONS]
 `libra publish` is being developed as the outward-facing counterpart
 to `libra cloud`. The shipped slices are local Worker-template
 initialisation, local Worker-template status, offline sync dry-runs,
-and Worker build/deploy orchestration. They do not yet upload
-repository snapshots, implement cloud status comparison, unpublish a
-site, or implement Git protocol.
+and Worker build/deploy/unpublish orchestration. They do not yet upload
+repository snapshots, implement cloud status comparison, or implement
+Git protocol.
 
 ## Subcommands
 
@@ -176,12 +177,23 @@ Current behavior:
 ### `libra publish unpublish`
 
 ```
-libra publish unpublish [--yes]
+libra publish unpublish --yes [--site-id <uuid>]
 ```
 
-Current behavior: this subcommand is not implemented. It exits with
-`LBR-UNSUPPORTED-001` and does not mutate local config, Cloudflare D1,
-R2, Worker routes, or Worker deployment state.
+Current behavior:
+
+- Requires `--yes`; without it the command fails before reading config
+  or running cloud commands.
+- Uses `--site-id <uuid>` when provided; otherwise reads
+  `publish.site_id` from repository config.
+- Validates that the site id is a UUID before constructing SQL.
+- Requires the local Worker template and configured `worker/wrangler.jsonc`
+  for the `LIBRA_PUBLISH_DB` binding.
+- Runs `pnpm exec wrangler d1 execute LIBRA_PUBLISH_DB --remote --yes
+  --command <UPDATE>` from `worker/`, setting
+  `publish_sites.status = 'disabled'` for the selected site.
+- Does not delete D1 rows, R2 objects, Worker routes, or Worker
+  deployments. The published Worker returns HTTP 410 for disabled sites.
 
 ## Configuration
 

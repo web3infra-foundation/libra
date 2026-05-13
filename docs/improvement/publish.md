@@ -909,13 +909,14 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.60) 桌面和移动视口都通过截图或 e2e 断言验证主要页面无文本溢出、遮挡和不可达操作。
 - [x] (v0.17.61) `libra publish deploy` 执行 Worker build、D1 migrations、`wrangler deploy`/OpenNext deploy；`--skip-deploy` 只跑本地 build，跳过 Cloudflare 远端变更。
 - [x] (v0.17.61) deploy 解析并输出部署 URL；deploy 成功但无 URL 时失败。
-- [ ] `libra publish unpublish` 将 `publish_sites.status` 标记为 `disabled`，不删除 D1/R2 数据；Worker API 返回 410。
+- [x] (v0.17.62) `libra publish unpublish --yes` 通过 Wrangler D1 execute 将 `publish_sites.status` 标记为 `disabled`，不删除 D1/R2 数据；Worker API 已覆盖 disabled site 返回 410。
 
 **Verification:**
 
 - [x] (v0.17.59) `pnpm --dir worker build`
 - [x] (v0.17.60) `pnpm --dir worker e2e`
 - [x] (v0.17.61) `cargo test --test command_test publish_deploy`
+- [x] (v0.17.62) `cargo test --test command_test publish_unpublish`
 
 **Dependencies:** Phase 4, Phase 6
 

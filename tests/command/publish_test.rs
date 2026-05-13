@@ -8,11 +8,7 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
     let repo = tempfile::tempdir().expect("temp repo");
     init_repo_via_cli(repo.path());
 
-    for args in [
-        &["publish", "sync"][..],
-        &["--json", "publish", "sync"][..],
-        &["publish", "unpublish"][..],
-    ] {
+    for args in [&["publish", "sync"][..], &["--json", "publish", "sync"][..]] {
         let output = run_libra_command(args, repo.path());
         assert!(
             !output.status.success(),
@@ -31,6 +27,34 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
             "{args:?} should explain that publish plumbing is not ready: {stderr}"
         );
     }
+}
+
+#[test]
+fn publish_unpublish_requires_confirmation_before_cloud_steps() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(
+        &[
+            "publish",
+            "unpublish",
+            "--site-id",
+            "00000000-0000-0000-0000-000000000001",
+        ],
+        repo.path(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "publish unpublish should require explicit --yes confirmation"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("--yes"),
+        "error should explain the confirmation requirement: {:?}",
+        report.message
+    );
 }
 
 #[test]

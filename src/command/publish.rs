@@ -43,6 +43,7 @@ use crate::{
     command::{load_object, status},
     internal::{
         branch::Branch,
+        config::ConfigKv,
         head::Head,
         publish::{
             preflight::{DenyReason, Preflight, PreflightDecision},
@@ -163,6 +164,10 @@ pub struct UnpublishArgs {
     /// Confirm the unpublish operation.
     #[arg(long)]
     pub yes: bool,
+
+    /// Site UUID to disable. Defaults to `publish.site_id` config.
+    #[arg(long)]
+    pub site_id: Option<String>,
 }
 
 const NOT_YET_IMPLEMENTED: &str = "`libra publish` Phase 4 sync/deploy plumbing is not ready yet. \
@@ -243,11 +248,26 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
                 CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
                     .with_stable_code(StableErrorCode::RepoStateInvalid)
             })?;
-            let mut runner = ProcessPublishDeployRunner;
+            let mut runner = ProcessPublishWorkerCommandRunner;
             let result = run_publish_deploy_at_root(&repo_root, &deploy_args, &mut runner)?;
             output::emit(&result, output)
         }
-        PublishCommand::Unpublish(_) => unsupported_publish_subcommand("unpublish"),
+        PublishCommand::Unpublish(unpublish_args) => {
+            if !unpublish_args.yes {
+                return Err(CliError::command_usage(
+                    "publish unpublish requires --yes to confirm disabling the site",
+                ));
+            }
+            let repo_root = util::try_working_dir().map_err(|source| {
+                CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            })?;
+            let site_id = resolve_unpublish_site_id(&unpublish_args).await?;
+            let mut runner = ProcessPublishWorkerCommandRunner;
+            let result =
+                run_publish_unpublish_at_root(&repo_root, &unpublish_args, &site_id, &mut runner)?;
+            output::emit(&result, output)
+        }
     }
 }
 
@@ -407,38 +427,60 @@ impl CommandOutput for PublishDeployOutput {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishUnpublishOutput {
+    worker_dir: String,
+    site_id: String,
+    status: String,
+    command: Vec<String>,
+}
+
+impl CommandOutput for PublishUnpublishOutput {
+    fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
+        if output.quiet {
+            return Ok(());
+        }
+        writeln!(writer, "Unpublished site {}", self.site_id)?;
+        writeln!(writer, "  worker: {}", self.worker_dir)?;
+        writeln!(writer, "  status: {}", self.status)?;
+        writeln!(writer, "  command: {}", self.command.join(" "))?;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
-struct PublishDeployCommandOutput {
+struct PublishWorkerCommandOutput {
     success: bool,
     status_code: Option<i32>,
     stdout: String,
     stderr: String,
 }
 
-trait PublishDeployCommandRunner {
+trait PublishWorkerCommandRunner {
     fn run(
         &mut self,
         worker_dir: &Path,
         program: &str,
         args: &[&str],
-    ) -> io::Result<PublishDeployCommandOutput>;
+    ) -> io::Result<PublishWorkerCommandOutput>;
 }
 
-struct ProcessPublishDeployRunner;
+struct ProcessPublishWorkerCommandRunner;
 
-impl PublishDeployCommandRunner for ProcessPublishDeployRunner {
+impl PublishWorkerCommandRunner for ProcessPublishWorkerCommandRunner {
     fn run(
         &mut self,
         worker_dir: &Path,
         program: &str,
         args: &[&str],
-    ) -> io::Result<PublishDeployCommandOutput> {
+    ) -> io::Result<PublishWorkerCommandOutput> {
         let output = Command::new(program)
             .args(args)
             .current_dir(worker_dir)
             .env("CI", "1")
             .output()?;
-        Ok(PublishDeployCommandOutput {
+        Ok(PublishWorkerCommandOutput {
             success: output.status.success(),
             status_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -450,7 +492,7 @@ impl PublishDeployCommandRunner for ProcessPublishDeployRunner {
 fn run_publish_deploy_at_root(
     repo_root: &Path,
     args: &DeployArgs,
-    runner: &mut dyn PublishDeployCommandRunner,
+    runner: &mut dyn PublishWorkerCommandRunner,
 ) -> CliResult<PublishDeployOutput> {
     let status = run_publish_status_at_root(repo_root)?;
     ensure_publish_deploy_template_ready(&status)?;
@@ -527,6 +569,117 @@ fn run_publish_deploy_at_root(
     })
 }
 
+async fn resolve_unpublish_site_id(args: &UnpublishArgs) -> CliResult<String> {
+    if let Some(site_id) = args.site_id.as_deref() {
+        return validate_publish_site_id(site_id);
+    }
+
+    let entry = ConfigKv::get("publish.site_id").await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read publish.site_id from repository config: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let Some(entry) = entry else {
+        return Err(CliError::failure(
+            "publish unpublish requires --site-id or publish.site_id config",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("pass '--site-id <uuid>' or configure publish.site_id before unpublishing."));
+    };
+    validate_publish_site_id(&entry.value)
+}
+
+fn validate_publish_site_id(site_id: &str) -> CliResult<String> {
+    uuid::Uuid::parse_str(site_id)
+        .map(|uuid| uuid.to_string())
+        .map_err(|source| {
+            CliError::failure(format!(
+                "publish site id '{site_id}' is not a valid UUID: {source}"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("use the UUID stored in publish.site_id or the D1 publish_sites row.")
+        })
+}
+
+fn run_publish_unpublish_at_root(
+    repo_root: &Path,
+    args: &UnpublishArgs,
+    site_id: &str,
+    runner: &mut dyn PublishWorkerCommandRunner,
+) -> CliResult<PublishUnpublishOutput> {
+    if !args.yes {
+        return Err(CliError::command_usage(
+            "publish unpublish requires --yes to confirm disabling the site",
+        ));
+    }
+
+    let status = run_publish_status_at_root(repo_root)?;
+    ensure_publish_deploy_template_ready(&status)?;
+    let worker_dir = repo_root.join("worker");
+    ensure_publish_deploy_files(&worker_dir)?;
+
+    let sql = format!(
+        "UPDATE publish_sites SET status = 'disabled', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE site_id = '{site_id}';"
+    );
+    let command = command_summary(
+        "pnpm",
+        &[
+            "exec",
+            "wrangler",
+            "d1",
+            "execute",
+            "LIBRA_PUBLISH_DB",
+            "--remote",
+            "--yes",
+            "--command",
+            &sql,
+        ],
+    );
+    let output = runner
+        .run(
+            &worker_dir,
+            "pnpm",
+            &[
+                "exec",
+                "wrangler",
+                "d1",
+                "execute",
+                "LIBRA_PUBLISH_DB",
+                "--remote",
+                "--yes",
+                "--command",
+                &sql,
+            ],
+        )
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to start publish unpublish command: {source}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    if !output.success {
+        return Err(CliError::fatal(format!(
+            "publish unpublish failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string()),
+            output.stdout.trim(),
+            output.stderr.trim(),
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("fix the Wrangler D1 error and rerun 'libra publish unpublish --yes'."));
+    }
+
+    Ok(PublishUnpublishOutput {
+        worker_dir: "worker".to_string(),
+        site_id: site_id.to_string(),
+        status: "disabled".to_string(),
+        command,
+    })
+}
+
 fn ensure_publish_deploy_template_ready(status: &PublishStatusOutput) -> CliResult<()> {
     match status.status {
         WorkerTemplateStatus::Current | WorkerTemplateStatus::Modified => Ok(()),
@@ -595,13 +748,13 @@ fn ensure_publish_deploy_files(worker_dir: &Path) -> CliResult<()> {
 }
 
 fn run_publish_deploy_step(
-    runner: &mut dyn PublishDeployCommandRunner,
+    runner: &mut dyn PublishWorkerCommandRunner,
     worker_dir: &Path,
     name: &str,
     program: &str,
     args: &[&str],
     steps: &mut Vec<PublishDeployStepSummary>,
-) -> CliResult<PublishDeployCommandOutput> {
+) -> CliResult<PublishWorkerCommandOutput> {
     let output = runner.run(worker_dir, program, args).map_err(|source| {
         CliError::fatal(format!(
             "failed to start publish deploy step '{name}' ({}): {source}",
@@ -1534,13 +1687,13 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakePublishDeployRunner {
+    struct FakePublishWorkerCommandRunner {
         calls: Vec<Vec<String>>,
-        outputs: VecDeque<PublishDeployCommandOutput>,
+        outputs: VecDeque<PublishWorkerCommandOutput>,
     }
 
-    impl FakePublishDeployRunner {
-        fn with_outputs(outputs: impl IntoIterator<Item = PublishDeployCommandOutput>) -> Self {
+    impl FakePublishWorkerCommandRunner {
+        fn with_outputs(outputs: impl IntoIterator<Item = PublishWorkerCommandOutput>) -> Self {
             Self {
                 calls: Vec::new(),
                 outputs: outputs.into_iter().collect(),
@@ -1548,13 +1701,13 @@ mod tests {
         }
     }
 
-    impl PublishDeployCommandRunner for FakePublishDeployRunner {
+    impl PublishWorkerCommandRunner for FakePublishWorkerCommandRunner {
         fn run(
             &mut self,
             worker_dir: &Path,
             program: &str,
             args: &[&str],
-        ) -> io::Result<PublishDeployCommandOutput> {
+        ) -> io::Result<PublishWorkerCommandOutput> {
             assert!(
                 worker_dir.ends_with("worker"),
                 "deploy commands must run from worker/: {}",
@@ -1568,8 +1721,8 @@ mod tests {
         }
     }
 
-    fn successful_deploy_command_output() -> PublishDeployCommandOutput {
-        PublishDeployCommandOutput {
+    fn successful_deploy_command_output() -> PublishWorkerCommandOutput {
+        PublishWorkerCommandOutput {
             success: true,
             status_code: Some(0),
             stdout: String::new(),
@@ -1577,8 +1730,8 @@ mod tests {
         }
     }
 
-    fn successful_deploy_command_output_with_stdout(stdout: &str) -> PublishDeployCommandOutput {
-        PublishDeployCommandOutput {
+    fn successful_deploy_command_output_with_stdout(stdout: &str) -> PublishWorkerCommandOutput {
+        PublishWorkerCommandOutput {
             success: true,
             status_code: Some(0),
             stdout: stdout.to_string(),
@@ -1837,7 +1990,7 @@ mod tests {
         materialize_deployable_worker(temp.path());
         let args = DeployArgs { skip_deploy: true };
         let mut runner =
-            FakePublishDeployRunner::with_outputs([successful_deploy_command_output()]);
+            FakePublishWorkerCommandRunner::with_outputs([successful_deploy_command_output()]);
 
         let output = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
             .expect("deploy --skip-deploy should build and skip cloud mutations");
@@ -1870,7 +2023,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir must be created");
         materialize_deployable_worker(temp.path());
         let args = DeployArgs { skip_deploy: false };
-        let mut runner = FakePublishDeployRunner::with_outputs([
+        let mut runner = FakePublishWorkerCommandRunner::with_outputs([
             successful_deploy_command_output(),
             successful_deploy_command_output(),
             successful_deploy_command_output_with_stdout(
@@ -1918,7 +2071,7 @@ mod tests {
         run_publish_init_at_root(temp.path(), &default_init_args())
             .expect("publish init must materialize the template");
         let args = DeployArgs { skip_deploy: true };
-        let mut runner = FakePublishDeployRunner::default();
+        let mut runner = FakePublishWorkerCommandRunner::default();
 
         let err = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
             .expect_err("deploy must fail before running commands with placeholder D1 config");
@@ -1932,6 +2085,87 @@ mod tests {
         assert!(
             runner.calls.is_empty(),
             "deploy must not run build or cloud commands before config validation"
+        );
+    }
+
+    #[test]
+    fn publish_unpublish_requires_yes() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        materialize_deployable_worker(temp.path());
+        let args = UnpublishArgs {
+            yes: false,
+            site_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+        };
+        let mut runner = FakePublishWorkerCommandRunner::default();
+
+        let err = run_publish_unpublish_at_root(
+            temp.path(),
+            &args,
+            "00000000-0000-0000-0000-000000000001",
+            &mut runner,
+        )
+        .expect_err("unpublish must require explicit confirmation");
+
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidArguments);
+        assert!(
+            runner.calls.is_empty(),
+            "unpublish must not run D1 mutation before --yes confirmation"
+        );
+    }
+
+    #[test]
+    fn publish_unpublish_marks_site_disabled_with_wrangler_d1_execute() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        materialize_deployable_worker(temp.path());
+        let args = UnpublishArgs {
+            yes: true,
+            site_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+        };
+        let mut runner =
+            FakePublishWorkerCommandRunner::with_outputs([successful_deploy_command_output()]);
+
+        let output = run_publish_unpublish_at_root(
+            temp.path(),
+            &args,
+            "00000000-0000-0000-0000-000000000001",
+            &mut runner,
+        )
+        .expect("unpublish should execute a D1 update through Wrangler");
+
+        assert_eq!(output.status, "disabled");
+        assert_eq!(output.site_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(runner.calls.len(), 1);
+        assert_eq!(
+            &runner.calls[0][..7],
+            &[
+                "pnpm".to_string(),
+                "exec".to_string(),
+                "wrangler".to_string(),
+                "d1".to_string(),
+                "execute".to_string(),
+                "LIBRA_PUBLISH_DB".to_string(),
+                "--remote".to_string(),
+            ]
+        );
+        assert!(
+            runner.calls[0]
+                .iter()
+                .any(|arg| arg.contains("status = 'disabled'")
+                    && arg.contains("00000000-0000-0000-0000-000000000001")),
+            "D1 command must disable the selected site: {:?}",
+            runner.calls[0],
+        );
+    }
+
+    #[test]
+    fn publish_site_id_validation_rejects_non_uuid() {
+        let err =
+            validate_publish_site_id("not-a-uuid").expect_err("site id must be a parseable UUID");
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidArguments);
+        assert!(
+            err.message().contains("not-a-uuid"),
+            "error must echo the bad site id: {}",
+            err.message()
         );
     }
 
