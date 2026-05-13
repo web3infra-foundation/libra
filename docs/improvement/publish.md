@@ -782,8 +782,8 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重。
-- [ ] 支持 `--ref <branch|tag|full-ref>` 的定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。
+- [x] (v0.17.53 dry-run planner) `sync --dry-run` 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重；完整 upload 路径仍由本 Phase 后续 snapshot/upload 项承载。
+- [x] (v0.17.53 dry-run planner) `sync --dry-run --ref <branch|tag|full-ref>` 支持定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。非 dry-run 的定向同步仍归 Phase 4 未完成项。
 - [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
 - [ ] 完整 snapshot upload 路径支持 `.librapublishignore` 和内置 deny 规则，并按 visibility/allowlist 决定 metadata-only、redaction 或失败。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
