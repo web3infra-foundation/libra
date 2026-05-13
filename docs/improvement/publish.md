@@ -787,6 +787,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
 - [ ] 完整 snapshot upload 路径支持 `.librapublishignore` 和内置 deny 规则，并按 visibility/allowlist 决定 metadata-only、redaction 或失败。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
+- [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。

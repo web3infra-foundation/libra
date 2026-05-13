@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::internal::publish::{
     contract::{
         FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile, PublishRefEntry,
-        RefType,
+        PublishRefsIndex, RefType,
     },
     preflight::{Preflight, PreflightDecision},
 };
@@ -229,6 +229,10 @@ pub fn publish_text_file_key(
     format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/files/{content_sha256}.txt")
 }
 
+pub fn publish_refs_index_key(repo_id: &str, site_id: &str) -> String {
+    format!("{repo_id}/publish/sites/{site_id}/refs.json")
+}
+
 /// Build the publish refs/revision plan that the sync orchestrator
 /// persists to D1.
 ///
@@ -354,6 +358,41 @@ impl SnapshotPlan {
             .iter()
             .find(|publish_ref| publish_ref.ref_name == default_ref)
             .map(|publish_ref| publish_ref.revision_oid.as_str())
+    }
+
+    pub fn to_refs_index(
+        &self,
+        site_id: &str,
+        refs_generation: u64,
+        generated_at: DateTime<Utc>,
+    ) -> Result<PublishRefsIndex, SnapshotBuildError> {
+        let default_ref =
+            self.default_ref
+                .clone()
+                .ok_or_else(|| SnapshotBuildError::InvalidRef {
+                    message: "refs index requires a default ref".to_string(),
+                })?;
+        if !self
+            .refs
+            .iter()
+            .any(|publish_ref| publish_ref.ref_name == default_ref && publish_ref.is_default)
+        {
+            return Err(SnapshotBuildError::InvalidRef {
+                message: format!("default ref {default_ref:?} is not marked in publish refs"),
+            });
+        }
+        Ok(PublishRefsIndex {
+            schema_version: PUBLISH_SCHEMA_VERSION,
+            site_id: site_id.to_string(),
+            refs_generation,
+            default_ref,
+            refs: self
+                .refs
+                .iter()
+                .map(|publish_ref| publish_ref.to_publish_ref_entry(generated_at))
+                .collect(),
+            generated_at,
+        })
     }
 }
 

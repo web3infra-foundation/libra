@@ -1,7 +1,7 @@
 use chrono::Utc;
 use libra::internal::publish::{
-    contract::RefType,
-    snapshot::{FileSnapshot, RefInput, RevisionPlan, build_snapshot_plan},
+    contract::{PUBLISH_SCHEMA_VERSION, RefType},
+    snapshot::{FileSnapshot, RefInput, RevisionPlan, build_snapshot_plan, publish_refs_index_key},
 };
 
 fn revision(revision_oid: &str, tree_oid: &str) -> RevisionPlan {
@@ -93,6 +93,45 @@ fn publish_refs_test_latest_uses_default_ref_not_first_ref() {
     assert_eq!(plan.refs[0].revision_oid, feature_oid);
     assert!(!plan.refs[0].is_default);
     assert!(plan.refs[1].is_default);
+}
+
+#[test]
+fn publish_refs_test_refs_index_payload_matches_plan() {
+    let generated_at = Utc::now();
+    let main_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let tag_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let tree_oid = "cccccccccccccccccccccccccccccccccccccccc";
+    let refs = vec![
+        publish_ref("refs/heads/main", main_oid, main_oid),
+        publish_ref("refs/tags/v1.0.0", tag_oid, main_oid),
+    ];
+    let plan = build_snapshot_plan(
+        &refs,
+        vec![revision(main_oid, tree_oid)],
+        Some("refs/heads/main"),
+    )
+    .expect("refs plan should build");
+
+    let index = plan
+        .to_refs_index("site-1", 42, generated_at)
+        .expect("refs index should build");
+
+    assert_eq!(
+        publish_refs_index_key("repo-1", "site-1"),
+        "repo-1/publish/sites/site-1/refs.json"
+    );
+    assert_eq!(index.schema_version, PUBLISH_SCHEMA_VERSION);
+    assert_eq!(index.site_id, "site-1");
+    assert_eq!(index.refs_generation, 42);
+    assert_eq!(index.default_ref, "refs/heads/main");
+    assert_eq!(index.generated_at, generated_at);
+    assert_eq!(index.refs.len(), 2);
+    assert_eq!(index.refs[0].ref_type, RefType::Branch);
+    assert_eq!(index.refs[0].short_name, "main");
+    assert!(index.refs[0].is_default);
+    assert_eq!(index.refs[1].ref_type, RefType::Tag);
+    assert_eq!(index.refs[1].short_name, "v1.0.0");
+    assert_eq!(index.refs[1].revision_oid, main_oid);
 }
 
 #[test]
