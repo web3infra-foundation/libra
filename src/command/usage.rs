@@ -1,8 +1,10 @@
 //! `libra usage` command for provider/model usage aggregates.
 
+use std::{fs, path::Path};
+
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     info_println,
@@ -52,8 +54,8 @@ pub enum UsageSubcommand {
     /// Delete usage rows older than the retention window.
     Prune {
         /// Retention window in days. Rows older than this are deleted.
-        #[arg(long, default_value_t = 90)]
-        retention_days: u32,
+        #[arg(long, value_parser = parse_positive_retention_days)]
+        retention_days: Option<u32>,
     },
 }
 
@@ -190,7 +192,8 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
     Ok(())
 }
 
-async fn prune_usage(retention_days: u32, output: &OutputConfig) -> CliResult<()> {
+async fn prune_usage(retention_days: Option<u32>, output: &OutputConfig) -> CliResult<()> {
+    let retention_days = resolve_usage_retention_days(retention_days)?;
     let db = open_repo_db().await?;
     let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
     let deleted = crate::internal::ai::usage::UsageRecorder::new(db)
@@ -257,6 +260,75 @@ fn emit_usage_csv(
         );
     }
     Ok(())
+}
+
+const DEFAULT_USAGE_RETENTION_DAYS: u32 = 90;
+
+#[derive(Debug, Default, Deserialize)]
+struct UsageRetentionProjectConfig {
+    #[serde(default)]
+    usage: UsageRetentionConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UsageRetentionConfig {
+    retention_days: Option<u32>,
+}
+
+fn parse_positive_retention_days(raw: &str) -> Result<u32, String> {
+    let days = raw
+        .parse::<u32>()
+        .map_err(|_| format!("'{raw}' is not a valid day count"))?;
+    validate_positive_retention_days(days, "--retention-days").map_err(|error| error.to_string())
+}
+
+fn resolve_usage_retention_days(cli_retention_days: Option<u32>) -> CliResult<u32> {
+    if let Some(days) = cli_retention_days {
+        return validate_positive_retention_days(days, "--retention-days");
+    }
+
+    let storage = try_get_storage_path(None).map_err(|error| {
+        CliError::repo_not_found()
+            .with_hint(format!("failed to resolve repository storage: {error}"))
+    })?;
+    let Some(days) = read_usage_retention_days_config(&storage.join("config.toml"))? else {
+        return Ok(DEFAULT_USAGE_RETENTION_DAYS);
+    };
+    validate_positive_retention_days(days, "usage.retention_days")
+}
+
+fn read_usage_retention_days_config(path: &Path) -> CliResult<Option<u32>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CliError::io(format!(
+                "failed to read usage retention config '{}': {error}",
+                path.display()
+            )));
+        }
+    };
+    usage_retention_days_from_config_toml(&contents).map_err(|error| {
+        CliError::failure(format!(
+            "failed to parse usage retention config '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn usage_retention_days_from_config_toml(contents: &str) -> Result<Option<u32>, toml::de::Error> {
+    let config: UsageRetentionProjectConfig = toml::from_str(contents)?;
+    Ok(config.usage.retention_days)
+}
+
+fn validate_positive_retention_days(days: u32, source: &str) -> CliResult<u32> {
+    if days == 0 {
+        Err(CliError::command_usage(format!(
+            "{source} must be greater than 0"
+        )))
+    } else {
+        Ok(days)
+    }
 }
 
 fn usage_human_cost(row: &crate::internal::ai::usage::UsageAggregate) -> String {
@@ -349,6 +421,32 @@ mod tests {
     fn rejects_invalid_usage_report_time() {
         let error = parse_usage_time_filter("soonish", "--since").unwrap_err();
         assert!(error.to_string().contains("invalid --since value"));
+    }
+
+    #[test]
+    fn parses_usage_retention_days_config() {
+        let days = usage_retention_days_from_config_toml(
+            r#"
+            [usage]
+            retention_days = 14
+            "#,
+        )
+        .expect("usage retention config should parse");
+
+        assert_eq!(days, Some(14));
+    }
+
+    #[test]
+    fn explicit_retention_days_must_be_positive() {
+        let error = parse_positive_retention_days("0").unwrap_err();
+        assert!(error.contains("--retention-days must be greater than 0"));
+    }
+
+    #[test]
+    fn invalid_usage_retention_config_reports_toml_error() {
+        let error = usage_retention_days_from_config_toml("[usage]\nretention_days = \"soon\"")
+            .unwrap_err();
+        assert!(error.to_string().contains("retention_days"));
     }
 
     #[test]

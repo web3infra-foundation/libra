@@ -41,7 +41,7 @@ model capability pricing table or a repository override in `.libra/config.toml`.
 
 | Flag | Description |
 |------|-------------|
-| `--retention-days <days>` | Keep rows newer than this many days; defaults to `90` |
+| `--retention-days <days>` | Keep rows newer than this many days; overrides `[usage].retention_days`; defaults to `90` |
 
 ## Human Output
 
@@ -57,10 +57,13 @@ spreadsheet import. The CSV columns include both `cost_usd` and
 
 ## Pricing Overrides
 
-Repository-local price overrides live in `.libra/config.toml` and are keyed by
-provider and model. Values are micro-dollars per million tokens:
+Repository-local usage settings live in `.libra/config.toml`. Price overrides
+are keyed by provider and model. Values are micro-dollars per million tokens:
 
 ```toml
+[usage]
+retention_days = 90
+
 [usage.pricing.openai."gpt-4o-mini"]
 input_micro_dollars_per_mtok = 150000
 output_micro_dollars_per_mtok = 600000
@@ -71,6 +74,9 @@ reasoning_micro_dollars_per_mtok = 600000
 If the config is missing or a provider/model has no built-in or overridden
 price, the usage row is still written and `cost_estimate_micro_dollars` remains
 empty.
+
+`libra usage prune` uses `[usage].retention_days` when `--retention-days` is not
+passed. The flag always wins over the project config.
 
 ## JSON Output
 
@@ -103,3 +109,5 @@ and deleted row count.
   `.libra/libra.db`.
 - Relative time filters are evaluated at command runtime and normalized to
   RFC3339 before querying.
+- Retention windows must be greater than `0`; invalid config fails closed before
+  deleting rows.
