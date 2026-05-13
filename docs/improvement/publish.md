@@ -790,7 +790,7 @@ v1 使用 gitignore 子集：
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
-- [ ] redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
+- [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
 
 **Verification:**
 
