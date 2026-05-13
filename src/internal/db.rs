@@ -77,6 +77,9 @@ pub async fn establish_connection_with_busy_timeout(
                 "Failed to ensure AI runtime contract schema: {err}"
             ))
         })?;
+    ensure_operation_schema(&conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to ensure operation schema: {err}")))?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -202,6 +205,56 @@ async fn setup_database_model(conn: &DatabaseConnection) -> Result<(), Transacti
 const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
 const AI_RUNTIME_CONTRACT_MIGRATION_SQL: &str =
     include_str!("../../sql/sqlite_20260415_ai_runtime_contract.sql");
+const OPERATION_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `operation` (
+    `op_id` TEXT PRIMARY KEY,
+    `repo_id` TEXT NOT NULL,
+    `view_id` TEXT NOT NULL,
+    `command_name` TEXT NOT NULL,
+    `description` TEXT NOT NULL,
+    `actor` TEXT NOT NULL,
+    `args_digest` TEXT,
+    `start_ts` INTEGER NOT NULL,
+    `end_ts` INTEGER,
+    `status` TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operation_repo_order
+    ON `operation`(`repo_id`, `end_ts` DESC, `start_ts` DESC, `op_id` DESC);
+
+CREATE TABLE IF NOT EXISTS `operation_parent` (
+    `op_id` TEXT NOT NULL,
+    `parent_op_id` TEXT NOT NULL,
+    PRIMARY KEY (`op_id`, `parent_op_id`)
+);
+CREATE INDEX IF NOT EXISTS idx_operation_parent_parent
+    ON `operation_parent`(`parent_op_id`, `op_id`);
+
+CREATE TABLE IF NOT EXISTS `operation_view` (
+    `view_id` TEXT PRIMARY KEY,
+    `repo_id` TEXT NOT NULL,
+    `head_kind` TEXT NOT NULL,
+    `head_target` TEXT NOT NULL,
+    `created_at` INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operation_view_repo_created
+    ON `operation_view`(`repo_id`, `created_at` DESC);
+
+CREATE TABLE IF NOT EXISTS `operation_view_ref` (
+    `view_id` TEXT NOT NULL,
+    `ref_kind` TEXT NOT NULL,
+    `ref_name` TEXT NOT NULL,
+    `ref_remote` TEXT NOT NULL,
+    `target_oid` TEXT NOT NULL,
+    PRIMARY KEY (`view_id`, `ref_kind`, `ref_name`, `ref_remote`)
+);
+
+CREATE TABLE IF NOT EXISTS `operation_view_workspace` (
+    `view_id` TEXT NOT NULL,
+    `pointer_kind` TEXT NOT NULL,
+    `pointer_value` TEXT NOT NULL,
+    PRIMARY KEY (`view_id`, `pointer_kind`)
+);
+"#;
 const AI_PROJECTION_SCHEMA_START: &str = "-- BEGIN AI PROJECTION SCHEMA";
 const AI_PROJECTION_SCHEMA_END: &str = "-- END AI PROJECTION SCHEMA";
 
@@ -334,6 +387,14 @@ pub async fn ensure_ai_runtime_contract_schema(conn: &DatabaseConnection) -> Res
     ))
     .await
     .map_err(|err| IOError::other(format!("Failed to apply AI runtime contract schema: {err}")))?;
+    Ok(())
+}
+
+async fn ensure_operation_schema(conn: &DatabaseConnection) -> Result<(), IOError> {
+    let backend = conn.get_database_backend();
+    conn.execute(Statement::from_string(backend, OPERATION_SCHEMA_SQL))
+        .await
+        .map_err(|err| IOError::other(format!("Failed to apply operation schema: {err}")))?;
     Ok(())
 }
 
