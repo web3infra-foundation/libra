@@ -967,7 +967,7 @@ v1 使用 gitignore 子集：
 - [ ] 恢复后的所有 branch/tag refs、HEAD、checkout 文件和源 revision 一致。
 - [ ] `libra clone "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"` 能 checkout 指定 tag 对应 revision；同名短 ref 必须要求完整 ref。
 - [ ] `libra clone libra+cloud://code.example.com/repo/<repo_id>` 在 slug rename 后仍能恢复同一 repo。
-- [ ] 未配置 `clone_domains.code.example.com` 时 clone 失败并给出配置 hint，不尝试从 Worker 页面下载。
+- [x] (v0.17.55/v0.17.78, verified v0.17.91) 未配置 `clone_domains.code.example.com` 时 clone 失败并给出配置 hint，不尝试从 Worker 页面下载。
 - [ ] AI object model、关系图和 projection/query indexes 能从 cloud baseline 恢复，且不依赖 publish redacted 字段。
 - [ ] 缺失 object 或 refs metadata 不完整时 clone 失败并清理目标目录。
 - [ ] `libra clone libra+cloud://code.example.com/kepler-ledger --json` 输出一个 clone envelope，包含可选 Cloudflare source 字段。
