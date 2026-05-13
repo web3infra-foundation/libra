@@ -30,6 +30,7 @@ use super::{
 use crate::{
     internal::{
         ai::{
+            automation::dispatch_repo_hook_lifecycle_event_to_history,
             history::{AI_REF, HistoryManager},
             session::{SessionState, SessionStore},
         },
@@ -335,6 +336,12 @@ pub async fn process_hook_event_with_target(
         .context("provider hook post-processing failed")?;
     if let Some(event_key) = dedup_key {
         append_processed_event_key(&mut session, event_key);
+    }
+
+    if let Err(err) =
+        dispatch_repo_hook_lifecycle_event_to_history(&process_cwd, &storage_path, event.kind).await
+    {
+        emit_warning(format!("failed to dispatch automation hook event: {err}"));
     }
 
     if event.kind == LifecycleEventKind::SessionEnd {

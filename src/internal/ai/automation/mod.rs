@@ -9,6 +9,7 @@ pub mod config;
 pub mod events;
 pub mod executor;
 pub mod history;
+pub mod runtime;
 pub mod scheduler;
 
 pub use config::{AutomationAction, AutomationConfig, AutomationRule, AutomationTrigger};
@@ -17,4 +18,7 @@ pub use events::{
 };
 pub use executor::AutomationExecutor;
 pub use history::AutomationHistory;
+pub use runtime::{
+    dispatch_hook_lifecycle_event_to_history, dispatch_repo_hook_lifecycle_event_to_history,
+};
 pub use scheduler::AutomationScheduler;

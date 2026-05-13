@@ -54,7 +54,8 @@ use crate::{
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
-            CompletionStreamEvent, CompletionUsage, Message, RetryingCompletionModel,
+            CompletionStreamEvent, CompletionUsage, CompletionUsageSummary, Message,
+            RetryingCompletionModel,
         },
         context_budget::{
             MemoryAnchor, MemoryAnchorDraft, MemoryAnchorEvent, MemoryAnchorLookupError,
@@ -500,6 +501,9 @@ pub struct App<M: CompletionModel> {
     provider_name: String,
     /// Session-level model usage rendered in the compact bottom-pane line.
     usage_snapshot: UsageDisplaySnapshot,
+    /// Estimated output tokens already added from streaming text deltas for
+    /// the active turn. Final provider usage replaces this estimate.
+    pending_stream_output_tokens: u64,
     /// Arguments used to render the currently open usage detail panel.
     usage_detail_args: Option<String>,
     /// MCP server instance for writing data.
@@ -646,6 +650,7 @@ where
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             usage_snapshot,
+            pending_stream_output_tokens: 0,
             usage_detail_args: None,
             mcp_server: app_config.mcp_server,
             mcp_plan_id,
@@ -2952,25 +2957,12 @@ where
                         usage,
                         wall_clock_ms,
                     } => {
-                        self.usage_snapshot.prompt_tokens = self
-                            .usage_snapshot
-                            .prompt_tokens
-                            .saturating_add(usage.input_tokens);
-                        self.usage_snapshot.completion_tokens = self
-                            .usage_snapshot
-                            .completion_tokens
-                            .saturating_add(usage.output_tokens);
-                        self.usage_snapshot.wall_clock_ms = self
-                            .usage_snapshot
-                            .wall_clock_ms
-                            .saturating_add(wall_clock_ms);
-                        self.usage_snapshot.cost_usd =
-                            match (self.usage_snapshot.cost_usd, usage.cost_usd) {
-                                (Some(current), Some(next)) => Some(current + next),
-                                (Some(current), None) => Some(current),
-                                (None, Some(next)) => Some(next),
-                                (None, None) => None,
-                            };
+                        apply_final_usage_update(
+                            &mut self.usage_snapshot,
+                            &usage,
+                            wall_clock_ms,
+                            &mut self.pending_stream_output_tokens,
+                        );
                         let usage_badge = format_usage_badge(&self.usage_snapshot);
                         self.widget
                             .bottom_pane
@@ -2980,6 +2972,7 @@ where
                         self.schedule_draw();
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
+                        self.pending_stream_output_tokens = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
@@ -3015,6 +3008,7 @@ where
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
+                        self.pending_stream_output_tokens = 0;
                         self.pending_auto_plan_repair_execution = None;
                         self.enqueue_mcp_turn_decision(
                             "abandon",
@@ -3042,6 +3036,16 @@ where
                         self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseDelta { delta } => {
+                        apply_streaming_usage_delta(
+                            &mut self.usage_snapshot,
+                            &delta,
+                            &mut self.pending_stream_output_tokens,
+                        );
+                        let usage_badge = format_usage_badge(&self.usage_snapshot);
+                        self.widget
+                            .bottom_pane
+                            .set_usage_line(Some(usage_badge.clone()));
+                        self.widget.set_usage_header(Some(usage_badge));
                         self.append_streaming_assistant_delta(&delta);
                         if let Some(code_ui_session) = self.code_ui_session.clone() {
                             code_ui_session
@@ -3054,6 +3058,7 @@ where
                                 .set_status(CodeUiSessionStatus::Thinking)
                                 .await;
                         }
+                        self.refresh_usage_detail_panel().await;
                         self.schedule_draw();
                     }
                     AgentEvent::ThinkingDelta { delta } => {
@@ -3064,6 +3069,7 @@ where
                         text,
                         provider_session_id: _provider_session_id,
                     } => {
+                        self.pending_stream_output_tokens = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
@@ -7772,6 +7778,53 @@ fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
     }
 }
 
+fn apply_streaming_usage_delta(
+    snapshot: &mut UsageDisplaySnapshot,
+    delta: &str,
+    pending_stream_output_tokens: &mut u64,
+) {
+    let tokens = estimate_streamed_output_tokens(delta);
+    if tokens == 0 {
+        return;
+    }
+    snapshot.completion_tokens = snapshot.completion_tokens.saturating_add(tokens);
+    *pending_stream_output_tokens = pending_stream_output_tokens.saturating_add(tokens);
+}
+
+fn apply_final_usage_update(
+    snapshot: &mut UsageDisplaySnapshot,
+    usage: &CompletionUsageSummary,
+    wall_clock_ms: u64,
+    pending_stream_output_tokens: &mut u64,
+) {
+    if *pending_stream_output_tokens > 0 {
+        snapshot.completion_tokens = snapshot
+            .completion_tokens
+            .saturating_sub(*pending_stream_output_tokens);
+        *pending_stream_output_tokens = 0;
+    }
+    snapshot.prompt_tokens = snapshot.prompt_tokens.saturating_add(usage.input_tokens);
+    snapshot.completion_tokens = snapshot
+        .completion_tokens
+        .saturating_add(usage.output_tokens);
+    snapshot.wall_clock_ms = snapshot.wall_clock_ms.saturating_add(wall_clock_ms);
+    snapshot.cost_usd = match (snapshot.cost_usd, usage.cost_usd) {
+        (Some(current), Some(next)) => Some(current + next),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    };
+}
+
+fn estimate_streamed_output_tokens(delta: &str) -> u64 {
+    let chars = delta.chars().filter(|ch| !ch.is_whitespace()).count();
+    if chars == 0 {
+        0
+    } else {
+        u64::try_from(chars.div_ceil(4)).unwrap_or(u64::MAX)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct UsageTuiProjectConfig {
     usage: Option<UsageTuiSectionConfig>,
@@ -8240,11 +8293,12 @@ mod tests {
         FirstTurnIntentPolicyUpdate, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
         PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep, ReviewScrollAction,
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
-        apply_developer_network_access, automatic_plan_repair_request_from_report,
-        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        classify_execution_failure_revision, classify_first_turn_task_intent,
-        code_ui_response_from_managed_selection, default_chat_allowed_tools,
+        apply_developer_network_access, apply_final_usage_update, apply_streaming_usage_delta,
+        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, classify_execution_failure_revision,
+        classify_first_turn_task_intent, code_ui_response_from_managed_selection,
+        default_chat_allowed_tools, estimate_streamed_output_tokens,
         exec_approval_decision_from_selection, execution_failure_report,
         execution_failure_revision_message, execution_requires_plan_repair,
         format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
@@ -8267,7 +8321,7 @@ mod tests {
             agent::{TaskIntent, ToolLoopConfig},
             completion::{
                 AssistantContent, CompletionError, CompletionModel, CompletionRequest,
-                CompletionResponse, Message, Text,
+                CompletionResponse, CompletionUsageSummary, Message, Text,
             },
             intentspec::{
                 ResolveContext,
@@ -8290,7 +8344,7 @@ mod tests {
                 context::{PlanDraftStep, SubmitPlanDraftArgs},
                 spec::ToolSpec,
             },
-            usage::UsageGrouping,
+            usage::{UsageDisplaySnapshot, UsageGrouping},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -8344,6 +8398,45 @@ mod tests {
         assert!(
             usage_detail_popup_enabled_from_toml("[usage]\ntui_detail_popup = true\n").unwrap()
         );
+    }
+
+    #[test]
+    fn streaming_usage_delta_updates_estimate_until_final_usage_arrives() {
+        let mut snapshot = UsageDisplaySnapshot {
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 10,
+            wall_clock_ms: 0,
+            cost_usd: None,
+        };
+        let mut pending = 0;
+
+        apply_streaming_usage_delta(&mut snapshot, "abcdefgh", &mut pending);
+
+        assert_eq!(estimate_streamed_output_tokens("abcdefgh"), 2);
+        assert_eq!(snapshot.completion_tokens, 12);
+        assert_eq!(pending, 2);
+
+        apply_final_usage_update(
+            &mut snapshot,
+            &CompletionUsageSummary {
+                input_tokens: 5,
+                output_tokens: 7,
+                cached_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(12),
+                cost_usd: Some(0.01),
+            },
+            1500,
+            &mut pending,
+        );
+
+        assert_eq!(pending, 0);
+        assert_eq!(snapshot.prompt_tokens, 5);
+        assert_eq!(snapshot.completion_tokens, 17);
+        assert_eq!(snapshot.wall_clock_ms, 1500);
+        assert_eq!(snapshot.cost_usd, Some(0.01));
     }
 
     #[test]

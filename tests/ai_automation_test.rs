@@ -1,11 +1,14 @@
 //! CEX-15 automation MVP contract tests.
 
+use std::fs;
+
 use chrono::{TimeZone, Utc};
 use libra::internal::{
     ai::{
         automation::{
             AutomationAction, AutomationConfig, AutomationExecutor, AutomationHistory,
             AutomationRunStatus, AutomationRuntimeEvent, AutomationScheduler, AutomationTrigger,
+            dispatch_hook_lifecycle_event_to_history,
         },
         hooks::{HookEvent, LifecycleEventKind},
     },
@@ -196,6 +199,50 @@ async fn automation_scheduler_continues_after_rule_failure() {
     assert_eq!(results[0].status, AutomationRunStatus::Failed);
     assert_eq!(results[1].rule_id, "prompt_after_failure");
     assert_eq!(results[1].status, AutomationRunStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn hook_lifecycle_event_dispatches_matching_rule_to_history() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let libra_dir = tmp.path().join(".libra");
+    fs::create_dir(&libra_dir).expect("create .libra dir");
+    fs::write(
+        libra_dir.join("automations.toml"),
+        r#"
+        [[rules]]
+        id = "session_end_summary"
+        trigger = { kind = "hook", event = "session_end" }
+        action = { kind = "prompt", prompt = "summarize this session" }
+
+        [[rules]]
+        id = "session_start_only"
+        trigger = { kind = "hook", event = "session_start" }
+        action = { kind = "prompt", prompt = "not this event" }
+    "#,
+    )
+    .expect("write automations");
+
+    let conn = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    run_builtin_migrations(&conn).await.expect("run migrations");
+
+    let results =
+        dispatch_hook_lifecycle_event_to_history(tmp.path(), &conn, LifecycleEventKind::SessionEnd)
+            .await
+            .expect("dispatch hook lifecycle event");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].rule_id, "session_end_summary");
+    assert_eq!(results[0].trigger_kind, "hook");
+    assert_eq!(results[0].status, AutomationRunStatus::Succeeded);
+
+    let rows = AutomationHistory::list_recent(&conn, 10)
+        .await
+        .expect("list automation log");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rule_id, "session_end_summary");
+    assert_eq!(rows[0].details["prompt"], "summarize this session");
 }
 
 #[tokio::test]
