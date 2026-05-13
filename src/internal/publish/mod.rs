@@ -25,6 +25,7 @@
 //! `ai_export`, etc. Each phase's submodule is gated on its
 //! predecessors' contracts holding stable.
 
+pub mod ai_export;
 pub mod contract;
 pub mod preflight;
 pub mod snapshot;
