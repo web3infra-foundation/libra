@@ -884,7 +884,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.14) `pnpm --dir worker test`
 - [x] (v0.17.14) `pnpm --dir worker exec tsc --noEmit`
 - [x] (v0.17.9) `cargo test --test publish_worker_template_embed_test`
-- [ ] `cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|wrangler.jsonc|tsconfig.json)'`
+- [x] (v0.17.58) `cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|wrangler.jsonc|tsconfig.json)'`
 
 **Dependencies:** Phase 0, Phase 2
 
