@@ -959,7 +959,7 @@ v1 使用 gitignore 子集：
 - [ ] mock R2 + D1 下，snapshot 能 round-trip。
 - [ ] D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot。
 - [ ] D1 latest 只指向默认 ref 的完整 published revision。
-- [ ] `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
+- [x] (v0.17.96) `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
 
 ### Checkpoint C：Cloudflare clone 可恢复
 

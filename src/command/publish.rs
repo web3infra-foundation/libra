@@ -25,7 +25,7 @@
 //! unpublish orchestration without changing the full-upload boundary.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     future::Future,
     io,
@@ -57,7 +57,7 @@ use crate::{
         tag::{self, TagObject},
     },
     utils::{
-        d1_client::{D1Client, D1Error, PublishRefRow},
+        d1_client::{D1Client, D1Error, PublishRefRow, PublishRevisionRow},
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
@@ -1329,6 +1329,13 @@ impl PublishRefComparisonState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PublishSnapshotIssueState {
+    Missing,
+    Unpublished,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishLocalRefOutput {
@@ -1359,6 +1366,16 @@ struct PublishChangedRefOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PublishRefSnapshotIssueOutput {
+    ref_name: String,
+    revision_oid: String,
+    state: PublishSnapshotIssueState,
+    revision_status: Option<String>,
+    revision_updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PublishRefComparisonOutput {
     state: PublishRefComparisonState,
     site_id: Option<String>,
@@ -1368,9 +1385,13 @@ struct PublishRefComparisonOutput {
     local_only_count: usize,
     published_only_count: usize,
     changed_count: usize,
+    snapshot_issue_count: usize,
+    snapshot_missing_count: usize,
+    snapshot_unpublished_count: usize,
     local_only: Vec<PublishLocalRefOutput>,
     published_only: Vec<PublishPublishedRefOutput>,
     changed: Vec<PublishChangedRefOutput>,
+    snapshot_issues: Vec<PublishRefSnapshotIssueOutput>,
 }
 
 impl PublishRefComparisonOutput {
@@ -1384,11 +1405,21 @@ impl PublishRefComparisonOutput {
             local_only_count: 0,
             published_only_count: 0,
             changed_count: 0,
+            snapshot_issue_count: 0,
+            snapshot_missing_count: 0,
+            snapshot_unpublished_count: 0,
             local_only: Vec::new(),
             published_only: Vec::new(),
             changed: Vec::new(),
+            snapshot_issues: Vec::new(),
         }
     }
+}
+
+#[derive(Debug)]
+struct PublishCloudStatusRows {
+    refs: Vec<PublishRefRow>,
+    revisions: BTreeMap<String, Option<PublishRevisionRow>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1453,6 +1484,11 @@ impl CommandOutput for PublishStatusOutput {
                 writer,
                 "  published-only refs: {}",
                 self.published_refs.published_only_count
+            )?;
+            writeln!(
+                writer,
+                "  snapshot issues: {}",
+                self.published_refs.snapshot_issue_count
             )?;
         }
         Ok(())
@@ -1648,7 +1684,7 @@ async fn run_publish_status_command_at_root(
                     source,
                 )
             })?;
-            d1_client
+            let refs = d1_client
                 .list_publish_refs(&site_id)
                 .await
                 .map_err(|source| {
@@ -1656,7 +1692,9 @@ async fn run_publish_status_command_at_root(
                         "failed to list D1 publish_refs for publish status",
                         source,
                     )
-                })
+                })?;
+            let revisions = load_publish_status_revisions(&d1_client, &site_id, &refs).await?;
+            Ok(PublishCloudStatusRows { refs, revisions })
         },
     )
     .await
@@ -1665,19 +1703,19 @@ async fn run_publish_status_command_at_root(
 async fn run_publish_status_command_at_root_with_loaders<
     LocalRefs,
     LocalRefsFuture,
-    PublishedRefs,
-    PublishedRefsFuture,
+    CloudRows,
+    CloudRowsFuture,
 >(
     repo_root: &Path,
     args: &StatusArgs,
     load_local_refs: LocalRefs,
-    load_published_refs: PublishedRefs,
+    load_cloud_rows: CloudRows,
 ) -> CliResult<PublishStatusOutput>
 where
     LocalRefs: FnOnce() -> LocalRefsFuture,
     LocalRefsFuture: Future<Output = CliResult<Vec<RefInput>>>,
-    PublishedRefs: FnOnce(String) -> PublishedRefsFuture,
-    PublishedRefsFuture: Future<Output = CliResult<Vec<PublishRefRow>>>,
+    CloudRows: FnOnce(String) -> CloudRowsFuture,
+    CloudRowsFuture: Future<Output = CliResult<PublishCloudStatusRows>>,
 {
     let mut output = run_publish_status_at_root(repo_root)?;
     let Some(site_id) = resolve_publish_status_site_id(args).await? else {
@@ -1685,15 +1723,46 @@ where
     };
 
     let local_refs = load_local_refs().await?;
-    let published_refs = load_published_refs(site_id.clone()).await?;
-    output.published_refs = compare_publish_refs(&site_id, &local_refs, &published_refs);
+    let cloud_rows = load_cloud_rows(site_id.clone()).await?;
+    output.published_refs = compare_publish_refs(
+        &site_id,
+        &local_refs,
+        &cloud_rows.refs,
+        &cloud_rows.revisions,
+    );
     Ok(output)
+}
+
+async fn load_publish_status_revisions(
+    d1_client: &D1Client,
+    site_id: &str,
+    refs: &[PublishRefRow],
+) -> CliResult<BTreeMap<String, Option<PublishRevisionRow>>> {
+    let mut revisions = BTreeMap::new();
+    let revision_oids = refs
+        .iter()
+        .map(|publish_ref| publish_ref.revision_oid.as_str())
+        .collect::<BTreeSet<_>>();
+    for revision_oid in revision_oids {
+        let revision = d1_client
+            .find_publish_revision_any(site_id, revision_oid)
+            .await
+            .map_err(|source| {
+                publish_status_d1_error(
+                    "failed to read D1 publish_revisions for publish status",
+                    source,
+                )
+            })?;
+        revisions.insert(revision_oid.to_string(), revision);
+    }
+    Ok(revisions)
 }
 
 fn compare_publish_refs(
     site_id: &str,
     local_refs: &[RefInput],
     published_refs: &[PublishRefRow],
+    published_revisions: &BTreeMap<String, Option<PublishRevisionRow>>,
 ) -> PublishRefComparisonOutput {
     let local_by_ref = local_refs
         .iter()
@@ -1707,6 +1776,31 @@ fn compare_publish_refs(
     let mut matching_count = 0usize;
     let mut local_only = Vec::new();
     let mut changed = Vec::new();
+    let mut snapshot_issues = Vec::new();
+
+    for published_ref in published_refs {
+        match published_revisions.get(&published_ref.revision_oid) {
+            Some(Some(revision)) if revision.status == "published" => {}
+            Some(Some(revision)) => {
+                snapshot_issues.push(PublishRefSnapshotIssueOutput {
+                    ref_name: published_ref.ref_name.clone(),
+                    revision_oid: published_ref.revision_oid.clone(),
+                    state: PublishSnapshotIssueState::Unpublished,
+                    revision_status: Some(revision.status.clone()),
+                    revision_updated_at: Some(revision.updated_at.clone()),
+                });
+            }
+            Some(None) | None => {
+                snapshot_issues.push(PublishRefSnapshotIssueOutput {
+                    ref_name: published_ref.ref_name.clone(),
+                    revision_oid: published_ref.revision_oid.clone(),
+                    state: PublishSnapshotIssueState::Missing,
+                    revision_status: None,
+                    revision_updated_at: None,
+                });
+            }
+        }
+    }
 
     for (ref_name, local_ref) in local_by_ref {
         let Some(published_ref) = published_by_ref.remove(ref_name) else {
@@ -1753,9 +1847,19 @@ fn compare_publish_refs(
         local_only_count: local_only.len(),
         published_only_count: published_only.len(),
         changed_count: changed.len(),
+        snapshot_issue_count: snapshot_issues.len(),
+        snapshot_missing_count: snapshot_issues
+            .iter()
+            .filter(|issue| issue.state == PublishSnapshotIssueState::Missing)
+            .count(),
+        snapshot_unpublished_count: snapshot_issues
+            .iter()
+            .filter(|issue| issue.state == PublishSnapshotIssueState::Unpublished)
+            .count(),
         local_only,
         published_only,
         changed,
+        snapshot_issues,
     }
 }
 
@@ -2329,6 +2433,7 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             &local_refs,
             &published_refs,
+            &publish_revision_map_for_refs(&published_refs),
         );
 
         assert_eq!(comparison.state, PublishRefComparisonState::Compared);
@@ -2351,6 +2456,54 @@ mod tests {
         assert_eq!(
             comparison.published_only[0].ref_name,
             "refs/tags/remote-only"
+        );
+        assert_eq!(comparison.snapshot_issue_count, 0);
+    }
+
+    #[test]
+    fn publish_status_ref_comparison_reports_snapshot_issues() {
+        let published_refs = vec![
+            publish_ref_row(
+                "refs/heads/main",
+                "1111111111111111111111111111111111111111",
+                "1111111111111111111111111111111111111111",
+            ),
+            publish_ref_row(
+                "refs/heads/syncing",
+                "2222222222222222222222222222222222222222",
+                "2222222222222222222222222222222222222222",
+            ),
+        ];
+        let revisions = publish_revision_map([(
+            "2222222222222222222222222222222222222222",
+            Some(publish_revision_row(
+                "2222222222222222222222222222222222222222",
+                "syncing",
+            )),
+        )]);
+
+        let comparison = compare_publish_refs(
+            "00000000-0000-0000-0000-000000000001",
+            &[],
+            &published_refs,
+            &revisions,
+        );
+
+        assert_eq!(comparison.snapshot_issue_count, 2);
+        assert_eq!(comparison.snapshot_missing_count, 1);
+        assert_eq!(comparison.snapshot_unpublished_count, 1);
+        assert_eq!(
+            comparison.snapshot_issues[0].state,
+            PublishSnapshotIssueState::Missing
+        );
+        assert_eq!(comparison.snapshot_issues[0].ref_name, "refs/heads/main");
+        assert_eq!(
+            comparison.snapshot_issues[1].state,
+            PublishSnapshotIssueState::Unpublished
+        );
+        assert_eq!(
+            comparison.snapshot_issues[1].revision_status.as_deref(),
+            Some("syncing")
         );
     }
 
@@ -2380,7 +2533,7 @@ mod tests {
             },
             |site_id| async move {
                 assert_eq!(site_id, "00000000-0000-0000-0000-000000000001");
-                Ok::<Vec<PublishRefRow>, CliError>(vec![
+                let refs = vec![
                     publish_ref_row(
                         "refs/heads/main",
                         "9999999999999999999999999999999999999999",
@@ -2391,7 +2544,15 @@ mod tests {
                         "3333333333333333333333333333333333333333",
                         "3333333333333333333333333333333333333333",
                     ),
-                ])
+                ];
+                let revisions = publish_revision_map([(
+                    "9999999999999999999999999999999999999999",
+                    Some(publish_revision_row(
+                        "9999999999999999999999999999999999999999",
+                        "published",
+                    )),
+                )]);
+                Ok::<PublishCloudStatusRows, CliError>(PublishCloudStatusRows { refs, revisions })
             },
         )
         .await
@@ -2417,6 +2578,12 @@ mod tests {
             json["publishedRefs"]["publishedOnly"][0]["refName"],
             "refs/tags/remote-only"
         );
+        assert_eq!(json["publishedRefs"]["snapshotIssueCount"], 1);
+        assert_eq!(json["publishedRefs"]["snapshotMissingCount"], 1);
+        assert_eq!(
+            json["publishedRefs"]["snapshotIssues"][0]["refName"],
+            "refs/tags/remote-only"
+        );
     }
 
     #[tokio::test]
@@ -2432,7 +2599,7 @@ mod tests {
             || async { Ok::<Vec<RefInput>, CliError>(Vec::new()) },
             |site_id| async move {
                 assert_eq!(site_id, "00000000-0000-0000-0000-000000000001");
-                Err::<Vec<PublishRefRow>, CliError>(publish_status_d1_error(
+                Err::<PublishCloudStatusRows, CliError>(publish_status_d1_error(
                     "failed to initialize D1 client for publish status ref comparison",
                     D1Error {
                         code: 1001,
@@ -2663,6 +2830,47 @@ mod tests {
             is_default: 0,
             sync_run_id: "sync-1".to_string(),
             schema_version: 1,
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn publish_revision_map_for_refs(
+        refs: &[PublishRefRow],
+    ) -> BTreeMap<String, Option<PublishRevisionRow>> {
+        refs.iter()
+            .map(|publish_ref| {
+                (
+                    publish_ref.revision_oid.clone(),
+                    Some(publish_revision_row(&publish_ref.revision_oid, "published")),
+                )
+            })
+            .collect()
+    }
+
+    fn publish_revision_map<const N: usize>(
+        entries: [(&str, Option<PublishRevisionRow>); N],
+    ) -> BTreeMap<String, Option<PublishRevisionRow>> {
+        entries
+            .into_iter()
+            .map(|(revision_oid, row)| (revision_oid.to_string(), row))
+            .collect()
+    }
+
+    fn publish_revision_row(revision_oid: &str, status: &str) -> PublishRevisionRow {
+        PublishRevisionRow {
+            site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            revision_oid: revision_oid.to_string(),
+            status: status.to_string(),
+            code_manifest_key: Some(format!("repo/publish/revisions/{revision_oid}/code.json")),
+            ai_index_key: None,
+            file_count: 1,
+            ai_object_count: 0,
+            ai_bundle_count: 0,
+            redaction_mode: "default".to_string(),
+            redaction_rules_version: "2026-05-13".to_string(),
+            sync_run_id: "sync-1".to_string(),
+            schema_version: 1,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
             updated_at: "2026-05-13T00:00:00Z".to_string(),
         }
     }

@@ -157,7 +157,10 @@ outdated, and conflicted files. It also includes `publishedRefs`. When
 no site id is available, `publishedRefs.state` is `unconfigured`. When
 comparison runs, `publishedRefs.state` is `compared` and the object
 contains matching, changed, local-only, and published-only ref counts
-plus the affected ref rows.
+plus the affected ref rows. The same object reports
+`snapshotIssueCount`, `snapshotMissingCount`, `snapshotUnpublishedCount`,
+and `snapshotIssues` when a D1 `publish_refs` row points at a missing or
+non-`published` `publish_revisions` snapshot.
 
 D1 comparison requires `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, and
 `LIBRA_D1_DATABASE_ID` using the same env/vault resolution as
