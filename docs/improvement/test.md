@@ -172,9 +172,9 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 - **现状 ✅**：`tests/harness/event_stream.rs` 与 [tests/code_ui_remote_sse_matrix.rs](../../tests/code_ui_remote_sse_matrix.rs) 已落地，7 条 `sse_cases.json` case 全部有 Rust runner。
 - **缺口**：
   - 已完成：blocking SSE client、initial replay、status/session/controller events、双订阅者、断线重连 replay、streaming fixture 单调增长。
-  - 仍待 P2：lagged stream 跨进程稳定再现困难，仅做 in-process broadcast 单测或长时 soak。
+  - 已完成：lagged stream 的跨进程稳定再现不作为 P0；in-process 单测 `sse_lag_recovers_with_full_session_snapshot_event` 已覆盖 `BroadcastStreamRecvError::Lagged` → 完整 `session_updated` snapshot recovery。
 - **优先级**：P0。
-- **测试位置**：**L2 已新增** `tests/harness/event_stream.rs` + `tests/code_ui_remote_sse_matrix.rs`；perf smoke 覆盖 1k event monotonic seq。
+- **测试位置**：**L2 已新增** `tests/harness/event_stream.rs` + `tests/code_ui_remote_sse_matrix.rs`；perf smoke 覆盖 1k event monotonic seq；lagged recovery 由 [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) `sse_lag_recovers_with_full_session_snapshot_event` 覆盖。
 - **AI 落地提示**：后续扩展继续复用现有 API：
   ```rust
   pub struct EventStream { /* reqwest::blocking::Response */ }
