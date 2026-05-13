@@ -48,7 +48,7 @@ fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::
 }
 
 #[test]
-fn cloud_clone_missing_clone_domain_config_fails_before_restore_stub() {
+fn clone_cloud_missing_clone_domain_config_fails_before_restore_stub() {
     let cwd = tempdir().unwrap();
     let dest = cwd.path().join("restored");
 
@@ -89,7 +89,7 @@ fn cloud_clone_missing_clone_domain_config_fails_before_restore_stub() {
 }
 
 #[test]
-fn cloud_clone_rejects_unsupported_git_style_options_before_config_lookup() {
+fn clone_cloud_rejects_unsupported_git_style_options_before_config_lookup() {
     let cwd = tempdir().unwrap();
     let source = "libra+cloud://code.example.com/kepler-ledger";
 
@@ -140,7 +140,7 @@ fn cloud_clone_rejects_unsupported_git_style_options_before_config_lookup() {
 }
 
 #[test]
-fn cloud_clone_configured_domain_loads_d1_r2_config_before_restore_stub() {
+fn clone_cloud_configured_domain_loads_d1_r2_config_before_restore_stub() {
     let cwd = tempdir().unwrap();
     let dest = cwd.path().join("restored");
 
