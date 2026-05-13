@@ -81,6 +81,17 @@ pub enum OpOutput {
         per_page: u64,
         total: u64,
     },
+    #[serde(rename = "show")]
+    Show {
+        op_id: String,
+        command_name: String,
+        description: String,
+        actor: String,
+        status: String,
+        start_ts: i64,
+        end_ts: Option<i64>,
+        view_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,7 +120,7 @@ pub async fn execute_safe(args: OpArgs, output: &OutputConfig) -> CliResult<()> 
             command,
             verbose,
         } => handle_op_log(number, page, command, verbose, output).await,
-        OpCommand::Show { .. } => Err(CliError::fatal("op show is not implemented yet")),
+        OpCommand::Show { op_ref, view } => handle_op_show(op_ref, view, output).await,
         OpCommand::Restore { .. } => Err(CliError::fatal("op restore is not implemented yet")),
     }
 }
@@ -190,6 +201,76 @@ async fn handle_op_log(
     Ok(())
 }
 
+async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) -> CliResult<()> {
+    let db = get_db_conn_instance().await;
+    let repo_id = current_repo_id().await?;
+    let op_id = resolve_op_ref(&db, &repo_id, &op_ref).await?;
+
+    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &op_id)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load operation '{op_id}': {e}")))?
+        .ok_or_else(|| {
+            CliError::fatal(format!("operation '{op_id}' not found"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra op log' to list available operations")
+        })?;
+    let op_record = &graph.operation;
+    let op_output = OpOutput::Show {
+        op_id: op_record.op_id.clone(),
+        command_name: op_record.command_name.clone(),
+        description: op_record.description.clone(),
+        actor: op_record.actor.clone(),
+        status: status_label(op_record.status).to_string(),
+        start_ts: op_record.start_ts,
+        end_ts: op_record.end_ts,
+        view_id: op_record.view_id.clone(),
+    };
+
+    if output.is_json() {
+        return emit_json_data("op", &op_output, output);
+    }
+
+    let short_id = &op_record.op_id[..8.min(op_record.op_id.len())];
+    println!("Operation: {short_id}");
+    println!("Command: {}", op_record.command_name);
+    println!("Description: {}", op_record.description);
+    println!("Actor: {}", op_record.actor);
+    println!("Status: {}", status_label(op_record.status));
+    println!("Started: {}", format_timestamp(op_record.start_ts));
+    if let Some(end_ts) = op_record.end_ts {
+        println!("Completed: {}", format_timestamp(end_ts));
+        println!(
+            "Duration: {}ms",
+            end_ts.saturating_sub(op_record.start_ts) * 1000
+        );
+    }
+    println!("View ID: {}", op_record.view_id);
+
+    if show_view {
+        println!();
+        println!("View Snapshot:");
+        println!(
+            "  HEAD: {} ({})",
+            graph.view.head_target, graph.view.head_kind
+        );
+        println!("  Refs:");
+        for ref_rec in &graph.refs {
+            let ref_name = if let Some(remote) = &ref_rec.ref_remote {
+                format!("{}/{}/{}", ref_rec.ref_kind, remote, ref_rec.ref_name)
+            } else {
+                format!("{} {}", ref_rec.ref_kind, ref_rec.ref_name)
+            };
+            println!(
+                "    {}: {}",
+                ref_name,
+                &ref_rec.target_oid[..7.min(ref_rec.target_oid.len())]
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn current_repo_id() -> CliResult<String> {
     ConfigKv::get("libra.repoid")
         .await
@@ -201,6 +282,41 @@ async fn current_repo_id() -> CliResult<String> {
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("run 'libra init' to initialize repository metadata")
         })
+}
+
+async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    repo_id: &str,
+    op_ref: &str,
+) -> CliResult<String> {
+    if let Some(index_str) = op_ref.strip_prefix("@{")
+        && let Some(index_end) = index_str.find('}')
+    {
+        let index: usize = index_str[..index_end].parse().map_err(|_| {
+            CliError::fatal(format!("invalid operation index: {op_ref}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        let page = OperationQueryPage {
+            page: 1,
+            per_page: (index + 1) as u64,
+        };
+        let result = OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
+            .await
+            .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+
+        return result
+            .items
+            .into_iter()
+            .nth(index)
+            .map(|op| op.op_id)
+            .ok_or_else(|| {
+                CliError::fatal(format!("operation index {index} out of range"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra op log' to see available operations")
+            });
+    }
+
+    Ok(op_ref.to_string())
 }
 
 fn log_entry_from_item(op: &OperationLogListItem) -> OpLogEntry {
