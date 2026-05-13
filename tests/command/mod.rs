@@ -1,6 +1,7 @@
 //! Shared test utilities and re-exports for the command integration test suite.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::Path,
@@ -58,6 +59,8 @@ pub(crate) struct CliErrorReport {
     pub(crate) usage: Option<String>,
     #[serde(default)]
     pub(crate) hints: Vec<String>,
+    #[serde(default)]
+    pub(crate) details: BTreeMap<String, Value>,
 }
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.

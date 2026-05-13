@@ -969,6 +969,66 @@ pub async fn read_cascaded_config_value(
     global_config_value(key).await
 }
 
+/// Read a config value for the given target using local-first, then global, and
+/// decrypt encrypted entries with the matching vault.
+///
+/// Use this for non-env config keys whose names still trigger sensitive-key
+/// encryption, for example credential/profile selectors that are stored through
+/// `libra config set`.
+pub async fn read_cascaded_config_value_decrypted(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Result<Option<String>> {
+    if let Some(value) = local_config_decrypted_value_for_target(local_target, key).await? {
+        return Ok(Some(value));
+    }
+    global_config_decrypted_value(key).await
+}
+
+async fn local_config_decrypted_value_for_target(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Result<Option<String>> {
+    let Some(entry) = local_config_entry_for_target(local_target, key).await? else {
+        return Ok(None);
+    };
+
+    let value = if entry.encrypted {
+        decrypt_value_for_local_target(&entry.value, local_target)
+            .await
+            .context(format!("failed to decrypt {key} from local config"))?
+    } else {
+        entry.value
+    };
+    Ok(trim_non_empty_config_value(value))
+}
+
+async fn global_config_decrypted_value(key: &str) -> Result<Option<String>> {
+    let Some(db_path) = global_config_path() else {
+        return Ok(None);
+    };
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let Some(entry) = read_config_entry_from_db_path(&db_path, key).await? else {
+        return Ok(None);
+    };
+    let value = if entry.encrypted {
+        decrypt_value(&entry.value, "global")
+            .await
+            .context(format!("failed to decrypt {key} from global config"))?
+    } else {
+        entry.value
+    };
+    Ok(trim_non_empty_config_value(value))
+}
+
+fn trim_non_empty_config_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Resolve user identity values from config and environment while preserving
 /// the source boundary between the two.
 ///

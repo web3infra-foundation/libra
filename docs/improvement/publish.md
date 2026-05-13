@@ -837,7 +837,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.52) scheme parser 对非法 clone domain、非法 slug/repo_id、非法 ref、非法 revision、缺失 slug/repo_id、`ref` 与 `revision` 同时出现返回 `CliInvalidArguments`，并给出可行动 hint；非 `libra+cloud://` scheme 仍归普通 clone remote 解析。
 - [x] (v0.17.77) scheme parser 保留后续 restore 需要的 target selector：`Slug(<slug>)`、`RepoId(<repo_id>)`、可选 `Ref(<ref>)` / `Revision(<oid|latest>)`，避免只校验 URL 但丢弃 D1 lookup 输入。
 - [x] (v0.17.55) Cloudflare clone 在 restore stub 前检查 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket`；未配置该 domain 时返回 `LBR-AUTH-001`，提示配置 keys，并且不创建目标目录。
-- [ ] Cloudflare clone 复用 publish/cloud 的完整本地配置和 vault 读取策略，通过 `clone_domains.<clone-domain>` 解析 D1/R2 访问参数；配置存在后继续进入 D1/R2 restore。
+- [x] (v0.17.78) Cloudflare clone 复用 cascaded local/global config 读取 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket` 和可选 `.credential_profile`，配置存在后进入 D1/R2 restore stub 并在结构化错误中保留已解析的 D1/R2 参数。
 - [ ] 通过 D1 用 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 解析 site；slug rename 不影响 `repo/<repo_id>` 稳定入口。
 - [ ] 通过 D1 解析 `repositories`、`object_index`、`publish_refs`、refs metadata 和 latest/default revision；通过 R2 读取完整 Git object 集合。
 - [ ] 使用 `run_init()` 初始化本地仓库，再恢复 objects、refs、HEAD、remote config，并完成 non-bare checkout。

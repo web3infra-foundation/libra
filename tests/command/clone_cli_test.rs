@@ -4,6 +4,7 @@
 
 use std::{fs, path::Path, process::Command};
 
+use serde_json::Value;
 use tempfile::tempdir;
 
 use super::parse_cli_error_stderr;
@@ -136,6 +137,112 @@ fn cloud_clone_rejects_unsupported_git_style_options_before_config_lookup() {
             "unsupported cloud clone option must not create the destination"
         );
     }
+}
+
+#[test]
+fn cloud_clone_configured_domain_loads_d1_r2_config_before_restore_stub() {
+    let cwd = tempdir().unwrap();
+    let dest = cwd.path().join("restored");
+
+    for (key, value) in [
+        (
+            "cloud.clone_domains.code.example.com.account_id",
+            "acct_123",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.d1_database_id",
+            "d1_pub_456",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.r2_bucket",
+            "publish-r2",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.credential_profile",
+            "prod",
+        ),
+    ] {
+        let output = run_libra(&["config", "set", "--global", key, value], cwd.path());
+        assert!(
+            output.status.success(),
+            "config set should succeed for {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = run_libra(
+        &[
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+            dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "configured cloud clone should reach the restore stub"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report
+            .message
+            .contains("Phase 5 of docs/improvement/publish.md is not yet implemented"),
+        "configured clone-domain should fail at the restore stub: {:?}",
+        report.message
+    );
+    assert!(
+        !report
+            .message
+            .contains("clone domain 'code.example.com' is not configured"),
+        "configured clone-domain should not fail at the config preflight: {:?}",
+        report.message
+    );
+    assert_eq!(
+        report.details.get("clone_domain").and_then(Value::as_str),
+        Some("code.example.com")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_account_id")
+            .and_then(Value::as_str),
+        Some("acct_123")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_d1_database_id")
+            .and_then(Value::as_str),
+        Some("d1_pub_456")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_r2_bucket")
+            .and_then(Value::as_str),
+        Some("publish-r2")
+    );
+    assert_eq!(
+        report
+            .details
+            .get("cloud_credential_profile")
+            .and_then(Value::as_str),
+        Some("prod")
+    );
+    assert_eq!(
+        report.details.get("cloud_target").and_then(Value::as_str),
+        Some("slug:kepler-ledger")
+    );
+    assert_eq!(
+        report.details.get("cloud_selector").and_then(Value::as_str),
+        Some("ref:refs/tags/v1.0.0")
+    );
+    assert!(
+        !dest.exists(),
+        "cloud clone restore stub must not create the destination"
+    );
 }
 
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {

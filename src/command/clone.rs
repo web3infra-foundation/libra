@@ -28,7 +28,9 @@ use crate::{
     },
     internal::{
         branch::{self, Branch},
-        config::{ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value},
+        config::{
+            ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value_decrypted,
+        },
         db::get_db_conn_instance,
         head::Head,
         protocol::DiscoveryResult,
@@ -187,6 +189,7 @@ pub enum CloneError {
         input: String,
         target: String,
         selector: Option<String>,
+        config_details: Vec<(&'static str, String)>,
     },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
@@ -282,6 +285,7 @@ impl From<CloneError> for CliError {
             CloneError::CloudPublishSourceNotYetImplemented {
                 ref target,
                 ref selector,
+                ref config_details,
                 ..
             } => {
                 // Codex pass-7 P1: surface the recognised but
@@ -302,6 +306,9 @@ impl From<CloneError> for CliError {
                     );
                 if let Some(selector) = selector {
                     cli = cli.with_detail("cloud_selector", selector.clone());
+                }
+                for (key, value) in config_details {
+                    cli = cli.with_detail(*key, value.clone());
                 }
                 cli
             }
@@ -687,7 +694,7 @@ async fn execute_clone_inner(
         let source =
             parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
         validate_cloud_clone_option_compatibility(args).map_err(|error| (error, None))?;
-        ensure_cloud_clone_domain_config(&source)
+        let clone_config = load_cloud_clone_domain_config(&source)
             .await
             .map_err(|error| (error, None))?;
         return Err((
@@ -695,6 +702,7 @@ async fn execute_clone_inner(
                 input: args.remote_repo.clone(),
                 target: source.target_label(),
                 selector: source.selector_label(),
+                config_details: clone_config.into_error_details(source.clone_domain),
             },
             None,
         ));
@@ -821,6 +829,29 @@ enum CloudPublishTarget {
 enum CloudPublishSelector {
     Ref(String),
     Revision(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CloudCloneDomainConfig {
+    account_id: String,
+    d1_database_id: String,
+    r2_bucket: String,
+    credential_profile: Option<String>,
+}
+
+impl CloudCloneDomainConfig {
+    fn into_error_details(self, clone_domain: String) -> Vec<(&'static str, String)> {
+        let mut details = vec![
+            ("clone_domain", clone_domain),
+            ("cloud_account_id", self.account_id),
+            ("cloud_d1_database_id", self.d1_database_id),
+            ("cloud_r2_bucket", self.r2_bucket),
+        ];
+        if let Some(credential_profile) = self.credential_profile {
+            details.push(("cloud_credential_profile", credential_profile));
+        }
+        details
+    }
 }
 
 impl CloudPublishSource {
@@ -959,15 +990,25 @@ fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), Clo
     Ok(())
 }
 
-async fn ensure_cloud_clone_domain_config(source: &CloudPublishSource) -> Result<(), CloneError> {
+async fn load_cloud_clone_domain_config(
+    source: &CloudPublishSource,
+) -> Result<CloudCloneDomainConfig, CloneError> {
     let required_suffixes = ["account_id", "d1_database_id", "r2_bucket"];
     let mut missing_keys = Vec::new();
     let local_target = clone_config_local_target();
+    let mut account_id = None;
+    let mut d1_database_id = None;
+    let mut r2_bucket = None;
 
     for suffix in required_suffixes {
         let key = format!("cloud.clone_domains.{}.{}", source.clone_domain, suffix);
-        match read_cascaded_config_value(local_target, &key).await {
-            Ok(Some(_)) => {}
+        match read_cascaded_config_value_decrypted(local_target, &key).await {
+            Ok(Some(value)) => match suffix {
+                "account_id" => account_id = Some(value),
+                "d1_database_id" => d1_database_id = Some(value),
+                "r2_bucket" => r2_bucket = Some(value),
+                _ => {}
+            },
             Ok(None) => missing_keys.push(key),
             Err(source_error) => {
                 return Err(CloneError::CloudCloneDomainConfigRead {
@@ -978,14 +1019,42 @@ async fn ensure_cloud_clone_domain_config(source: &CloudPublishSource) -> Result
         }
     }
 
-    if missing_keys.is_empty() {
-        Ok(())
-    } else {
-        Err(CloneError::CloudCloneDomainNotConfigured {
+    if !missing_keys.is_empty() {
+        return Err(CloneError::CloudCloneDomainNotConfigured {
             domain: source.clone_domain.clone(),
             missing_keys: missing_keys.join(", "),
-        })
+        });
     }
+
+    let credential_profile_key = format!(
+        "cloud.clone_domains.{}.credential_profile",
+        source.clone_domain
+    );
+    let credential_profile =
+        read_cascaded_config_value_decrypted(local_target, &credential_profile_key)
+            .await
+            .map_err(|source_error| CloneError::CloudCloneDomainConfigRead {
+                domain: source.clone_domain.clone(),
+                source: source_error,
+            })?;
+
+    Ok(CloudCloneDomainConfig {
+        account_id: account_id.ok_or_else(|| CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: format!("cloud.clone_domains.{}.account_id", source.clone_domain),
+        })?,
+        d1_database_id: d1_database_id.ok_or_else(|| {
+            CloneError::CloudCloneDomainNotConfigured {
+                domain: source.clone_domain.clone(),
+                missing_keys: format!("cloud.clone_domains.{}.d1_database_id", source.clone_domain),
+            }
+        })?,
+        r2_bucket: r2_bucket.ok_or_else(|| CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: format!("cloud.clone_domains.{}.r2_bucket", source.clone_domain),
+        })?,
+        credential_profile,
+    })
 }
 
 fn clone_config_local_target() -> LocalIdentityTarget<'static> {
