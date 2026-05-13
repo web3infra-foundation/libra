@@ -939,7 +939,7 @@ v1 使用 gitignore 子集：
 **Verification:**
 
 - [ ] `cargo test publish_incremental_test`
-- [ ] `cargo test publish_redaction_contract_test`
+- [x] (v0.17.92) `cargo test publish_redaction_contract_test`
 - [ ] `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
 
 **Dependencies:** Phase 5, Phase 7
@@ -1018,6 +1018,7 @@ cargo test publish_refs_test
 cargo test publish_snapshot_test
 cargo test publish_ai_object_model_contract_test
 cargo test publish_ai_export_test
+cargo test publish_redaction_contract_test
 cargo test publish_worker_template_embed_test
 cargo test --test command_test publish
 cargo test cloud_clone_source_parse_test
