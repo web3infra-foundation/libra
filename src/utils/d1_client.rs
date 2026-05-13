@@ -84,6 +84,23 @@ pub struct D1Statement {
     pub params: Option<Vec<serde_json::Value>>,
 }
 
+/// CAS update input for `publish_sites.latest_revision_oid`.
+pub struct PublishSiteLatestUpdate<'a> {
+    pub site_id: &'a str,
+    pub default_ref: Option<&'a str>,
+    pub latest_revision_oid: Option<&'a str>,
+    pub next_refs_generation: i64,
+    pub expected_refs_generation: i64,
+    pub updated_at: &'a str,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PublishSiteLatestUpdateResult {
+    Updated,
+    Conflict,
+}
+
 /// Cloudflare D1 REST API client.
 ///
 /// `Clone` is cheap (HTTP client is `Arc` internally). Construct via
@@ -967,6 +984,24 @@ impl D1Client {
         Ok(())
     }
 
+    /// CAS-update a site's latest/default publish pointers.
+    ///
+    /// Without `force`, the update only applies when the stored
+    /// `refs_generation` matches `expected_refs_generation`; a
+    /// zero-row update is reported as [`PublishSiteLatestUpdateResult::Conflict`]
+    /// so callers can surface a clear retry-or-`--force` error. With
+    /// `force`, the generation guard is intentionally omitted.
+    pub async fn update_publish_site_latest(
+        &self,
+        update: PublishSiteLatestUpdate<'_>,
+    ) -> Result<PublishSiteLatestUpdateResult, D1Error> {
+        let D1Statement { sql, params } = publish_site_latest_update_statement(&update);
+        let result = self.execute(&sql, params).await?;
+        Ok(publish_site_latest_update_result_from_changes(
+            result.meta.and_then(|meta| meta.changes).unwrap_or(0),
+        ))
+    }
+
     /// Insert or update a `publish_sync_runs` row.
     pub async fn upsert_publish_sync_run(&self, row: &PublishSyncRunRow) -> Result<(), D1Error> {
         let sql = r#"
@@ -1320,6 +1355,37 @@ fn publish_site_select_sql(where_clause: &str) -> String {
                 schema_version, created_at, updated_at \
          FROM publish_sites WHERE {where_clause} LIMIT 1"
     )
+}
+
+fn publish_site_latest_update_statement(update: &PublishSiteLatestUpdate<'_>) -> D1Statement {
+    let mut sql = "UPDATE publish_sites \
+                   SET default_ref = ?2, latest_revision_oid = ?3, refs_generation = ?4, \
+                       updated_at = ?5 \
+                   WHERE site_id = ?1"
+        .to_string();
+    let mut params = vec![
+        serde_json::json!(update.site_id),
+        serde_json::json!(update.default_ref),
+        serde_json::json!(update.latest_revision_oid),
+        serde_json::json!(update.next_refs_generation),
+        serde_json::json!(update.updated_at),
+    ];
+    if !update.force {
+        sql.push_str(" AND refs_generation = ?6");
+        params.push(serde_json::json!(update.expected_refs_generation));
+    }
+    D1Statement {
+        sql,
+        params: Some(params),
+    }
+}
+
+fn publish_site_latest_update_result_from_changes(changes: i64) -> PublishSiteLatestUpdateResult {
+    if changes > 0 {
+        PublishSiteLatestUpdateResult::Updated
+    } else {
+        PublishSiteLatestUpdateResult::Conflict
+    }
 }
 
 /// Split a multi-statement SQL script into individual statements.
@@ -1904,6 +1970,56 @@ mod tests {
         assert!(
             !repo_sql.contains("slug = ?2"),
             "repo lookup must not depend on the current slug: {repo_sql}"
+        );
+    }
+
+    #[test]
+    fn publish_latest_cas_update_requires_generation_match_unless_forced() {
+        let guarded = PublishSiteLatestUpdate {
+            site_id: "site-1",
+            default_ref: Some("refs/heads/main"),
+            latest_revision_oid: Some("abcdef0123456789abcdef0123456789abcdef01"),
+            next_refs_generation: 12,
+            expected_refs_generation: 11,
+            updated_at: "2026-05-13T12:00:00Z",
+            force: false,
+        };
+        let guarded_statement = publish_site_latest_update_statement(&guarded);
+        assert!(
+            guarded_statement
+                .sql
+                .contains("WHERE site_id = ?1 AND refs_generation = ?6"),
+            "non-force update must use refs_generation as the CAS guard: {}",
+            guarded_statement.sql
+        );
+        assert_eq!(guarded_statement.params.as_ref().expect("params").len(), 6);
+        assert_eq!(
+            guarded_statement.params.as_ref().expect("params").last(),
+            Some(&serde_json::json!(11))
+        );
+
+        let forced = PublishSiteLatestUpdate {
+            force: true,
+            ..guarded
+        };
+        let forced_statement = publish_site_latest_update_statement(&forced);
+        assert!(
+            !forced_statement.sql.contains("refs_generation = ?6"),
+            "force update must bypass the stale-generation guard: {}",
+            forced_statement.sql
+        );
+        assert_eq!(forced_statement.params.as_ref().expect("params").len(), 5);
+    }
+
+    #[test]
+    fn publish_latest_cas_update_reports_conflict_on_zero_changes() {
+        assert_eq!(
+            publish_site_latest_update_result_from_changes(1),
+            PublishSiteLatestUpdateResult::Updated
+        );
+        assert_eq!(
+            publish_site_latest_update_result_from_changes(0),
+            PublishSiteLatestUpdateResult::Conflict
         );
     }
 

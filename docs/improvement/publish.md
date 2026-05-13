@@ -930,7 +930,7 @@ v1 使用 gitignore 子集：
 **Acceptance criteria:**
 
 - [ ] 重复 sync 不重复上传未变化文件、AI objects 和 AI bundle。
-- [ ] CAS latest revision 冲突有清晰错误和 `--force` 路径。
+- [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
