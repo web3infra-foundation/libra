@@ -793,6 +793,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.118) `build_revision_d1_rows()` 为单 revision 生成 `publish_revisions` 和 `publish_files` rows；text rows 保留 `content_sha256`/`r2_key`，binary、too-large、ignored rows 保持 metadata-only。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
 - [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
+- [x] (v0.17.119) `build_site_index_artifacts()` 从全量 `SnapshotPlan` 生成 `publish_refs` rows、`refs.json` 和 `latest.json` payload，并可写入 `PublishStorage`；实际 D1 upsert/CAS 仍由后续 sync sink 承载。
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
