@@ -790,6 +790,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.114) `build_revision_artifact_plan()` 生成单 revision 的 `code-manifest.json` payload、文本 R2 blob 上传清单，并将 binary、too-large、ignored path 保持为 metadata-only；完整非 dry-run sync/D1 写入仍由后续 Phase 4 项承载。
 - [x] (v0.17.115) `publish sync` 命令层可从 committed revision tree materialize repo-relative path + blob bytes 为 `RevisionFileInput`，供后续非 dry-run sync 写入 artifact/D1/R2。
 - [x] (v0.17.116) `upload_revision_artifacts()` 将单 revision 的 `code-manifest.json` 和文本预览 blob 写入 `PublishStorage`，并保持 binary、too-large、ignored path 不产生 R2 blob；D1 `publish_files` metadata rows 仍由后续 sync sink 承载。
+- [x] (v0.17.118) `build_revision_d1_rows()` 为单 revision 生成 `publish_revisions` 和 `publish_files` rows；text rows 保留 `content_sha256`/`r2_key`，binary、too-large、ignored rows 保持 metadata-only。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
 - [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
