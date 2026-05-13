@@ -820,8 +820,8 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `cargo test --test command_test publish`
-- [ ] `cargo test publish`
+- [x] (v0.17.94) `cargo test --test command_test publish`
+- [x] (v0.17.94) `cargo test publish`
 
 **Dependencies:** Phase 3
 
