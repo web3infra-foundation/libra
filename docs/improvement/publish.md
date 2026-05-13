@@ -169,15 +169,16 @@ Build/deploy scripts：
 {
   "scripts": {
     "dev": "next dev",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "build": "opennextjs-cloudflare build",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "next:build": "next build",
+    "preview": "pnpm build && opennextjs-cloudflare preview",
+    "build": "pnpm cf-typegen && opennextjs-cloudflare build",
+    "deploy": "pnpm build && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   }
 }
 ```
 
-`wrangler types` 生成的 `CloudflareEnv` 是 binding 类型来源；不要手写漂移的 `Env` interface。
+`wrangler types` 生成的 `CloudflareEnv` 是 binding 类型来源；不要手写漂移的 `Env` interface。`open-next.config.ts` 必须设置 OpenNext `buildCommand` 为 `pnpm next:build`，让外层 `pnpm build` 可以执行 `cf-typegen` 和 OpenNext build，同时避免 OpenNext 内部再次调用 `pnpm build` 造成递归。
 
 ### Worker 分发与打包
 
@@ -909,7 +910,7 @@ v1 使用 gitignore 子集：
 
 **Verification:**
 
-- [ ] `pnpm --dir worker build`
+- [x] (v0.17.59) `pnpm --dir worker build`
 - [ ] `pnpm --dir worker e2e`
 - [ ] `cargo test --test command_test publish_deploy`
 

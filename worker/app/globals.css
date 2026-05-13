@@ -103,7 +103,8 @@
 }
 
 @layer components {
-  .lb-mono { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
+  .lb-mono,
+  .libra-mono { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
   .lb-serif { font-family: var(--font-serif); }
   .lb-brand {
     font-family: var(--font-serif);
@@ -148,7 +149,8 @@
   }
 
   /* Chip/pill — five tones map to design tokens */
-  .lb-chip {
+  .lb-chip,
+  .libra-pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -162,20 +164,27 @@
     color: var(--ink-mid);
     white-space: nowrap;
   }
-  .lb-chip-good { background: var(--good-tint); border-color: transparent; color: var(--good); }
-  .lb-chip-warn { background: var(--warn-tint); border-color: transparent; color: var(--warn); }
-  .lb-chip-bad  { background: var(--bad-tint);  border-color: transparent; color: var(--bad);  }
+  .lb-chip-good,
+  .libra-pill-good { background: var(--good-tint); border-color: transparent; color: var(--good); }
+  .lb-chip-warn,
+  .libra-pill-warn { background: var(--warn-tint); border-color: transparent; color: var(--warn); }
+  .lb-chip-bad,
+  .libra-pill-bad { background: var(--bad-tint); border-color: transparent; color: var(--bad); }
   .lb-chip-info { background: var(--info-tint); border-color: transparent; color: var(--info); }
-  .lb-chip-accent { background: var(--gold-tint); border-color: transparent; color: var(--gold); }
+  .lb-chip-accent,
+  .libra-pill-accent { background: var(--gold-tint); border-color: transparent; color: var(--gold); }
 
-  .lb-card {
+  .lb-card,
+  .libra-card {
     background: var(--paper);
     border: 1px solid var(--paper-line);
     border-radius: var(--r-2);
     box-shadow: var(--shadow-1);
   }
-  .lb-card-pad { padding: 14px 16px; }
-  .lb-card-row {
+  .lb-card-pad,
+  .libra-card-pad { padding: 14px 16px; }
+  .lb-card-row,
+  .libra-card-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -185,7 +194,8 @@
   }
   .lb-card-row:last-child { border-bottom: 0; }
 
-  .lb-codebox {
+  .lb-codebox,
+  .libra-codebox {
     background: var(--paper-deep);
     border: 1px solid var(--paper-line);
     border-radius: var(--r-1);
@@ -197,8 +207,10 @@
     color: var(--ink-deep);
   }
 
-  .lb-link { color: var(--gold); border-bottom: 1px solid transparent; }
-  .lb-link:hover { border-bottom-color: var(--gold); }
+  .lb-link,
+  .libra-link { color: var(--gold); border-bottom: 1px solid transparent; }
+  .lb-link:hover,
+  .libra-link:hover { border-bottom-color: var(--gold); }
 
   /* Scrollbars (paper) */
   *::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -230,18 +242,7 @@
  * the canonical `lb-*` names.
  */
 @layer components {
-  .libra-pill { @apply lb-chip; }
-  .libra-pill-accent { @apply lb-chip-accent; }
-  .libra-pill-warn { @apply lb-chip-warn; }
-  .libra-pill-bad { @apply lb-chip-bad; }
-  .libra-pill-good { @apply lb-chip-good; }
-  .libra-card { @apply lb-card; }
-  .libra-card-pad { @apply lb-card-pad; }
-  .libra-card-row { @apply lb-card-row; }
-  .libra-link { @apply lb-link; }
-  .libra-mono { @apply lb-mono; }
   .libra-text-muted { color: var(--ink-soft); }
   .libra-text-faint { color: var(--ink-faint); }
   .libra-divider { height: 1px; background: var(--paper-line); }
-  .libra-codebox { @apply lb-codebox; }
 }

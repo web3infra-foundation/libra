@@ -1,6 +1,6 @@
 {
   "name": "libra-publish-worker",
-  "version": "0.17.58",
+  "version": "0.17.59",
   "private": true,
   "description": "Libra publish — Cloudflare Worker (Next.js + OpenNext) reading D1/R2 publish snapshots",
   "scripts": {
@@ -8,9 +8,10 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
+    "next:build": "next build",
     "build": "pnpm cf-typegen && opennextjs-cloudflare build",
-    "preview": "pnpm cf-typegen && opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "pnpm cf-typegen && opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "preview": "pnpm build && opennextjs-cloudflare preview",
+    "deploy": "pnpm build && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "e2e": "playwright test",
     "e2e:install": "playwright install --with-deps chromium"
