@@ -12,7 +12,9 @@ pub mod history;
 pub mod scheduler;
 
 pub use config::{AutomationAction, AutomationConfig, AutomationRule, AutomationTrigger};
-pub use events::{AutomationError, AutomationRunResult, AutomationRunStatus};
+pub use events::{
+    AutomationError, AutomationRunResult, AutomationRunStatus, AutomationRuntimeEvent,
+};
 pub use executor::AutomationExecutor;
 pub use history::AutomationHistory;
 pub use scheduler::AutomationScheduler;

@@ -5,9 +5,9 @@ use libra::internal::{
     ai::{
         automation::{
             AutomationAction, AutomationConfig, AutomationExecutor, AutomationHistory,
-            AutomationRunStatus, AutomationScheduler, AutomationTrigger,
+            AutomationRunStatus, AutomationRuntimeEvent, AutomationScheduler, AutomationTrigger,
         },
-        hooks::LifecycleEventKind,
+        hooks::{HookEvent, LifecycleEventKind},
     },
     db::migration::run_builtin_migrations,
 };
@@ -75,6 +75,60 @@ fn automation_cron_simulation_selects_due_rules() {
     assert_eq!(
         due.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
         vec!["quarter_hour"]
+    );
+}
+
+#[tokio::test]
+async fn automation_scheduler_dispatches_hook_and_vcs_runtime_events() {
+    let config = AutomationConfig::from_toml_str(
+        r#"
+        [[rules]]
+        id = "session_end_hook"
+        trigger = { kind = "hook", event = "session_end" }
+        action = { kind = "prompt", prompt = "summarize session" }
+
+        [[rules]]
+        id = "post_commit_vcs"
+        trigger = { kind = "vcs", event = "post_commit" }
+        action = { kind = "prompt", prompt = "summarize commit" }
+
+        [[rules]]
+        id = "hourly"
+        trigger = { kind = "cron", schedule = "@hourly" }
+        action = { kind = "prompt", prompt = "cron only" }
+    "#,
+    )
+    .expect("parse automations");
+
+    let scheduler = AutomationScheduler::new(config);
+    let hook_results = scheduler
+        .run_event(
+            AutomationRuntimeEvent::hook(HookEvent::SessionEnd),
+            &AutomationExecutor::dry_run(),
+        )
+        .await
+        .expect("dispatch hook event");
+    assert_eq!(
+        hook_results
+            .iter()
+            .map(|result| result.rule_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session_end_hook"]
+    );
+
+    let vcs_results = scheduler
+        .run_event(
+            AutomationRuntimeEvent::vcs("post_commit"),
+            &AutomationExecutor::dry_run(),
+        )
+        .await
+        .expect("dispatch vcs event");
+    assert_eq!(
+        vcs_results
+            .iter()
+            .map(|result| result.rule_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["post_commit_vcs"]
     );
 }
 

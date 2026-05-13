@@ -4,6 +4,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::internal::ai::{automation::config::AutomationTrigger, hooks::HookEvent};
+
 #[derive(Debug, Error)]
 pub enum AutomationError {
     #[error("failed to parse automation config: {0}")]
@@ -25,6 +27,42 @@ pub enum AutomationRunStatus {
     Failed,
     ApprovalRequired,
     Skipped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutomationRuntimeEvent {
+    Hook { event: HookEvent },
+    Vcs { event: String },
+}
+
+impl AutomationRuntimeEvent {
+    pub fn hook(event: HookEvent) -> Self {
+        Self::Hook { event }
+    }
+
+    pub fn vcs(event: impl Into<String>) -> Self {
+        Self::Vcs {
+            event: event.into(),
+        }
+    }
+
+    pub fn matches_trigger(&self, trigger: &AutomationTrigger) -> bool {
+        match (self, trigger) {
+            (
+                Self::Hook { event },
+                AutomationTrigger::Hook {
+                    event: trigger_event,
+                },
+            ) => event == trigger_event,
+            (
+                Self::Vcs { event },
+                AutomationTrigger::Vcs {
+                    event: trigger_event,
+                },
+            ) => event == trigger_event,
+            _ => false,
+        }
+    }
 }
 
 impl AutomationRunStatus {

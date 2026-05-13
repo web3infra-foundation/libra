@@ -2,7 +2,7 @@ use chrono::{DateTime, Timelike, Utc};
 
 use crate::internal::ai::automation::{
     config::{AutomationConfig, AutomationRule, AutomationTrigger},
-    events::{AutomationError, AutomationRunResult},
+    events::{AutomationError, AutomationRunResult, AutomationRuntimeEvent},
     executor::AutomationExecutor,
 };
 
@@ -41,6 +41,27 @@ impl AutomationScheduler {
         let due = self.due_rules_at(now)?;
         let mut results = Vec::with_capacity(due.len());
         for rule in due {
+            results.push(executor.execute_rule(rule, rule.trigger.clone()).await);
+        }
+        Ok(results)
+    }
+
+    pub fn matching_event_rules(&self, event: &AutomationRuntimeEvent) -> Vec<&AutomationRule> {
+        self.config
+            .rules
+            .iter()
+            .filter(|rule| rule.enabled && event.matches_trigger(&rule.trigger))
+            .collect()
+    }
+
+    pub async fn run_event(
+        &self,
+        event: AutomationRuntimeEvent,
+        executor: &AutomationExecutor,
+    ) -> Result<Vec<AutomationRunResult>, AutomationError> {
+        let matching = self.matching_event_rules(&event);
+        let mut results = Vec::with_capacity(matching.len());
+        for rule in matching {
             results.push(executor.execute_rule(rule, rule.trigger.clone()).await);
         }
         Ok(results)
