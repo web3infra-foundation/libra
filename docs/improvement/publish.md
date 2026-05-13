@@ -932,7 +932,7 @@ v1 使用 gitignore 子集：
 - [ ] CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [ ] public visibility 下 secret/redaction fixture 无泄漏。
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
-- [ ] `docs/commands/publish.md` 更新为用户可读文档。
+- [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
 
 **Verification:**
@@ -974,9 +974,9 @@ v1 使用 gitignore 子集：
 ### Checkpoint D：Worker 可读
 
 - [ ] Miniflare 能通过 API 读回 site、refs、tree、file、AI versions、AI objects 和 AI graph。
-- [ ] private 缺 Access JWT 或 JWT 校验失败返回 403。
-- [ ] disabled site 返回 410。
-- [ ] R2 miss 和 D1 miss 返回 typed 404。
+- [x] (v0.17.63) private 缺 Access JWT 或 JWT 校验失败返回 403。
+- [x] (v0.17.63) disabled site 返回 410。
+- [x] (v0.17.63) R2 miss 和 D1 miss 返回 typed 404。
 
 ### Checkpoint E：页面可发布
 

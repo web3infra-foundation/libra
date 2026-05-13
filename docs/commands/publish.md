@@ -2,7 +2,7 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.62:
+Current implementation status in v0.17.63:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
@@ -18,6 +18,8 @@ Current implementation status in v0.17.62:
 - `libra publish unpublish --yes` disables a published site by setting
   `publish_sites.status = 'disabled'` through Wrangler D1 execute. The
   Worker already returns HTTP 410 for disabled sites.
+- Worker API route tests cover private-site 403, disabled-site 410, and
+  typed 404 envelopes for missing D1 file rows or missing R2 content.
 - `libra publish sync` without `--dry-run` is registered, but it
   currently returns `LBR-UNSUPPORTED-001` with a pointer to
   `docs/improvement/publish.md`.

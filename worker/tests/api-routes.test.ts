@@ -180,6 +180,32 @@ describe("/api/sites/[slug]/file", () => {
     expect(body.data.file.path).toBe("README.md");
     expect(body.data.content?.body).toContain("Hello from publish snapshot");
   });
+  it("returns typed 404 when D1 has no file row", async () => {
+    const response = await fileGet(
+      makeRequest("/api/sites/libra-demo/file?path=missing.md"),
+      { params: Promise.resolve({ slug: "libra-demo" }) },
+    );
+    expect(response.status).toBe(404);
+    const body = await jsonBody<ErrorBody>(response);
+    expect(body).toMatchObject({ ok: false, code: "FILE_NOT_FOUND" });
+  });
+  it("returns typed 404 when R2 content is missing", async () => {
+    const readme = d1.tables["publish_files"]!.find(
+      (row) => row["path"] === "README.md",
+    );
+    if (!readme || typeof readme["r2_key"] !== "string") {
+      throw new Error("README.md fixture must have an R2 key");
+    }
+    r2.objects.delete(readme["r2_key"]);
+
+    const response = await fileGet(
+      makeRequest("/api/sites/libra-demo/file?path=README.md"),
+      { params: Promise.resolve({ slug: "libra-demo" }) },
+    );
+    expect(response.status).toBe(404);
+    const body = await jsonBody<ErrorBody>(response);
+    expect(body).toMatchObject({ ok: false, code: "R2_OBJECT_MISSING" });
+  });
   it("returns metadata-only for binary files (no R2 leak)", async () => {
     const response = await fileGet(
       makeRequest("/api/sites/libra-demo/file?path=assets/logo.png"),
