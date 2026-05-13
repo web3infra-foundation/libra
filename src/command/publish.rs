@@ -50,9 +50,9 @@ use crate::{
                 validate_oid, validate_ref_name,
             },
             upload::{
-                RevisionArtifactUploadSummary, RevisionD1Rows, SiteIndexArtifacts,
-                build_revision_d1_rows, build_site_index_artifacts, upload_revision_artifacts,
-                upload_site_index_artifacts,
+                RevisionArtifactUploadOptions, RevisionArtifactUploadSummary, RevisionD1Rows,
+                SiteIndexArtifacts, build_revision_d1_rows, build_site_index_artifacts,
+                upload_revision_artifacts_with_options, upload_site_index_artifacts,
             },
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
@@ -1028,7 +1028,11 @@ async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncO
     let selected_refs = select_publish_refs(&all_refs, args.r#ref.as_deref())?;
     let default_ref = resolve_publish_default_ref(&all_refs).await?;
     let warnings = inspect_publish_dirty(args.fail_on_dirty).await?;
-    let mut sink = CloudPublishSyncSink { d1_client, storage };
+    let mut sink = CloudPublishSyncSink {
+        d1_client,
+        storage,
+        force_upload: args.force,
+    };
     run_publish_sync_selected_refs_with_sink(
         args,
         &site,
@@ -1087,6 +1091,7 @@ trait PublishSyncSink {
 struct CloudPublishSyncSink {
     d1_client: D1Client,
     storage: PublishStorage,
+    force_upload: bool,
 }
 
 #[async_trait]
@@ -1102,14 +1107,20 @@ impl PublishSyncSink for CloudPublishSyncSink {
         &mut self,
         plan: &RevisionArtifactPlan,
     ) -> CliResult<RevisionArtifactUploadSummary> {
-        upload_revision_artifacts(&self.storage, plan)
-            .await
-            .map_err(|source| {
-                CliError::fatal(format!(
-                    "failed to upload publish revision artifacts: {source}"
-                ))
-                .with_stable_code(StableErrorCode::NetworkProtocol)
-            })
+        upload_revision_artifacts_with_options(
+            &self.storage,
+            plan,
+            RevisionArtifactUploadOptions {
+                force: self.force_upload,
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to upload publish revision artifacts: {source}"
+            ))
+            .with_stable_code(StableErrorCode::NetworkProtocol)
+        })
     }
 
     async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
@@ -2937,7 +2948,10 @@ mod tests {
                 .push(plan.revision.revision_oid.clone());
             Ok(RevisionArtifactUploadSummary {
                 code_manifest_key: plan.code_manifest_key.clone(),
+                code_manifest_uploaded: true,
                 text_blob_count: plan.text_blobs.len(),
+                text_blob_uploaded_count: plan.text_blobs.len(),
+                text_blob_skipped_count: 0,
                 text_blob_keys: plan
                     .text_blobs
                     .iter()

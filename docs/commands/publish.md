@@ -128,6 +128,8 @@ Current behavior:
   `refs.json` and `latest.json`, and advances `publish_sites` through a
   refs-generation CAS. After that CAS succeeds, stale `publish_refs`
   rows from older sync runs for the same site are deleted.
+- Repeated sync skips existing revision `code-manifest.json` and text
+  preview objects unless `--force` is passed.
 - `--ref` on non-dry-run sync writes only the selected ref and its
   revision snapshot. It does not upload `refs.json`/`latest.json` and
   does not advance the complete refs generation.

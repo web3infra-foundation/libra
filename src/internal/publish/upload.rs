@@ -26,8 +26,18 @@ pub const PUBLISH_SITE_LATEST_RELATIVE_KEY: &str = "latest.json";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevisionArtifactUploadSummary {
     pub code_manifest_key: String,
+    pub code_manifest_uploaded: bool,
     pub text_blob_count: usize,
+    pub text_blob_uploaded_count: usize,
+    pub text_blob_skipped_count: usize,
     pub text_blob_keys: Vec<String>,
+}
+
+/// Options controlling revision artifact upload idempotency.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RevisionArtifactUploadOptions {
+    /// Re-write objects even when the content-addressed key already exists.
+    pub force: bool,
 }
 
 /// D1 rows generated for one revision artefact plan.
@@ -74,18 +84,43 @@ pub async fn upload_revision_artifacts(
     storage: &PublishStorage,
     plan: &RevisionArtifactPlan,
 ) -> Result<RevisionArtifactUploadSummary, PublishStorageError> {
+    upload_revision_artifacts_with_options(storage, plan, RevisionArtifactUploadOptions::default())
+        .await
+}
+
+/// Write a revision code snapshot to publish storage with explicit
+/// idempotency controls.
+pub async fn upload_revision_artifacts_with_options(
+    storage: &PublishStorage,
+    plan: &RevisionArtifactPlan,
+    options: RevisionArtifactUploadOptions,
+) -> Result<RevisionArtifactUploadSummary, PublishStorageError> {
     let mut text_blob_keys = Vec::with_capacity(plan.text_blobs.len());
+    let mut text_blob_uploaded_count = 0usize;
+    let mut text_blob_skipped_count = 0usize;
     for blob in &plan.text_blobs {
-        storage.put_bytes(&blob.relative_key, &blob.bytes).await?;
+        if options.force || !storage.head(&blob.relative_key).await? {
+            storage.put_bytes(&blob.relative_key, &blob.bytes).await?;
+            text_blob_uploaded_count += 1;
+        } else {
+            text_blob_skipped_count += 1;
+        }
         text_blob_keys.push(blob.object_key.clone());
     }
-    storage
-        .put_json(&plan.code_manifest_relative_key, &plan.code_manifest)
-        .await?;
+    let code_manifest_uploaded =
+        options.force || !storage.head(&plan.code_manifest_relative_key).await?;
+    if code_manifest_uploaded {
+        storage
+            .put_json(&plan.code_manifest_relative_key, &plan.code_manifest)
+            .await?;
+    }
 
     Ok(RevisionArtifactUploadSummary {
         code_manifest_key: plan.code_manifest_key.clone(),
         text_blob_count: text_blob_keys.len(),
+        code_manifest_uploaded,
+        text_blob_uploaded_count,
+        text_blob_skipped_count,
         text_blob_keys,
     })
 }

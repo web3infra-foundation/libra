@@ -937,7 +937,8 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 重复 sync 不重复上传未变化文件、AI objects 和 AI bundle。
+- [x] (v0.17.122) 重复 sync 会跳过已存在的 revision `code-manifest.json` 和文本预览 R2 objects；`--force` 会重新上传这些 code snapshot artifacts。
+- [ ] 重复 sync 不重复上传未变化的 AI objects 和 AI bundle。
 - [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。

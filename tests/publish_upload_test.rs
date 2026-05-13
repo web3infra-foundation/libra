@@ -11,7 +11,8 @@ use libra::{
         },
         upload::{
             PUBLISH_REFS_INDEX_RELATIVE_KEY, PUBLISH_SITE_LATEST_RELATIVE_KEY,
-            build_revision_d1_rows, build_site_index_artifacts, upload_revision_artifacts,
+            RevisionArtifactUploadOptions, build_revision_d1_rows, build_site_index_artifacts,
+            upload_revision_artifacts, upload_revision_artifacts_with_options,
             upload_site_index_artifacts,
         },
     },
@@ -72,7 +73,10 @@ async fn publish_upload_test_writes_manifest_and_text_blobs_only() {
         .expect("artifact upload should succeed");
 
     assert_eq!(summary.code_manifest_key, artifact.code_manifest_key);
+    assert!(summary.code_manifest_uploaded);
     assert_eq!(summary.text_blob_count, 1);
+    assert_eq!(summary.text_blob_uploaded_count, 1);
+    assert_eq!(summary.text_blob_skipped_count, 0);
     assert_eq!(
         summary.text_blob_keys,
         vec![artifact.text_blobs[0].object_key.clone()]
@@ -107,6 +111,59 @@ async fn publish_upload_test_writes_manifest_and_text_blobs_only() {
             "metadata-only path must not create an R2 blob: {metadata_only}"
         );
     }
+}
+
+#[tokio::test]
+async fn publish_upload_test_skips_existing_revision_artifacts_unless_forced() {
+    let repo_id = "11111111-2222-3333-4444-555555555555";
+    let site_id = "00000000-0000-0000-0000-0000publish01";
+    let revision_oid = "abcdef0123456789abcdef0123456789abcdef01";
+    let tree_oid = "1234567812345678123456781234567812345678";
+    let generated_at = Utc
+        .with_ymd_and_hms(2026, 5, 13, 12, 0, 0)
+        .single()
+        .expect("test timestamp must be valid");
+    let artifact = build_revision_artifact_plan(
+        repo_id,
+        site_id,
+        revision_oid,
+        revision_oid,
+        tree_oid,
+        generated_at,
+        vec![RevisionFileInput {
+            path: "src/lib.rs".to_string(),
+            bytes: b"fn x()\n".to_vec(),
+        }],
+        &SnapshotConfig::default(),
+    )
+    .expect("artifact plan should build");
+    let storage = PublishStorage::new(Arc::new(InMemory::new()), repo_id, site_id)
+        .expect("mock R2 storage should be constructed");
+
+    let first = upload_revision_artifacts(&storage, &artifact)
+        .await
+        .expect("first artifact upload should write objects");
+    assert!(first.code_manifest_uploaded);
+    assert_eq!(first.text_blob_uploaded_count, 1);
+    assert_eq!(first.text_blob_skipped_count, 0);
+
+    let second = upload_revision_artifacts(&storage, &artifact)
+        .await
+        .expect("second artifact upload should be idempotent");
+    assert!(!second.code_manifest_uploaded);
+    assert_eq!(second.text_blob_uploaded_count, 0);
+    assert_eq!(second.text_blob_skipped_count, 1);
+
+    let forced = upload_revision_artifacts_with_options(
+        &storage,
+        &artifact,
+        RevisionArtifactUploadOptions { force: true },
+    )
+    .await
+    .expect("forced artifact upload should rewrite existing objects");
+    assert!(forced.code_manifest_uploaded);
+    assert_eq!(forced.text_blob_uploaded_count, 1);
+    assert_eq!(forced.text_blob_skipped_count, 0);
 }
 
 #[tokio::test]
