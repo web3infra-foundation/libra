@@ -140,7 +140,7 @@ fn clone_cloud_rejects_unsupported_git_style_options_before_config_lookup() {
 }
 
 #[test]
-fn clone_cloud_configured_domain_loads_d1_r2_config_before_restore_stub() {
+fn clone_cloud_configured_domain_requires_d1_api_token_before_site_lookup() {
     let cwd = tempdir().unwrap();
     let dest = cwd.path().join("restored");
 
@@ -181,15 +181,13 @@ fn clone_cloud_configured_domain_loads_d1_r2_config_before_restore_stub() {
 
     assert!(
         !output.status.success(),
-        "configured cloud clone should reach the restore stub"
+        "configured cloud clone should fail"
     );
     let (_, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.error_code, "LBR-AUTH-001");
     assert!(
-        report
-            .message
-            .contains("Phase 5 of docs/improvement/publish.md is not yet implemented"),
-        "configured clone-domain should fail at the restore stub: {:?}",
+        report.message.contains("D1 API token"),
+        "configured clone-domain should ask for the D1 API token before site lookup: {:?}",
         report.message
     );
     assert!(
@@ -204,44 +202,12 @@ fn clone_cloud_configured_domain_loads_d1_r2_config_before_restore_stub() {
         Some("code.example.com")
     );
     assert_eq!(
-        report
-            .details
-            .get("cloud_account_id")
-            .and_then(Value::as_str),
-        Some("acct_123")
-    );
-    assert_eq!(
-        report
-            .details
-            .get("cloud_d1_database_id")
-            .and_then(Value::as_str),
-        Some("d1_pub_456")
-    );
-    assert_eq!(
-        report
-            .details
-            .get("cloud_r2_bucket")
-            .and_then(Value::as_str),
-        Some("publish-r2")
-    );
-    assert_eq!(
-        report
-            .details
-            .get("cloud_credential_profile")
-            .and_then(Value::as_str),
-        Some("prod")
-    );
-    assert_eq!(
-        report.details.get("cloud_target").and_then(Value::as_str),
-        Some("slug:kepler-ledger")
-    );
-    assert_eq!(
-        report.details.get("cloud_selector").and_then(Value::as_str),
-        Some("ref:refs/tags/v1.0.0")
+        report.details.get("missing_keys").and_then(Value::as_str),
+        Some("LIBRA_D1_API_TOKEN (env or vault)")
     );
     assert!(
         !dest.exists(),
-        "cloud clone restore stub must not create the destination"
+        "cloud clone D1 credential preflight must not create the destination"
     );
 }
 

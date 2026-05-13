@@ -62,6 +62,10 @@ cloud.clone_domains.<domain>.d1_database_id
 cloud.clone_domains.<domain>.r2_bucket
 ```
 
+Cloud site resolution also requires `LIBRA_D1_API_TOKEN` from the environment or
+Libra vault config so the CLI can query the configured D1 database before
+starting restore.
+
 ### `[LOCAL_PATH]`
 
 Optional destination directory. When omitted, Libra infers the directory name from the

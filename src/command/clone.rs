@@ -30,6 +30,7 @@ use crate::{
         branch::{self, Branch},
         config::{
             ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value_decrypted,
+            resolve_env_for_target,
         },
         db::get_db_conn_instance,
         head::Head,
@@ -37,6 +38,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
+        d1_client::{D1Client, PublishSiteRow},
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
@@ -168,6 +170,8 @@ pub enum CloneError {
         domain: String,
         missing_keys: String,
     },
+    #[error("D1 API token is not configured for clone domain '{domain}'")]
+    CloudCloneD1ApiTokenNotConfigured { domain: String },
     #[error("failed to read clone domain '{domain}' configuration: {source}")]
     CloudCloneDomainConfigRead {
         domain: String,
@@ -190,6 +194,24 @@ pub enum CloneError {
         target: String,
         selector: Option<String>,
         config_details: Vec<(&'static str, String)>,
+    },
+    #[error(
+        "failed to resolve libra+cloud site {target} in clone domain '{domain}' \
+         via D1 (code {code}): {message}"
+    )]
+    CloudPublishSiteLookupFailed {
+        domain: String,
+        target: String,
+        code: i32,
+        message: String,
+    },
+    #[error("libra+cloud site {target} was not found in clone domain '{domain}'")]
+    CloudPublishSiteNotFound { domain: String, target: String },
+    #[error("libra+cloud site {target} in clone domain '{domain}' is not active: {status}")]
+    CloudPublishSiteUnavailable {
+        domain: String,
+        target: String,
+        status: String,
     },
     #[error("invalid libra+cloud clone source '{input}': {reason}")]
     InvalidCloudPublishSource { input: String, reason: String },
@@ -266,8 +288,19 @@ impl From<CloneError> for CliError {
                 .with_hint(format!(
                     "configure cloud.clone_domains.{domain}.account_id, \
                      cloud.clone_domains.{domain}.d1_database_id, and \
-                     cloud.clone_domains.{domain}.r2_bucket before cloning this source."
+                     cloud.clone_domains.{domain}.r2_bucket, and set LIBRA_D1_API_TOKEN \
+                     before cloning this source."
                 )),
+            CloneError::CloudCloneD1ApiTokenNotConfigured { ref domain } => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_detail("missing_keys", "LIBRA_D1_API_TOKEN (env or vault)")
+                    .with_hint(
+                        "set LIBRA_D1_API_TOKEN in the environment or Libra vault config so \
+                         the CLI can query the configured D1 database.",
+                    )
+            }
             CloneError::CloudCloneDomainConfigRead { ref domain, .. } => {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -312,6 +345,47 @@ impl From<CloneError> for CliError {
                 }
                 cli
             }
+            CloneError::CloudPublishSiteLookupFailed {
+                ref domain,
+                ref target,
+                code,
+                ref message,
+            } => {
+                let stable_code = if matches!(code, 401 | 403 | 1002) {
+                    StableErrorCode::AuthPermissionDenied
+                } else {
+                    StableErrorCode::NetworkUnavailable
+                };
+                CliError::fatal(error.to_string())
+                    .with_stable_code(stable_code)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_detail("cloud_target", target.clone())
+                    .with_detail("d1_error_code", code.to_string())
+                    .with_detail("d1_error_message", message.clone())
+                    .with_hint(
+                        "check the D1 database id, API token, account id, and network access.",
+                    )
+            }
+            CloneError::CloudPublishSiteNotFound {
+                ref domain,
+                ref target,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoNotFound)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_hint(
+                    "check the clone domain, slug/repo id, or publish the site before cloning.",
+                ),
+            CloneError::CloudPublishSiteUnavailable {
+                ref domain,
+                ref target,
+                ref status,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("cloud_site_status", status.clone())
+                .with_hint("enable the publish site before cloning it from libra+cloud://."),
             CloneError::InvalidCloudPublishSource { .. } => {
                 CliError::command_usage(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -697,12 +771,17 @@ async fn execute_clone_inner(
         let clone_config = load_cloud_clone_domain_config(&source)
             .await
             .map_err(|error| (error, None))?;
+        let publish_site = resolve_cloud_publish_site(&source, &clone_config)
+            .await
+            .map_err(|error| (error, None))?;
+        let mut config_details = clone_config.into_error_details(source.clone_domain.clone());
+        config_details.extend(cloud_publish_site_error_details(&publish_site));
         return Err((
             CloneError::CloudPublishSourceNotYetImplemented {
                 input: args.remote_repo.clone(),
                 target: source.target_label(),
                 selector: source.selector_label(),
-                config_details: clone_config.into_error_details(source.clone_domain),
+                config_details,
             },
             None,
         ));
@@ -834,6 +913,7 @@ enum CloudPublishSelector {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CloudCloneDomainConfig {
     account_id: String,
+    api_token: String,
     d1_database_id: String,
     r2_bucket: String,
     credential_profile: Option<String>,
@@ -1043,6 +1123,16 @@ async fn load_cloud_clone_domain_config(
             domain: source.clone_domain.clone(),
             missing_keys: format!("cloud.clone_domains.{}.account_id", source.clone_domain),
         })?,
+        api_token: resolve_env_for_target("LIBRA_D1_API_TOKEN", local_target)
+            .await
+            .map_err(|source_error| CloneError::CloudCloneDomainConfigRead {
+                domain: source.clone_domain.clone(),
+                source: source_error,
+            })?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| CloneError::CloudCloneD1ApiTokenNotConfigured {
+                domain: source.clone_domain.clone(),
+            })?,
         d1_database_id: d1_database_id.ok_or_else(|| {
             CloneError::CloudCloneDomainNotConfigured {
                 domain: source.clone_domain.clone(),
@@ -1055,6 +1145,66 @@ async fn load_cloud_clone_domain_config(
         })?,
         credential_profile,
     })
+}
+
+async fn resolve_cloud_publish_site(
+    source: &CloudPublishSource,
+    config: &CloudCloneDomainConfig,
+) -> Result<PublishSiteRow, CloneError> {
+    let d1_client = D1Client::new(
+        config.account_id.clone(),
+        config.api_token.clone(),
+        config.d1_database_id.clone(),
+    );
+    let target = source.target_label();
+    let result = match &source.target {
+        CloudPublishTarget::Slug(slug) => {
+            d1_client
+                .find_publish_site_by_clone_slug(&source.clone_domain, slug)
+                .await
+        }
+        CloudPublishTarget::RepoId(repo_id) => {
+            d1_client
+                .find_publish_site_by_clone_repo_id(&source.clone_domain, repo_id)
+                .await
+        }
+    }
+    .map_err(|source_error| CloneError::CloudPublishSiteLookupFailed {
+        domain: source.clone_domain.clone(),
+        target: target.clone(),
+        code: source_error.code,
+        message: source_error.message,
+    })?;
+
+    let site = result.ok_or_else(|| CloneError::CloudPublishSiteNotFound {
+        domain: source.clone_domain.clone(),
+        target: target.clone(),
+    })?;
+    if site.status != "active" {
+        return Err(CloneError::CloudPublishSiteUnavailable {
+            domain: source.clone_domain.clone(),
+            target,
+            status: site.status,
+        });
+    }
+    Ok(site)
+}
+
+fn cloud_publish_site_error_details(site: &PublishSiteRow) -> Vec<(&'static str, String)> {
+    let mut details = vec![
+        ("cloud_site_id", site.site_id.clone()),
+        ("cloud_repo_id", site.repo_id.clone()),
+        ("cloud_slug", site.slug.clone()),
+        ("cloud_site_status", site.status.clone()),
+        ("cloud_refs_generation", site.refs_generation.to_string()),
+    ];
+    if let Some(default_ref) = &site.default_ref {
+        details.push(("cloud_default_ref", default_ref.clone()));
+    }
+    if let Some(latest_revision_oid) = &site.latest_revision_oid {
+        details.push(("cloud_latest_revision_oid", latest_revision_oid.clone()));
+    }
+    details
 }
 
 fn clone_config_local_target() -> LocalIdentityTarget<'static> {
@@ -1587,5 +1737,38 @@ mod tests {
             let cli: CliError = error.into();
             assert_eq!(cli.stable_code(), StableErrorCode::CliInvalidArguments);
         }
+    }
+
+    #[test]
+    fn cloud_clone_domain_resolve_test_site_details_are_carried_to_restore_stub() {
+        let site = PublishSiteRow {
+            site_id: "site_123".to_string(),
+            repo_id: "repo_456".to_string(),
+            clone_domain: "code.example.com".to_string(),
+            slug: "kepler-ledger".to_string(),
+            display_origin: "https://code.example.com".to_string(),
+            name: "Kepler Ledger".to_string(),
+            visibility: "public".to_string(),
+            status: "active".to_string(),
+            worker_name: "libra-publish".to_string(),
+            default_ref: Some("refs/heads/main".to_string()),
+            latest_revision_oid: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            refs_generation: 7,
+            max_preview_bytes: 1024,
+            schema_version: 1,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        };
+
+        let details = cloud_publish_site_error_details(&site);
+        assert!(details.contains(&("cloud_site_id", "site_123".to_string())));
+        assert!(details.contains(&("cloud_repo_id", "repo_456".to_string())));
+        assert!(details.contains(&("cloud_slug", "kepler-ledger".to_string())));
+        assert!(details.contains(&("cloud_default_ref", "refs/heads/main".to_string())));
+        assert!(details.contains(&(
+            "cloud_latest_revision_oid",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )));
+        assert!(details.contains(&("cloud_refs_generation", "7".to_string())));
     }
 }
