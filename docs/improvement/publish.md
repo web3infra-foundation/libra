@@ -879,7 +879,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.11) private visibility 缺少或无法验证 `Cf-Access-Jwt-Assertion` 时返回 403。
 - [x] (v0.17.11) disabled site 返回 410，不读取 R2 bundle。
 - [x] (v0.17.11) FakeD1/FakeR2 route fixture 能通过 API round-trip。
-- [ ] Miniflare D1/R2 fixture round-trip 尚未落地。
+- [x] (v0.17.93) Miniflare D1/R2 fixture round-trip 使用专用 workers-pool Vitest config 覆盖 site、refs、tree、file、AI versions、AI objects 和 AI graph。
 
 **Verification:**
 
@@ -974,7 +974,7 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint D：Worker 可读
 
-- [ ] Miniflare 能通过 API 读回 site、refs、tree、file、AI versions、AI objects 和 AI graph。
+- [x] (v0.17.93) Miniflare 能通过 API 读回 site、refs、tree、file、AI versions、AI objects 和 AI graph。
 - [x] (v0.17.63) private 缺 Access JWT 或 JWT 校验失败返回 403。
 - [x] (v0.17.63) disabled site 返回 410。
 - [x] (v0.17.63) R2 miss 和 D1 miss 返回 typed 404。
@@ -1028,6 +1028,7 @@ cargo test cloud_storage_backup_test
 pnpm --dir worker cf-typegen
 pnpm --dir worker lint
 pnpm --dir worker test
+pnpm --dir worker test:miniflare
 pnpm --dir worker exec tsc --noEmit
 pnpm --dir worker build
 cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|playwright.config|wrangler.jsonc|tsconfig.json)'

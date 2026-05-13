@@ -24,7 +24,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
-    exclude: ["tests/e2e/**"],
+    exclude: ["tests/e2e/**", "tests/miniflare-*.test.ts"],
     globals: false,
     poolOptions: useMiniflare
       ? {

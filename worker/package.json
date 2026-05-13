@@ -1,12 +1,13 @@
 {
   "name": "libra-publish-worker",
-  "version": "0.17.92",
+  "version": "0.17.93",
   "private": true,
   "description": "Libra publish — Cloudflare Worker (Next.js + OpenNext) reading D1/R2 publish snapshots",
   "scripts": {
     "dev": "next dev",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
+    "test:miniflare": "WRANGLER_LOG_PATH=.wrangler/logs vitest run --config vitest.miniflare.config.ts",
     "test:watch": "vitest",
     "next:build": "next build",
     "build": "pnpm cf-typegen && opennextjs-cloudflare build",
