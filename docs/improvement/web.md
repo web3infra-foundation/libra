@@ -32,7 +32,7 @@
 
 | 区域 | 已落地 | 仍需收口 |
 |------|--------|----------|
-| Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden | 在 `docs/commands/code.md` 增补稳定字段表，避免只靠测试表达契约 |
+| Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden；`docs/commands/code.md` 已补稳定字段表、thread list envelope 与 Code UI error code 表 | 后续新增字段/错误码时继续同步 Rust/TS/wire test/命令文档 |
 | API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | 继续补齐 Web API client / component / browser smoke 测试 |
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 需要 API client 单测、组件测试、browser smoke；长 transcript/diff/tool output 的主线程保护仍不足 |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
@@ -78,7 +78,7 @@
 - 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard。
 - 增加 store/controller hook 测试：首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce、lease retry once、`CONTROLLER_CONFLICT` 不重试。
 - 增加组件测试：无 session 空态、read-only controller、`BROWSER_CONTROL_DISABLED`、pending interaction 五种 kind、streaming assistant message、empty diff、parse error、long diff collapse。
-- Rust：把 `tests/code_ui_scenarios.rs` 中 browser flow 的 audit log 断言补上；把 `/api/code/threads` invalid limit / clamp 场景纳入 Rust runner，而不是只停在 JSON 数据文件。
+- Rust：把 `tests/code_ui_scenarios.rs` 中 browser flow 的 audit log 断言补上；`/api/code/threads` invalid limit / clamp 场景已由 `tests/code_ui_remote_security_matrix.rs` + `tests/data/code_ui_remote/security_cases.json` 覆盖。
 - [x] 修复 SSE lag 可观测性：`BroadcastStream` 收到 `Lagged` 时不能静默丢弃；server 会发送一次完整 `session_updated` snapshot。
 
 **验收：**
@@ -158,7 +158,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 - CI 增加 `pnpm --dir web lint`、`pnpm --dir web build`，并检查 `web/out/` 与 source 变更同步。
 - 增加 browser smoke：打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread title，发送消息后 snapshot 更新。
-- `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、error code 表、`--browser-control` 矩阵。
+- [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
 - `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致。
 
 **验收命令：**

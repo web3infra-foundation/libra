@@ -112,6 +112,48 @@ When `--browser-control loopback` is requested and the browser holds the active 
 
 For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session — no terminal required. Headless mode currently advertises `messageInput`, `streamingText`, and `toolCalls` capabilities; `interactiveApprovals`, `planUpdates`, and `patchsets` light up once the corresponding workflow integrations land.
 
+### Code UI Wire Contract
+
+The Code UI JSON contract uses camelCase field names and snake_case enum values. The Rust source of truth is `src/internal/ai/web/code_ui.rs`; the browser mirror is `web/src/lib/code-ui/types.ts`; `tests/ai_code_ui_wire_test.rs` pins the wire shape.
+
+`GET /api/code/session` returns a `CodeUiSessionSnapshot`:
+
+| Field | Type | Contract |
+|-------|------|----------|
+| `sessionId` | string | Runtime session identifier retained for compatibility. |
+| `threadId` | string, optional | Canonical persisted Libra thread ID; prefer this for resume, graph, Web, MCP, and diagnostics flows when present. |
+| `workingDir` | string | Session working directory. |
+| `provider` | object | `{ provider, model?, mode?, managed }`. |
+| `capabilities` | object | Eight booleans: `messageInput`, `streamingText`, `planUpdates`, `toolCalls`, `patchsets`, `interactiveApprovals`, `structuredQuestions`, `providerSessionResume`. |
+| `controller` | object | `{ kind, ownerLabel?, canWrite, leaseExpiresAt?, reason?, loopbackOnly }`; `kind` is `none`, `browser`, `automation`, `tui`, or `cli`. |
+| `status` | string | `idle`, `thinking`, `executing_tool`, `awaiting_interaction`, `completed`, or `error`. |
+| `transcript` | array | Entries with `id`, `kind`, optional `title` / `content` / `status`, `streaming`, `metadata`, `createdAt`, `updatedAt`. |
+| `plans` / `tasks` / `toolCalls` / `patchsets` | arrays | Runtime projections used by Workflow, Summary, Diff, and Terminal panes. |
+| `interactions` | array | Pending/resolved UI prompts. `kind` is `approval`, `sandbox_approval`, `request_user_input`, `intent_review_choice`, or `post_plan_choice`. |
+| `updatedAt` | string | ISO 8601 update timestamp. |
+
+`GET /api/code/events` streams `CodeUiEventEnvelope` records with `seq`, `type`, `at`, and `data`. Event `type` is `session_updated`, `status_changed`, or `controller_changed`; `session_updated` carries a full `CodeUiSessionSnapshot`.
+
+`GET /api/code/threads` returns `{ items, nextOffset? }`. Each item has `id`, optional `title`, `archived`, optional `currentIntentId`, `createdAt`, and `updatedAt`. `limit` defaults to 50 and clamps to 200; malformed `limit` or `offset` returns `INVALID_QUERY_PARAM`.
+
+Code UI API errors use `{ error: { code, message } }`:
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `LOOPBACK_REQUIRED` | 403 | Non-loopback client attempted an API route. |
+| `PAYLOAD_TOO_LARGE` | 413 | Write request body exceeded 256 KiB. |
+| `CONTROL_DISABLED` | 403 | Automation control is not enabled for this process. |
+| `MISSING_CONTROL_TOKEN` / `INVALID_CONTROL_TOKEN` | 403 | Automation control token is absent or invalid. |
+| `MISSING_CONTROLLER_TOKEN` / `INVALID_CONTROLLER_TOKEN` | 403 | Lease token is absent or invalid for a write route. |
+| `INVALID_CONTROLLER_KIND` | 400 | Controller attach requested an unsupported kind. |
+| `CONTROLLER_CONFLICT` | 409 | Another live controller owns the lease, or the session is busy. |
+| `BROWSER_CONTROL_DISABLED` | 403 | Browser write control is disabled. |
+| `AUTOMATION_CONTROLLER_REQUIRED` | 403 | An automation-only path was called with a non-automation lease. |
+| `CODE_UI_UNAVAILABLE` | 404 | No active `libra code` session is attached to the web server. |
+| `INVALID_QUERY_PARAM` | 400 | Query parsing failed, currently for `/threads` pagination. |
+| `STORAGE_PATH_INVALID` / `STATUS_UNAVAILABLE` / `THREAD_LIST_FAILED` / `DB_UNAVAILABLE` / `INTERNAL_ERROR` | 500 | Server-side storage, status, projection, database, or fallback internal failure. |
+| `UNSUPPORTED_OPERATION` | 422 | Runtime rejected a requested operation that is not yet supported. |
+
 ### Web Search
 
 The `web_search` tool requires the session network policy to allow outbound access. If `BRAVE_SEARCH_API_KEY` is available from the process environment or `vault.env.BRAVE_SEARCH_API_KEY`, Libra tries the Brave Search API first and returns result titles, URLs, and snippets. If Brave is not configured or the request fails, Libra falls back to the zero-configuration DuckDuckGo HTML endpoint.
