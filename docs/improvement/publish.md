@@ -795,7 +795,7 @@ v1 使用 gitignore 子集：
 **Verification:**
 
 - [x] (v0.17.97) `cargo test publish_snapshot_test`
-- [ ] `cargo test publish_preflight_test`
+- [x] (v0.17.98) `cargo test publish_preflight_test`
 - [ ] `cargo test publish_ai_object_model_contract_test`
 - [ ] `cargo test publish_ai_export_test`
 
