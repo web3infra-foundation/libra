@@ -186,9 +186,9 @@ Build/deploy scripts：
 
 分发决策：
 
-- Libra source distribution / crates.io package 必须包含 root `worker/` 的 source-only 文件：`app/`、`components/`、`lib/`、`public/`、`migrations/`、`package.json`、`pnpm-lock.yaml`、`next.config.*`、`open-next.config.*`、`wrangler.jsonc`、`tsconfig.json`、测试和必要静态资源。
+- Libra source distribution / crates.io package 必须包含 root `worker/` 的 source-only 文件：`app/`、`components/`、`lib/`、`public/`、`migrations/`、`package.json`、`pnpm-lock.yaml`、`next.config.*`、`open-next.config.*`、`playwright.config.*`、`wrangler.jsonc`、`tsconfig.json`、测试和必要静态资源。
 - Libra binary release 必须嵌入同一份 Worker 模板 manifest 和文件内容；v1 可使用 `rust-embed` 或构建期生成的 manifest module，但运行时必须从二进制内置模板读取，不能依赖 sidecar archive、`CARGO_MANIFEST_DIR` 或相对源码路径。
-- 模板只分发源码、配置、lockfile 和 migrations；不得包含 `worker/node_modules/`、`worker/.next/`、`worker/.open-next/`、`worker/.wrangler/`、`.turbo/`、coverage、日志、`.env*` 或 Cloudflare 凭据。
+- 模板只分发源码、配置、lockfile 和 migrations；不得包含 `worker/node_modules/`、`worker/.next/`、`worker/.open-next/`、`worker/.wrangler/`、`.turbo/`、`.next-types/`、`test-results/`、`playwright-report/`、coverage、日志、`.env*` 或 Cloudflare 凭据。
 - Cargo build 只嵌入 Worker 模板文件，不执行 `pnpm --dir worker build`。Worker 的 Next/OpenNext build 只在 `libra publish deploy` 阶段运行，避免普通 CLI 安装和编译依赖 Cloudflare/Node 构建产物。
 - `Cargo.toml` package include/exclude、`.gitignore` 和模板 manifest 的 exclude 规则必须一致；新增生成目录或敏感文件模式时，三处同步更新。
 
@@ -211,6 +211,9 @@ Build/deploy scripts：
     "worker/.next/**",
     "worker/.open-next/**",
     "worker/.wrangler/**",
+    "worker/.next-types/**",
+    "worker/test-results/**",
+    "worker/playwright-report/**",
     "worker/.env*"
   ]
 }
@@ -885,7 +888,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.14) `pnpm --dir worker test`
 - [x] (v0.17.14) `pnpm --dir worker exec tsc --noEmit`
 - [x] (v0.17.9) `cargo test --test publish_worker_template_embed_test`
-- [x] (v0.17.58) `cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|wrangler.jsonc|tsconfig.json)'`
+- [x] (v0.17.60) `cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|playwright.config|wrangler.jsonc|tsconfig.json)'`
 
 **Dependencies:** Phase 0, Phase 2
 
@@ -901,9 +904,9 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
 - [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；完整云端 sync/status 对比仍归 Phase 4。
 - [x] (v0.17.14) Next.js + React 前端能展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
-- [ ] 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。
+- [x] (v0.17.60) 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。
 - [x] (v0.17.14) 前端通过 Worker API client 读取真实 API/fixture，不保留 mock-only 数据路径。
-- [ ] 桌面和移动视口都通过截图或 e2e 断言验证主要页面无文本溢出、遮挡和不可达操作。
+- [x] (v0.17.60) 桌面和移动视口都通过截图或 e2e 断言验证主要页面无文本溢出、遮挡和不可达操作。
 - [ ] `libra publish deploy` 执行 build、D1 migrations、`wrangler deploy`。
 - [ ] deploy 输出 URL。
 - [ ] `libra publish unpublish` 将 `publish_sites.status` 标记为 `disabled`，不删除 D1/R2 数据；Worker API 返回 410。
@@ -911,7 +914,7 @@ v1 使用 gitignore 子集：
 **Verification:**
 
 - [x] (v0.17.59) `pnpm --dir worker build`
-- [ ] `pnpm --dir worker e2e`
+- [x] (v0.17.60) `pnpm --dir worker e2e`
 - [ ] `cargo test --test command_test publish_deploy`
 
 **Dependencies:** Phase 4, Phase 6
@@ -1024,7 +1027,7 @@ pnpm --dir worker lint
 pnpm --dir worker test
 pnpm --dir worker exec tsc --noEmit
 pnpm --dir worker build
-cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|wrangler.jsonc|tsconfig.json)'
+cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|playwright.config|wrangler.jsonc|tsconfig.json)'
 ```
 
 Live cloud gate：

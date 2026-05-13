@@ -2,7 +2,7 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.59:
+Current implementation status in v0.17.60:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
@@ -22,6 +22,10 @@ Current implementation status in v0.17.59:
 - The Worker `build` script runs `cf-typegen` and OpenNext; OpenNext is
   configured to call `pnpm next:build` internally so `pnpm build` does
   not recursively invoke itself.
+- The Worker e2e runner starts `next dev` with local fixture D1/R2
+  bindings when `BASE_URL` is unset, and runs desktop plus mobile
+  Chromium assertions for the publish landing page, code browser, file
+  viewer, AI model page, refs, status, and empty/non-text states.
 - The full code/ref/AI snapshot upload, cloud status comparison, Worker
   deploy, and unpublish flows remain tracked in
   `docs/improvement/publish.md`.

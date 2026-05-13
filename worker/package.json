@@ -1,6 +1,6 @@
 {
   "name": "libra-publish-worker",
-  "version": "0.17.59",
+  "version": "0.17.60",
   "private": true,
   "description": "Libra publish — Cloudflare Worker (Next.js + OpenNext) reading D1/R2 publish snapshots",
   "scripts": {
@@ -14,6 +14,7 @@
     "deploy": "pnpm build && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "e2e": "playwright test",
+    "e2e:serve": "next dev --webpack --hostname 127.0.0.1 --port 3127",
     "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {

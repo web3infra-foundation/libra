@@ -42,5 +42,7 @@ id_ed25519*
 !.dev.vars.example
 *.tsbuildinfo
 coverage/
+test-results/
+playwright-report/
 .next-types/
 cloudflare-env.d.ts

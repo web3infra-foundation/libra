@@ -1,19 +1,19 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /*
- * Codex pass-4 P3: the Phase 7 acceptance list calls for
- * desktop+mobile screenshot or e2e assertions on the main pages
- * (publish landing, code browser, file viewer, AI object model,
- * status) so a layout regression is caught before deploy.
+ * Phase 7 acceptance: the e2e runner starts a local Next dev server
+ * with deterministic D1/R2 fixture bindings when BASE_URL is not set,
+ * then exercises the public Worker pages on desktop and mobile
+ * Chromium viewports. Set BASE_URL to point the same assertions at a
+ * deployed preview instead.
  *
  * Run via:
  *   pnpm --dir worker e2e:install     # one-off Playwright browser install
- *   pnpm --dir worker dev &           # local Wrangler / Next dev server
  *   pnpm --dir worker e2e
- *
- * `BASE_URL` overrides the default if you point the runner at a
- * remote preview deployment.
  */
+const baseURL = process.env.BASE_URL ?? "http://127.0.0.1:3127";
+const shouldStartLocalServer = process.env.BASE_URL === undefined;
+
 export default defineConfig({
   testDir: "tests/e2e",
   fullyParallel: false,
@@ -21,12 +21,26 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   use: {
-    baseURL: process.env.BASE_URL ?? "http://localhost:3000",
+    baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
+  ...(shouldStartLocalServer
+    ? {
+        webServer: {
+          command: "pnpm e2e:serve",
+          env: { LIBRA_PUBLISH_E2E_FIXTURE: "1" },
+          reuseExistingServer: false,
+          timeout: 120_000,
+          url: baseURL,
+        },
+      }
+    : {}),
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile", use: { ...devices["iPhone 14"] } },
+    {
+      name: "mobile",
+      use: { ...devices["Pixel 7"], browserName: "chromium" },
+    },
   ],
 });

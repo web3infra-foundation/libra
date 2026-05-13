@@ -18,7 +18,7 @@ export default function Home() {
           <div>
             <p className="lb-h2">Browse a published site</p>
             <p className="lb-meta">
-              <span className="lb-mono">/sites/&lt;slug&gt;</span>
+              <span className="lb-mono break-all">/sites/&lt;slug&gt;</span>
             </p>
           </div>
           <span className="lb-chip">GET</span>
@@ -27,7 +27,7 @@ export default function Home() {
           <div>
             <p className="lb-h2">Stable repo entry</p>
             <p className="lb-meta">
-              <span className="lb-mono">/sites/repo/&lt;repo_id&gt;</span>
+              <span className="lb-mono break-all">/sites/repo/&lt;repo_id&gt;</span>
             </p>
           </div>
           <span className="lb-chip">GET</span>
@@ -36,7 +36,7 @@ export default function Home() {
           <div>
             <p className="lb-h2">JSON API</p>
             <p className="lb-meta">
-              <span className="lb-mono">
+              <span className="lb-mono break-all">
                 /api/sites/&lt;slug&gt;/&#123;refs|tree|file|ai|status&#125;
               </span>
             </p>
@@ -47,7 +47,7 @@ export default function Home() {
 
       <section className="mt-10">
         <p className="lb-eyebrow">Restoring the repository locally</p>
-        <pre className="lb-codebox mt-3">
+        <pre className="lb-codebox mt-3 whitespace-pre-wrap break-all">
 {`libra clone libra+cloud://<clone-domain>/<slug>
 libra clone libra+cloud://<clone-domain>/repo/<repo_id>
 libra clone "libra+cloud://<clone-domain>/<slug>?ref=refs/tags/v1.0.0"`}

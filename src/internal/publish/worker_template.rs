@@ -33,6 +33,7 @@ use rust_embed::Embed;
 #[include = "tsconfig.json"]
 #[include = "next.config.ts"]
 #[include = "open-next.config.ts"]
+#[include = "playwright.config.ts"]
 #[include = "wrangler.jsonc"]
 #[include = "next-env.d.ts"]
 #[include = "env.d.ts"]
@@ -46,6 +47,9 @@ use rust_embed::Embed;
 #[exclude = ".open-next/*"]
 #[exclude = ".wrangler/*"]
 #[exclude = ".turbo/*"]
+#[exclude = ".next-types/*"]
+#[exclude = "test-results/*"]
+#[exclude = "playwright-report/*"]
 #[exclude = "*.tsbuildinfo"]
 #[exclude = ".env"]
 #[exclude = ".env.*"]
@@ -155,6 +159,10 @@ pub const MANIFEST: &[ManifestEntry] = &[
         render_policy: RenderPolicy::ManagedTemplate,
     },
     ManifestEntry {
+        path: "playwright.config.ts",
+        render_policy: RenderPolicy::ManagedTemplate,
+    },
+    ManifestEntry {
         path: "wrangler.jsonc",
         render_policy: RenderPolicy::RenderedConfig,
     },
@@ -222,6 +230,9 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
     ".open-next",
     ".wrangler",
     ".turbo",
+    ".next-types",
+    "test-results",
+    "playwright-report",
     ".env",
     ".dev.vars",
     "cloudflare-env.d.ts",
