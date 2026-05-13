@@ -987,13 +987,38 @@ fn duration_millis_u64(duration: std::time::Duration) -> u64 {
 
 fn completion_error_kind(error: &CompletionError) -> &'static str {
     match error {
+        CompletionError::HttpError(error) if error.is_timeout() => "timeout",
         CompletionError::HttpError(_) => "http_error",
         CompletionError::JsonError(_) => "json_error",
+        CompletionError::RequestError(error) if error_message_is_cancelled(&error.to_string()) => {
+            "cancelled"
+        }
+        CompletionError::RequestError(error) if error_message_is_timeout(&error.to_string()) => {
+            "timeout"
+        }
         CompletionError::RequestError(_) => "request_error",
+        CompletionError::ProviderError(message) if error_message_is_cancelled(message) => {
+            "cancelled"
+        }
+        CompletionError::ProviderError(message) if error_message_is_timeout(message) => "timeout",
         CompletionError::ProviderError(_) => "provider_error",
+        CompletionError::ResponseError(message) if error_message_is_cancelled(message) => {
+            "cancelled"
+        }
+        CompletionError::ResponseError(message) if error_message_is_timeout(message) => "timeout",
         CompletionError::ResponseError(_) => "response_error",
         CompletionError::NotImplemented(_) => "not_implemented",
     }
+}
+
+fn error_message_is_cancelled(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cancelled") || lower.contains("canceled")
+}
+
+fn error_message_is_timeout(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
 }
 
 fn build_tool_loop_context_frame(
@@ -1326,6 +1351,28 @@ mod tests {
                 result.as_ref().is_ok_and(|o| o.is_success()),
             ));
         }
+    }
+
+    #[test]
+    fn completion_error_kind_classifies_cancel_and_timeout() {
+        assert_eq!(
+            completion_error_kind(&CompletionError::ProviderError(
+                "mock timeout after 100ms".to_string()
+            )),
+            "timeout"
+        );
+        assert_eq!(
+            completion_error_kind(&CompletionError::ResponseError(
+                "request cancelled by user".to_string()
+            )),
+            "cancelled"
+        );
+        assert_eq!(
+            completion_error_kind(&CompletionError::ProviderError(
+                "provider overloaded".to_string()
+            )),
+            "provider_error"
+        );
     }
 
     /// Scenario: a model that emits text and thinking deltas via the stream channel
