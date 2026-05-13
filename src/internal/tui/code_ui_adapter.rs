@@ -179,6 +179,21 @@ mod tests {
         )
     }
 
+    fn pending_interaction(id: &str) -> CodeUiInteractionRequest {
+        CodeUiInteractionRequest {
+            id: id.to_string(),
+            kind: CodeUiInteractionKind::Approval,
+            title: Some("Approval".to_string()),
+            description: None,
+            prompt: None,
+            options: Vec::new(),
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::json!({}),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        }
+    }
+
     #[tokio::test]
     async fn submit_message_sends_control_command_and_waits_for_ack() {
         let (adapter, mut rx) = test_adapter();
@@ -279,18 +294,7 @@ mod tests {
         let (adapter, mut rx) = test_adapter();
         adapter
             .session
-            .upsert_interaction(CodeUiInteractionRequest {
-                id: "approval-1".to_string(),
-                kind: CodeUiInteractionKind::Approval,
-                title: Some("Approval".to_string()),
-                description: None,
-                prompt: None,
-                options: Vec::new(),
-                status: CodeUiInteractionStatus::Pending,
-                metadata: serde_json::json!({}),
-                requested_at: Utc::now(),
-                resolved_at: None,
-            })
+            .upsert_interaction(pending_interaction("approval-1"))
             .await;
         adapter
             .session
@@ -312,6 +316,45 @@ mod tests {
                 ..
             } => {
                 assert_eq!(interaction_id, "approval-1");
+                ack.send(Ok(())).expect("ack receiver should be live");
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        respond.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn respond_interaction_routes_requested_id_with_multiple_pending() {
+        let (adapter, mut rx) = test_adapter();
+        adapter
+            .session
+            .upsert_interaction(pending_interaction("approval-1"))
+            .await;
+        adapter
+            .session
+            .upsert_interaction(pending_interaction("approval-2"))
+            .await;
+        adapter
+            .session
+            .set_status(CodeUiSessionStatus::AwaitingInteraction)
+            .await;
+
+        let adapter_for_task = adapter.clone();
+        let respond = tokio::spawn(async move {
+            adapter_for_task
+                .respond_interaction("approval-2", CodeUiInteractionResponse::default())
+                .await
+        });
+
+        let command = rx.recv().await.expect("control command should be sent");
+        match command {
+            TuiControlCommand::RespondInteraction {
+                interaction_id,
+                ack,
+                ..
+            } => {
+                assert_eq!(interaction_id, "approval-2");
                 ack.send(Ok(())).expect("ack receiver should be live");
             }
             _ => panic!("unexpected command"),

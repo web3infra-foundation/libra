@@ -162,9 +162,9 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - 已完成：`--control observe` 下 automation attach → 403 `CONTROL_DISABLED`。
   - 已完成：同 client 续约 vs 不同 client conflict 的 token 失效顺序。
   - 已完成：approval 接受/拒绝/`apply_to_future` 三条 P0，以及 `never` / `on-failure` / `untrusted` / `allow-all` policy 行为覆盖。
-  - 仍待 P1：多个 pending interaction 并发的 ID 路由。
+  - 已完成：多个 pending interaction 同时存在时，Code UI adapter 按请求的 `interaction_id` 转发，不回退到 `activeInteractionId` 或首个 pending interaction。
 - **优先级**：P0（功能已覆盖；长时/lagged soak 降级为 P2）。
-- **测试位置**：**L2 已扩展** lease matrix 10/10；approval P0 由 `tests/code_ui_remote_approval_matrix.rs` 覆盖。
+- **测试位置**：**L2 已扩展** lease matrix 10/10；approval P0 由 `tests/code_ui_remote_approval_matrix.rs` 覆盖；多 pending ID 路由由 [src/internal/tui/code_ui_adapter.rs](../../src/internal/tui/code_ui_adapter.rs) `respond_interaction_routes_requested_id_with_multiple_pending` 覆盖。
 - **AI 落地提示**：新增 lease case 时仍保持“一条 JSON case + 一条 `lease_case!()`”的 cargo 输出定位。
 
 ### 5.5 SSE 事件流
@@ -229,9 +229,9 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - 已完成：`never` 无 interaction 且拒绝 needs-human shell；`on-failure` / `untrusted` 会产生 approval interaction；`allow-all` 不产生 prompt 且执行同一 shell fixture。
   - 已完成：拒绝路径：harness POST `approved=false` → tool 返回拒绝结果 → assistant 看到拒绝。
   - 已完成：`apply_to_future` 缓存：第二次同 tool 自动通过。
-  - **P1**：多个 pending interaction 并发的 ID 路由。降级原因：fake provider 每轮只发一个 tool_call，单 turn 并发需要扩展 fixture schema 支持 parallel tool calls，与 §5.13 之外的工作量不相称；P0 三条已经覆盖 ID 寻址正确性（每轮单 pending 也是 ID 路由的最小用例）。
-- **优先级**：P0（前三条），P1（并发降级）。
-- **测试位置**：**L2 已新增** `tests/code_ui_remote_approval_matrix.rs`，并扩展 `code_session.rs` 的 `respond_interaction()` helper。
+  - 已完成：多个 pending interaction 并发的 ID 路由在 TUI Code UI adapter 边界有直接回归，确保 HTTP `/interactions/{id}` 按 requested id 转发给 App。
+- **优先级**：P0（已覆盖）。
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_approval_matrix.rs`，并扩展 `code_session.rs` 的 `respond_interaction()` helper；adapter 级多 pending 回归在 [src/internal/tui/code_ui_adapter.rs](../../src/internal/tui/code_ui_adapter.rs)。
 - **AI 落地提示**：`CodeSession` 已有通用的 `respond_interaction(id, approved, selected_option, apply_to_future)`；新增 case 应直接复用：
   ```rust
   pub fn respond_interaction(
