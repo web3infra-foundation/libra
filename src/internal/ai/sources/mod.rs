@@ -21,9 +21,14 @@ use crate::internal::ai::tools::{
     spec::ToolSpec,
 };
 
+pub mod config;
 pub mod mcp;
 pub mod openapi;
 
+pub use config::{
+    SourceConfigEntry, SourceConfigLoadReport, SourceConfigOrigin, SourceConfigView,
+    register_builtin_mcp_source_from_project_config, source_config_view_from_project_config,
+};
 pub use mcp::{BUILTIN_MCP_SOURCE_SLUG, McpSource};
 pub use openapi::{OpenApiToolSpecError, openapi_tool_capabilities_from_fixture};
 

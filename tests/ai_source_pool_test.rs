@@ -4,6 +4,7 @@
 //! bridge while enforcing trust-tier and per-session isolation rules.
 
 use std::{
+    fs,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -13,8 +14,9 @@ use libra::internal::ai::{
     mcp::server::LibraMcpServer,
     sources::{
         BUILTIN_MCP_SOURCE_SLUG, CapabilityManifest, ManifestValidationError, McpSource, Source,
-        SourceCallContext, SourceEnablement, SourceKind, SourcePool, SourceToolCapability,
-        SourceToolNaming, TrustTier, openapi_tool_capabilities_from_fixture,
+        SourceCallContext, SourceConfigOrigin, SourceEnablement, SourceKind, SourcePool,
+        SourceToolCapability, SourceToolNaming, TrustTier, openapi_tool_capabilities_from_fixture,
+        register_builtin_mcp_source_from_project_config, source_config_view_from_project_config,
         source_prefixed_tool_name,
     },
     tools::{
@@ -274,6 +276,55 @@ async fn mcp_source_keeps_legacy_bridge_names_and_schema_compatible() {
     assert_eq!(
         serde_json::to_value(prefixed_run.schema().function.parameters).expect("prefixed schema"),
         serde_json::to_value(legacy_run.schema().function.parameters).expect("legacy schema")
+    );
+}
+
+#[tokio::test]
+async fn legacy_mcp_project_config_maps_to_enabled_builtin_source_view() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let libra_dir = temp_dir.path().join(".libra");
+    fs::create_dir_all(&libra_dir).expect("create .libra");
+    fs::write(
+        libra_dir.join("config.toml"),
+        r#"[mcp]
+enabled = true
+transport = "stdio"
+"#,
+    )
+    .expect("write legacy mcp config");
+
+    let view = source_config_view_from_project_config(temp_dir.path());
+    let entry = view
+        .source(BUILTIN_MCP_SOURCE_SLUG)
+        .expect("legacy mcp config should map to builtin MCP source");
+    assert_eq!(entry.slug, BUILTIN_MCP_SOURCE_SLUG);
+    assert_eq!(entry.kind, SourceKind::Mcp);
+    assert_eq!(entry.enablement, SourceEnablement::ProjectConfig);
+    assert_eq!(entry.origin, SourceConfigOrigin::LegacyMcp);
+
+    let server = Arc::new(LibraMcpServer::new(None, None));
+    let expected_tool_count = McpSource::builtin(server.clone()).manifest().tools.len();
+    let pool = SourcePool::new();
+    let report = register_builtin_mcp_source_from_project_config(&pool, server, temp_dir.path())
+        .expect("register builtin MCP source from legacy config");
+
+    assert!(report.legacy_mcp_config_mapped);
+    let statuses = pool.source_statuses().expect("list source statuses");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].slug, BUILTIN_MCP_SOURCE_SLUG);
+    assert_eq!(statuses[0].kind, SourceKind::Mcp);
+    assert_eq!(statuses[0].enablement, SourceEnablement::ProjectConfig);
+    assert_eq!(statuses[0].tool_count, expected_tool_count);
+
+    let handlers = pool
+        .tool_handlers_for_session("session-a", SourceToolNaming::Prefixed)
+        .expect("legacy-config MCP source should remain enabled");
+    let prefixed_name = source_prefixed_tool_name(BUILTIN_MCP_SOURCE_SLUG, "run_libra_vcs");
+    assert!(
+        handlers.iter().any(|(name, handler)| {
+            name == &prefixed_name && handler.schema().function.name == prefixed_name
+        }),
+        "source-prefixed run_libra_vcs handler should be visible"
     );
 }
 

@@ -125,7 +125,7 @@ use crate::{
             },
             session::{SessionState, SessionStore},
             skills::{SkillDispatcher, load_skills},
-            sources::{McpSource, SourcePool},
+            sources::{SourcePool, register_builtin_mcp_source_from_project_config},
             tools::{
                 ToolRegistry, ToolRegistryBuilder,
                 context::UserInputRequest,
@@ -2793,9 +2793,11 @@ where
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
     let source_pool = SourcePool::new();
-    if let Err(error) =
-        source_pool.register_source(Arc::new(McpSource::builtin(params.mcp_server.clone())))
-    {
+    if let Err(error) = register_builtin_mcp_source_from_project_config(
+        &source_pool,
+        params.mcp_server.clone(),
+        registry.working_dir(),
+    ) {
         tracing::warn!("failed to register built-in MCP source: {error}");
     }
     config.source_pool = Some(source_pool.clone());
