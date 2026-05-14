@@ -802,8 +802,8 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.137) `publish sync` 默认 AI planner 接入 history-backed adapter，非 dry-run 生产路径不再输出固定空 AI bundle；本地 AI history 中已有的 snapshot/event objects 会进入 AI object rows、bundle count 和 sync-run 计数，projection/runtime rebuild 仍由下方未完成项跟踪。
 - [x] (v0.17.138) `publish sync` 默认 AI planner 调用 `ProjectionRebuilder`，把 latest-thread rebuild 结果导出为 `Thread`、`Scheduler`、`QueryIndex`、`LiveContextWindow`、`ReadyQueue`、`ParallelGroup`、`Checkpoint`、`RetryRoute` 和 `UiCurrentView` projection objects；全线程覆盖和缺失类型失败报告仍由下方未完成项跟踪。
 - [x] (v0.17.139) `ProjectionRebuilder::rebuild_all_threads()` 覆盖所有独立 Intent 组件和无 Intent 的 task/run 组件，`publish sync` 会为每个 thread component 导出完整 projection/runtime object set；缺失类型失败报告仍由下方未完成项跟踪。
-- [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
-- [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
+- [x] (v0.17.140) AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects：snapshot/event 由 history-backed adapter 读取，projection/runtime 由 all-thread rebuild 生成，reference type manifest 和 production sync tests 同时覆盖。
+- [x] (v0.17.140) projection/runtime 对象缺失时，`publish sync` 按 reference rebuild/read contract 从 snapshot/event history 重建；若 AI history 存在但没有可重建的 Intent/Task/Run 根，sync 失败并报告缺失的 projection/runtime object types。
 - [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
 
 **Verification:**

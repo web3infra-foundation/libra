@@ -201,6 +201,17 @@ pub struct UnpublishArgs {
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
 const PUBLISH_REDACTION_RULES_VERSION: &str = "2026.05.13-1";
+const PUBLISH_AI_PROJECTION_OBJECT_TYPES: &[&str] = &[
+    "Thread",
+    "Scheduler",
+    "QueryIndex",
+    "LiveContextWindow",
+    "ReadyQueue",
+    "ParallelGroup",
+    "Checkpoint",
+    "RetryRoute",
+    "UiCurrentView",
+];
 
 /// clap value parser for `--max-preview-bytes`.
 ///
@@ -1314,16 +1325,25 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
             .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         let projection_rebuilder = ProjectionRebuilder::new(self.storage.as_ref(), &self.history);
-        for rebuild in projection_rebuilder
-            .rebuild_all_threads()
-            .await
-            .map_err(|source| {
-                CliError::fatal(format!(
-                    "failed to rebuild publish AI projection objects: {source:#}"
-                ))
-                .with_stable_code(StableErrorCode::InternalInvariant)
-            })?
-        {
+        let projection_rebuilds =
+            projection_rebuilder
+                .rebuild_all_threads()
+                .await
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to rebuild publish AI projection objects: {source:#}"
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?;
+        if !objects.is_empty() && projection_rebuilds.is_empty() {
+            return Err(CliError::fatal(format!(
+                "failed to rebuild publish AI projection objects: missing projection object types \
+                 {}; no rebuildable Intent, Task, or Run history was found",
+                PUBLISH_AI_PROJECTION_OBJECT_TYPES.join(", ")
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant));
+        }
+        for rebuild in projection_rebuilds {
             objects.extend(
                 build_publish_ai_projection_objects(
                     &rebuild,
@@ -3719,6 +3739,70 @@ mod tests {
         assert_eq!(sink.revisions[0].ai_object_count, 20);
         assert_eq!(sink.sync_runs[0].ai_object_count, 20);
         assert_eq!(sink.sync_runs[1].ai_object_count, 20);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_fails_when_ai_projection_cannot_rebuild() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let libra_dir = temp.path().join(".libra");
+        let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+        let db_conn = Arc::new(
+            db::get_db_conn_instance_for_path(&libra_dir.join(util::DATABASE))
+                .await
+                .expect("db should open"),
+        );
+        let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
+        let usage_only = serde_json::json!({
+            "runId": "00000000-0000-0000-0000-000000000001",
+            "promptTokens": 10,
+            "completionTokens": 5
+        });
+        let usage_hash = storage
+            .put_json(&usage_only)
+            .await
+            .expect("usage fixture should store");
+        history
+            .append("run_usage", "usage-only", usage_hash)
+            .await
+            .expect("usage fixture should be tracked");
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let err = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect_err("projection-less AI history must fail");
+
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.message().contains("missing projection object types"),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("Thread"), "{}", err.message());
+        assert!(
+            err.message()
+                .contains("no rebuildable Intent, Task, or Run history"),
+            "{}",
+            err.message()
+        );
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
