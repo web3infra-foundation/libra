@@ -9,6 +9,7 @@ use libra::{
         add::{self, AddArgs},
         commit::{self, CommitArgs},
     },
+    internal::branch::Branch,
     utils::test::ChangeDirGuard,
 };
 use serial_test::serial;
@@ -766,6 +767,39 @@ fn test_stash_branch_refuses_existing_branch() {
     assert!(
         stderr.contains("LBR-CONFLICT-002"),
         "branch conflict should surface ConflictOperationBlocked, stderr: {stderr}"
+    );
+}
+
+/// `stash branch <name>` must treat a corrupt existing branch row as
+/// name-occupied instead of letting the lossy branch lookup downgrade it to
+/// "missing" and overwrite the row.
+#[tokio::test]
+#[serial]
+async fn test_stash_branch_refuses_corrupt_existing_branch() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("occupied", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before corrupt branch conflict",
+    );
+
+    let output = run_libra_command(&["stash", "branch", "occupied"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch must not overwrite a corrupt existing branch row"
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        stderr.contains("a branch named 'occupied' already exists"),
+        "unexpected stderr: {stderr}"
     );
 }
 

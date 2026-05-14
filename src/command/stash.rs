@@ -35,7 +35,10 @@ use crate::{
             restore_working_directory_from_tree,
         },
     },
-    internal::head::Head,
+    internal::{
+        branch::{Branch as InternalBranch, BranchStoreError},
+        head::Head,
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         object,
@@ -70,6 +73,9 @@ enum StashError {
     #[error("a branch named '{0}' already exists")]
     BranchExists(String),
 
+    #[error("failed to query branch '{branch}': {detail}")]
+    BranchLookupFailed { branch: String, detail: String },
+
     #[error("clearing all stash entries requires --force in interactive mode")]
     ClearRequiresForce,
 
@@ -99,6 +105,7 @@ impl StashError {
             Self::StashNotExist(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeConflict(_) => StableErrorCode::ConflictUnresolved,
             Self::BranchExists(_) => StableErrorCode::ConflictOperationBlocked,
+            Self::BranchLookupFailed { .. } => StableErrorCode::IoReadFailed,
             Self::ClearRequiresForce => StableErrorCode::CliInvalidArguments,
             Self::ReadObject(_) => StableErrorCode::IoReadFailed,
             Self::WriteObject(_) => StableErrorCode::IoWriteFailed,
@@ -133,6 +140,9 @@ impl From<StashError> for CliError {
             StashError::BranchExists(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use a different branch name or delete the existing branch first"),
+            StashError::BranchLookupFailed { .. } => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("repair branch storage, then retry 'libra stash branch'."),
             StashError::ClearRequiresForce => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("re-run with --force, or use --json / --machine for scripted use"),
@@ -508,9 +518,10 @@ async fn run_show(
 }
 
 async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashOutput, StashError> {
-    use crate::internal::branch::Branch as InternalBranch;
-
-    if InternalBranch::exists(&branch_name).await {
+    if InternalBranch::exists_result(&branch_name, None)
+        .await
+        .map_err(|error| stash_branch_store_error(&branch_name, error))?
+    {
         return Err(StashError::BranchExists(branch_name));
     }
 
@@ -551,6 +562,13 @@ async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashO
         applied,
         dropped,
     })
+}
+
+fn stash_branch_store_error(branch: &str, error: BranchStoreError) -> StashError {
+    StashError::BranchLookupFailed {
+        branch: branch.to_string(),
+        detail: error.to_string(),
+    }
 }
 
 async fn run_clear(force: bool, output: &OutputConfig) -> Result<StashOutput, StashError> {

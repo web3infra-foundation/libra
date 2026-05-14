@@ -39,8 +39,9 @@
 
 后续维护项：
 
-- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 为旧调用点保留 `Vec` / `Option` / `()` wrapper；这是兼容债，后续继续迁移到 `*_result` API
-- **少量旧调用点仍可继续迁移到 fallible API**：非第二批范围内的旧命令和工具模块可继续把分支查询失败从 best-effort 迁移到显式传播
+- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 为旧调用点和旧测试保留 `Vec` / `Option` / `()` wrapper；这是兼容债，后续继续迁移到 `*_result` API。
+- **生产调用点继续迁移到 fallible API**：v0.17.148 已把 `stash branch` 的 branch-name 占用检查迁到 `exists_result()`，避免损坏 branch row 被当作缺失并覆盖；`bisect reset` 恢复原分支时已迁到 `find_branch_result()`，存储损坏会显式返回 `LBR-REPO-002`，不再静默 detached fallback。
+- **少量旧调用点仍可继续迁移到 fallible API**：非第二批范围内的旧命令、工具模块和测试 helper 可继续把分支查询失败从 best-effort 迁移到显式传播。
 - **`DelegatedCli` 是兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；后续如需更细粒度 typed error 可再拆分
 
 ### 目标与非目标
@@ -49,7 +50,7 @@
 - `BranchError` typed error enum、显式 `StableErrorCode`、统一 `run_branch()` / `render_branch_output()`、create / force-delete 确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续把 `internal::branch` 的旧兼容 wrapper 调用点迁移到 `list/find/delete *_result` fallible API，逐步消除 best-effort 查询路径
+- 继续把 `internal::branch` 的旧兼容 wrapper 调用点迁移到 `list/find/delete *_result` fallible API，逐步消除 best-effort 查询路径；v0.17.148 已覆盖 `stash branch` 和 `bisect reset` 两个生产路径。
 - 继续收口少量 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
 
 **本批非目标：**

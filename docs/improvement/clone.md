@@ -32,7 +32,7 @@
 - non-bare checkout 失败已通过 `restore::execute_checked_typed()` 返回 typed `RestoreError` 并中止 clone；不会再出现 checkout 失败但 clone 报成功。
 - `cleanup_failed_clone()` 的失败会通过 `with_priority_hint()` 附加到最终错误，避免磁盘残留静默不可见。
 - discovery 阶段已通过 `RemoteSpecErrorKind` 区分本地路径、URL 语法、unsupported scheme 等错误。
-- 剩余 Cloudflare D1/R2 source scheme 仍归 [publish.md](publish.md) Phase 5，不阻塞当前 clone 命令现代化验收。
+- Cloudflare D1/R2 source scheme 已由 [publish.md](publish.md) Phase 5 落地；不再阻塞 clone 命令现代化验收，后续只按 publish live gate 验证真实环境闭环。
 
 ### 目标与非目标
 
@@ -51,7 +51,7 @@
   - fetch 内部的 progress 格式（NDJSON、progress bar 渲染等）由 fetch 改进批次负责，clone 批次不做任何改动
 - **不在 JSON 中暴露 pack 下载统计**。`fetch_repository_safe()` 当前不返回结构化统计（objects_fetched / bytes_received），在 fetch 改进前不把这类字段写进对外 schema
 - **不改变 vault 策略**。clone 始终 `vault: true`，与 init 的默认行为一致
-- **不在本批实现 Cloudflare D1/R2 source scheme**。该能力由 [publish.md](publish.md) Phase 5 纳入发布交付，见下方“后续特性”；不能阻塞当前 clone 输出、错误码和 checkout 修复
+- **不把 Cloudflare D1/R2 source scheme 算入最初的 clone 现代化批次**。该能力已由 [publish.md](publish.md) Phase 5 纳入发布交付并落地；本文件保留其契约，作为 clone 输出、错误码和 checkout 修复之外的已交付扩展。
 
 ### 设计原则
 
@@ -63,11 +63,11 @@
 6. **non-bare clone 只有在 checkout 完成后才算成功**：remote/refs 配置完成但工作树恢复失败，必须整体视为 clone 失败
 7. **成功 schema 必须忠实表达 empty remote**：不伪造分支名；对“没有任何可 checkout 分支”的成功场景使用显式空值
 
-### 后续特性：Cloudflare D1/R2 source scheme（由 publish 计划纳入交付）
+### 已交付扩展：Cloudflare D1/R2 source scheme（由 publish 计划纳入交付）
 
 Cloudflare 上的仓库恢复不新增 `libra publish download`，也不把下载参数塞进 `libra publish`。恢复入口应属于 `libra clone`，通过现有 `CloneArgs.remote_repo` 位置参数识别 Libra 自有的 Cloudflare source scheme。
 
-落地要求归属 [publish.md](publish.md) Phase 5：实现 publish 功能时，必须同步完成本节定义的 `libra+cloud://` clone source 首版能力。
+落地要求归属 [publish.md](publish.md) Phase 5：当前 v0.17.142 已完成本节定义的 `libra+cloud://` clone source 首版能力，包括 D1 site/ref/revision 解析、R2 Git object restore、refs metadata restore、checkout、结构化输出和 AI object model baseline restore。
 
 建议 CLI 形态：
 
