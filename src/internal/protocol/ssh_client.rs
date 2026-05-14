@@ -22,7 +22,7 @@ const DEFAULT_SSH_PORT: u16 = 22;
 /// Idle timeout for SSH I/O operations. Triggers when a single read/write or
 /// process-wait call makes no progress for this duration. As long as data keeps
 /// flowing the timer resets — large transfers are not penalized.
-const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct SshClient {
     user: String,

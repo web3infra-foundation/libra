@@ -29,7 +29,10 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
 use crate::internal::publish::{
-    contract::{FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile},
+    contract::{
+        FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile, PublishRefEntry,
+        PublishRefsIndex, RefType,
+    },
     preflight::{Preflight, PreflightDecision},
 };
 
@@ -117,6 +120,33 @@ pub struct RevisionPlan {
     pub generated_at: DateTime<Utc>,
 }
 
+/// File body supplied by the sync orchestrator before classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionFileInput {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// One text blob that must be materialised in R2.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextBlobUpload {
+    pub path: String,
+    pub content_sha256: String,
+    pub relative_key: String,
+    pub object_key: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Complete code snapshot artefacts for one revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionArtifactPlan {
+    pub revision: RevisionPlan,
+    pub code_manifest_relative_key: String,
+    pub code_manifest_key: String,
+    pub code_manifest: PublishCodeManifest,
+    pub text_blobs: Vec<TextBlobUpload>,
+}
+
 impl RevisionPlan {
     /// Aggregate file count across every kind.
     pub fn total_file_count(&self) -> usize {
@@ -149,6 +179,58 @@ impl RevisionPlan {
                 .collect(),
         }
     }
+}
+
+/// Build the code snapshot artefacts the sync path persists to D1/R2.
+///
+/// Text files become R2 blob uploads and manifest/D1 rows. Binary,
+/// too-large and ignored paths only appear in the manifest/D1 metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn build_revision_artifact_plan(
+    repo_id: &str,
+    site_id: &str,
+    revision_oid: &str,
+    commit_oid: &str,
+    tree_oid: &str,
+    generated_at: DateTime<Utc>,
+    files: Vec<RevisionFileInput>,
+    config: &SnapshotConfig,
+) -> Result<RevisionArtifactPlan, SnapshotBuildError> {
+    validate_oid(revision_oid)?;
+    validate_oid(commit_oid)?;
+    validate_oid(tree_oid)?;
+
+    let mut snapshots = Vec::with_capacity(files.len());
+    let mut text_blobs = Vec::new();
+    for file in files {
+        let snapshot = classify_file(&file.path, &file.bytes, config)?;
+        if let FileSnapshot::Text { content_sha256, .. } = &snapshot {
+            text_blobs.push(TextBlobUpload {
+                path: file.path.clone(),
+                content_sha256: content_sha256.clone(),
+                relative_key: publish_text_file_relative_key(revision_oid, content_sha256),
+                object_key: publish_text_file_key(repo_id, site_id, revision_oid, content_sha256),
+                bytes: file.bytes,
+            });
+        }
+        snapshots.push(snapshot);
+    }
+
+    let revision = RevisionPlan {
+        revision_oid: revision_oid.to_string(),
+        commit_oid: commit_oid.to_string(),
+        tree_oid: tree_oid.to_string(),
+        files: snapshots,
+        generated_at,
+    };
+    let code_manifest = revision.to_code_manifest(repo_id, site_id);
+    Ok(RevisionArtifactPlan {
+        revision,
+        code_manifest_relative_key: publish_code_manifest_relative_key(revision_oid),
+        code_manifest_key: publish_code_manifest_key(repo_id, site_id, revision_oid),
+        code_manifest,
+        text_blobs,
+    })
 }
 
 impl FileSnapshot {
@@ -213,8 +295,19 @@ impl FileSnapshot {
     }
 }
 
+pub fn publish_code_manifest_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/code-manifest.json")
+}
+
 pub fn publish_code_manifest_key(repo_id: &str, site_id: &str, revision_oid: &str) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/code-manifest.json")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_code_manifest_relative_key(revision_oid)
+    )
+}
+
+pub fn publish_text_file_relative_key(revision_oid: &str, content_sha256: &str) -> String {
+    format!("revisions/{revision_oid}/files/{content_sha256}.txt")
 }
 
 pub fn publish_text_file_key(
@@ -223,7 +316,80 @@ pub fn publish_text_file_key(
     revision_oid: &str,
     content_sha256: &str,
 ) -> String {
-    format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/files/{content_sha256}.txt")
+    format!(
+        "{repo_id}/publish/sites/{site_id}/{}",
+        publish_text_file_relative_key(revision_oid, content_sha256)
+    )
+}
+
+pub fn publish_refs_index_key(repo_id: &str, site_id: &str) -> String {
+    format!("{repo_id}/publish/sites/{site_id}/refs.json")
+}
+
+/// Build the publish refs/revision plan that the sync orchestrator
+/// persists to D1.
+///
+/// Every supplied ref is preserved as a `publish_refs` candidate, while
+/// `revisions` is reduced to the unique set referenced by those refs.
+/// If two refs point at the same `revision_oid`, they share one
+/// `RevisionPlan` and therefore one R2/D1 revision snapshot.
+pub fn build_snapshot_plan(
+    refs: &[RefInput],
+    revisions: Vec<RevisionPlan>,
+    default_ref: Option<&str>,
+) -> Result<SnapshotPlan, SnapshotBuildError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if let Some(default_ref) = default_ref {
+        validate_ref_name(default_ref)?;
+        if !refs
+            .iter()
+            .any(|publish_ref| publish_ref.ref_name == default_ref)
+        {
+            return Err(SnapshotBuildError::InvalidRef {
+                message: format!("default ref {default_ref:?} is not included in publish refs"),
+            });
+        }
+    }
+
+    let mut revision_by_oid = BTreeMap::new();
+    for revision in revisions {
+        validate_oid(&revision.revision_oid)?;
+        validate_oid(&revision.commit_oid)?;
+        validate_oid(&revision.tree_oid)?;
+        revision_by_oid
+            .entry(revision.revision_oid.clone())
+            .or_insert(revision);
+    }
+
+    let mut ref_plans = Vec::with_capacity(refs.len());
+    let mut used_revisions = BTreeSet::new();
+    let mut unique_revisions = Vec::new();
+    for publish_ref in refs {
+        validate_ref_name(&publish_ref.ref_name)?;
+        validate_oid(&publish_ref.target_oid)?;
+        validate_oid(&publish_ref.revision_oid)?;
+        let Some(revision) = revision_by_oid.get(&publish_ref.revision_oid) else {
+            return Err(SnapshotBuildError::MissingRevision {
+                revision_oid: publish_ref.revision_oid.clone(),
+            });
+        };
+        if used_revisions.insert(publish_ref.revision_oid.clone()) {
+            unique_revisions.push(revision.clone());
+        }
+        ref_plans.push(RefPlan {
+            ref_name: publish_ref.ref_name.clone(),
+            target_oid: publish_ref.target_oid.clone(),
+            revision_oid: publish_ref.revision_oid.clone(),
+            is_default: default_ref.is_some_and(|name| name == publish_ref.ref_name),
+        });
+    }
+
+    Ok(SnapshotPlan {
+        revisions: unique_revisions,
+        refs: ref_plans,
+        default_ref: default_ref.map(ToString::to_string),
+    })
 }
 
 /// Plan for one ref entry. Mirrors the `publish_refs` row shape +
@@ -234,6 +400,32 @@ pub struct RefPlan {
     pub target_oid: String,
     pub revision_oid: String,
     pub is_default: bool,
+}
+
+impl RefPlan {
+    pub fn ref_type(&self) -> RefType {
+        if self.ref_name.starts_with("refs/tags/") {
+            RefType::Tag
+        } else {
+            RefType::Branch
+        }
+    }
+
+    pub fn short_name(&self) -> &str {
+        short_ref_name(&self.ref_name).unwrap_or(self.ref_name.as_str())
+    }
+
+    pub fn to_publish_ref_entry(&self, updated_at: DateTime<Utc>) -> PublishRefEntry {
+        PublishRefEntry {
+            ref_name: self.ref_name.clone(),
+            ref_type: self.ref_type(),
+            short_name: self.short_name().to_string(),
+            target_oid: self.target_oid.clone(),
+            revision_oid: self.revision_oid.clone(),
+            is_default: self.is_default,
+            updated_at,
+        }
+    }
 }
 
 /// Full plan returned by [`build_snapshot_plan`]. The orchestrator
@@ -247,6 +439,56 @@ pub struct SnapshotPlan {
     pub default_ref: Option<String>,
 }
 
+impl SnapshotPlan {
+    /// Return the revision that may update `publish_sites.latest_revision_oid`.
+    ///
+    /// The latest pointer is intentionally derived only from the default
+    /// ref. Other branch/tag refs can be published in the same sync, but
+    /// must not move the site-level latest pointer.
+    pub fn default_latest_revision_oid(&self) -> Option<&str> {
+        let default_ref = self.default_ref.as_deref()?;
+        self.refs
+            .iter()
+            .find(|publish_ref| publish_ref.ref_name == default_ref)
+            .map(|publish_ref| publish_ref.revision_oid.as_str())
+    }
+
+    pub fn to_refs_index(
+        &self,
+        site_id: &str,
+        refs_generation: u64,
+        generated_at: DateTime<Utc>,
+    ) -> Result<PublishRefsIndex, SnapshotBuildError> {
+        let default_ref =
+            self.default_ref
+                .clone()
+                .ok_or_else(|| SnapshotBuildError::InvalidRef {
+                    message: "refs index requires a default ref".to_string(),
+                })?;
+        if !self
+            .refs
+            .iter()
+            .any(|publish_ref| publish_ref.ref_name == default_ref && publish_ref.is_default)
+        {
+            return Err(SnapshotBuildError::InvalidRef {
+                message: format!("default ref {default_ref:?} is not marked in publish refs"),
+            });
+        }
+        Ok(PublishRefsIndex {
+            schema_version: PUBLISH_SCHEMA_VERSION,
+            site_id: site_id.to_string(),
+            refs_generation,
+            default_ref,
+            refs: self
+                .refs
+                .iter()
+                .map(|publish_ref| publish_ref.to_publish_ref_entry(generated_at))
+                .collect(),
+            generated_at,
+        })
+    }
+}
+
 /// Errors surfaced by the snapshot builder.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotBuildError {
@@ -254,6 +496,8 @@ pub enum SnapshotBuildError {
     InvalidRef { message: String },
     #[error("snapshot revision oid is invalid: {oid}")]
     InvalidOid { oid: String },
+    #[error("snapshot revision {revision_oid} is missing from the revision plan")]
+    MissingRevision { revision_oid: String },
     #[error("snapshot path {path:?} is not valid UTF-8")]
     NonUtf8Path { path: PathBuf },
     #[error("snapshot file {path:?} could not be hashed")]
@@ -420,6 +664,12 @@ pub fn validate_ref_name(value: &str) -> Result<(), SnapshotBuildError> {
             message: format!("ref name {value:?} must start with refs/heads/ or refs/tags/"),
         })
     }
+}
+
+pub fn short_ref_name(full_ref: &str) -> Option<&str> {
+    full_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| full_ref.strip_prefix("refs/tags/"))
 }
 
 /// Detect ambiguous short refs: a branch and a tag with the same

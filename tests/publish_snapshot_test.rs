@@ -1,10 +1,19 @@
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
-use libra::internal::publish::{
-    contract::{FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest},
-    snapshot::{
-        FileSnapshot, IgnoredReason, RevisionPlan, publish_code_manifest_key, publish_text_file_key,
+use libra::{
+    internal::publish::{
+        contract::{FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest},
+        snapshot::{
+            FileSnapshot, IgnoredReason, RevisionFileInput, RevisionPlan, SnapshotConfig,
+            build_revision_artifact_plan, publish_code_manifest_key,
+            publish_code_manifest_relative_key, publish_text_file_key,
+            publish_text_file_relative_key,
+        },
     },
+    utils::storage::publish_storage::PublishStorage,
 };
+use object_store::memory::InMemory;
 
 #[test]
 fn publish_snapshot_test_revision_plan_emits_code_manifest_contract() {
@@ -87,4 +96,205 @@ fn publish_snapshot_test_revision_plan_emits_code_manifest_contract() {
         publish_code_manifest_key(repo_id, site_id, revision_oid),
         format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/code-manifest.json")
     );
+}
+
+#[test]
+fn publish_snapshot_test_revision_artifact_plan_separates_text_blobs_from_metadata_only() {
+    let repo_id = "11111111-2222-3333-4444-555555555555";
+    let site_id = "00000000-0000-0000-0000-0000publish01";
+    let revision_oid = "abcdef0123456789abcdef0123456789abcdef01";
+    let tree_oid = "1234567812345678123456781234567812345678";
+    let generated_at = Utc
+        .with_ymd_and_hms(2026, 5, 13, 12, 0, 0)
+        .single()
+        .expect("test timestamp must be valid");
+    let mut config = SnapshotConfig {
+        max_preview_bytes: 8,
+        ..SnapshotConfig::default()
+    };
+    config.preflight.extend_with_ignore_text("ignored.txt\n");
+
+    let plan = build_revision_artifact_plan(
+        repo_id,
+        site_id,
+        revision_oid,
+        revision_oid,
+        tree_oid,
+        generated_at,
+        vec![
+            RevisionFileInput {
+                path: "src/lib.rs".to_string(),
+                bytes: b"fn x()\n".to_vec(),
+            },
+            RevisionFileInput {
+                path: "assets/logo.bin".to_string(),
+                bytes: vec![0, 1, 2],
+            },
+            RevisionFileInput {
+                path: "docs/large.md".to_string(),
+                bytes: b"123456789".to_vec(),
+            },
+            RevisionFileInput {
+                path: "ignored.txt".to_string(),
+                bytes: b"secret".to_vec(),
+            },
+        ],
+        &config,
+    )
+    .expect("artifact plan should build");
+
+    assert_eq!(plan.revision.total_file_count(), 4);
+    assert_eq!(plan.revision.r2_blob_count(), 1);
+    assert_eq!(
+        plan.code_manifest_relative_key,
+        publish_code_manifest_relative_key(revision_oid)
+    );
+    assert_eq!(
+        plan.code_manifest_key,
+        publish_code_manifest_key(repo_id, site_id, revision_oid)
+    );
+    assert_eq!(plan.code_manifest.files.len(), 4);
+
+    let text_sha = libra::internal::publish::snapshot::sha256_hex(b"fn x()\n");
+    assert_eq!(plan.text_blobs.len(), 1);
+    assert_eq!(plan.text_blobs[0].path, "src/lib.rs");
+    assert_eq!(plan.text_blobs[0].content_sha256, text_sha);
+    assert_eq!(
+        plan.text_blobs[0].relative_key,
+        publish_text_file_relative_key(revision_oid, &text_sha)
+    );
+    assert_eq!(
+        plan.text_blobs[0].object_key,
+        publish_text_file_key(repo_id, site_id, revision_oid, &text_sha)
+    );
+    assert_eq!(plan.text_blobs[0].bytes, b"fn x()\n");
+
+    let text_key = publish_text_file_key(repo_id, site_id, revision_oid, &text_sha);
+    let modes = plan
+        .code_manifest
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.display_mode,
+                file.r2_key.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modes,
+        vec![
+            ("src/lib.rs", FileDisplayMode::Text, Some(text_key.as_str())),
+            ("assets/logo.bin", FileDisplayMode::Binary, None),
+            ("docs/large.md", FileDisplayMode::TooLarge, None),
+            ("ignored.txt", FileDisplayMode::Ignored, None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn publish_snapshot_test_mock_r2_d1_snapshot_round_trip() {
+    let repo_id = "11111111-2222-3333-4444-555555555555";
+    let site_id = "00000000-0000-0000-0000-0000publish01";
+    let revision_oid = "abcdef0123456789abcdef0123456789abcdef01";
+    let text_body = b"pub fn demo() {}\n";
+    let text_sha = libra::internal::publish::snapshot::sha256_hex(text_body);
+    let generated_at = Utc
+        .with_ymd_and_hms(2026, 5, 13, 12, 0, 0)
+        .single()
+        .expect("test timestamp must be valid");
+    let plan = RevisionPlan {
+        revision_oid: revision_oid.to_string(),
+        commit_oid: revision_oid.to_string(),
+        tree_oid: "1234567812345678123456781234567812345678".to_string(),
+        generated_at,
+        files: vec![
+            FileSnapshot::Text {
+                path: "src/lib.rs".to_string(),
+                size_bytes: text_body.len() as u64,
+                content_sha256: text_sha.clone(),
+                language: Some("rust".to_string()),
+            },
+            FileSnapshot::Binary {
+                path: "assets/logo.png".to_string(),
+                size_bytes: 128,
+            },
+            FileSnapshot::TooLarge {
+                path: "target/big.log".to_string(),
+                size_bytes: 2 * 1024 * 1024,
+            },
+            FileSnapshot::Ignored {
+                path: ".env.local".to_string(),
+                size_bytes: 64,
+                reason: IgnoredReason::BuiltinCredential,
+            },
+        ],
+    };
+    let storage = PublishStorage::new(Arc::new(InMemory::new()), repo_id, site_id)
+        .expect("mock R2 storage should be constructed");
+    let manifest = plan.to_code_manifest(repo_id, site_id);
+    let manifest_relative = format!("revisions/{revision_oid}/code-manifest.json");
+    let text_relative = format!("revisions/{revision_oid}/files/{text_sha}.txt");
+
+    storage
+        .put_json(&manifest_relative, &manifest)
+        .await
+        .expect("manifest should write to mock R2");
+    storage
+        .put_bytes(&text_relative, text_body)
+        .await
+        .expect("text body should write to mock R2");
+
+    assert_eq!(
+        storage.key_for(&manifest_relative).unwrap(),
+        publish_code_manifest_key(repo_id, site_id, revision_oid)
+    );
+    let loaded_manifest: PublishCodeManifest = storage
+        .get_json(&manifest_relative)
+        .await
+        .expect("manifest should round-trip from mock R2");
+    assert_eq!(loaded_manifest, manifest);
+
+    let mock_d1_rows = loaded_manifest
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.display_mode,
+                file.content_sha256.as_deref(),
+                file.r2_key.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(mock_d1_rows.len(), 4);
+
+    let text_row = mock_d1_rows
+        .iter()
+        .find(|row| row.1 == FileDisplayMode::Text)
+        .expect("text file row should exist");
+    assert_eq!(text_row.2, Some(text_sha.as_str()));
+    assert_eq!(
+        text_row.3,
+        Some(publish_text_file_key(repo_id, site_id, revision_oid, &text_sha).as_str())
+    );
+    assert_eq!(
+        storage
+            .get_bytes(&text_relative)
+            .await
+            .expect("text body should round-trip from mock R2"),
+        text_body
+    );
+
+    for row in mock_d1_rows
+        .iter()
+        .filter(|row| row.1 != FileDisplayMode::Text)
+    {
+        assert_eq!(
+            row.2, None,
+            "metadata-only row has no content hash: {row:?}"
+        );
+        assert_eq!(row.3, None, "metadata-only row has no R2 key: {row:?}");
+    }
 }

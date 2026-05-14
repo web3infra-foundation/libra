@@ -21,13 +21,13 @@ pub struct HttpsClient {
 }
 
 /// Default connection timeout for initial TCP+TLS handshake.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Default idle (read) timeout — triggers when no bytes arrive for this duration.
 /// This acts as an "idle timeout" rather than a total-request timeout: as long as
 /// the server keeps sending data the timer resets, but if the connection stalls for
 /// longer than this the request is aborted.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl ProtocolClient for HttpsClient {
     fn from_url(url: &Url) -> Self {

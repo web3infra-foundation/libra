@@ -92,6 +92,12 @@ impl<'a> ProjectionRebuilder<'a> {
         self.rebuild_latest_thread_from_data(&objects)
     }
 
+    pub async fn rebuild_all_threads(&self) -> Result<Vec<MaterializedProjection>> {
+        let objects = self.read_history_objects().await?;
+
+        self.rebuild_all_threads_from_data(&objects)
+    }
+
     pub async fn rebuild_thread(
         &self,
         thread_id: ThreadId,
@@ -166,6 +172,25 @@ impl<'a> ProjectionRebuilder<'a> {
         };
 
         self.rebuild_selected_thread_from_data(objects, &selection)
+    }
+
+    fn rebuild_all_threads_from_data(
+        &self,
+        objects: &HistoryObjects,
+    ) -> Result<Vec<MaterializedProjection>> {
+        let selections = select_all_threads(
+            &objects.intents,
+            &objects.plans,
+            &objects.tasks,
+            &objects.runs,
+        );
+        let mut projections = Vec::with_capacity(selections.len());
+        for selection in selections {
+            if let Some(projection) = self.rebuild_selected_thread_from_data(objects, &selection)? {
+                projections.push(projection);
+            }
+        }
+        Ok(projections)
     }
 
     fn rebuild_thread_from_data(
@@ -867,6 +892,53 @@ fn select_latest_thread(
         plan_ids: HashSet::new(),
         task_ids: HashSet::from([latest_task_id]),
     })
+}
+
+fn select_all_threads(
+    intents: &[Intent],
+    plans: &[Plan],
+    tasks: &[Task],
+    runs: &[Run],
+) -> Vec<SelectedThread> {
+    let mut selections = Vec::new();
+    if !intents.is_empty() {
+        let mut sorted_intents = intents.iter().collect::<Vec<_>>();
+        sorted_intents.sort_by_key(|intent| {
+            sort_key(intent.header().created_at(), intent.header().object_id())
+        });
+
+        let mut visited = HashSet::new();
+        for intent in sorted_intents {
+            let intent_id = intent.header().object_id();
+            if visited.contains(&intent_id) {
+                continue;
+            }
+
+            let component_ids = connected_intent_component(intents, intent_id);
+            visited.extend(component_ids.iter().copied());
+            selections.push(selected_thread_from_intent_ids(
+                intents,
+                plans,
+                tasks,
+                component_ids,
+            ));
+        }
+    } else {
+        let thread_task_ids = tasks
+            .iter()
+            .map(|task| task.header().object_id())
+            .chain(runs.iter().map(|run| run.task()))
+            .collect::<BTreeSet<_>>();
+        selections.extend(thread_task_ids.into_iter().map(|task_id| SelectedThread {
+            thread_id: derive_thread_id(&[], Some(task_id)),
+            intent_ids: HashSet::new(),
+            plan_ids: HashSet::new(),
+            task_ids: HashSet::from([task_id]),
+        }));
+    }
+
+    selections.sort_by_key(|selection| selection.thread_id);
+    selections
 }
 
 fn select_thread_by_id(

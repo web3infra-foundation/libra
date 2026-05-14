@@ -7,8 +7,9 @@
 //! Authentication uses a Cloudflare account ID, API token, and D1 database ID,
 //! resolved through [`resolve_env`](crate::internal::config::resolve_env) so they
 //! can come from process env, local repo `vault.env.*` config, or global config.
-//! The client always speaks HTTPS to `api.cloudflare.com`; the constructor enforces
-//! `https_only(true)` and the URL builder rejects non-HTTPS schemes defensively.
+//! The default client speaks HTTPS to `api.cloudflare.com`; the constructor enforces
+//! `https_only(true)`. Tests can inject a different API base URL through
+//! [`D1Client::new_with_api_base_url`].
 //!
 //! Schema management is conservative: [`D1Client::ensure_object_index_table`]
 //! migrates an older single-column unique index into a composite `(repo_id, o_id)`
@@ -19,6 +20,8 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::internal::config::resolve_env;
+
+const DEFAULT_D1_API_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
 /// Top-level wrapper for every Cloudflare D1 API response.
 ///
@@ -84,6 +87,23 @@ pub struct D1Statement {
     pub params: Option<Vec<serde_json::Value>>,
 }
 
+/// CAS update input for `publish_sites.latest_revision_oid`.
+pub struct PublishSiteLatestUpdate<'a> {
+    pub site_id: &'a str,
+    pub default_ref: Option<&'a str>,
+    pub latest_revision_oid: Option<&'a str>,
+    pub next_refs_generation: i64,
+    pub expected_refs_generation: i64,
+    pub updated_at: &'a str,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PublishSiteLatestUpdateResult {
+    Updated,
+    Conflict,
+}
+
 /// Cloudflare D1 REST API client.
 ///
 /// `Clone` is cheap (HTTP client is `Arc` internally). Construct via
@@ -95,6 +115,7 @@ pub struct D1Client {
     account_id: String,
     api_token: String,
     database_id: String,
+    api_base_url: Url,
 }
 
 impl D1Client {
@@ -159,42 +180,78 @@ impl D1Client {
     ///   (extremely unlikely in production), falls back to a default `Client::new()`
     ///   so the constructor itself never fails.
     pub fn new(account_id: String, api_token: String, database_id: String) -> Self {
-        let client = Client::builder()
-            .https_only(true)
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        // INVARIANT: the default Cloudflare API base URL is a checked-in constant.
+        let api_base_url = Url::parse(DEFAULT_D1_API_BASE_URL)
+            .expect("DEFAULT_D1_API_BASE_URL must be a valid URL");
+        Self::with_api_base_url(account_id, api_token, database_id, api_base_url, true)
+    }
+
+    /// Create a D1 client that targets a custom Cloudflare-compatible API base URL.
+    ///
+    /// This seam is intended for local tests that provide a mock D1 endpoint. The
+    /// supplied base URL should point at the Cloudflare API root, e.g.
+    /// `http://127.0.0.1:8787/client/v4`; the client appends
+    /// `/accounts/<account>/d1/database/<db>/query`.
+    pub fn new_with_api_base_url(
+        account_id: String,
+        api_token: String,
+        database_id: String,
+        api_base_url: &str,
+    ) -> Result<Self, D1Error> {
+        let api_base_url = Url::parse(api_base_url).map_err(|e| D1Error {
+            code: 2005,
+            message: format!("Invalid API base URL: {}", e),
+        })?;
+        Ok(Self::with_api_base_url(
+            account_id,
+            api_token,
+            database_id,
+            api_base_url,
+            false,
+        ))
+    }
+
+    fn with_api_base_url(
+        account_id: String,
+        api_token: String,
+        database_id: String,
+        api_base_url: Url,
+        https_only: bool,
+    ) -> Self {
+        let mut builder = Client::builder();
+        if https_only {
+            builder = builder.https_only(true);
+        }
+        let client = builder.build().unwrap_or_else(|_| Client::new());
         Self {
             client,
             account_id,
             api_token,
             database_id,
+            api_base_url,
         }
     }
 
     /// Build the per-request `/query` endpoint URL for this account/database.
     ///
     /// Boundary conditions:
-    /// - Returns a `D1Error` with code `2005` when the formatted URL fails to parse
-    ///   (would only happen if account_id/database_id contain invalid URL chars,
-    ///   which is checked indirectly by Cloudflare's own API).
-    /// - Returns a `D1Error` with code `2006` if the parsed scheme is not `https` —
-    ///   defensive belt-and-braces in addition to `https_only` on the client.
+    /// - Returns a `D1Error` with code `2005` when appending the account/database
+    ///   path to the configured API base URL fails.
     fn api_url(&self) -> Result<Url, D1Error> {
-        let url_str = format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}/query",
-            self.account_id, self.database_id
-        );
-        let url = Url::parse(&url_str).map_err(|e| D1Error {
-            code: 2005,
-            message: format!("Invalid API URL: {}", e),
-        })?;
-
-        if url.scheme() != "https" {
-            return Err(D1Error {
-                code: 2006,
-                message: "API URL must use HTTPS".to_string(),
-            });
+        let mut url = self.api_base_url.clone();
+        if !url.path().ends_with('/') {
+            let path = format!("{}/", url.path());
+            url.set_path(&path);
         }
+        url = url
+            .join(&format!(
+                "accounts/{}/d1/database/{}/query",
+                self.account_id, self.database_id
+            ))
+            .map_err(|e| D1Error {
+                code: 2005,
+                message: format!("Invalid API URL: {}", e),
+            })?;
 
         Ok(url)
     }
@@ -579,6 +636,20 @@ impl D1Client {
         let sql = "SELECT repo_id FROM repositories WHERE name = ?1";
         let result: Vec<IdRow> = self.query(sql, Some(vec![serde_json::json!(name)])).await?;
         Ok(result.into_iter().next().map(|r| r.repo_id))
+    }
+
+    /// Look up a repository row by stable `repo_id`.
+    ///
+    /// Cloudflare clone restore uses the `publish_sites.repo_id`
+    /// binding to verify that the backing backup metadata exists
+    /// before it starts creating a local repository.
+    pub async fn find_repository(&self, repo_id: &str) -> Result<Option<RepositoryRow>, D1Error> {
+        let sql =
+            "SELECT repo_id, name, created_at, updated_at FROM repositories WHERE repo_id = ?1";
+        let rows: Vec<RepositoryRow> = self
+            .query(sql, Some(vec![serde_json::json!(repo_id)]))
+            .await?;
+        Ok(rows.into_iter().next())
     }
 
     // ── CEX-EntireIO §10.2: agent_session / agent_checkpoint mirroring ──
@@ -967,6 +1038,24 @@ impl D1Client {
         Ok(())
     }
 
+    /// CAS-update a site's latest/default publish pointers.
+    ///
+    /// Without `force`, the update only applies when the stored
+    /// `refs_generation` matches `expected_refs_generation`; a
+    /// zero-row update is reported as [`PublishSiteLatestUpdateResult::Conflict`]
+    /// so callers can surface a clear retry-or-`--force` error. With
+    /// `force`, the generation guard is intentionally omitted.
+    pub async fn update_publish_site_latest(
+        &self,
+        update: PublishSiteLatestUpdate<'_>,
+    ) -> Result<PublishSiteLatestUpdateResult, D1Error> {
+        let D1Statement { sql, params } = publish_site_latest_update_statement(&update);
+        let result = self.execute(&sql, params).await?;
+        Ok(publish_site_latest_update_result_from_changes(
+            result.meta.and_then(|meta| meta.changes).unwrap_or(0),
+        ))
+    }
+
     /// Insert or update a `publish_sync_runs` row.
     pub async fn upsert_publish_sync_run(&self, row: &PublishSyncRunRow) -> Result<(), D1Error> {
         let sql = r#"
@@ -1086,6 +1175,23 @@ impl D1Client {
         Ok(())
     }
 
+    /// Delete stale `publish_refs` rows left by older all-refs sync runs.
+    ///
+    /// Callers run this only after a full sync has upserted every current
+    /// local branch/tag ref with `current_sync_run_id` and after the site
+    /// latest/default CAS succeeds. That order prevents deleting the previous
+    /// default ref while `publish_sites.default_ref` still points at it.
+    pub async fn delete_publish_refs_for_other_sync_runs(
+        &self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> Result<i64, D1Error> {
+        let D1Statement { sql, params } =
+            delete_publish_refs_for_other_sync_runs_statement(site_id, current_sync_run_id);
+        let result = self.execute(&sql, params).await?;
+        Ok(result.meta.and_then(|meta| meta.changes).unwrap_or(0))
+    }
+
     /// Insert or update a `publish_files` row.
     pub async fn upsert_publish_file(&self, row: &PublishFileRow) -> Result<(), D1Error> {
         let sql = r#"
@@ -1147,6 +1253,53 @@ impl D1Client {
         ];
         self.execute(sql, Some(params)).await?;
         Ok(())
+    }
+
+    /// List AI object rows for one published revision.
+    pub async fn list_publish_ai_objects(
+        &self,
+        site_id: &str,
+        revision_oid: &str,
+    ) -> Result<Vec<PublishAiObjectRow>, D1Error> {
+        let sql = r#"
+            SELECT site_id, revision_oid, object_type, object_id, layer,
+                   r2_key, redaction_mode, payload_sha256, schema_version, created_at
+              FROM publish_ai_objects
+             WHERE site_id = ?1 AND revision_oid = ?2
+             ORDER BY layer, object_type, object_id
+        "#;
+        self.query(
+            sql,
+            Some(vec![
+                serde_json::json!(site_id),
+                serde_json::json!(revision_oid),
+            ]),
+        )
+        .await
+    }
+
+    /// List AI version rows for one published revision.
+    pub async fn list_publish_ai_versions(
+        &self,
+        site_id: &str,
+        revision_oid: &str,
+    ) -> Result<Vec<PublishAiVersionRow>, D1Error> {
+        let sql = r#"
+            SELECT site_id, ai_version_id, revision_oid, bundle_key, bundle_sha256,
+                   object_count, redaction_mode, redaction_rules_version,
+                   schema_version, created_at
+              FROM publish_ai_versions
+             WHERE site_id = ?1 AND revision_oid = ?2
+             ORDER BY created_at, ai_version_id
+        "#;
+        self.query(
+            sql,
+            Some(vec![
+                serde_json::json!(site_id),
+                serde_json::json!(revision_oid),
+            ]),
+        )
+        .await
     }
 
     /// Insert or update a `publish_ai_versions` row.
@@ -1320,6 +1473,50 @@ fn publish_site_select_sql(where_clause: &str) -> String {
                 schema_version, created_at, updated_at \
          FROM publish_sites WHERE {where_clause} LIMIT 1"
     )
+}
+
+fn publish_site_latest_update_statement(update: &PublishSiteLatestUpdate<'_>) -> D1Statement {
+    let mut sql = "UPDATE publish_sites \
+                   SET default_ref = ?2, latest_revision_oid = ?3, refs_generation = ?4, \
+                       updated_at = ?5 \
+                   WHERE site_id = ?1"
+        .to_string();
+    let mut params = vec![
+        serde_json::json!(update.site_id),
+        serde_json::json!(update.default_ref),
+        serde_json::json!(update.latest_revision_oid),
+        serde_json::json!(update.next_refs_generation),
+        serde_json::json!(update.updated_at),
+    ];
+    if !update.force {
+        sql.push_str(" AND refs_generation = ?6");
+        params.push(serde_json::json!(update.expected_refs_generation));
+    }
+    D1Statement {
+        sql,
+        params: Some(params),
+    }
+}
+
+fn publish_site_latest_update_result_from_changes(changes: i64) -> PublishSiteLatestUpdateResult {
+    if changes > 0 {
+        PublishSiteLatestUpdateResult::Updated
+    } else {
+        PublishSiteLatestUpdateResult::Conflict
+    }
+}
+
+fn delete_publish_refs_for_other_sync_runs_statement(
+    site_id: &str,
+    current_sync_run_id: &str,
+) -> D1Statement {
+    D1Statement {
+        sql: "DELETE FROM publish_refs WHERE site_id = ?1 AND sync_run_id != ?2".to_string(),
+        params: Some(vec![
+            serde_json::json!(site_id),
+            serde_json::json!(current_sync_run_id),
+        ]),
+    }
 }
 
 /// Split a multi-statement SQL script into individual statements.
@@ -1708,6 +1905,40 @@ mod tests {
         assert!(!json.contains("params"));
     }
 
+    #[test]
+    fn d1_client_default_api_url_uses_cloudflare_query_endpoint() {
+        let client = D1Client::new(
+            "account-123".to_string(),
+            "token-123".to_string(),
+            "database-123".to_string(),
+        );
+
+        let url = client.api_url().expect("default D1 API URL should parse");
+
+        assert_eq!(
+            url.as_str(),
+            "https://api.cloudflare.com/client/v4/accounts/account-123/d1/database/database-123/query"
+        );
+    }
+
+    #[test]
+    fn d1_client_custom_api_base_url_uses_query_endpoint() {
+        let client = D1Client::new_with_api_base_url(
+            "account-123".to_string(),
+            "token-123".to_string(),
+            "database-123".to_string(),
+            "http://127.0.0.1:8787/client/v4",
+        )
+        .expect("custom D1 API base URL should parse");
+
+        let url = client.api_url().expect("custom D1 API URL should parse");
+
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:8787/client/v4/accounts/account-123/d1/database/database-123/query"
+        );
+    }
+
     /// Scenario: with all three D1 env vars unset and the local repo config holding
     /// the values, `from_env` should successfully build a client. This is the
     /// happy path users follow when storing credentials in `vault.env.*` rather
@@ -1904,6 +2135,73 @@ mod tests {
         assert!(
             !repo_sql.contains("slug = ?2"),
             "repo lookup must not depend on the current slug: {repo_sql}"
+        );
+    }
+
+    #[test]
+    fn publish_latest_cas_update_requires_generation_match_unless_forced() {
+        let guarded = PublishSiteLatestUpdate {
+            site_id: "site-1",
+            default_ref: Some("refs/heads/main"),
+            latest_revision_oid: Some("abcdef0123456789abcdef0123456789abcdef01"),
+            next_refs_generation: 12,
+            expected_refs_generation: 11,
+            updated_at: "2026-05-13T12:00:00Z",
+            force: false,
+        };
+        let guarded_statement = publish_site_latest_update_statement(&guarded);
+        assert!(
+            guarded_statement
+                .sql
+                .contains("WHERE site_id = ?1 AND refs_generation = ?6"),
+            "non-force update must use refs_generation as the CAS guard: {}",
+            guarded_statement.sql
+        );
+        assert_eq!(guarded_statement.params.as_ref().expect("params").len(), 6);
+        assert_eq!(
+            guarded_statement.params.as_ref().expect("params").last(),
+            Some(&serde_json::json!(11))
+        );
+
+        let forced = PublishSiteLatestUpdate {
+            force: true,
+            ..guarded
+        };
+        let forced_statement = publish_site_latest_update_statement(&forced);
+        assert!(
+            !forced_statement.sql.contains("refs_generation = ?6"),
+            "force update must bypass the stale-generation guard: {}",
+            forced_statement.sql
+        );
+        assert_eq!(forced_statement.params.as_ref().expect("params").len(), 5);
+    }
+
+    #[test]
+    fn publish_latest_cas_update_reports_conflict_on_zero_changes() {
+        assert_eq!(
+            publish_site_latest_update_result_from_changes(1),
+            PublishSiteLatestUpdateResult::Updated
+        );
+        assert_eq!(
+            publish_site_latest_update_result_from_changes(0),
+            PublishSiteLatestUpdateResult::Conflict
+        );
+    }
+
+    #[test]
+    fn publish_ref_stale_delete_scopes_to_site_and_current_sync_run() {
+        let statement = delete_publish_refs_for_other_sync_runs_statement("site-1", "sync-current");
+        assert_eq!(
+            statement.sql,
+            "DELETE FROM publish_refs WHERE site_id = ?1 AND sync_run_id != ?2"
+        );
+        let params = statement.params.expect("delete statement must bind params");
+        assert_eq!(
+            params,
+            vec![
+                serde_json::json!("site-1"),
+                serde_json::json!("sync-current")
+            ]
         );
     }
 

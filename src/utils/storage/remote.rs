@@ -44,6 +44,10 @@ impl RemoteStorage {
         Self { inner, key_prefix }
     }
 
+    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.inner)
+    }
+
     /// Convert ObjectHash to storage path (aa/bbcc...)
     fn hash_to_path(&self, hash: &ObjectHash) -> ObjectPath {
         let h = hash.to_string();

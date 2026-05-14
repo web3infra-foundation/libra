@@ -31,9 +31,12 @@ The remote repository URL to clone from. Supports SSH (`git@host:user/repo.git`)
 HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem paths.
 `libra+cloud://` publish sources are recognized and strictly validated. The clone
 domain must be configured locally before restore starts; otherwise Libra returns
-`LBR-AUTH-001` and does not create the destination directory. Full Cloudflare
-D1/R2 restore is not implemented yet; valid, configured cloud sources currently
-return the Phase 5 not-implemented error instead of falling through to generic
+`LBR-AUTH-001` and does not create the destination directory. Configured cloud
+sources resolve the D1 site, repository row, published refs, selected/default
+revision, object index, and R2 object availability before creating the target
+directory. Restore then initializes a local Libra repo, downloads indexed Git
+objects from R2, restores refs metadata, writes origin cloud config, and checks
+out the selected/default revision. Cloud sources never fall through to generic
 Git discovery.
 
 ```bash
@@ -61,6 +64,10 @@ cloud.clone_domains.<domain>.account_id
 cloud.clone_domains.<domain>.d1_database_id
 cloud.clone_domains.<domain>.r2_bucket
 ```
+
+Cloud site resolution also requires `LIBRA_D1_API_TOKEN` from the environment or
+Libra vault config so the CLI can query the configured D1 database before
+starting restore.
 
 ### `[LOCAL_PATH]`
 
@@ -230,6 +237,7 @@ Empty remote returns `"branch": null` and a warning:
 
 - `branch` is the actual checked-out branch; `null` when the remote has no refs
 - `shallow` is `true` when `--depth` was used
+- `source_kind` and `cloud_site` are omitted for ordinary Git/local clones; `libra+cloud://` clones add them with clone domain, site id, slug, repo id, selected ref, and restored revision
 - `ref_format` and `converted_from` from init are intentionally excluded
 - `objects_fetched` / `bytes_received` are not exposed until the fetch improvement lands
 

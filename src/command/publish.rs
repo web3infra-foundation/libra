@@ -2,27 +2,17 @@
 //!
 //! Per `docs/improvement/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
-//! materialises the embedded Worker template, `sync --dry-run` plans
-//! local refs without cloud writes, `status` reports local template
+//! materialises the embedded Worker template, `sync` plans and writes
+//! local refs to publish D1/R2 storage, `status` reports local template
 //! drift and can compare local refs with D1 `publish_refs`, `deploy`
 //! validates/builds the Worker before optionally
 //! applying D1 migrations and deploying with Wrangler, and
-//! `unpublish --yes` disables a site through Wrangler D1 execute. The
-//! remaining full sync upload still surfaces a clear unsupported error
-//! until the cloud mutation plumbing ships.
-//!
-//! Unsupported full-sync/cloud-comparison paths return a typed error
-//! pointing the user at:
-//!
-//!   * the relevant `libra cloud sync` baseline that is implemented
-//!     (Phase 1's `run_cloud_sync` helper),
-//!   * the publish.md design doc,
-//!   * the remaining publish.md v1 sync/status work.
+//! `unpublish --yes` disables a site through Wrangler D1 execute.
 //!
 //! Codex pass-7 P1 registered the CLI surface so the `clap` parser
 //! would not reject `libra publish ...`. Later slices filled in local
-//! template management, dry-run planning, Worker deployment, and
-//! unpublish orchestration without changing the full-upload boundary.
+//! template management, dry-run planning, Worker deployment,
+//! unpublish orchestration, and the first D1/R2 publish sync path.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,8 +23,11 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
     str::FromStr,
+    sync::Arc,
 };
 
+use async_trait::async_trait;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use git_internal::{
     hash::ObjectHash,
@@ -44,23 +37,49 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    command::{load_object, status},
+    command::{cloud, load_object, status},
     internal::{
+        ai::{history::HistoryManager, projection::ProjectionRebuilder},
         branch::Branch,
         config::ConfigKv,
+        db,
         head::Head,
         publish::{
+            ai_export::{
+                AiExportPlan, AiExportRequest, HistoryAiExportRequest, ProjectionAiExportRequest,
+                build_ai_export_plan, build_publish_ai_projection_objects,
+                collect_publish_ai_objects_from_history,
+            },
+            contract::{
+                AiBundleAssociatedIds, PUBLISH_SCHEMA_VERSION, RedactionMode, SiteVisibility,
+            },
             preflight::{DenyReason, Preflight, PreflightDecision},
-            snapshot::{RefInput, detect_ambiguous_short_refs, validate_oid, validate_ref_name},
+            snapshot::{
+                FileSnapshot, RefInput, RevisionArtifactPlan, RevisionFileInput, SnapshotConfig,
+                build_revision_artifact_plan, build_snapshot_plan, detect_ambiguous_short_refs,
+                validate_oid, validate_ref_name,
+            },
+            upload::{
+                AiExportArtifactUploadSummary, AiExportD1Rows, RevisionArtifactUploadOptions,
+                RevisionArtifactUploadSummary, RevisionD1Rows, SiteIndexArtifacts,
+                build_ai_export_d1_rows, build_revision_d1_rows, build_site_index_artifacts,
+                upload_ai_export_artifacts_with_options, upload_revision_artifacts_with_options,
+                upload_site_index_artifacts,
+            },
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
         tag::{self, TagObject},
     },
     utils::{
-        d1_client::{D1Client, D1Error, PublishRefRow, PublishRevisionRow},
+        d1_client::{
+            D1Client, D1Error, PublishAiObjectRow, PublishAiVersionRow, PublishFileRow,
+            PublishRefRow, PublishRevisionRow, PublishSiteLatestUpdate,
+            PublishSiteLatestUpdateResult, PublishSiteRow, PublishSyncRunRow,
+        },
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
+        storage::{local::LocalStorage, publish_storage::PublishStorage},
         util,
     },
 };
@@ -76,7 +95,7 @@ pub struct PublishArgs {
 pub enum PublishCommand {
     /// Materialise the local Worker template scaffold.
     Init(InitArgs),
-    /// Plan publish sync; full D1/R2 upload is still unsupported unless --dry-run is used.
+    /// Sync publish snapshots to D1/R2, or plan them with --dry-run.
     Sync(SyncArgs),
     /// Inspect local Worker template status and optionally compare D1 refs.
     Status(StatusArgs),
@@ -179,12 +198,20 @@ pub struct UnpublishArgs {
     pub site_id: Option<String>,
 }
 
-const NOT_YET_IMPLEMENTED: &str = "`libra publish sync` full D1/R2 upload is not ready yet. \
-     `libra publish init`, `libra publish sync --dry-run`, `libra publish status`, \
-     `libra publish deploy`, and `libra publish unpublish --yes` are available; track \
-     docs/improvement/publish.md for the remaining v1 sync/status work.";
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
+const PUBLISH_REDACTION_RULES_VERSION: &str = "2026.05.13-1";
+const PUBLISH_AI_PROJECTION_OBJECT_TYPES: &[&str] = &[
+    "Thread",
+    "Scheduler",
+    "QueryIndex",
+    "LiveContextWindow",
+    "ReadyQueue",
+    "ParallelGroup",
+    "Checkpoint",
+    "RetryRoute",
+    "UiCurrentView",
+];
 
 /// clap value parser for `--max-preview-bytes`.
 ///
@@ -208,21 +235,6 @@ fn parse_max_preview_bytes(raw: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
-fn unsupported_publish_subcommand(subcommand: &'static str) -> CliResult<()> {
-    // Codex pass-8 P2: tag the typed error with `Unsupported` so the
-    // stable-code surface is `LBR-UNSUPPORTED-001`, not the generic
-    // internal-invariant fallback. Downstream tooling that classifies
-    // errors by stable code (CI matrix, telemetry) can match on
-    // "feature not yet implemented" rather than treating this as a
-    // crash bug.
-    Err(CliError::fatal(NOT_YET_IMPLEMENTED)
-        .with_stable_code(StableErrorCode::Unsupported)
-        .with_detail("operation", "publish")
-        .with_detail("component", "publish")
-        .with_detail("subcommand", subcommand)
-        .with_detail("phase", "4"))
-}
-
 pub async fn execute(args: PublishArgs) -> CliResult<()> {
     execute_safe(args, &OutputConfig::default()).await
 }
@@ -239,10 +251,11 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             output::emit(&result, output)
         }
         PublishCommand::Sync(sync_args) => {
-            if !sync_args.dry_run {
-                return unsupported_publish_subcommand("sync");
-            }
-            let result = run_publish_sync_dry_run(&sync_args).await?;
+            let result = if sync_args.dry_run {
+                run_publish_sync_dry_run(&sync_args).await?
+            } else {
+                run_publish_sync_non_dry_run(&sync_args).await?
+            };
             output::emit(&result, output)
         }
         PublishCommand::Status(status_args) => {
@@ -332,7 +345,7 @@ impl CommandOutput for PublishInitOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PublishSyncDryRunOutput {
+struct PublishSyncOutput {
     dry_run: bool,
     site_id: Option<String>,
     selected_ref: Option<String>,
@@ -349,12 +362,16 @@ struct PublishSyncDryRunOutput {
     warnings: Vec<String>,
 }
 
-impl CommandOutput for PublishSyncDryRunOutput {
+impl CommandOutput for PublishSyncOutput {
     fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
         if output.quiet {
             return Ok(());
         }
-        writeln!(writer, "Publish dry-run plan")?;
+        if self.dry_run {
+            writeln!(writer, "Publish dry-run plan")?;
+        } else {
+            writeln!(writer, "Publish sync complete")?;
+        }
         writeln!(writer, "  refs: {}", self.refs_count)?;
         writeln!(writer, "  revisions: {}", self.revision_count)?;
         writeln!(
@@ -869,7 +886,7 @@ struct PublishSyncRevisionOutput {
     ai_bundle_count: usize,
 }
 
-async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRunOutput> {
+async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncOutput> {
     validate_publish_sync_args(args)?;
 
     let all_refs = collect_publish_refs().await?;
@@ -970,7 +987,7 @@ async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRu
         })
         .collect::<Vec<_>>();
 
-    Ok(PublishSyncDryRunOutput {
+    Ok(PublishSyncOutput {
         dry_run: true,
         site_id: None,
         selected_ref,
@@ -986,6 +1003,928 @@ async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRu
         revisions,
         warnings,
     })
+}
+
+async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncOutput> {
+    validate_publish_sync_args(args)?;
+
+    let site_id = resolve_publish_sync_site_id().await?;
+    let d1_client = D1Client::from_env()
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to initialize D1 client", source))?;
+    d1_client
+        .ensure_publish_schema()
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to ensure publish D1 schema", source))?;
+    let site = d1_client
+        .find_publish_site(&site_id)
+        .await
+        .map_err(|source| publish_sync_d1_error("failed to load D1 publish site", source))?
+        .ok_or_else(|| {
+            CliError::failure(format!("publish site '{site_id}' was not found in D1"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint(
+                    "create the publish_sites row for this site or configure publish.site_id to \
+                     an existing site before running 'libra publish sync'.",
+                )
+        })?;
+    let site = publish_sync_site_context_from_row(&site)?;
+    let storage = cloud::create_publish_storage(&site.repo_id, &site.site_id)
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!("failed to initialize publish R2 storage: {source}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint(
+                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_BUCKET, \
+                     LIBRA_STORAGE_ACCESS_KEY, and LIBRA_STORAGE_SECRET_KEY.",
+                )
+        })?;
+
+    let all_refs = collect_publish_refs().await?;
+    if all_refs.is_empty() {
+        return Err(
+            CliError::failure("no local branch or tag refs are available to publish")
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("create a commit on a local branch or tag a commit before publishing."),
+        );
+    }
+    let selected_refs = select_publish_refs(&all_refs, args.r#ref.as_deref())?;
+    let default_ref = resolve_publish_default_ref(&all_refs).await?;
+    let warnings = inspect_publish_dirty(args.fail_on_dirty).await?;
+    let mut sink = CloudPublishSyncSink {
+        d1_client,
+        storage,
+        force_upload: args.force,
+    };
+    run_publish_sync_selected_refs_with_sink(
+        args,
+        &site,
+        selected_refs,
+        default_ref,
+        warnings,
+        &mut sink,
+    )
+    .await
+}
+
+#[derive(Clone, Debug)]
+struct PublishSyncSiteContext {
+    repo_id: String,
+    site_id: String,
+    visibility: SiteVisibility,
+    max_preview_bytes: u64,
+    refs_generation: i64,
+}
+
+struct PublishSiteLatestUpdateRequest<'a> {
+    site_id: &'a str,
+    default_ref: Option<&'a str>,
+    latest_revision_oid: Option<&'a str>,
+    next_refs_generation: i64,
+    expected_refs_generation: i64,
+    updated_at: &'a str,
+    force: bool,
+}
+
+#[async_trait]
+trait PublishSyncSink {
+    async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()>;
+    async fn upload_revision_artifacts(
+        &mut self,
+        plan: &RevisionArtifactPlan,
+    ) -> CliResult<RevisionArtifactUploadSummary>;
+    async fn upload_ai_export_artifacts(
+        &mut self,
+        plan: &AiExportPlan,
+    ) -> CliResult<AiExportArtifactUploadSummary>;
+    async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()>;
+    async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()>;
+    async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()>;
+    async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()>;
+    async fn upload_site_index_artifacts(
+        &mut self,
+        artifacts: &SiteIndexArtifacts,
+    ) -> CliResult<()>;
+    async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()>;
+    async fn update_site_latest(
+        &mut self,
+        update: PublishSiteLatestUpdateRequest<'_>,
+    ) -> CliResult<PublishSiteLatestUpdateResult>;
+    async fn delete_stale_refs(
+        &mut self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> CliResult<i64>;
+}
+
+struct CloudPublishSyncSink {
+    d1_client: D1Client,
+    storage: PublishStorage,
+    force_upload: bool,
+}
+
+#[async_trait]
+impl PublishSyncSink for CloudPublishSyncSink {
+    async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_sync_run(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish sync run", source))
+    }
+
+    async fn upload_revision_artifacts(
+        &mut self,
+        plan: &RevisionArtifactPlan,
+    ) -> CliResult<RevisionArtifactUploadSummary> {
+        upload_revision_artifacts_with_options(
+            &self.storage,
+            plan,
+            RevisionArtifactUploadOptions {
+                force: self.force_upload,
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to upload publish revision artifacts: {source}"
+            ))
+            .with_stable_code(StableErrorCode::NetworkProtocol)
+        })
+    }
+
+    async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_revision(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish revision", source))
+    }
+
+    async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_file(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish file", source))
+    }
+
+    async fn upload_ai_export_artifacts(
+        &mut self,
+        plan: &AiExportPlan,
+    ) -> CliResult<AiExportArtifactUploadSummary> {
+        upload_ai_export_artifacts_with_options(
+            &self.storage,
+            plan,
+            RevisionArtifactUploadOptions {
+                force: self.force_upload,
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!("failed to upload publish AI artifacts: {source}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+        })
+    }
+
+    async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ai_object(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish AI object", source))
+    }
+
+    async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ai_version(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish AI version", source))
+    }
+
+    async fn upload_site_index_artifacts(
+        &mut self,
+        artifacts: &SiteIndexArtifacts,
+    ) -> CliResult<()> {
+        upload_site_index_artifacts(&self.storage, artifacts)
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to upload publish site index artifacts: {source}"
+                ))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+            })
+    }
+
+    async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()> {
+        self.d1_client
+            .upsert_publish_ref(&row)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to upsert publish ref", source))
+    }
+
+    async fn update_site_latest(
+        &mut self,
+        update: PublishSiteLatestUpdateRequest<'_>,
+    ) -> CliResult<PublishSiteLatestUpdateResult> {
+        self.d1_client
+            .update_publish_site_latest(PublishSiteLatestUpdate {
+                site_id: update.site_id,
+                default_ref: update.default_ref,
+                latest_revision_oid: update.latest_revision_oid,
+                next_refs_generation: update.next_refs_generation,
+                expected_refs_generation: update.expected_refs_generation,
+                updated_at: update.updated_at,
+                force: update.force,
+            })
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to update publish site latest", source))
+    }
+
+    async fn delete_stale_refs(
+        &mut self,
+        site_id: &str,
+        current_sync_run_id: &str,
+    ) -> CliResult<i64> {
+        self.d1_client
+            .delete_publish_refs_for_other_sync_runs(site_id, current_sync_run_id)
+            .await
+            .map_err(|source| publish_sync_d1_error("failed to delete stale publish refs", source))
+    }
+}
+
+struct PublishRevisionExecutionPlan {
+    artifact: RevisionArtifactPlan,
+    rows: RevisionD1Rows,
+    ai_plan: AiExportPlan,
+    ai_rows: AiExportD1Rows,
+    ref_count: usize,
+    preflight_denied_count: usize,
+}
+
+struct PublishAiExportPlanInput {
+    repo_id: String,
+    site_id: String,
+    revision_oid: String,
+    tree_oid: String,
+    generated_at: chrono::DateTime<Utc>,
+    redaction_mode: RedactionMode,
+    redaction_rules_version: String,
+}
+
+#[async_trait]
+trait PublishAiExportPlanner {
+    async fn plan_revision_ai_export(
+        &self,
+        input: PublishAiExportPlanInput,
+    ) -> CliResult<AiExportPlan>;
+}
+
+struct HistoryBackedPublishAiExportPlanner {
+    history: HistoryManager,
+    storage: Arc<LocalStorage>,
+}
+
+impl HistoryBackedPublishAiExportPlanner {
+    async fn new() -> CliResult<Self> {
+        let repo_path = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
+        let storage = Arc::new(LocalStorage::new(repo_path.join("objects")));
+        let db_path = repo_path.join(util::DATABASE);
+        let db_conn = db::get_db_conn_instance_for_path(&db_path)
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to open repository database '{}': {source}",
+                    db_path.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+            })?;
+        let history = HistoryManager::new(storage.clone(), repo_path, Arc::new(db_conn));
+        Ok(Self { history, storage })
+    }
+}
+
+#[async_trait]
+impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
+    async fn plan_revision_ai_export(
+        &self,
+        input: PublishAiExportPlanInput,
+    ) -> CliResult<AiExportPlan> {
+        let mut objects = collect_publish_ai_objects_from_history(
+            &self.history,
+            self.storage.as_ref(),
+            HistoryAiExportRequest {
+                site_id: input.site_id.clone(),
+                revision_oid: input.revision_oid.clone(),
+                source_ref: format!("revision/{}", input.revision_oid),
+                redaction_mode: input.redaction_mode,
+                redaction_rules_version: input.redaction_rules_version.clone(),
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to collect publish AI history objects: {source}"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        let projection_rebuilder = ProjectionRebuilder::new(self.storage.as_ref(), &self.history);
+        let projection_rebuilds =
+            projection_rebuilder
+                .rebuild_all_threads()
+                .await
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to rebuild publish AI projection objects: {source:#}"
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?;
+        if !objects.is_empty() && projection_rebuilds.is_empty() {
+            return Err(CliError::fatal(format!(
+                "failed to rebuild publish AI projection objects: missing projection object types \
+                 {}; no rebuildable Intent, Task, or Run history was found",
+                PUBLISH_AI_PROJECTION_OBJECT_TYPES.join(", ")
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant));
+        }
+        for rebuild in projection_rebuilds {
+            objects.extend(
+                build_publish_ai_projection_objects(
+                    &rebuild,
+                    ProjectionAiExportRequest {
+                        site_id: input.site_id.clone(),
+                        revision_oid: input.revision_oid.clone(),
+                        source_ref: format!("revision/{}", input.revision_oid),
+                        redaction_mode: input.redaction_mode,
+                        redaction_rules_version: input.redaction_rules_version.clone(),
+                    },
+                )
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to build publish AI projection objects: {source}"
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?,
+            );
+        }
+
+        build_ai_export_plan(AiExportRequest {
+            repo_id: input.repo_id,
+            site_id: input.site_id,
+            revision_oid: input.revision_oid.clone(),
+            ai_version_id: format!("ai-{}", input.revision_oid),
+            generated_at: input.generated_at,
+            ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+            redaction_mode: input.redaction_mode,
+            redaction_rules_version: input.redaction_rules_version,
+            associated_ids: AiBundleAssociatedIds {
+                tree_oid: Some(input.tree_oid),
+                ..AiBundleAssociatedIds::default()
+            },
+            objects,
+        })
+        .map_err(|source| {
+            CliError::fatal(format!("failed to build publish AI export plan: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })
+    }
+}
+
+async fn run_publish_sync_selected_refs_with_sink(
+    args: &SyncArgs,
+    site: &PublishSyncSiteContext,
+    selected_refs: Vec<RefInput>,
+    default_ref: Option<String>,
+    warnings: Vec<String>,
+    sink: &mut dyn PublishSyncSink,
+) -> CliResult<PublishSyncOutput> {
+    let ai_planner = HistoryBackedPublishAiExportPlanner::new().await?;
+    run_publish_sync_selected_refs_with_sink_and_ai_planner(
+        args,
+        site,
+        selected_refs,
+        default_ref,
+        warnings,
+        sink,
+        &ai_planner,
+    )
+    .await
+}
+
+async fn run_publish_sync_selected_refs_with_sink_and_ai_planner(
+    args: &SyncArgs,
+    site: &PublishSyncSiteContext,
+    selected_refs: Vec<RefInput>,
+    default_ref: Option<String>,
+    mut warnings: Vec<String>,
+    sink: &mut dyn PublishSyncSink,
+    ai_planner: &dyn PublishAiExportPlanner,
+) -> CliResult<PublishSyncOutput> {
+    if selected_refs.is_empty() {
+        return Err(
+            CliError::failure("no local branch or tag refs are available to publish")
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
+    }
+
+    let updates_full_refs_generation = args.r#ref.is_none();
+    let selected_ref = if updates_full_refs_generation {
+        None
+    } else {
+        selected_refs
+            .first()
+            .map(|publish_ref| publish_ref.ref_name.clone())
+    };
+    if selected_ref.is_some() {
+        warnings.push(
+            "targeted --ref sync will not update the complete published refs generation"
+                .to_string(),
+        );
+    }
+    let generated_at = Utc::now();
+    let sync_run_id = uuid::Uuid::new_v4().to_string();
+    let redaction_mode = publish_redaction_mode(args)?;
+
+    let revision_ref_counts = revision_ref_counts(&selected_refs);
+    let mut revision_plans = Vec::with_capacity(revision_ref_counts.len());
+    for (revision_oid, ref_count) in revision_ref_counts {
+        let materialized = materialize_revision_files(&revision_oid)?;
+        let preflight = preflight_for_revision_items_with_visibility(
+            &materialized.tree_items,
+            &revision_oid,
+            site.visibility,
+            args.allow_sensitive_path.clone(),
+        )?;
+        let config = SnapshotConfig {
+            max_preview_bytes: site.max_preview_bytes,
+            preflight,
+        };
+        let artifact = build_revision_artifact_plan(
+            &site.repo_id,
+            &site.site_id,
+            &materialized.revision_oid,
+            &materialized.commit_oid,
+            &materialized.tree_oid,
+            generated_at,
+            materialized.files,
+            &config,
+        )
+        .map_err(snapshot_ref_error)?;
+        for file in &artifact.revision.files {
+            if let FileSnapshot::Ignored { path, reason, .. } = file {
+                warnings.push(format!(
+                    "publish preflight kept '{}' as metadata-only in revision {} ({})",
+                    path,
+                    artifact.revision.revision_oid,
+                    ignored_reason_label(*reason)
+                ));
+            }
+        }
+        let preflight_denied_count = artifact
+            .revision
+            .files
+            .iter()
+            .filter(|file| matches!(file, FileSnapshot::Ignored { .. }))
+            .count();
+        let mut rows = build_revision_d1_rows(
+            &artifact,
+            &sync_run_id,
+            redaction_mode,
+            PUBLISH_REDACTION_RULES_VERSION,
+        )
+        .map_err(|source| {
+            CliError::fatal(format!("failed to build publish D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        let ai_plan = ai_planner
+            .plan_revision_ai_export(PublishAiExportPlanInput {
+                repo_id: site.repo_id.clone(),
+                site_id: site.site_id.clone(),
+                revision_oid: materialized.revision_oid.clone(),
+                tree_oid: materialized.tree_oid.clone(),
+                generated_at,
+                redaction_mode,
+                redaction_rules_version: PUBLISH_REDACTION_RULES_VERSION.to_string(),
+            })
+            .await?;
+        let ai_rows = build_ai_export_d1_rows(&ai_plan).map_err(|source| {
+            CliError::fatal(format!("failed to build publish AI D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        rows.revision.ai_index_key = Some(ai_plan.index_key.clone());
+        rows.revision.ai_object_count =
+            usize_to_i64(ai_rows.objects.len(), "publish sync AI object count")?;
+        rows.revision.ai_bundle_count = 1;
+        revision_plans.push(PublishRevisionExecutionPlan {
+            artifact,
+            rows,
+            ai_plan,
+            ai_rows,
+            ref_count,
+            preflight_denied_count,
+        });
+    }
+
+    let file_count: usize = revision_plans
+        .iter()
+        .map(|plan| plan.rows.files.len())
+        .sum();
+    let ai_object_count: usize = revision_plans
+        .iter()
+        .map(|plan| plan.ai_rows.objects.len())
+        .sum();
+    let ai_bundle_count = revision_plans.len();
+    let refs_count = selected_refs.len();
+    let revision_count = revision_plans.len();
+    let started_at = generated_at.to_rfc3339();
+    let counts = PublishSyncRunCounts {
+        refs: refs_count,
+        revisions: revision_count,
+        files: file_count,
+        ai_objects: ai_object_count,
+        ai_bundles: ai_bundle_count,
+    };
+    let running = publish_sync_run_row(PublishSyncRunRowInput {
+        site_id: &site.site_id,
+        sync_run_id: &sync_run_id,
+        status: "running",
+        started_at: &started_at,
+        finished_at: None,
+        counts,
+        warnings: &warnings,
+        error_message: None,
+    })?;
+    sink.upsert_sync_run(running).await?;
+
+    let persist_result = persist_publish_sync_plan(
+        PublishSyncPersistContext {
+            args,
+            site,
+            selected_refs: &selected_refs,
+            default_ref: default_ref.as_deref(),
+            generated_at,
+            sync_run_id: &sync_run_id,
+            revision_plans: &revision_plans,
+        },
+        sink,
+    )
+    .await;
+    if let Err(error) = persist_result {
+        let finished_at = Utc::now().to_rfc3339();
+        let failed = publish_sync_run_row(PublishSyncRunRowInput {
+            site_id: &site.site_id,
+            sync_run_id: &sync_run_id,
+            status: "failed",
+            started_at: &started_at,
+            finished_at: Some(&finished_at),
+            counts,
+            warnings: &warnings,
+            error_message: Some(error.message()),
+        })?;
+        let _ = sink.upsert_sync_run(failed).await;
+        return Err(error);
+    }
+
+    let finished_at = Utc::now().to_rfc3339();
+    let succeeded = publish_sync_run_row(PublishSyncRunRowInput {
+        site_id: &site.site_id,
+        sync_run_id: &sync_run_id,
+        status: "succeeded",
+        started_at: &started_at,
+        finished_at: Some(&finished_at),
+        counts,
+        warnings: &warnings,
+        error_message: None,
+    })?;
+    sink.upsert_sync_run(succeeded).await?;
+
+    let latest_revision_oid =
+        latest_revision_oid_for_selected_refs(default_ref.as_deref(), &selected_refs);
+    let refs = selected_refs
+        .into_iter()
+        .map(|publish_ref| {
+            let is_default = default_ref
+                .as_ref()
+                .is_some_and(|name| name == &publish_ref.ref_name);
+            PublishSyncRefOutput {
+                ref_name: publish_ref.ref_name,
+                target_oid: publish_ref.target_oid,
+                revision_oid: publish_ref.revision_oid,
+                is_default,
+            }
+        })
+        .collect::<Vec<_>>();
+    let revisions = revision_plans
+        .iter()
+        .map(|plan| PublishSyncRevisionOutput {
+            revision_oid: plan.artifact.revision.revision_oid.clone(),
+            ref_count: plan.ref_count,
+            file_count: plan.rows.files.len(),
+            preflight_denied_count: plan.preflight_denied_count,
+            ai_object_count: plan.ai_rows.objects.len(),
+            ai_bundle_count: 1,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PublishSyncOutput {
+        dry_run: false,
+        site_id: Some(site.site_id.clone()),
+        selected_ref,
+        refs_count: refs.len(),
+        revision_count: revisions.len(),
+        default_ref,
+        latest_revision_oid,
+        file_count,
+        ai_object_count,
+        ai_bundle_count,
+        updates_full_refs_generation,
+        refs,
+        revisions,
+        warnings,
+    })
+}
+
+struct PublishSyncPersistContext<'a> {
+    args: &'a SyncArgs,
+    site: &'a PublishSyncSiteContext,
+    selected_refs: &'a [RefInput],
+    default_ref: Option<&'a str>,
+    generated_at: chrono::DateTime<Utc>,
+    sync_run_id: &'a str,
+    revision_plans: &'a [PublishRevisionExecutionPlan],
+}
+
+async fn persist_publish_sync_plan(
+    context: PublishSyncPersistContext<'_>,
+    sink: &mut dyn PublishSyncSink,
+) -> CliResult<()> {
+    for plan in context.revision_plans {
+        sink.upload_revision_artifacts(&plan.artifact).await?;
+        sink.upload_ai_export_artifacts(&plan.ai_plan).await?;
+        sink.upsert_revision(plan.rows.revision.clone()).await?;
+        for file in &plan.rows.files {
+            sink.upsert_file(file.clone()).await?;
+        }
+        for object in &plan.ai_rows.objects {
+            sink.upsert_ai_object(object.clone()).await?;
+        }
+        sink.upsert_ai_version(plan.ai_rows.version.clone()).await?;
+    }
+
+    if context.args.r#ref.is_none() {
+        let revision_snapshots = context
+            .revision_plans
+            .iter()
+            .map(|plan| plan.artifact.revision.clone())
+            .collect::<Vec<_>>();
+        let snapshot_plan = build_snapshot_plan(
+            context.selected_refs,
+            revision_snapshots,
+            context.default_ref,
+        )
+        .map_err(snapshot_ref_error)?;
+        let next_refs_generation =
+            context.site.refs_generation.checked_add(1).ok_or_else(|| {
+                CliError::fatal("publish refs_generation overflowed while planning sync")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+            })?;
+        let artifacts = build_site_index_artifacts(
+            &snapshot_plan,
+            &context.site.site_id,
+            context.sync_run_id,
+            u64::try_from(next_refs_generation).map_err(|_| {
+                CliError::fatal("publish refs_generation cannot be negative")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+            })?,
+            context.generated_at,
+        )
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to build publish refs/latest artifacts: {source}"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        sink.upload_site_index_artifacts(&artifacts).await?;
+        for row in artifacts.ref_rows {
+            sink.upsert_ref(row).await?;
+        }
+        let updated_at = context.generated_at.to_rfc3339();
+        let update = PublishSiteLatestUpdateRequest {
+            site_id: &context.site.site_id,
+            default_ref: Some(&artifacts.latest.default_ref),
+            latest_revision_oid: Some(&artifacts.latest.latest_revision_oid),
+            next_refs_generation,
+            expected_refs_generation: context.site.refs_generation,
+            updated_at: &updated_at,
+            force: context.args.force,
+        };
+        match sink.update_site_latest(update).await? {
+            PublishSiteLatestUpdateResult::Updated => {}
+            PublishSiteLatestUpdateResult::Conflict => {
+                return Err(CliError::conflict(
+                    "publish site refs_generation changed while syncing",
+                )
+                .with_hint(
+                    "rerun 'libra publish sync' to rebuild from the latest site row, or pass \
+                     '--force' if you intentionally want to overwrite the pointer.",
+                ));
+            }
+        }
+        sink.delete_stale_refs(&context.site.site_id, context.sync_run_id)
+            .await?;
+    } else {
+        let updated_at = context.generated_at.to_rfc3339();
+        for publish_ref in context.selected_refs {
+            sink.upsert_ref(build_publish_ref_row(
+                &context.site.site_id,
+                context.sync_run_id,
+                &updated_at,
+                context.default_ref,
+                publish_ref,
+            ))
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn revision_ref_counts(selected_refs: &[RefInput]) -> BTreeMap<String, usize> {
+    let mut revision_ref_counts = BTreeMap::new();
+    for publish_ref in selected_refs {
+        *revision_ref_counts
+            .entry(publish_ref.revision_oid.clone())
+            .or_default() += 1;
+    }
+    revision_ref_counts
+}
+
+fn latest_revision_oid_for_selected_refs(
+    default_ref: Option<&str>,
+    selected_refs: &[RefInput],
+) -> Option<String> {
+    default_ref
+        .and_then(|name| {
+            selected_refs
+                .iter()
+                .find(|publish_ref| publish_ref.ref_name == name)
+        })
+        .or_else(|| selected_refs.first())
+        .map(|publish_ref| publish_ref.revision_oid.clone())
+}
+
+fn build_publish_ref_row(
+    site_id: &str,
+    sync_run_id: &str,
+    updated_at: &str,
+    default_ref: Option<&str>,
+    publish_ref: &RefInput,
+) -> PublishRefRow {
+    PublishRefRow {
+        site_id: site_id.to_string(),
+        ref_name: publish_ref.ref_name.clone(),
+        ref_type: if publish_ref.ref_name.starts_with("refs/tags/") {
+            "tag".to_string()
+        } else {
+            "branch".to_string()
+        },
+        short_name: publish_short_ref_name(&publish_ref.ref_name)
+            .unwrap_or(&publish_ref.ref_name)
+            .to_string(),
+        target_oid: publish_ref.target_oid.clone(),
+        revision_oid: publish_ref.revision_oid.clone(),
+        is_default: if default_ref.is_some_and(|name| name == publish_ref.ref_name) {
+            1
+        } else {
+            0
+        },
+        sync_run_id: sync_run_id.to_string(),
+        schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+        updated_at: updated_at.to_string(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PublishSyncRunCounts {
+    refs: usize,
+    revisions: usize,
+    files: usize,
+    ai_objects: usize,
+    ai_bundles: usize,
+}
+
+struct PublishSyncRunRowInput<'a> {
+    site_id: &'a str,
+    sync_run_id: &'a str,
+    status: &'a str,
+    started_at: &'a str,
+    finished_at: Option<&'a str>,
+    counts: PublishSyncRunCounts,
+    warnings: &'a [String],
+    error_message: Option<&'a str>,
+}
+
+fn publish_sync_run_row(input: PublishSyncRunRowInput<'_>) -> CliResult<PublishSyncRunRow> {
+    let warnings_json = serde_json::to_string(input.warnings).map_err(|source| {
+        CliError::internal(format!("failed to encode publish sync warnings: {source}"))
+    })?;
+    Ok(PublishSyncRunRow {
+        sync_run_id: input.sync_run_id.to_string(),
+        site_id: input.site_id.to_string(),
+        status: input.status.to_string(),
+        started_at: input.started_at.to_string(),
+        finished_at: input.finished_at.map(ToString::to_string),
+        refs_count: usize_to_i64(input.counts.refs, "publish sync refs count")?,
+        revision_count: usize_to_i64(input.counts.revisions, "publish sync revision count")?,
+        file_count: usize_to_i64(input.counts.files, "publish sync file count")?,
+        ai_object_count: usize_to_i64(input.counts.ai_objects, "publish sync AI object count")?,
+        ai_bundle_count: usize_to_i64(input.counts.ai_bundles, "publish sync AI bundle count")?,
+        warnings_json,
+        error_message: input.error_message.map(ToString::to_string),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        schema_version: i64::from(PUBLISH_SCHEMA_VERSION),
+    })
+}
+
+fn usize_to_i64(value: usize, label: &str) -> CliResult<i64> {
+    i64::try_from(value).map_err(|_| {
+        CliError::fatal(format!("{label} exceeds D1 integer range"))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+    })
+}
+
+async fn resolve_publish_sync_site_id() -> CliResult<String> {
+    let entry = ConfigKv::get("publish.site_id").await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read publish.site_id from repository config: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let Some(entry) = entry else {
+        return Err(
+            CliError::failure("publish sync requires publish.site_id config")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("configure publish.site_id before running 'libra publish sync'."),
+        );
+    };
+    validate_publish_site_id(&entry.value)
+}
+
+fn publish_sync_site_context_from_row(row: &PublishSiteRow) -> CliResult<PublishSyncSiteContext> {
+    let visibility = match row.visibility.as_str() {
+        "public" => SiteVisibility::Public,
+        "private" => SiteVisibility::Private,
+        value => {
+            return Err(CliError::failure(format!(
+                "publish site '{}' has invalid visibility '{value}'",
+                row.site_id
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("set publish_sites.visibility to 'public' or 'private'."));
+        }
+    };
+    let max_preview_bytes = u64::try_from(row.max_preview_bytes).map_err(|_| {
+        CliError::failure(format!(
+            "publish site '{}' has negative max_preview_bytes {}",
+            row.site_id, row.max_preview_bytes
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    if max_preview_bytes == 0 {
+        return Err(CliError::failure(format!(
+            "publish site '{}' has max_preview_bytes 0",
+            row.site_id
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("set publish_sites.max_preview_bytes to a positive byte count."));
+    }
+    Ok(PublishSyncSiteContext {
+        repo_id: row.repo_id.clone(),
+        site_id: row.site_id.clone(),
+        visibility,
+        max_preview_bytes,
+        refs_generation: row.refs_generation,
+    })
+}
+
+fn publish_redaction_mode(args: &SyncArgs) -> CliResult<RedactionMode> {
+    match args.ai_redaction.as_str() {
+        "default" => Ok(RedactionMode::Default),
+        "strict" => Ok(RedactionMode::Strict),
+        value => Err(CliError::command_usage(format!(
+            "invalid --ai-redaction value '{value}'; expected 'default' or 'strict'"
+        ))),
+    }
+}
+
+fn publish_sync_d1_error(operation: &str, source: D1Error) -> CliError {
+    let stable_code = match source.code {
+        1001..=1003 => StableErrorCode::AuthMissingCredentials,
+        2001..=2003 | 2005..=2006 => StableErrorCode::NetworkUnavailable,
+        _ => StableErrorCode::NetworkProtocol,
+    };
+    CliError::fatal(format!("{operation}: {}", source.message))
+        .with_stable_code(stable_code)
+        .with_hint(
+            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, LIBRA_D1_DATABASE_ID, and \
+             publish.site_id before running 'libra publish sync'.",
+        )
 }
 
 fn validate_publish_sync_args(args: &SyncArgs) -> CliResult<()> {
@@ -1187,7 +2126,7 @@ async fn inspect_publish_dirty(fail_on_dirty: bool) -> CliResult<Vec<String>> {
 
     let message = format!(
         "dirty working tree has {staged_count} staged path(s) and {unstaged_count} unstaged or \
-         untracked path(s); dry-run plans committed refs only"
+         untracked path(s); publish sync plans committed refs only"
     );
     if fail_on_dirty {
         Err(CliError::fatal(message)
@@ -1206,6 +2145,18 @@ struct RevisionDryRunScan {
     denied_paths: Vec<PreflightDeniedPath>,
 }
 
+// Staged for the full non-dry-run sync orchestrator; unit-tested now
+// so the next slice can wire it into D1/R2 without reworking tree IO.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct MaterializedRevisionFiles {
+    revision_oid: String,
+    commit_oid: String,
+    tree_oid: String,
+    tree_items: Vec<(PathBuf, ObjectHash)>,
+    files: Vec<RevisionFileInput>,
+}
+
 #[derive(Debug)]
 struct PreflightDeniedPath {
     path: String,
@@ -1213,6 +2164,62 @@ struct PreflightDeniedPath {
 }
 
 fn scan_revision_files(revision_oid: &str) -> CliResult<RevisionDryRunScan> {
+    let revision = load_revision_tree_items(revision_oid)?;
+    let preflight = preflight_for_revision_items(&revision.tree_items, revision_oid)?;
+    let mut denied_paths = Vec::new();
+    for (path, _) in &revision.tree_items {
+        if let PreflightDecision::Deny(reason) = preflight.evaluate(path, false) {
+            denied_paths.push(PreflightDeniedPath {
+                path: path.display().to_string(),
+                reason,
+            });
+        }
+    }
+
+    Ok(RevisionDryRunScan {
+        file_count: revision.tree_items.len(),
+        denied_paths,
+    })
+}
+
+#[allow(dead_code)]
+fn materialize_revision_files(revision_oid: &str) -> CliResult<MaterializedRevisionFiles> {
+    let revision = load_revision_tree_items(revision_oid)?;
+    let mut files = Vec::with_capacity(revision.tree_items.len());
+    for (path, blob_oid) in &revision.tree_items {
+        let blob: Blob = load_object(blob_oid).map_err(|source| {
+            CliError::fatal(format!(
+                "failed to load publish blob '{}' at path '{}' for revision '{}': {source}",
+                blob_oid,
+                path.display(),
+                revision_oid
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+        })?;
+        let path = path.to_str().ok_or_else(|| {
+            CliError::failure(format!(
+                "publish revision '{revision_oid}' contains a non-UTF-8 path: {}",
+                path.display()
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("rename the path to valid UTF-8 before publishing.")
+        })?;
+        files.push(RevisionFileInput {
+            path: path.to_string(),
+            bytes: blob.data,
+        });
+    }
+
+    Ok(MaterializedRevisionFiles {
+        revision_oid: revision.revision_oid,
+        commit_oid: revision.commit_oid,
+        tree_oid: revision.tree_oid,
+        tree_items: revision.tree_items,
+        files,
+    })
+}
+
+fn load_revision_tree_items(revision_oid: &str) -> CliResult<MaterializedRevisionFiles> {
     let commit_oid = ObjectHash::from_str(revision_oid).map_err(|source| {
         CliError::fatal(format!(
             "publish revision oid '{revision_oid}' is invalid: {source}"
@@ -1233,20 +2240,13 @@ fn scan_revision_files(revision_oid: &str) -> CliResult<RevisionDryRunScan> {
         .with_stable_code(StableErrorCode::RepoStateInvalid)
     })?;
     let items = tree.get_plain_items();
-    let preflight = preflight_for_revision_items(&items, revision_oid)?;
-    let mut denied_paths = Vec::new();
-    for (path, _) in &items {
-        if let PreflightDecision::Deny(reason) = preflight.evaluate(path, false) {
-            denied_paths.push(PreflightDeniedPath {
-                path: path.display().to_string(),
-                reason,
-            });
-        }
-    }
 
-    Ok(RevisionDryRunScan {
-        file_count: items.len(),
-        denied_paths,
+    Ok(MaterializedRevisionFiles {
+        revision_oid: revision_oid.to_string(),
+        commit_oid: commit_oid.to_string(),
+        tree_oid: commit.tree_id.to_string(),
+        tree_items: items,
+        files: Vec::new(),
     })
 }
 
@@ -1255,9 +2255,32 @@ fn preflight_for_revision_items(
     revision_oid: &str,
 ) -> CliResult<Preflight> {
     let mut preflight = Preflight::new();
+    extend_preflight_with_revision_ignore(&mut preflight, items, revision_oid)?;
+    Ok(preflight)
+}
+
+fn preflight_for_revision_items_with_visibility(
+    items: &[(PathBuf, ObjectHash)],
+    revision_oid: &str,
+    visibility: SiteVisibility,
+    allow_sensitive_paths: Vec<String>,
+) -> CliResult<Preflight> {
+    let mut preflight =
+        Preflight::for_visibility(visibility, allow_sensitive_paths).map_err(|source| {
+            CliError::command_usage(format!("invalid publish preflight policy: {source}"))
+        })?;
+    extend_preflight_with_revision_ignore(&mut preflight, items, revision_oid)?;
+    Ok(preflight)
+}
+
+fn extend_preflight_with_revision_ignore(
+    preflight: &mut Preflight,
+    items: &[(PathBuf, ObjectHash)],
+    revision_oid: &str,
+) -> CliResult<()> {
     let ignore_path = Path::new(".librapublishignore");
     let Some((_, ignore_oid)) = items.iter().find(|(path, _)| path == ignore_path) else {
-        return Ok(preflight);
+        return Ok(());
     };
 
     let blob: Blob = load_object(ignore_oid).map_err(|source| {
@@ -1275,13 +2298,22 @@ fn preflight_for_revision_items(
         .with_hint("commit .librapublishignore as UTF-8 text before publishing.")
     })?;
     preflight.extend_with_ignore_text(text);
-    Ok(preflight)
+    Ok(())
 }
 
 fn preflight_reason_label(reason: DenyReason) -> &'static str {
     match reason {
         DenyReason::BuiltinCredential => "builtin_credential",
         DenyReason::UserIgnore => "user_ignore",
+    }
+}
+
+fn ignored_reason_label(reason: crate::internal::publish::snapshot::IgnoredReason) -> &'static str {
+    match reason {
+        crate::internal::publish::snapshot::IgnoredReason::BuiltinCredential => {
+            "builtin_credential"
+        }
+        crate::internal::publish::snapshot::IgnoredReason::UserIgnore => "user_ignore",
     }
 }
 
@@ -2053,9 +3085,19 @@ fn render_policy_name(policy: RenderPolicy) -> &'static str {
 mod tests {
     use std::{collections::VecDeque, fs};
 
+    use git_internal::internal::object::{
+        intent::Intent,
+        tree::{TreeItem, TreeItemMode},
+        types::ActorRef,
+    };
     use serde_json::Value;
 
     use super::*;
+    use crate::{
+        command::save_object,
+        internal::publish::contract::{AiObjectLayer, AiObjectRedaction, PublishAiObject},
+        utils::{storage_ext::StorageExt, test},
+    };
 
     fn default_init_args() -> InitArgs {
         InitArgs {
@@ -2067,6 +3109,42 @@ mod tests {
             worker_name: None,
             max_preview_bytes: None,
         }
+    }
+
+    fn sync_args(targeted: bool) -> SyncArgs {
+        SyncArgs {
+            r#ref: targeted.then(|| "main".to_string()),
+            dry_run: false,
+            fail_on_dirty: false,
+            ai_redaction: "default".to_string(),
+            allow_sensitive_path: Vec::new(),
+            force: false,
+        }
+    }
+
+    fn publish_sync_site_context() -> PublishSyncSiteContext {
+        PublishSyncSiteContext {
+            repo_id: "repo-1".to_string(),
+            site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            visibility: SiteVisibility::Public,
+            max_preview_bytes: 1024 * 1024,
+            refs_generation: 7,
+        }
+    }
+
+    fn commit_with_single_file(path: &str, body: &str, message: &str) -> Commit {
+        let blob = Blob::from_content(body);
+        save_object(&blob, &blob.id).expect("blob should save");
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            blob.id,
+            path.to_string(),
+        )])
+        .expect("tree should build");
+        save_object(&tree, &tree.id).expect("tree should save");
+        let commit = Commit::from_tree_id(tree.id, Vec::new(), message);
+        save_object(&commit, &commit.id).expect("commit should save");
+        commit
     }
 
     #[derive(Default)]
@@ -2104,6 +3182,169 @@ mod tests {
         }
     }
 
+    struct SingleObjectAiExportPlanner;
+
+    #[async_trait::async_trait]
+    impl PublishAiExportPlanner for SingleObjectAiExportPlanner {
+        async fn plan_revision_ai_export(
+            &self,
+            input: PublishAiExportPlanInput,
+        ) -> CliResult<AiExportPlan> {
+            build_ai_export_plan(AiExportRequest {
+                repo_id: input.repo_id,
+                site_id: input.site_id.clone(),
+                revision_oid: input.revision_oid.clone(),
+                ai_version_id: format!("ai-{}", input.revision_oid),
+                generated_at: input.generated_at,
+                ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+                redaction_mode: input.redaction_mode,
+                redaction_rules_version: input.redaction_rules_version.clone(),
+                associated_ids: AiBundleAssociatedIds {
+                    tree_oid: Some(input.tree_oid),
+                    ..AiBundleAssociatedIds::default()
+                },
+                objects: vec![publish_ai_object(
+                    &input.site_id,
+                    &input.revision_oid,
+                    input.redaction_mode,
+                    &input.redaction_rules_version,
+                )],
+            })
+            .map_err(|source| CliError::internal(format!("test AI export failed: {source}")))
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePublishSyncSink {
+        sync_runs: Vec<PublishSyncRunRow>,
+        revision_uploads: Vec<String>,
+        ai_uploads: Vec<String>,
+        revisions: Vec<PublishRevisionRow>,
+        files: Vec<PublishFileRow>,
+        ai_objects: Vec<PublishAiObjectRow>,
+        ai_versions: Vec<PublishAiVersionRow>,
+        site_index_uploads: usize,
+        refs: Vec<PublishRefRow>,
+        latest_updates: Vec<FakeLatestUpdate>,
+        stale_ref_deletes: Vec<(String, String)>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeLatestUpdate {
+        site_id: String,
+        default_ref: Option<String>,
+        latest_revision_oid: Option<String>,
+        next_refs_generation: i64,
+        expected_refs_generation: i64,
+        force: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl PublishSyncSink for FakePublishSyncSink {
+        async fn upsert_sync_run(&mut self, row: PublishSyncRunRow) -> CliResult<()> {
+            self.sync_runs.push(row);
+            Ok(())
+        }
+
+        async fn upload_revision_artifacts(
+            &mut self,
+            plan: &RevisionArtifactPlan,
+        ) -> CliResult<RevisionArtifactUploadSummary> {
+            self.revision_uploads
+                .push(plan.revision.revision_oid.clone());
+            Ok(RevisionArtifactUploadSummary {
+                code_manifest_key: plan.code_manifest_key.clone(),
+                code_manifest_uploaded: true,
+                text_blob_count: plan.text_blobs.len(),
+                text_blob_uploaded_count: plan.text_blobs.len(),
+                text_blob_skipped_count: 0,
+                text_blob_keys: plan
+                    .text_blobs
+                    .iter()
+                    .map(|blob| blob.object_key.clone())
+                    .collect(),
+            })
+        }
+
+        async fn upload_ai_export_artifacts(
+            &mut self,
+            plan: &AiExportPlan,
+        ) -> CliResult<AiExportArtifactUploadSummary> {
+            self.ai_uploads.push(plan.bundle.revision_oid.clone());
+            Ok(AiExportArtifactUploadSummary {
+                index_uploaded: true,
+                graph_uploaded: true,
+                bundle_uploaded: true,
+                object_count: plan.objects.len(),
+                object_uploaded_count: plan.objects.len(),
+                object_skipped_count: 0,
+                object_keys: plan
+                    .objects
+                    .iter()
+                    .map(|object| object.r2_key.clone())
+                    .collect(),
+            })
+        }
+
+        async fn upsert_revision(&mut self, row: PublishRevisionRow) -> CliResult<()> {
+            self.revisions.push(row);
+            Ok(())
+        }
+
+        async fn upsert_file(&mut self, row: PublishFileRow) -> CliResult<()> {
+            self.files.push(row);
+            Ok(())
+        }
+
+        async fn upsert_ai_object(&mut self, row: PublishAiObjectRow) -> CliResult<()> {
+            self.ai_objects.push(row);
+            Ok(())
+        }
+
+        async fn upsert_ai_version(&mut self, row: PublishAiVersionRow) -> CliResult<()> {
+            self.ai_versions.push(row);
+            Ok(())
+        }
+
+        async fn upload_site_index_artifacts(
+            &mut self,
+            _artifacts: &SiteIndexArtifacts,
+        ) -> CliResult<()> {
+            self.site_index_uploads += 1;
+            Ok(())
+        }
+
+        async fn upsert_ref(&mut self, row: PublishRefRow) -> CliResult<()> {
+            self.refs.push(row);
+            Ok(())
+        }
+
+        async fn update_site_latest(
+            &mut self,
+            update: PublishSiteLatestUpdateRequest<'_>,
+        ) -> CliResult<PublishSiteLatestUpdateResult> {
+            self.latest_updates.push(FakeLatestUpdate {
+                site_id: update.site_id.to_string(),
+                default_ref: update.default_ref.map(ToString::to_string),
+                latest_revision_oid: update.latest_revision_oid.map(ToString::to_string),
+                next_refs_generation: update.next_refs_generation,
+                expected_refs_generation: update.expected_refs_generation,
+                force: update.force,
+            });
+            Ok(PublishSiteLatestUpdateResult::Updated)
+        }
+
+        async fn delete_stale_refs(
+            &mut self,
+            site_id: &str,
+            current_sync_run_id: &str,
+        ) -> CliResult<i64> {
+            self.stale_ref_deletes
+                .push((site_id.to_string(), current_sync_run_id.to_string()));
+            Ok(1)
+        }
+    }
+
     fn successful_deploy_command_output() -> PublishWorkerCommandOutput {
         PublishWorkerCommandOutput {
             success: true,
@@ -2136,6 +3377,432 @@ mod tests {
             ),
         )
         .expect("wrangler config placeholder should be replaceable");
+    }
+
+    #[tokio::test]
+    async fn publish_sync_materializes_revision_file_inputs_from_commit_tree() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# demo\n");
+        let lib_blob = Blob::from_content("pub fn demo() {}\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        save_object(&lib_blob, &lib_blob.id).expect("lib blob should save");
+
+        let src_tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            lib_blob.id,
+            "lib.rs".to_string(),
+        )])
+        .expect("src tree should build");
+        save_object(&src_tree, &src_tree.id).expect("src tree should save");
+
+        let root_tree = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, readme_blob.id, "README.md".to_string()),
+            TreeItem::new(TreeItemMode::Tree, src_tree.id, "src".to_string()),
+        ])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+
+        let materialized = materialize_revision_files(&commit.id.to_string())
+            .expect("revision files should materialize from committed tree");
+
+        assert_eq!(materialized.revision_oid, commit.id.to_string());
+        assert_eq!(materialized.commit_oid, commit.id.to_string());
+        assert_eq!(materialized.tree_oid, root_tree.id.to_string());
+        assert_eq!(materialized.tree_items.len(), 2);
+
+        let files = materialized
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.bytes.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            files.get("README.md").copied(),
+            Some(b"# demo\n".as_slice())
+        );
+        assert_eq!(
+            files.get("src/lib.rs").copied(),
+            Some(b"pub fn demo() {}\n".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_all_refs_persists_revision_rows_and_site_index() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# demo\n");
+        let secret_blob = Blob::from_content("TOKEN=secret\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        save_object(&secret_blob, &secret_blob.id).expect("secret blob should save");
+
+        let root_tree = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, readme_blob.id, "README.md".to_string()),
+            TreeItem::new(TreeItemMode::Blob, secret_blob.id, ".env.local".to_string()),
+        ])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+        let revision_oid = commit.id.to_string();
+        let refs = vec![
+            publish_local_ref("refs/heads/main", &revision_oid, &revision_oid),
+            publish_local_ref("refs/tags/v1", &revision_oid, &revision_oid),
+        ];
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            refs,
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("non-dry-run sync should persist through the sink");
+
+        assert!(!output.dry_run);
+        assert_eq!(output.refs_count, 2);
+        assert_eq!(output.revision_count, 1);
+        assert_eq!(
+            output.latest_revision_oid.as_deref(),
+            Some(revision_oid.as_str())
+        );
+        assert!(output.updates_full_refs_generation);
+        assert_eq!(sink.sync_runs.len(), 2);
+        assert_eq!(sink.sync_runs[0].status, "running");
+        assert_eq!(sink.sync_runs[1].status, "succeeded");
+        assert_eq!(sink.revision_uploads, vec![revision_oid.clone()]);
+        assert_eq!(sink.revisions.len(), 1);
+        assert_eq!(sink.files.len(), 2);
+        assert!(
+            sink.files
+                .iter()
+                .any(|row| row.path == ".env.local" && row.display_mode == "ignored"),
+            "built-in sensitive paths should become metadata-only rows",
+        );
+        assert_eq!(sink.site_index_uploads, 1);
+        assert_eq!(sink.refs.len(), 2);
+        assert_eq!(
+            sink.stale_ref_deletes,
+            vec![(site.site_id.clone(), sink.sync_runs[0].sync_run_id.clone())],
+            "all-refs sync must remove publish_refs rows from older sync runs after latest CAS",
+        );
+        assert_eq!(
+            sink.latest_updates,
+            vec![FakeLatestUpdate {
+                site_id: site.site_id.clone(),
+                default_ref: Some("refs/heads/main".to_string()),
+                latest_revision_oid: Some(revision_oid),
+                next_refs_generation: 8,
+                expected_refs_generation: 7,
+                force: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_targeted_ref_does_not_advance_full_refs_generation() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let readme_blob = Blob::from_content("# targeted\n");
+        save_object(&readme_blob, &readme_blob.id).expect("readme blob should save");
+        let root_tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            readme_blob.id,
+            "README.md".to_string(),
+        )])
+        .expect("root tree should build");
+        save_object(&root_tree, &root_tree.id).expect("root tree should save");
+        let commit = Commit::from_tree_id(root_tree.id, Vec::new(), "publish fixture");
+        save_object(&commit, &commit.id).expect("commit should save");
+
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(true);
+        let mut sink = FakePublishSyncSink::default();
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("targeted sync should still persist the selected ref");
+
+        assert!(!output.updates_full_refs_generation);
+        assert_eq!(sink.site_index_uploads, 0);
+        assert!(sink.latest_updates.is_empty());
+        assert!(sink.stale_ref_deletes.is_empty());
+        assert_eq!(sink.refs.len(), 1);
+        assert_eq!(sink.refs[0].ref_name, "refs/heads/main");
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_latest_uses_default_ref_revision() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let main_commit = commit_with_single_file("README.md", "main\n", "main fixture");
+        let tag_commit = commit_with_single_file("README.md", "tag\n", "tag fixture");
+        let main_revision = main_commit.id.to_string();
+        let tag_revision = tag_commit.id.to_string();
+        let refs = vec![
+            publish_local_ref("refs/heads/main", &main_revision, &main_revision),
+            publish_local_ref("refs/tags/v2", &tag_revision, &tag_revision),
+        ];
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            refs,
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("all-refs sync should persist both revisions");
+
+        assert_eq!(output.revision_count, 2);
+        assert_eq!(
+            output.latest_revision_oid.as_deref(),
+            Some(main_revision.as_str())
+        );
+        assert_eq!(sink.latest_updates.len(), 1);
+        assert_eq!(
+            sink.latest_updates[0].latest_revision_oid.as_deref(),
+            Some(main_revision.as_str()),
+            "site latest must follow the default ref revision, not the tag revision",
+        );
+        assert_ne!(main_revision, tag_revision);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_persists_ai_artifacts_and_counts() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+        let ai_planner = SingleObjectAiExportPlanner;
+
+        let output = run_publish_sync_selected_refs_with_sink_and_ai_planner(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+            &ai_planner,
+        )
+        .await
+        .expect("non-dry-run sync should persist AI artifacts");
+
+        assert_eq!(output.ai_object_count, 1);
+        assert_eq!(output.ai_bundle_count, 1);
+        assert_eq!(output.revisions[0].ai_object_count, 1);
+        assert_eq!(output.revisions[0].ai_bundle_count, 1);
+        assert_eq!(sink.ai_uploads, vec![revision_oid.clone()]);
+        assert_eq!(sink.ai_objects.len(), 1);
+        assert_eq!(sink.ai_versions.len(), 1);
+        assert_eq!(sink.revisions[0].ai_object_count, 1);
+        assert_eq!(sink.revisions[0].ai_bundle_count, 1);
+        assert!(
+            sink.revisions[0]
+                .ai_index_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with("/ai/index.json")),
+            "revision row must point at the uploaded AI index"
+        );
+        assert_eq!(sink.sync_runs[0].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[0].ai_bundle_count, 1);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[1].ai_bundle_count, 1);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_default_planner_exports_history_ai_objects() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let libra_dir = temp.path().join(".libra");
+        let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+        let db_conn = Arc::new(
+            db::get_db_conn_instance_for_path(&libra_dir.join(util::DATABASE))
+                .await
+                .expect("db should open"),
+        );
+        let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
+        let intent = Intent::new(
+            ActorRef::human("publish-test").expect("actor"),
+            "Publish history-backed AI objects",
+        )
+        .expect("intent");
+        storage
+            .put_tracked(&intent, &history)
+            .await
+            .expect("intent should be written to history");
+        let second_intent = Intent::new(
+            ActorRef::human("publish-test").expect("actor"),
+            "Publish second history-backed thread",
+        )
+        .expect("second intent");
+        storage
+            .put_tracked(&second_intent, &history)
+            .await
+            .expect("second intent should be written to history");
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("default planner should export AI history objects");
+
+        let object_types = sink
+            .ai_objects
+            .iter()
+            .map(|object| object.object_type.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "Intent",
+            "Thread",
+            "Scheduler",
+            "QueryIndex",
+            "LiveContextWindow",
+            "ReadyQueue",
+            "ParallelGroup",
+            "Checkpoint",
+            "RetryRoute",
+            "UiCurrentView",
+        ] {
+            assert!(
+                object_types.contains(expected),
+                "default planner should export {expected}, got {object_types:?}"
+            );
+        }
+        assert_eq!(
+            sink.ai_objects
+                .iter()
+                .filter(|object| object.object_type == "Thread")
+                .count(),
+            2,
+            "default planner must rebuild every independent thread component",
+        );
+        assert_eq!(output.ai_object_count, 20);
+        assert_eq!(sink.ai_objects.len(), 20);
+        assert_eq!(sink.revisions[0].ai_object_count, 20);
+        assert_eq!(sink.sync_runs[0].ai_object_count, 20);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 20);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_fails_when_ai_projection_cannot_rebuild() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let libra_dir = temp.path().join(".libra");
+        let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+        let db_conn = Arc::new(
+            db::get_db_conn_instance_for_path(&libra_dir.join(util::DATABASE))
+                .await
+                .expect("db should open"),
+        );
+        let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
+        let usage_only = serde_json::json!({
+            "runId": "00000000-0000-0000-0000-000000000001",
+            "promptTokens": 10,
+            "completionTokens": 5
+        });
+        let usage_hash = storage
+            .put_json(&usage_only)
+            .await
+            .expect("usage fixture should store");
+        history
+            .append("run_usage", "usage-only", usage_hash)
+            .await
+            .expect("usage fixture should be tracked");
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let err = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect_err("projection-less AI history must fail");
+
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.message().contains("missing projection object types"),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("Thread"), "{}", err.message());
+        assert!(
+            err.message()
+                .contains("no rebuildable Intent, Task, or Run history"),
+            "{}",
+            err.message()
+        );
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
@@ -2831,6 +4498,30 @@ mod tests {
             sync_run_id: "sync-1".to_string(),
             schema_version: 1,
             updated_at: "2026-05-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn publish_ai_object(
+        site_id: &str,
+        revision_oid: &str,
+        redaction_mode: RedactionMode,
+        redaction_rules_version: &str,
+    ) -> PublishAiObject {
+        PublishAiObject {
+            schema_version: PUBLISH_SCHEMA_VERSION,
+            site_id: site_id.to_string(),
+            revision_oid: revision_oid.to_string(),
+            object_type: "Intent".to_string(),
+            object_id: "intent-1".to_string(),
+            layer: AiObjectLayer::Snapshot,
+            source_refs: vec!["refs/heads/main".to_string()],
+            relationships: Vec::new(),
+            payload: serde_json::json!({ "title": "ship AI publish" }),
+            redaction: AiObjectRedaction {
+                mode: redaction_mode,
+                rules_version: redaction_rules_version.to_string(),
+            },
+            removed_fields: Vec::new(),
         }
     }
 

@@ -30,4 +30,5 @@ pub mod contract;
 pub mod incremental;
 pub mod preflight;
 pub mod snapshot;
+pub mod upload;
 pub mod worker_template;
