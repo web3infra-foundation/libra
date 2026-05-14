@@ -22,6 +22,151 @@ async fn count_reflog_entries() -> usize {
         .unwrap_or(0)
 }
 
+#[test]
+fn test_reflog_show_json_outputs_entries() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reflog", "show", "-n", "1"], repo.path());
+    assert_cli_success(&output, "json reflog show");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reflog.show");
+    assert_eq!(json["data"]["ref_name"], "HEAD");
+    assert_eq!(json["data"]["count"], 1);
+    assert!(json["data"]["total_count"].as_u64().unwrap_or_default() >= 1);
+
+    let entries = json["data"]["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["selector"], "HEAD@{0}");
+    assert_eq!(entries[0]["index"], 0);
+    assert_eq!(entries[0]["ref_name"], "HEAD");
+    assert!(entries[0]["new_oid"].as_str().unwrap_or_default().len() >= 7);
+    assert_eq!(
+        entries[0]["short_new_oid"]
+            .as_str()
+            .unwrap_or_default()
+            .len(),
+        7
+    );
+    assert!(
+        entries[0]["commit"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("base")
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_reflog_show_json_invalid_date_reports_invalid_arguments() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["--json", "reflog", "show", "--since", "not-a-date"],
+        repo.path(),
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(report.message.contains("invalid --since date"));
+}
+
+#[test]
+fn test_reflog_exists_machine_outputs_single_json_line() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "reflog", "exists", "HEAD"], repo.path());
+    assert_cli_success(&output, "machine reflog exists");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "expected one JSON line, got: {stdout}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("expected JSON");
+    assert_eq!(json["command"], "reflog.exists");
+    assert_eq!(json["data"]["ref_name"], "HEAD");
+    assert_eq!(json["data"]["exists"], true);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_reflog_exists_json_missing_ref_reports_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["--json", "reflog", "exists", "refs/heads/missing"],
+        repo.path(),
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report
+            .message
+            .contains("reflog entry for 'refs/heads/missing' not found")
+    );
+}
+
+#[test]
+fn test_reflog_exists_json_expands_bare_branch_name() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reflog", "exists", "main"], repo.path());
+    assert_cli_success(&output, "json reflog exists main");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reflog.exists");
+    assert_eq!(json["data"]["ref_name"], "refs/heads/main");
+    assert_eq!(json["data"]["exists"], true);
+}
+
+#[test]
+fn test_reflog_delete_json_reports_deleted_count() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reflog", "delete", "HEAD@{0}"], repo.path());
+    assert_cli_success(&output, "json reflog delete");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reflog.delete");
+    assert_eq!(json["data"]["deleted_count"], 1);
+    assert_eq!(json["data"]["selectors"][0], "HEAD@{0}");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_reflog_delete_json_expands_bare_branch_selector() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reflog", "delete", "main@{0}"], repo.path());
+    assert_cli_success(&output, "json reflog delete main@{0}");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reflog.delete");
+    assert_eq!(json["data"]["deleted_count"], 1);
+    assert_eq!(json["data"]["selectors"][0], "main@{0}");
+}
+
+#[test]
+fn test_reflog_delete_json_missing_selector_reports_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reflog", "delete", "HEAD@{99}"], repo.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(report.message.contains("HEAD@{99}"));
+}
+
 #[tokio::test]
 #[serial]
 async fn test_reflog_show_with_filters() {

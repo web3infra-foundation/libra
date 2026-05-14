@@ -184,7 +184,7 @@
 
 | 顺序 | 命令 | 当前状态 | 后续重点 |
 |------|------|--------|--------|
-| **30** | `reflog` / `checkout` | 兼容层和旧 CLI 形态并存 | CLI 形态收口、typed error、JSON / machine |
+| **30** | `reflog` / `checkout` | 部分落地：`reflog show/delete/exists` 已有 JSON/machine 成功路径、裸分支解析与显式错误码；`checkout` 仍保留兼容入口 | `checkout` 的 typed error、JSON / machine 与 render split |
 | **31** | `mv` / `rm` / `worktree` | ✅ 已落地：`mv` / `rm` / worktree 成功路径、非 FUSE worktree 错误路径、FUSE `umount` 成功路径均已有 JSON/machine；后续仅保留 FUSE mount 管理的更细错误码扩展 | destructive 路径的结果模型、显式错误码、确认消息 |
 | **32** | `merge` / `rebase` | 状态机复杂，风险高 | merge / rebase 状态结构化、冲突契约、typed error |
 | **33** | `lfs` / `cloud` | 外部系统耦合高 | JSON / progress 契约、网络/权限错误分层 |

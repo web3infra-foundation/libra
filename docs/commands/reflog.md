@@ -12,7 +12,7 @@ libra reflog exists <ref_name>
 
 ## Description
 
-`libra reflog` records and displays the history of reference changes in the repository. Every time HEAD or a branch tip moves (commit, merge, rebase, reset, checkout, etc.), a reflog entry is created with the old and new object IDs, a timestamp, the committer identity, and a description of the action.
+`libra reflog` records and displays the history of reference changes in the repository. Commands that are wired into Libra's reflog integration (commit, switch, merge, rebase, reset, fetch, pull, push, clone, etc.) create entries with the old and new object IDs, a timestamp, the committer identity, and a description of the action.
 
 Reflog entries are stored in the SQLite `reflog` table, providing transactional safety and queryable history. This contrasts with Git's flat-file approach where each ref has a separate reflog file under `.git/logs/`.
 
@@ -68,7 +68,7 @@ Delete specific reflog entries by selector.
 
 | Argument | Description |
 |----------|-------------|
-| `<selector>...` | One or more reflog selectors in `ref@{N}` format (e.g., `HEAD@{3}`, `main@{0}`). Multiple selectors can target different refs; entries within the same ref are deleted in reverse index order to preserve indices. |
+| `<selector>...` | One or more reflog selectors in `ref@{N}` format (e.g., `HEAD@{3}`, `main@{0}`). Bare branch names are expanded to `refs/heads/<name>`. Multiple selectors can target different refs; entries within the same ref are deleted in reverse index order to preserve indices. |
 
 ```bash
 # Delete a single reflog entry
@@ -84,7 +84,7 @@ Check whether a reference has any reflog entries. Exits with success (0) if at l
 
 | Argument | Description |
 |----------|-------------|
-| `<ref_name>` | Reference name to check (required). |
+| `<ref_name>` | Reference name to check (required). Bare branch names are expanded to `refs/heads/<name>`. |
 
 ```bash
 # Check if HEAD has reflog entries
@@ -174,6 +174,90 @@ No output, exit code 0.
 fatal: reflog entry for 'nonexistent' not found
 ```
 
+## JSON / Machine Output
+
+`--json` and `--machine` are supported for `show`, `delete`, and `exists`. `--json` emits a command envelope, and `--machine` emits the same envelope as a single NDJSON line.
+
+**`reflog show`**:
+
+```json
+{
+  "ok": true,
+  "command": "reflog.show",
+  "data": {
+    "ref_name": "HEAD",
+    "pretty": "oneline",
+    "count": 1,
+    "total_count": 3,
+    "filters": {
+      "since": null,
+      "until": null,
+      "grep": null,
+      "author": null,
+      "number": 1,
+      "patch": false,
+      "stat": false
+    },
+    "entries": [
+      {
+        "selector": "HEAD@{0}",
+        "index": 0,
+        "ref_name": "HEAD",
+        "old_oid": "def5678...",
+        "new_oid": "abc1234...",
+        "short_new_oid": "abc1234",
+        "timestamp": 1715788800,
+        "datetime": "Wed May 15 16:00:00 2024 +0000",
+        "committer": {
+          "name": "Alice",
+          "email": "alice@example.com"
+        },
+        "action": "commit",
+        "message": "add new feature",
+        "summary": "commit: add new feature",
+        "commit": {
+          "author": {
+            "name": "Alice",
+            "email": "alice@example.com"
+          },
+          "message": "add new feature"
+        },
+        "patch": null,
+        "stat": null
+      }
+    ]
+  }
+}
+```
+
+When `--patch` or `--stat` is set, the corresponding entry fields contain the rendered patch or stat string; otherwise they are `null`.
+
+**`reflog delete`**:
+
+```json
+{
+  "ok": true,
+  "command": "reflog.delete",
+  "data": {
+    "selectors": ["HEAD@{0}"],
+    "deleted_count": 1
+  }
+}
+```
+
+**`reflog exists`**:
+
+```json
+{
+  "ok": true,
+  "command": "reflog.exists",
+  "data": {
+    "ref_name": "HEAD",
+    "exists": true
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why subcommand-based instead of Git's implicit `show`?
@@ -225,5 +309,6 @@ Note: jj does not have a reflog. Instead, it maintains an operation log (`jj op 
 | `LBR-CLI-002` | Invalid `--since` or `--until` date format |
 | `LBR-CLI-002` | Invalid reflog selector format (must be `ref@{N}`) |
 | `LBR-CLI-003` | Reflog entry not found (for `exists` or `delete`) |
+| `LBR-REPO-002` | Reflog entry points at a missing or invalid commit object |
 | `LBR-IO-001` | Failed to read reflog entries from database |
 | `LBR-IO-002` | Failed to delete reflog entries from database |
