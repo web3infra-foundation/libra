@@ -8,7 +8,7 @@
 - Cloudflare 下载/恢复不作为 `libra publish` 的命令或参数设计；实现本 publish 方案时，必须同步完成 [clone.md](clone.md) 中新增的 Cloudflare source scheme（例如 `libra clone libra+cloud://<clone-domain>/<slug>`），让 `publish` 只负责发布展示，`clone` 负责恢复仓库。
 - v1 必须发布所有本地分支和 tag：`libra publish sync` 默认提交 `refs/heads/*` 与 `refs/tags/*` 指向的所有可达发布快照；`--ref <branch|tag|full-ref>` 进入 v1 作为定向同步/调试入口，但不能替代完整发布验收。
 - 不再要求“SQL 与代码一字不差”这种脆弱约束。改为提供单一 schema 源文件和一致性测试。
-- Claude Design 前端设计包已经启动，v1 必须把前端实现纳入任务包：Next.js + React 前端要按设计产物实现 branch/tag 浏览、代码展示、AI object model 和发布状态视图。
+- Claude Design 前端实现已按 Phase 7 handoff 落地，当前 `worker/` 模板就是 accepted baseline；设计偏差和无独立设计包的交接记录见 [publish-worker-design-handoff.md](publish-worker-design-handoff.md)。
 - v1 的 “所有 AI 版本信息”以 [docs/agent/ai-object-model-reference.md](../agent/ai-object-model-reference.md) 为完整对象契约：snapshot objects、event objects 和 Libra projection/runtime objects 都必须发布；visibility 只决定字段级 redaction，不改变对象类型覆盖范围。
 - Worker 随 Libra 分发：源码仓库根目录 `worker/` 是 Worker 模板来源，Libra release 必须把该模板作为 source-only 资源嵌入或打包；`libra publish init` 从该模板生成目标仓库根目录 `worker/`，不依赖用户本机存在 Libra 源码 checkout。
 
@@ -782,26 +782,26 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [x] (v0.17.53 dry-run planner) `sync --dry-run` 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重；完整 upload 路径仍由本 Phase 后续 snapshot/upload 项承载。
-- [x] (v0.17.53 dry-run planner) `sync --dry-run --ref <branch|tag|full-ref>` 支持定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。非 dry-run 的定向同步仍归 Phase 4 未完成项。
+- [x] (v0.17.53 dry-run planner) `sync --dry-run` 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重；非 dry-run upload 已由 v0.17.120+ 落地。
+- [x] (v0.17.53 dry-run planner) `sync --dry-run --ref <branch|tag|full-ref>` 支持定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。非 dry-run 定向同步已由 v0.17.121 落地。
 - [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
 - [x] (v0.17.120) 非 dry-run snapshot upload 路径读取 committed `.librapublishignore` 和内置 deny 规则；public site 拒绝 `--allow-sensitive-path`，private site 精确 allowlist，命中 deny 的文件保持 metadata-only D1 rows。
-- [x] (v0.17.113) `Preflight::for_visibility()` 拒绝 public site 使用 `--allow-sensitive-path`，并只在 private site 精确匹配 repo-relative allowlist path；完整 snapshot upload 仍由上方未完成项承载。
-- [x] (v0.17.114) `build_revision_artifact_plan()` 生成单 revision 的 `code-manifest.json` payload、文本 R2 blob 上传清单，并将 binary、too-large、ignored path 保持为 metadata-only；完整非 dry-run sync/D1 写入仍由后续 Phase 4 项承载。
+- [x] (v0.17.113) `Preflight::for_visibility()` 拒绝 public site 使用 `--allow-sensitive-path`，并只在 private site 精确匹配 repo-relative allowlist path；完整 snapshot upload 已由 v0.17.120 落地。
+- [x] (v0.17.114) `build_revision_artifact_plan()` 生成单 revision 的 `code-manifest.json` payload、文本 R2 blob 上传清单，并将 binary、too-large、ignored path 保持为 metadata-only；完整非 dry-run sync/D1 写入已由 v0.17.120 落地。
 - [x] (v0.17.115) `publish sync` 命令层可从 committed revision tree materialize repo-relative path + blob bytes 为 `RevisionFileInput`，供后续非 dry-run sync 写入 artifact/D1/R2。
-- [x] (v0.17.116) `upload_revision_artifacts()` 将单 revision 的 `code-manifest.json` 和文本预览 blob 写入 `PublishStorage`，并保持 binary、too-large、ignored path 不产生 R2 blob；D1 `publish_files` metadata rows 仍由后续 sync sink 承载。
+- [x] (v0.17.116) `upload_revision_artifacts()` 将单 revision 的 `code-manifest.json` 和文本预览 blob 写入 `PublishStorage`，并保持 binary、too-large、ignored path 不产生 R2 blob；D1 `publish_files` metadata rows 已由 sync sink 落地。
 - [x] (v0.17.118) `build_revision_d1_rows()` 为单 revision 生成 `publish_revisions` 和 `publish_files` rows；text rows 保留 `content_sha256`/`r2_key`，binary、too-large、ignored rows 保持 metadata-only。
 - [x] (v0.17.120) 非 dry-run `publish sync` 对每个唯一 revision 上传文本预览和 `code-manifest.json` 到 R2，并将 binary、too_large、ignored 文件写为 D1 metadata-only `publish_files` rows。
-- [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 仍由后续非 dry-run sync 项承载。
-- [x] (v0.17.119) `build_site_index_artifacts()` 从全量 `SnapshotPlan` 生成 `publish_refs` rows、`refs.json` 和 `latest.json` payload，并可写入 `PublishStorage`；实际 D1 upsert/CAS 仍由后续 sync sink 承载。
+- [x] (v0.17.111) `SnapshotPlan::to_refs_index()` 生成 `refs.json` payload 和 R2 key；完整 sync upload 已由 v0.17.120 落地。
+- [x] (v0.17.119) `build_site_index_artifacts()` 从全量 `SnapshotPlan` 生成 `publish_refs` rows、`refs.json` 和 `latest.json` payload，并可写入 `PublishStorage`；实际 D1 upsert/CAS 已由 sync sink 落地。
 - [x] (v0.17.120) 全量非 dry-run `publish sync` 上传 `refs.json`、`latest.json`，并为每个唯一 revision 上传 `code-manifest.json`。
 - [x] (v0.17.124) `upload_ai_export_artifacts()` 可将 `AiExportPlan` 写入 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并生成 `publish_ai_objects` / `publish_ai_versions` D1 rows；重复调用默认跳过已存在对象，`--force` 可重写。
-- [x] (v0.17.126) `publish sync` orchestration 对每个唯一 revision 调用 AI export planner，生成并上传 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并写入 `publish_ai_objects` / `publish_ai_versions` rows 与 revision/sync-run 计数；默认 planner 在 v0.17.137 已改为 history-backed，完整 projection/runtime 覆盖见下方未完成项。
-- [x] (v0.17.135) `ai_export` 内置 AI object model type manifest 覆盖 reference 的 snapshot/event/projection 全部对象类型，并将所有类型接入 bundle relationship index buckets；真实 history/projection 数据源导出仍由下方未完成项跟踪。
-- [x] (v0.17.136) `ai_export` 新增 history-backed adapter，可从 AI history 的 snapshot/event subtrees 读取真实 JSON blob，映射 `snapshot`/`invocation` 等内部存储名到 reference 对象类型，并在进入 publish envelope 前执行字段级 redaction；生产 sync 默认 planner 和 projection/runtime rebuild 仍由下方未完成项跟踪。
-- [x] (v0.17.137) `publish sync` 默认 AI planner 接入 history-backed adapter，非 dry-run 生产路径不再输出固定空 AI bundle；本地 AI history 中已有的 snapshot/event objects 会进入 AI object rows、bundle count 和 sync-run 计数，projection/runtime rebuild 仍由下方未完成项跟踪。
-- [x] (v0.17.138) `publish sync` 默认 AI planner 调用 `ProjectionRebuilder`，把 latest-thread rebuild 结果导出为 `Thread`、`Scheduler`、`QueryIndex`、`LiveContextWindow`、`ReadyQueue`、`ParallelGroup`、`Checkpoint`、`RetryRoute` 和 `UiCurrentView` projection objects；全线程覆盖和缺失类型失败报告仍由下方未完成项跟踪。
-- [x] (v0.17.139) `ProjectionRebuilder::rebuild_all_threads()` 覆盖所有独立 Intent 组件和无 Intent 的 task/run 组件，`publish sync` 会为每个 thread component 导出完整 projection/runtime object set；缺失类型失败报告仍由下方未完成项跟踪。
+- [x] (v0.17.126) `publish sync` orchestration 对每个唯一 revision 调用 AI export planner，生成并上传 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并写入 `publish_ai_objects` / `publish_ai_versions` rows 与 revision/sync-run 计数；默认 planner 在 v0.17.137 改为 history-backed。
+- [x] (v0.17.135) `ai_export` 内置 AI object model type manifest 覆盖 reference 的 snapshot/event/projection 全部对象类型，并将所有类型接入 bundle relationship index buckets。
+- [x] (v0.17.136) `ai_export` 新增 history-backed adapter，可从 AI history 的 snapshot/event subtrees 读取真实 JSON blob，映射 `snapshot`/`invocation` 等内部存储名到 reference 对象类型，并在进入 publish envelope 前执行字段级 redaction。
+- [x] (v0.17.137) `publish sync` 默认 AI planner 接入 history-backed adapter，非 dry-run 生产路径不再输出固定空 AI bundle；本地 AI history 中已有的 snapshot/event objects 会进入 AI object rows、bundle count 和 sync-run 计数。
+- [x] (v0.17.138) `publish sync` 默认 AI planner 调用 `ProjectionRebuilder`，把 latest-thread rebuild 结果导出为 `Thread`、`Scheduler`、`QueryIndex`、`LiveContextWindow`、`ReadyQueue`、`ParallelGroup`、`Checkpoint`、`RetryRoute` 和 `UiCurrentView` projection objects。
+- [x] (v0.17.139) `ProjectionRebuilder::rebuild_all_threads()` 覆盖所有独立 Intent 组件和无 Intent 的 task/run 组件，`publish sync` 会为每个 thread component 导出完整 projection/runtime object set。
 - [x] (v0.17.140) AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects：snapshot/event 由 history-backed adapter 读取，projection/runtime 由 all-thread rebuild 生成，reference type manifest 和 production sync tests 同时覆盖。
 - [x] (v0.17.140) projection/runtime 对象缺失时，`publish sync` 按 reference rebuild/read contract 从 snapshot/event history 重建；若 AI history 存在但没有可重建的 Intent/Task/Run 根，sync 失败并报告缺失的 projection/runtime object types。
 - [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
@@ -847,13 +847,13 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [x] (v0.17.52) `src/command/clone.rs` 在 remote discovery 前识别并校验 `libra+cloud://<clone-domain>/<slug>`、`libra+cloud://<clone-domain>/repo/<repo_id>`、`?ref=<branch|tag|full-ref>` 和 `?revision=<oid|latest>`；完整 D1/R2 restore 仍返回 Phase 5 not-implemented。
+- [x] (v0.17.52) `src/command/clone.rs` 在 remote discovery 前识别并校验 `libra+cloud://<clone-domain>/<slug>`、`libra+cloud://<clone-domain>/repo/<repo_id>`、`?ref=<branch|tag|full-ref>` 和 `?revision=<oid|latest>`；早期 not-implemented stub 已由 v0.17.130+ resolved-plan restore 取代。
 - [x] (v0.17.52) scheme parser 对非法 clone domain、非法 slug/repo_id、非法 ref、非法 revision、缺失 slug/repo_id、`ref` 与 `revision` 同时出现返回 `CliInvalidArguments`，并给出可行动 hint；非 `libra+cloud://` scheme 仍归普通 clone remote 解析。
 - [x] (v0.17.77) scheme parser 保留后续 restore 需要的 target selector：`Slug(<slug>)`、`RepoId(<repo_id>)`、可选 `Ref(<ref>)` / `Revision(<oid|latest>)`，避免只校验 URL 但丢弃 D1 lookup 输入。
 - [x] (v0.17.55) Cloudflare clone 在 restore stub 前检查 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket`；未配置该 domain 时返回 `LBR-AUTH-001`，提示配置 keys，并且不创建目标目录。
-- [x] (v0.17.78) Cloudflare clone 复用 cascaded local/global config 读取 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket` 和可选 `.credential_profile`，配置存在后进入 D1/R2 restore stub 并在结构化错误中保留已解析的 D1/R2 参数。
+- [x] (v0.17.78) Cloudflare clone 复用 cascaded local/global config 读取 `cloud.clone_domains.<clone-domain>.account_id`、`.d1_database_id`、`.r2_bucket` 和可选 `.credential_profile`，配置存在后进入 D1/R2 restore 路径并在结构化错误中保留已解析的 D1/R2 参数。
 - [x] (v0.17.109) 通过 D1 用 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 解析 site；slug rename 不影响 `repo/<repo_id>` 稳定入口。
-- [x] (v0.17.125) Cloudflare clone restore stub 前通过 D1 解析 `repositories`、`publish_refs`、default/latest/指定 ref 或 revision、`publish_revisions` 和 `object_index` 基线；branch/tag 短名冲突要求完整 ref。
+- [x] (v0.17.125) Cloudflare clone 通过 D1 解析 `repositories`、`publish_refs`、default/latest/指定 ref 或 revision、`publish_revisions` 和 `object_index` 基线；branch/tag 短名冲突要求完整 ref。
 - [x] (v0.17.127) Cloudflare clone restore plan 对 D1 `object_index` 中的 Git object 逐项校验 R2 存在性；缺失对象以 `RepoCorrupt` 失败，避免进入后续本地恢复。
 - [x] (v0.17.128) 抽出 strict refs metadata restore helper，缺失 `metadata.json` 时硬失败，供后续 Cloudflare clone 在创建目标目录后执行失败清理。
 - [x] (v0.17.129) 抽出 indexed Git object restore helper，复用 R2 get、hash verify、LocalStorage put 和 downloaded/skipped/failed report counts；后续 Cloudflare clone restore 可把失败 report 映射到目标目录清理。
@@ -919,13 +919,13 @@ v1 使用 gitignore 子集：
 
 ### Phase 7：Claude Design 前端实现和 deploy/init
 
-**Description:** 将 Claude Design 已启动的前端设计包落地为 Next.js + React on Cloudflare Workers，并把 `init/deploy` 接入 Wrangler/OpenNext。前端实现是 v1 必交付任务包，不作为验收后的补充工作。
+**Description:** 将已接收的前端 baseline 落地为 Next.js + React on Cloudflare Workers，并把 `init/deploy` 接入 Wrangler/OpenNext。前端实现是 v1 必交付任务包，不作为验收后的补充工作；无独立 Claude Design 包时以 [publish-worker-design-handoff.md](publish-worker-design-handoff.md) 记录的 `worker/` 模板为 accepted baseline。
 
 **Acceptance criteria:**
 
 - [x] (v0.17.143) 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差记录在 [publish-worker-design-handoff.md](publish-worker-design-handoff.md)，作为无 PR 上下文时的 durable handoff。
 - [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
-- [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；完整云端 sync/status 对比仍归 Phase 4。
+- [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；云端 D1 refs/status 对比已由 Phase 4 落地。
 - [x] (v0.17.14) Next.js + React 前端能展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
 - [x] (v0.17.60) 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。
 - [x] (v0.17.14) 前端通过 Worker API client 读取真实 API/fixture，不保留 mock-only 数据路径。
@@ -957,6 +957,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.126) `publish sync` 接入 AI artifact 幂等上传，重复 sync 不重复上传未变化的 AI objects 和 AI bundle，`--force` 复用同一路径强制重写。
 - [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
+- [x] (v0.17.144) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` / `LIBRA_PUBLISH_LIVE_SLUG` / `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 后执行已部署 Worker refs/tree/file API smoke；该入口不启动 MCP Server。
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
@@ -965,6 +966,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.103) `cargo test publish_incremental_test`
 - [x] (v0.17.92) `cargo test publish_redaction_contract_test`
+- [x] (v0.17.144) `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live_gate_prerequisites_are_explicit -- --test-threads=1`
 - [ ] `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
 
 **Dependencies:** Phase 5, Phase 7
@@ -975,14 +977,14 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint A：本地 dry-run 可用
 
-- [x] (v0.17.53) `libra publish sync --dry-run` 能输出将发布的本地 refs、revision、file counts 和 AI count/bundle count 计划；完整 AI exporter 仍归 Phase 3。
+- [x] (v0.17.53) `libra publish sync --dry-run` 能输出将发布的本地 refs、revision、file counts 和 AI count/bundle count 计划；完整 AI exporter 已由 Phase 3 落地。
 - [x] (v0.17.53) 不需要 Cloudflare 凭据也能跑完 preflight。
 - [x] (v0.17.54) 高风险文件能 warning：dry-run 对 committed tree 的 `.librapublishignore` 与内置 deny 规则命中项输出 warning。
 
 ### Checkpoint B：云端数据闭环
 
 - [x] (v0.17.107) mock R2 + D1 下，snapshot 能 round-trip。
-- [x] (v0.17.108) `publish_refs_test` 固化 all-refs、同 revision 去重和 default-ref latest 的 D1 写入规划契约；完整 D1 写入仍由非 dry-run sync 项承载。
+- [x] (v0.17.108) `publish_refs_test` 固化 all-refs、同 revision 去重和 default-ref latest 的 D1 写入规划契约；完整 D1 写入已由非 dry-run sync 落地。
 - [x] (v0.17.121) D1 `publish_refs` 覆盖所有本地 branch/tag refs，多个 ref 指向同一 commit 时复用同一 revision snapshot；全量 sync 成功后删除旧 sync run 遗留的 stale refs。
 - [x] (v0.17.123) D1 latest 只指向默认 ref 的完整 published revision；命令层非 dry-run 测试覆盖 branch/tag 指向不同 revision 时 latest 仍选择默认 ref。
 - [x] (v0.17.96) `publish status` 能发现本地 branch/tag 与云端 refs 的新增、删除、移动和 snapshot 缺失。
@@ -1067,6 +1069,12 @@ Live cloud gate：
 LIBRA_ENABLE_TEST_LIVE_CLOUD=1 \
 cargo test --features test-live-cloud publish_live -- --test-threads=1
 ```
+
+当前 `publish_live_gate_prerequisites_are_explicit` 会从进程环境或
+仓库 `.env.test` 读取 live 配置，验证 D1/R2 凭据并报告缺失的 deploy-smoke 输入。完整 live gate 仍要求提供
+`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`、`LIBRA_PUBLISH_LIVE_SLUG`、
+`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`，并完成 all-refs sync、`libra+cloud`
+clone restore 和已部署 Worker refs/tree/file API smoke。
 
 ## 范围管理
 

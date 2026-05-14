@@ -17,8 +17,9 @@ Current implementation status:
   upserts `publish_sync_runs`, `publish_revisions`, `publish_files`,
   `publish_ai_objects`, `publish_ai_versions`, and `publish_refs` in
   D1, and advances `publish_sites.latest_revision_oid` only for a full
-  all-refs sync. The current built-in AI planner emits an empty bundle
-  until full AI object source extraction lands.
+  all-refs sync. The built-in AI export planner reads local AI history,
+  emits redacted snapshot/event objects, and adds projection objects
+  for the publish AI index, graph, and bundle.
 - `libra publish deploy` validates the local Worker template, requires
   the generated Worker config/bindings, runs `pnpm build`, and, unless
   `--skip-deploy` is set, applies D1 migrations and deploys the Worker
@@ -39,8 +40,13 @@ Current implementation status:
   bindings when `BASE_URL` is unset, and runs desktop plus mobile
   Chromium assertions for the publish landing page, code browser, file
   viewer, AI model page, refs, status, and empty/non-text states.
-- The AI snapshot upload and Git protocol restore flows remain
-  tracked in `docs/improvement/publish.md`.
+- `libra clone libra+cloud://<clone-domain>/<slug>` restores published
+  Git objects, refs metadata, and publish AI index/graph/bundle/object
+  envelopes from D1/R2 into a local Libra repository.
+- The remaining live-only publish gate is tracked in
+  `docs/improvement/publish.md`; it requires a real all-refs sync,
+  cloud clone restore, deployed Worker refs/tree/file API smoke, and
+  Cloudflare credentials with deploy permissions.
 
 ## Synopsis
 
@@ -54,12 +60,12 @@ libra publish unpublish [OPTIONS]
 
 ## Description
 
-`libra publish` is being developed as the outward-facing counterpart
-to `libra cloud`. The shipped slices are local Worker-template
-initialisation, local Worker-template status, offline sync dry-runs,
-cloud ref status comparison, and Worker build/deploy/unpublish
-orchestration. They do not yet upload repository snapshots or
-implement Git protocol.
+`libra publish` is the outward-facing counterpart to `libra cloud`.
+The shipped slices cover local Worker-template initialisation and
+status, offline sync dry-runs, cloud snapshot and AI artifact upload,
+cloud ref status comparison, Worker build/deploy/unpublish
+orchestration, and `libra+cloud://` clone restore for the published
+read-only snapshot surface.
 
 ## Subcommands
 
@@ -238,7 +244,8 @@ Current behavior:
 `ConfigKv`. It records only the Worker template manifest described in
 the Files section.
 
-The planned Phase 4 configuration keys are:
+The publish commands and cloud clone restore use these repository
+configuration keys when they are present:
 
 | Key | Description |
 |-----|-------------|
@@ -251,10 +258,11 @@ The planned Phase 4 configuration keys are:
 | `publish.worker_name` | Wrangler worker name. |
 | `publish.max_preview_bytes` | Per-file preview size cap. |
 
-The planned sync/deploy implementation will read Cloudflare
-credentials, account ids, and API tokens from the same `LIBRA_D1_*` /
-`LIBRA_STORAGE_*` environment variables that `libra cloud` uses. They
-are never written into the Worker template or to `ConfigKv`.
+`libra publish sync`, `libra publish status --site-id`, and
+`libra+cloud://` clone restore read Cloudflare account ids, API tokens,
+and R2 S3 credentials from the same `LIBRA_D1_*` / `LIBRA_STORAGE_*`
+environment variables that `libra cloud` uses. These secrets are never
+written into the Worker template or to `ConfigKv`.
 
 ## Files
 
@@ -266,10 +274,10 @@ are never written into the Worker template or to `ConfigKv`.
   already exists, so column-level CHECK additions in 0001 never
   reach existing databases.
 - `worker/migrations/<NNNN>_*.sql` — byte-equal mirrors of every
-  file under `sql/publish/`, reserved for the planned
-  `wrangler d1 migrations apply` step in `libra publish deploy`. The
-  `publish_schema_contract_worker_mirror_is_byte_equal` test walks
-  both directories and refuses any drift.
+  file under `sql/publish/`; `libra publish deploy` applies them with
+  `wrangler d1 migrations apply` unless `--skip-deploy` is set. The
+  `publish_schema_contract_worker_mirror_is_byte_equal` test walks both
+  directories and refuses any drift.
 - `worker/` — Next.js + React + OpenNext-for-Cloudflare project. Ships
   embedded in the Libra binary; `libra publish init` materialises it
   in the target repository's root.
@@ -318,11 +326,39 @@ migration MUST be additive (`CREATE TABLE … IF NOT EXISTS`,
 `CREATE TRIGGER … IF NOT EXISTS`) so reapplying on a fresh shard
 yields the same end state as applying the chain incrementally.
 
+## Live Gate
+
+The live publish gate is opt-in because it writes to real Cloudflare
+D1/R2 resources and, when deploy-smoke variables are present, probes a
+deployed Worker:
+
+```bash
+LIBRA_ENABLE_TEST_LIVE_CLOUD=1 \
+cargo test --features test-live-cloud publish_live -- --test-threads=1
+```
+
+Required for the D1/R2 prerequisite portion, either as exported
+environment variables or as key/value lines in the repository
+`.env.test` file:
+
+- `LIBRA_D1_ACCOUNT_ID`
+- `LIBRA_D1_API_TOKEN`
+- `LIBRA_D1_DATABASE_ID`
+- `LIBRA_STORAGE_ENDPOINT`
+- `LIBRA_STORAGE_BUCKET`
+- `LIBRA_STORAGE_ACCESS_KEY`
+- `LIBRA_STORAGE_SECRET_KEY`
+
+The deployed Worker refs/tree/file API smoke additionally requires
+`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`, `LIBRA_PUBLISH_LIVE_SLUG`, and
+`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`; set
+`LIBRA_PUBLISH_LIVE_FILE_PATH` when the root tree has no direct file
+entry to probe.
+
 ## See also
 
-- `libra clone` — the planned restore path for Cloudflare D1 / R2
-  via the `libra+cloud://<clone-domain>/<slug>` source scheme. Current
-  builds recognize that scheme but return `LBR-UNSUPPORTED-001`.
+- `libra clone` — restores Cloudflare D1 / R2 publish snapshots via
+  the `libra+cloud://<clone-domain>/<slug>` source scheme.
 - `libra cloud` — private Cloudflare backup that `publish` builds on
   top of.
 - `docs/improvement/publish.md` — internal design + phased rollout.
