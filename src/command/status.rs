@@ -1617,10 +1617,11 @@ fn list_workdir_files_split_safe(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>,
                 .map_err(|err| io::Error::other(err.to_string()))?
                 .to_path_buf();
             if file_type.is_dir() {
+                // Always recurse into directories to discover files inside ignored directories
+                // The --force flag will allow staging files from ignored directories
+                pending_dirs.push(path.clone());
                 if util::check_gitignore(workdir, &path) {
                     ignored.push(relative);
-                } else {
-                    pending_dirs.push(path);
                 }
             } else if file_type.is_file() {
                 if util::check_gitignore(workdir, &path) {
