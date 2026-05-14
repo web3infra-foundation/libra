@@ -143,9 +143,13 @@ export function deriveWorkflowSummary(
 }
 
 export type TerminalRowKind = "meta" | "info" | "run" | "pass" | "fail" | "warn";
+export const TERMINAL_OUTPUT_PREVIEW_CHARS = 200 * 1024;
+
 export type TerminalRow = {
   kind: TerminalRowKind;
   text: string;
+  fullText?: string;
+  hiddenChars?: number;
 };
 
 /**
@@ -189,8 +193,21 @@ function toolCallRow(tool: CodeUiToolCallSnapshot): TerminalRow {
       : tool.status === "running"
         ? "run"
         : "info";
-  const text = tool.summary ?? `${tool.toolName} (${tool.status})`;
-  return { kind, text };
+  const heading = tool.summary ?? `${tool.toolName} (${tool.status})`;
+  const text = tool.details ? `${heading}\n${tool.details}` : heading;
+  return truncateTerminalRow(kind, text);
+}
+
+function truncateTerminalRow(kind: TerminalRowKind, text: string): TerminalRow {
+  if (text.length <= TERMINAL_OUTPUT_PREVIEW_CHARS) {
+    return { kind, text };
+  }
+  return {
+    kind,
+    text: text.slice(0, TERMINAL_OUTPUT_PREVIEW_CHARS),
+    fullText: text,
+    hiddenChars: text.length - TERMINAL_OUTPUT_PREVIEW_CHARS,
+  };
 }
 
 export type DerivedDiffFile = {

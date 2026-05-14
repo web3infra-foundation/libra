@@ -33,9 +33,9 @@
 | 区域 | 已落地 | 仍需收口 |
 |------|--------|----------|
 | Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden；`docs/commands/code.md` 已补稳定字段表、thread list envelope 与 Code UI error code 表 | 后续新增字段/错误码时继续同步 Rust/TS/wire test/命令文档 |
-| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | 继续补齐 Web API client / component / browser smoke 测试 |
-| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 需要 API client 单测、组件测试、browser smoke；长 transcript/diff/tool output 的主线程保护仍不足 |
-| Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
+| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | API client、组件、browser audit scenario 已有回归；后续新增字段/错误码时继续同步测试 |
+| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 diff 与长 tool output 已默认 collapse；仍需补长 transcript 保护和 browser smoke |
+| Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
 | Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
@@ -141,7 +141,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - Workflow：把 `plans[].steps[].status`、`tasks[].status`、`toolCalls[].status`、`patchsets[].status` 映射到 phase strip；新增 `tasks[]` 单列；点击 step 展示 summary/details/metadata。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
-- Terminal：按 Sandbox / Tools / Agent tab 展示真实 tool/transcript/diagnostics；长 tool output 超过 200 KiB 截断并提供 load-more。
+- Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；diagnostics 映射仍需后续接入。
 - Sidebar：当前 thread + projection list 已有；后续新增 server-side `q=` 前先证明 client-side 50 条过滤不够。`New thread` 和 thread switch 仍引导 CLI，直到后端入口存在。
 - Settings：保持只读；任何可修改项必须先有后端 endpoint 和权限模型。
 
