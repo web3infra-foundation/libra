@@ -7,15 +7,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
+use git_internal::internal::object::types::ObjectType;
 
 use super::{
     contract::{
         AiBundleAssociatedIds, AiBundleIndexes, AiBundleObjectEntry, AiBundleRedaction,
-        AiGraphNode, AiObjectLayer, AiObjectRelationship, PUBLISH_SCHEMA_VERSION, PublishAiBundle,
-        PublishAiGraph, PublishAiIndex, PublishAiIndexBundleEntry, PublishAiObject, RedactionMode,
+        AiGraphNode, AiObjectLayer, AiObjectRedaction, AiObjectRelationship,
+        PUBLISH_SCHEMA_VERSION, PublishAiBundle, PublishAiGraph, PublishAiIndex,
+        PublishAiIndexBundleEntry, PublishAiObject, RedactionMode,
     },
     snapshot::sha256_hex,
 };
+use crate::{internal::ai::history::HistoryManager, utils::storage::Storage};
 
 /// Index bucket used for the AI object model relationship projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +39,14 @@ pub struct AiObjectModelTypeSpec {
     pub object_type: &'static str,
     pub layer: AiObjectLayer,
     pub index_bucket: AiObjectModelIndexBucket,
+}
+
+/// One AI history subtree that can be exported into the publish model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AiHistoryObjectTypeSpec {
+    pub history_type: &'static str,
+    pub object_type: &'static str,
+    pub layer: AiObjectLayer,
 }
 
 const AI_OBJECT_MODEL_TYPE_SPECS: &[AiObjectModelTypeSpec] = &[
@@ -166,9 +177,107 @@ const AI_OBJECT_MODEL_TYPE_SPECS: &[AiObjectModelTypeSpec] = &[
     },
 ];
 
+const AI_HISTORY_OBJECT_TYPE_SPECS: &[AiHistoryObjectTypeSpec] = &[
+    AiHistoryObjectTypeSpec {
+        history_type: "intent",
+        object_type: "Intent",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "plan",
+        object_type: "Plan",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "task",
+        object_type: "Task",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "run",
+        object_type: "Run",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "patchset",
+        object_type: "PatchSet",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "snapshot",
+        object_type: "ContextSnapshot",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "context_snapshot",
+        object_type: "ContextSnapshot",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "provenance",
+        object_type: "Provenance",
+        layer: AiObjectLayer::Snapshot,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "intent_event",
+        object_type: "IntentEvent",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "task_event",
+        object_type: "TaskEvent",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "run_event",
+        object_type: "RunEvent",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "plan_step_event",
+        object_type: "PlanStepEvent",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "run_usage",
+        object_type: "RunUsage",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "invocation",
+        object_type: "ToolInvocation",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "tool_invocation",
+        object_type: "ToolInvocation",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "evidence",
+        object_type: "Evidence",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "decision",
+        object_type: "Decision",
+        layer: AiObjectLayer::Event,
+    },
+    AiHistoryObjectTypeSpec {
+        history_type: "context_frame",
+        object_type: "ContextFrame",
+        layer: AiObjectLayer::Event,
+    },
+];
+
 /// Return the publish AI object model coverage manifest.
 pub fn ai_object_model_type_specs() -> &'static [AiObjectModelTypeSpec] {
     AI_OBJECT_MODEL_TYPE_SPECS
+}
+
+/// Return history subtree names that map into the publish AI object model.
+pub fn ai_history_object_type_specs() -> &'static [AiHistoryObjectTypeSpec] {
+    AI_HISTORY_OBJECT_TYPE_SPECS
 }
 
 /// Inputs needed to build the AI publish artefact set for one revision.
@@ -184,6 +293,16 @@ pub struct AiExportRequest {
     pub redaction_rules_version: String,
     pub associated_ids: AiBundleAssociatedIds,
     pub objects: Vec<PublishAiObject>,
+}
+
+/// Inputs needed to convert local AI history blobs into publish envelopes.
+#[derive(Clone, Debug)]
+pub struct HistoryAiExportRequest {
+    pub site_id: String,
+    pub revision_oid: String,
+    pub source_ref: String,
+    pub redaction_mode: RedactionMode,
+    pub redaction_rules_version: String,
 }
 
 /// Planned R2/D1 outputs for one revision's AI object model.
@@ -259,6 +378,120 @@ pub enum AiExportError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to list AI history objects for {history_type}: {message}")]
+    ListHistoryObjects {
+        history_type: &'static str,
+        message: String,
+    },
+    #[error("failed to read AI history object {history_type}/{object_id}: {message}")]
+    ReadHistoryObject {
+        history_type: &'static str,
+        object_id: String,
+        message: String,
+    },
+    #[error("AI history object {history_type}/{object_id} is {actual_type}, expected blob")]
+    HistoryObjectNotBlob {
+        history_type: &'static str,
+        object_id: String,
+        actual_type: String,
+    },
+    #[error("failed to parse AI history object {history_type}/{object_id}: {source}")]
+    ParseHistoryObject {
+        history_type: &'static str,
+        object_id: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// Convert the current AI history branch into redacted publish envelopes.
+pub async fn collect_publish_ai_objects_from_history<S>(
+    history: &HistoryManager,
+    storage: &S,
+    request: HistoryAiExportRequest,
+) -> Result<Vec<PublishAiObject>, AiExportError>
+where
+    S: Storage + ?Sized,
+{
+    let mut objects = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for spec in AI_HISTORY_OBJECT_TYPE_SPECS {
+        let history_objects = history
+            .list_objects(spec.history_type)
+            .await
+            .map_err(|source| AiExportError::ListHistoryObjects {
+                history_type: spec.history_type,
+                message: source.to_string(),
+            })?;
+
+        for (object_id, hash) in history_objects {
+            let key = (spec.object_type.to_string(), object_id.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+
+            let (data, object_type) =
+                storage
+                    .get(&hash)
+                    .await
+                    .map_err(|source| AiExportError::ReadHistoryObject {
+                        history_type: spec.history_type,
+                        object_id: object_id.clone(),
+                        message: source.to_string(),
+                    })?;
+            if object_type != ObjectType::Blob {
+                return Err(AiExportError::HistoryObjectNotBlob {
+                    history_type: spec.history_type,
+                    object_id,
+                    actual_type: object_type.to_string(),
+                });
+            }
+
+            let payload = serde_json::from_slice(&data).map_err(|source| {
+                AiExportError::ParseHistoryObject {
+                    history_type: spec.history_type,
+                    object_id: object_id.clone(),
+                    source,
+                }
+            })?;
+            let (payload, removed_fields) = redact_history_payload(payload, request.redaction_mode);
+
+            objects.push(PublishAiObject {
+                schema_version: PUBLISH_SCHEMA_VERSION,
+                site_id: request.site_id.clone(),
+                revision_oid: request.revision_oid.clone(),
+                object_type: spec.object_type.to_string(),
+                object_id: object_id.clone(),
+                layer: spec.layer,
+                source_refs: vec![
+                    request.source_ref.clone(),
+                    format!("history/{}/{}@{}", spec.history_type, object_id, hash),
+                ],
+                relationships: Vec::new(),
+                payload,
+                redaction: AiObjectRedaction {
+                    mode: request.redaction_mode,
+                    rules_version: request.redaction_rules_version.clone(),
+                },
+                removed_fields,
+            });
+        }
+    }
+
+    objects.sort_by(|left, right| {
+        (
+            left.layer,
+            left.object_type.as_str(),
+            left.object_id.as_str(),
+        )
+            .cmp(&(
+                right.layer,
+                right.object_type.as_str(),
+                right.object_id.as_str(),
+            ))
+    });
+    Ok(objects)
 }
 
 /// Build index, graph and bundle artefacts from redacted AI objects.
@@ -606,4 +839,72 @@ fn sort_index_values(indexes: &mut AiBundleIndexes) {
             values.dedup();
         }
     }
+}
+
+fn redact_history_payload(
+    mut payload: serde_json::Value,
+    mode: RedactionMode,
+) -> (serde_json::Value, Vec<String>) {
+    let mut removed_fields = Vec::new();
+    redact_history_value(&mut payload, mode, "payload", &mut removed_fields);
+    removed_fields.sort();
+    removed_fields.dedup();
+    (payload, removed_fields)
+}
+
+fn redact_history_value(
+    value: &mut serde_json::Value,
+    mode: RedactionMode,
+    path: &str,
+    removed_fields: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                let child_path = format!("{path}.{key}");
+                if should_redact_history_key(&key, mode) {
+                    object.remove(&key);
+                    removed_fields.push(child_path);
+                } else if let Some(child) = object.get_mut(&key) {
+                    redact_history_value(child, mode, &child_path, removed_fields);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_history_value(child, mode, path, removed_fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn should_redact_history_key(key: &str, mode: RedactionMode) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    let default_sensitive = matches!(
+        normalized.as_str(),
+        "absoluteworkspacepath"
+            | "providerrawrequest"
+            | "providerrawresponse"
+            | "providerrawtranscript"
+    );
+    if default_sensitive {
+        return true;
+    }
+    matches!(mode, RedactionMode::Strict)
+        && (normalized.contains("prompt")
+            || normalized.contains("toolpayload")
+            || normalized.contains("providerdetail")
+            || normalized.contains("providerrequest")
+            || normalized.contains("providerresponse")
+            || normalized.contains("providertranscript")
+            || normalized.contains("workspacepath")
+            || normalized == "path"
+            || normalized.ends_with("path"))
 }
