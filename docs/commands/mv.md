@@ -101,6 +101,70 @@ Checking rename of 'old.rs' to 'new.rs'
 Renaming old.rs to new.rs
 ```
 
+Global `--quiet` suppresses dry-run and verbose human output while keeping
+warnings and errors on stderr.
+
+## Structured Output
+
+`libra mv` supports the global `--json` and `--machine` flags on successful moves.
+
+- `--json` writes one success envelope to `stdout`
+- `--machine` writes the same schema as compact single-line JSON
+- `stderr` stays clean on success
+- dry-run output reports the planned move pairs without changing the filesystem or index
+
+Example:
+
+```json
+{
+  "ok": true,
+  "command": "mv",
+  "data": {
+    "moves": [
+      {
+        "source": "old.rs",
+        "destination": "new.rs"
+      }
+    ],
+    "index_updates": [
+      {
+        "source": "old.rs",
+        "destination": "new.rs"
+      }
+    ],
+    "dry_run": false,
+    "forced": false,
+    "verbose": false
+  }
+}
+```
+
+Dry-run:
+
+```json
+{
+  "ok": true,
+  "command": "mv",
+  "data": {
+    "moves": [
+      {
+        "source": "old.rs",
+        "destination": "new.rs"
+      }
+    ],
+    "index_updates": [
+      {
+        "source": "old.rs",
+        "destination": "new.rs"
+      }
+    ],
+    "dry_run": true,
+    "forced": false,
+    "verbose": false
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why paths-based instead of explicit `--source` / `--dest`?
@@ -138,6 +202,7 @@ Libra provides an explicit `mv` command (like Git) because its index-based model
 | Verbose | `-v` / `--verbose` | `-v` / `--verbose` | N/A |
 | Dry run | `-n` / `--dry-run` | `-n` / `--dry-run` | N/A |
 | Force overwrite | `-f` / `--force` | `-f` / `--force` | N/A |
+| Structured JSON output | `--json` / `--machine` | N/A | N/A |
 | Skip errors | Not supported | `-k` | N/A |
 | Sparse checkout | Not supported | `--sparse` | N/A |
 

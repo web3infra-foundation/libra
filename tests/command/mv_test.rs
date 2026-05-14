@@ -289,6 +289,104 @@ async fn test_mv_dry_run_output_matches_command_text() {
 
 #[tokio::test]
 #[serial]
+/// Emits a structured success envelope for dry-run moves and leaves disk/index unchanged.
+async fn test_mv_json_dry_run_outputs_plan_without_moving_file() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("dry_json.txt", "d").await;
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "mv",
+            "--dry-run",
+            "dry_json.txt",
+            "dry_json_new.txt",
+        ],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "mv --json --dry-run");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "json dry-run success should keep stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["command"], "mv");
+    assert_eq!(value["data"]["dry_run"], true);
+    assert_eq!(value["data"]["forced"], false);
+    assert_eq!(value["data"]["verbose"], false);
+    assert_eq!(value["data"]["moves"][0]["source"], "dry_json.txt");
+    assert_eq!(value["data"]["moves"][0]["destination"], "dry_json_new.txt");
+    assert_eq!(value["data"]["index_updates"][0]["source"], "dry_json.txt");
+    assert_eq!(
+        value["data"]["index_updates"][0]["destination"],
+        "dry_json_new.txt"
+    );
+
+    assert!(temp_path.path().join("dry_json.txt").exists());
+    assert!(!temp_path.path().join("dry_json_new.txt").exists());
+    let index = Index::load(path::index()).unwrap();
+    assert!(index.tracked("dry_json.txt", 0));
+    assert!(!index.tracked("dry_json_new.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
+/// Emits compact single-line structured output for machine-mode successful moves.
+async fn test_mv_machine_success_outputs_single_line_json() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    stage_file("machine.txt", "m").await;
+
+    let output = run_libra_command(
+        &["--machine", "mv", "machine.txt", "machine_new.txt"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "mv --machine");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "machine success should keep stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one JSON line, got: {stdout}"
+    );
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["command"], "mv");
+    assert_eq!(value["data"]["dry_run"], false);
+    assert_eq!(value["data"]["forced"], false);
+    assert_eq!(value["data"]["verbose"], false);
+    assert_eq!(value["data"]["moves"][0]["source"], "machine.txt");
+    assert_eq!(value["data"]["moves"][0]["destination"], "machine_new.txt");
+    assert_eq!(value["data"]["index_updates"][0]["source"], "machine.txt");
+    assert_eq!(
+        value["data"]["index_updates"][0]["destination"],
+        "machine_new.txt"
+    );
+
+    assert!(!temp_path.path().join("machine.txt").exists());
+    assert!(temp_path.path().join("machine_new.txt").exists());
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("machine.txt", 0));
+    assert!(index.tracked("machine_new.txt", 0));
+}
+
+#[tokio::test]
+#[serial]
 /// Prints usage text when `mv` is called without enough arguments.
 async fn test_mv_usage_output_matches_command_text() {
     let temp_path = tempdir().unwrap();

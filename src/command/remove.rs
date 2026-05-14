@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use clap::Parser;
 use colored::Colorize;
 use git_internal::{errors::GitError, internal::index::Index};
+use serde::Serialize;
 use tokio::fs;
 
 use crate::{
     command::status::{changes_to_be_committed_safe, changes_to_be_staged},
     utils::{
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path,
         path_ext::PathExt,
         util,
@@ -78,6 +79,30 @@ struct DiffStatus {
     index_commit_workingtree: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct RemoveOutput {
+    pathspecs: Vec<String>,
+    paths: Vec<RemovePathOutput>,
+    directories: Vec<RemoveDirectoryOutput>,
+    cached: bool,
+    recursive: bool,
+    forced: bool,
+    dry_run: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RemovePathOutput {
+    path: String,
+    removed_from_index: bool,
+    removed_from_disk: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoveDirectoryOutput {
+    path: String,
+    removed_from_disk: bool,
+}
+
 pub async fn execute(args: RemoveArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -87,8 +112,13 @@ pub async fn execute(args: RemoveArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Removes paths from the index and optionally from the
 /// working tree, supporting recursive and cache-only modes.
-pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: RemoveArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let result = run_remove(args).await?;
+    render_remove_output(&result, output)
+}
+
+async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
     let idx_file = path::index();
     let mut remove_list = Vec::new();
     let mut remove_dir_list = Vec::new();
@@ -293,8 +323,23 @@ pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult
         }
     }
 
+    let paths = remove_list
+        .iter()
+        .map(|path| RemovePathOutput {
+            path: path.clone(),
+            removed_from_index: !args.dry_run,
+            removed_from_disk: !args.cached && !args.dry_run,
+        })
+        .collect();
+    let directories = remove_dir_list
+        .iter()
+        .map(|path| RemoveDirectoryOutput {
+            path: path.clone(),
+            removed_from_disk: args.recursive && !args.cached && !args.dry_run,
+        })
+        .collect();
+
     for path_str in remove_list.iter() {
-        println!("rm '{}'", path_str.bright_yellow());
         if !args.dry_run {
             let relative_path = PathBuf::from(&path_str).to_workdir().to_string_or_panic();
             index.remove(&relative_path, 0);
@@ -333,6 +378,28 @@ pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult
 
     if index.save(&idx_file).is_err() {
         return Err(CliError::fatal("failed to save index"));
+    }
+
+    Ok(RemoveOutput {
+        pathspecs,
+        paths,
+        directories,
+        cached: args.cached,
+        recursive: args.recursive,
+        forced: args.force,
+        dry_run: args.dry_run,
+    })
+}
+
+fn render_remove_output(result: &RemoveOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("rm", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    for path in &result.paths {
+        println!("rm '{}'", path.path.bright_yellow());
     }
     Ok(())
 }
