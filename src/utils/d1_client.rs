@@ -1255,6 +1255,29 @@ impl D1Client {
         Ok(())
     }
 
+    /// List AI object rows for one published revision.
+    pub async fn list_publish_ai_objects(
+        &self,
+        site_id: &str,
+        revision_oid: &str,
+    ) -> Result<Vec<PublishAiObjectRow>, D1Error> {
+        let sql = r#"
+            SELECT site_id, revision_oid, object_type, object_id, layer,
+                   r2_key, redaction_mode, payload_sha256, schema_version, created_at
+              FROM publish_ai_objects
+             WHERE site_id = ?1 AND revision_oid = ?2
+             ORDER BY layer, object_type, object_id
+        "#;
+        self.query(
+            sql,
+            Some(vec![
+                serde_json::json!(site_id),
+                serde_json::json!(revision_oid),
+            ]),
+        )
+        .await
+    }
+
     /// Insert or update a `publish_ai_versions` row.
     pub async fn upsert_publish_ai_version(
         &self,

@@ -19,10 +19,19 @@ use git_internal::internal::object::{
     tree::{Tree, TreeItem, TreeItemMode},
 };
 use libra::{
-    internal::model::reference,
+    internal::{
+        model::reference,
+        publish::{
+            contract::{
+                AiObjectLayer, AiObjectRedaction, PUBLISH_SCHEMA_VERSION, PublishAiObject,
+                RedactionMode,
+            },
+            snapshot::sha256_hex,
+        },
+    },
     utils::{
         pager::LIBRA_TEST_ENV,
-        storage::{Storage, remote::RemoteStorage},
+        storage::{Storage, publish_storage::PublishStorage, remote::RemoteStorage},
     },
 };
 use object_store::local::LocalFileSystem;
@@ -306,6 +315,7 @@ fn clone_cloud_mock_d1_and_r2_restores_slug_tag_and_repo_id_sources() {
     );
     assert_rev_parse(&default_dest, &probe_home, "HEAD", &fixture.commit_oid);
     assert_rev_parse(&default_dest, &probe_home, "--abbrev-ref", "main");
+    assert_cloud_clone_ai_history(&default_dest, &probe_home);
 
     let tag_dest = cwd.path().join("restored-tag");
     let output = run_libra_with_env(
@@ -489,10 +499,27 @@ fn create_cloud_clone_cli_fixture() -> CloudCloneCliFixture {
             .put_metadata(&metadata)
             .await
             .expect("metadata should write to mock R2");
+        let publish_store = PublishStorage::new(
+            Arc::new(
+                LocalFileSystem::new_with_prefix(r2_root.path())
+                    .expect("local mock R2 root should be valid"),
+            ),
+            "repo_456",
+            "site_123",
+        )
+        .expect("publish storage should build for mock R2");
+        publish_store
+            .put_json(
+                &mock_ai_object_relative_key(&commit.id.to_string()),
+                &mock_publish_ai_object(&commit.id.to_string()),
+            )
+            .await
+            .expect("AI object should write to mock R2");
     });
 
     let data = MockD1Data {
         commit_oid: commit.id.to_string(),
+        ai_objects: vec![mock_ai_object_row(&commit.id.to_string())],
         objects: vec![
             mock_object_row(&blob.id.to_string(), "blob", blob.to_data().unwrap().len()),
             mock_object_row(&tree.id.to_string(), "tree", tree.to_data().unwrap().len()),
@@ -537,6 +564,7 @@ fn mock_object_row(o_id: &str, o_type: &str, o_size: usize) -> Value {
 #[derive(Clone)]
 struct MockD1Data {
     commit_oid: String,
+    ai_objects: Vec<Value>,
     objects: Vec<Value>,
 }
 
@@ -689,7 +717,16 @@ fn mock_d1_rows(sql: &str, params: &[Value], data: &MockD1Data) -> Result<Vec<Va
         && param_str(params, 0) == Some("site_123")
         && param_str(params, 1) == Some(data.commit_oid.as_str())
     {
-        return Ok(vec![mock_publish_revision_row(&data.commit_oid)]);
+        return Ok(vec![mock_publish_revision_row(
+            &data.commit_oid,
+            data.ai_objects.len() as i64,
+        )]);
+    }
+    if sql.contains("FROM publish_ai_objects")
+        && param_str(params, 0) == Some("site_123")
+        && param_str(params, 1) == Some(data.commit_oid.as_str())
+    {
+        return Ok(data.ai_objects.clone());
     }
     if sql.contains("FROM object_index WHERE repo_id = ?1") {
         return Ok(if param_str(params, 0) == Some("repo_456") {
@@ -748,7 +785,7 @@ fn mock_publish_ref_row(
     })
 }
 
-fn mock_publish_revision_row(revision_oid: &str) -> Value {
+fn mock_publish_revision_row(revision_oid: &str, ai_object_count: i64) -> Value {
     serde_json::json!({
         "site_id": "site_123",
         "revision_oid": revision_oid,
@@ -756,8 +793,8 @@ fn mock_publish_revision_row(revision_oid: &str) -> Value {
         "code_manifest_key": null,
         "ai_index_key": null,
         "file_count": 1,
-        "ai_object_count": 0,
-        "ai_bundle_count": 0,
+        "ai_object_count": ai_object_count,
+        "ai_bundle_count": if ai_object_count > 0 { 1 } else { 0 },
         "redaction_mode": "default",
         "redaction_rules_version": "1",
         "sync_run_id": "sync_123",
@@ -765,6 +802,74 @@ fn mock_publish_revision_row(revision_oid: &str) -> Value {
         "created_at": "2026-05-13T00:00:00Z",
         "updated_at": "2026-05-13T00:00:00Z"
     })
+}
+
+fn assert_cloud_clone_ai_history(repo: &Path, home: &Path) {
+    let output = run_libra_with_home(&["cat-file", "--ai-list-types"], repo, home);
+    assert!(
+        output.status.success(),
+        "cat-file --ai-list-types failed after cloud clone: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .filter_map(|line| line.split_once('\t').map(|(object_type, _)| object_type))
+            .any(|object_type| object_type == "publish_ai_intent"),
+        "cloud clone should restore publish AI objects into local AI history, got: {stdout}"
+    );
+}
+
+fn mock_ai_object_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/objects/snapshot/Intent/intent-1.json")
+}
+
+fn mock_ai_object_r2_key(revision_oid: &str) -> String {
+    format!(
+        "repo_456/publish/sites/site_123/{}",
+        mock_ai_object_relative_key(revision_oid)
+    )
+}
+
+fn mock_ai_object_row(revision_oid: &str) -> Value {
+    let object = mock_publish_ai_object(revision_oid);
+    let bytes = serde_json::to_vec(&object).expect("AI object should serialize");
+    serde_json::json!({
+        "site_id": "site_123",
+        "revision_oid": revision_oid,
+        "object_type": "Intent",
+        "object_id": "intent-1",
+        "layer": "snapshot",
+        "r2_key": mock_ai_object_r2_key(revision_oid),
+        "redaction_mode": "default",
+        "payload_sha256": sha256_hex(&bytes),
+        "schema_version": 1,
+        "created_at": "2026-05-13T00:00:00Z"
+    })
+}
+
+fn mock_publish_ai_object(revision_oid: &str) -> PublishAiObject {
+    PublishAiObject {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        site_id: "site_123".to_string(),
+        revision_oid: revision_oid.to_string(),
+        object_type: "Intent".to_string(),
+        object_id: "intent-1".to_string(),
+        layer: AiObjectLayer::Snapshot,
+        source_refs: vec!["refs/heads/main".to_string()],
+        relationships: Vec::new(),
+        payload: serde_json::json!({
+            "id": "intent-1",
+            "title": "ship cloud clone AI restore",
+            "status": "accepted"
+        }),
+        redaction: AiObjectRedaction {
+            mode: RedactionMode::Default,
+            rules_version: "1".to_string(),
+        },
+        removed_fields: Vec::new(),
+    }
 }
 
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {

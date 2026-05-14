@@ -18,7 +18,7 @@ use git_internal::{
     hash::{ObjectHash, get_hash_kind},
 };
 use object_store::{aws::AmazonS3Builder, local::LocalFileSystem};
-use sea_orm::DatabaseTransaction;
+use sea_orm::{DatabaseConnection, DatabaseTransaction};
 use serde::Serialize;
 use url::Url;
 
@@ -31,6 +31,7 @@ use crate::{
         restore::{RestoreArgs, RestoreError},
     },
     internal::{
+        ai::history::HistoryManager,
         branch::{self, Branch},
         config::{
             ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value_decrypted,
@@ -39,19 +40,26 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::DiscoveryResult,
+        publish::{
+            contract::{AiObjectLayer, PublishAiObject, RedactionMode},
+            snapshot::sha256_hex,
+        },
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
         d1_client::{
-            D1Client, ObjectIndexRow, PublishRefRow, PublishRevisionRow, PublishSiteRow,
-            RepositoryRow,
+            D1Client, ObjectIndexRow, PublishAiObjectRow, PublishRefRow, PublishRevisionRow,
+            PublishSiteRow, RepositoryRow,
         },
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
         pager::LIBRA_TEST_ENV,
         path,
-        storage::{Storage, local::LocalStorage, remote::RemoteStorage},
+        storage::{
+            Storage, local::LocalStorage, publish_storage::PublishStorage, remote::RemoteStorage,
+        },
+        storage_ext::StorageExt,
         util,
     },
 };
@@ -327,6 +335,14 @@ pub enum CloneError {
         "failed to restore refs metadata for libra+cloud site {target} in clone domain '{domain}': {message}"
     )]
     CloudPublishRefsMetadataRestoreFailed {
+        domain: String,
+        target: String,
+        message: String,
+    },
+    #[error(
+        "failed to restore AI object model for libra+cloud site {target} in clone domain '{domain}': {message}"
+    )]
+    CloudPublishAiRestoreFailed {
         domain: String,
         target: String,
         message: String,
@@ -671,6 +687,16 @@ impl From<CloneError> for CliError {
                 .with_hint(
                     "run 'libra cloud sync --force' so refs metadata is available in R2.",
                 ),
+            CloneError::CloudPublishAiRestoreFailed {
+                ref domain,
+                ref target,
+                ref message,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("cloud_target", target.clone())
+                .with_detail("restore_error", message.clone())
+                .with_hint("rerun 'libra publish sync' so AI object model R2/D1 rows agree."),
             CloneError::CloudPublishCheckoutSetupFailed {
                 ref domain,
                 ref target,
@@ -1343,6 +1369,8 @@ async fn clone_cloud_publish_into_destination(
                 message,
             },
         )?;
+    restore_cloud_publish_ai_objects(source, restore_plan, r2_storage, &local_storage, &db_conn)
+        .await?;
 
     configure_cloud_publish_checkout(source, restore_plan, &args.remote_repo).await?;
 
@@ -1433,6 +1461,7 @@ struct CloudPublishRestorePlan {
     checkout: CloudPublishCheckoutTarget,
     revision: PublishRevisionRow,
     object_indexes: Vec<ObjectIndexRow>,
+    ai_objects: Vec<PublishAiObjectRow>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1481,6 +1510,168 @@ fn cloud_object_restore_failure_message(warnings: &[String]) -> String {
     } else {
         warnings.join("; ")
     }
+}
+
+async fn restore_cloud_publish_ai_objects(
+    source: &CloudPublishSource,
+    restore_plan: &CloudPublishRestorePlan,
+    r2_storage: &RemoteStorage,
+    local_storage: &LocalStorage,
+    db_conn: &DatabaseConnection,
+) -> Result<(), CloneError> {
+    if restore_plan.ai_objects.is_empty() {
+        return Ok(());
+    }
+
+    let publish_storage = PublishStorage::new(
+        r2_storage.object_store(),
+        &restore_plan.site.repo_id,
+        &restore_plan.site.site_id,
+    )
+    .map_err(|source_error| CloneError::CloudPublishAiRestoreFailed {
+        domain: source.clone_domain.clone(),
+        target: site_target_label(source, &restore_plan.site),
+        message: source_error.to_string(),
+    })?;
+    let history = HistoryManager::new(
+        Arc::new(local_storage.clone()),
+        util::storage_path(),
+        Arc::new(db_conn.clone()),
+    );
+    let r2_prefix = format!(
+        "{}/publish/sites/{}/",
+        restore_plan.site.repo_id, restore_plan.site.site_id
+    );
+
+    for row in &restore_plan.ai_objects {
+        let relative_key = row.r2_key.strip_prefix(&r2_prefix).ok_or_else(|| {
+            CloneError::CloudPublishAiRestoreFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!(
+                    "AI object row {}/{} has R2 key outside site namespace: {}",
+                    row.object_type, row.object_id, row.r2_key
+                ),
+            }
+        })?;
+        let object: PublishAiObject =
+            publish_storage
+                .get_json(relative_key)
+                .await
+                .map_err(|source_error| CloneError::CloudPublishAiRestoreFailed {
+                    domain: source.clone_domain.clone(),
+                    target: site_target_label(source, &restore_plan.site),
+                    message: source_error.to_string(),
+                })?;
+        validate_cloud_publish_ai_object_row(source, restore_plan, row, &object)?;
+
+        let hash = local_storage
+            .put_json(&object)
+            .await
+            .map_err(|source_error| CloneError::CloudPublishAiRestoreFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!(
+                    "failed to store AI object {}/{} locally: {source_error}",
+                    row.object_type, row.object_id
+                ),
+            })?;
+        history
+            .append(
+                &cloud_publish_ai_history_type(&row.object_type),
+                &row.object_id,
+                hash,
+            )
+            .await
+            .map_err(|source_error| CloneError::CloudPublishAiRestoreFailed {
+                domain: source.clone_domain.clone(),
+                target: site_target_label(source, &restore_plan.site),
+                message: format!(
+                    "failed to index AI object {}/{} locally: {source_error}",
+                    row.object_type, row.object_id
+                ),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn validate_cloud_publish_ai_object_row(
+    source: &CloudPublishSource,
+    restore_plan: &CloudPublishRestorePlan,
+    row: &PublishAiObjectRow,
+    object: &PublishAiObject,
+) -> Result<(), CloneError> {
+    let object_schema_version = i64::from(object.schema_version);
+    let mismatch = object.site_id != row.site_id
+        || object.revision_oid != row.revision_oid
+        || object.object_type != row.object_type
+        || object.object_id != row.object_id
+        || cloud_publish_ai_layer_label(object.layer) != row.layer
+        || cloud_publish_ai_redaction_mode_label(object.redaction.mode) != row.redaction_mode
+        || object_schema_version != row.schema_version;
+    if mismatch {
+        return Err(CloneError::CloudPublishAiRestoreFailed {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, &restore_plan.site),
+            message: format!(
+                "AI object row {}/{} does not match R2 object envelope",
+                row.object_type, row.object_id
+            ),
+        });
+    }
+    let object_bytes = serde_json::to_vec(object).map_err(|source_error| {
+        CloneError::CloudPublishAiRestoreFailed {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, &restore_plan.site),
+            message: format!(
+                "failed to verify AI object {}/{} checksum: {source_error}",
+                row.object_type, row.object_id
+            ),
+        }
+    })?;
+    let actual_sha256 = sha256_hex(&object_bytes);
+    if actual_sha256 != row.payload_sha256 {
+        return Err(CloneError::CloudPublishAiRestoreFailed {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, &restore_plan.site),
+            message: format!(
+                "AI object row {}/{} payload checksum does not match R2 object",
+                row.object_type, row.object_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn cloud_publish_ai_layer_label(layer: AiObjectLayer) -> &'static str {
+    match layer {
+        AiObjectLayer::Snapshot => "snapshot",
+        AiObjectLayer::Event => "event",
+        AiObjectLayer::Projection => "projection",
+    }
+}
+
+fn cloud_publish_ai_redaction_mode_label(mode: RedactionMode) -> &'static str {
+    match mode {
+        RedactionMode::Default => "default",
+        RedactionMode::Strict => "strict",
+    }
+}
+
+fn cloud_publish_ai_history_type(object_type: &str) -> String {
+    let mut out = String::from("publish_ai");
+    for ch in object_type.chars() {
+        if ch.is_ascii_uppercase() {
+            out.push('_');
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }
 
 async fn configure_cloud_publish_checkout(
@@ -1807,6 +1998,23 @@ async fn resolve_cloud_publish_restore_plan(
             revision_oid: checkout.revision_oid.clone(),
         })?;
 
+    let ai_objects = if revision.ai_object_count > 0 {
+        d1_client
+            .list_publish_ai_objects(&site.site_id, &revision.revision_oid)
+            .await
+            .map_err(
+                |source_error| CloneError::CloudPublishMetadataLookupFailed {
+                    domain: source.clone_domain.clone(),
+                    site_id: site.site_id.clone(),
+                    operation: "publish_ai_objects lookup",
+                    code: source_error.code,
+                    message: source_error.message,
+                },
+            )?
+    } else {
+        Vec::new()
+    };
+
     let object_indexes =
         d1_client
             .get_object_indexes(&site.repo_id)
@@ -1837,6 +2045,7 @@ async fn resolve_cloud_publish_restore_plan(
         checkout,
         revision,
         object_indexes,
+        ai_objects,
     })
 }
 
@@ -3282,6 +3491,7 @@ mod tests {
                     commit.to_data().unwrap().len(),
                 ),
             ],
+            ai_objects: Vec::new(),
         };
 
         (plan, remote, commit.id)

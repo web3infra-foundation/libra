@@ -93,9 +93,9 @@ libra clone "libra+cloud://<clone-domain>/<slug>?revision=<oid|latest>" [LOCAL_P
 
 1. 在 `execute_clone()` 的 remote discovery 前解析 `remote_repo`；命中 `libra+cloud://` 时进入 Cloudflare clone 分支，普通 Git/SSH/本地路径继续走现有 fetch discovery。
 2. 从本地 `clone_domains.<clone-domain>` Cloudflare 配置或 vault 解析 D1/R2 访问参数；缺少配置时返回配置类错误和 actionable hint。
-3. 通过 D1 解析 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 以及 `ref/revision`，读取 `repositories`、`object_index`、`publish_refs`、refs metadata 和完整 AI object model 索引。当前 v0.17.125 已完成 repository、publish refs、default/latest/指定 revision、published revision 和 object_index 基线解析；v0.17.127 已补 R2 Git object 存在性校验。
+3. 通过 D1 解析 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 以及 `ref/revision`，读取 `repositories`、`object_index`、`publish_refs`、refs metadata 和完整 AI object model 索引。当前 v0.17.125 已完成 repository、publish refs、default/latest/指定 revision、published revision 和 object_index 基线解析；v0.17.127 已补 R2 Git object 存在性校验；v0.17.141 已读取 `publish_ai_objects` 并恢复 R2 AI object envelope 到本地 AI history 基线。
 4. 校验并读取 R2 中完整 Git object 集合。publish 的代码预览 snapshot 只能用于页面展示，不能作为 clone 的源码真相；对象缺失必须失败并提示先运行 `libra cloud sync` 或重新发布完整数据。
-5. 复用 `run_init()` 初始化本地仓库，再按 object_index/refs metadata 写入对象、refs、HEAD 和 config。当前 v0.17.130 已完成 resolved-plan 本地 restore transaction；完整 mock D1/R2 CLI 注入测试和 AI object model 本地恢复仍归 publish Phase 5/8 后续切片。
+5. 复用 `run_init()` 初始化本地仓库，再按 object_index/refs metadata 写入对象、refs、HEAD 和 config。当前 v0.17.130 已完成 resolved-plan 本地 restore transaction；v0.17.134 已完成 mock D1/R2 CLI 注入测试；v0.17.141 已恢复 AI object envelope history 基线，完整 AI version/projection/query index 本地物化仍归 publish Phase 5/8 后续切片。
 6. non-bare clone 必须完成 checkout 后才返回成功；checkout 失败进入 `CheckoutFailed` 路径并清理本批创建的目标目录。
 7. 如果 D1/R2 中有 AI object model 数据，按 [AI Object Model Reference](../agent/ai-object-model-reference.md) 恢复 snapshot/event/projection objects、关系图和本地 AI 版本索引；不要从已 redaction 的 publish payload 反推被移除字段。
 
