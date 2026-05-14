@@ -10,7 +10,7 @@ C5（Audit P2）
 - [`src/command/worktree.rs`](../../../src/command/worktree.rs) 已实现 `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair`，以及 Unix 下的 `umount` 子命令。
 - `worktree remove` 当前默认**不删除磁盘目录**，继续保持非破坏默认。
 - `WorktreeSubcommand::Remove { path, delete_dir }` 已暴露 `--delete-dir`；显式传入后会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除。
-- 第 31 批"mv / rm / worktree 结构化输出"已在 `mv` / `rm` / worktree `list` / `remove` 成功路径上启动；当前 `mv` / `rm` 已有成功 JSON / machine schema，`worktree list` 已有 `worktree.list` JSON / machine schema，`worktree remove` 已有 `worktree.remove` JSON / machine success schema，其他 worktree destructive 子命令与 `WorktreeError` typed enum 仍待后续切片。
+- 第 31 批"mv / rm / worktree 结构化输出"已在 `mv` / `rm` / worktree 常用成功路径上启动；当前 `mv` / `rm` 已有成功 JSON / machine schema，worktree `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair` 已有成功 JSON / machine schema，FUSE `umount` 与 `WorktreeError` typed enum 仍待后续切片。
 - [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，并包含 `--delete-dir` on/off 与 dirty 拒绝路径。
 - [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) 已固定对外兼容契约：默认保留目录，`--delete-dir` 删除 clean 目录，dirty 时拒绝并保留 registry/目录。
 
@@ -138,6 +138,7 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 - [x] (v0.17.162) `worktree list` JSON / machine schema 已落地并由 `test_worktree_list_json_outputs_structured_entries`、`test_worktree_list_machine_outputs_single_json_line` 覆盖。
 - [x] (v0.17.163) dirty `--delete-dir` 拒绝由 `test_worktree_remove_with_delete_dir_dirty_path_is_rejected` 覆盖，断言 `LBR-CONFLICT-002`、目录保留和 registry 保留。
 - [x] (v0.17.164) `worktree remove` 成功路径 JSON / machine schema 已落地并由 `test_worktree_remove_json_reports_kept_directory`、`test_worktree_remove_machine_reports_deleted_directory` 覆盖，断言 canonical `path`、`registry_removed` 与 `disk_directory_deleted`。
+- [x] (v0.17.166) worktree `add` / `lock` / `unlock` / `move` / `prune` / `repair` 成功路径 JSON / machine schema 已落地，命令文档已补每个 envelope 示例。
 
 ## 风险与缓解
 

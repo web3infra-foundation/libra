@@ -41,6 +41,7 @@ Create a new linked worktree at the given filesystem path.
 ```bash
 # Create a new worktree for a feature branch
 libra worktree add ../my-feature
+libra --json worktree add ../my-feature
 
 # Create using absolute path
 libra worktree add /tmp/libra-test
@@ -75,6 +76,7 @@ libra worktree lock ../my-feature
 
 # Lock with a reason
 libra worktree lock ../my-feature --reason "long-running experiment"
+libra --json worktree lock ../my-feature --reason "long-running experiment"
 ```
 
 ### Subcommand: `unlock`
@@ -87,6 +89,7 @@ Remove the lock from a previously locked worktree. Idempotent: unlocking an alre
 
 ```bash
 libra worktree unlock ../my-feature
+libra --machine worktree unlock ../my-feature
 ```
 
 ### Subcommand: `move`
@@ -100,6 +103,7 @@ Move or rename an existing linked worktree. The directory is renamed on disk and
 
 ```bash
 libra worktree move ../my-feature ../my-feature-v2
+libra --json worktree move ../my-feature ../my-feature-v2
 ```
 
 ### Subcommand: `prune`
@@ -108,6 +112,7 @@ Remove worktrees from the registry whose directories no longer exist on disk. Th
 
 ```bash
 libra worktree prune
+libra --machine worktree prune
 ```
 
 ### Subcommand: `remove`
@@ -169,6 +174,7 @@ Repair worktree metadata by removing duplicate entries (same canonical path) and
 
 ```bash
 libra worktree repair
+libra --json worktree repair
 ```
 
 ## Common Commands
@@ -239,7 +245,24 @@ No worktrees to prune
 
 ## JSON Output
 
-**`worktree list`** uses the `worktree.list` command envelope:
+`worktree add`, `lock`, `unlock`, `move`, `prune`, `remove`, and `repair`
+use command-specific envelopes. `--machine` emits the same schemas as compact
+single-line JSON.
+
+**`worktree.add`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.add",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "already_exists": false
+  }
+}
+```
+
+**`worktree.list`**:
 
 ```json
 {
@@ -260,7 +283,64 @@ No worktrees to prune
 }
 ```
 
-**`worktree remove`** uses the `worktree.remove` command envelope:
+**`worktree.lock`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.lock",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "locked": true,
+    "lock_reason": "long-running experiment",
+    "changed": true
+  }
+}
+```
+
+**`worktree.unlock`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.unlock",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "locked": false,
+    "changed": true
+  }
+}
+```
+
+**`worktree.move`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.move",
+  "data": {
+    "source": "/Users/alice/projects/my-feature",
+    "destination": "/Users/alice/projects/my-feature-v2",
+    "registry_updated": true,
+    "disk_directory_moved": true
+  }
+}
+```
+
+**`worktree.prune`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.prune",
+  "data": {
+    "pruned": ["/Users/alice/projects/old-experiment"],
+    "pruned_count": 1
+  }
+}
+```
+
+**`worktree.remove`**:
 
 ```json
 {
@@ -270,6 +350,18 @@ No worktrees to prune
     "path": "/Users/alice/projects/my-feature",
     "registry_removed": true,
     "disk_directory_deleted": false
+  }
+}
+```
+
+**`worktree.repair`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.repair",
+  "data": {
+    "changed": true
   }
 }
 ```

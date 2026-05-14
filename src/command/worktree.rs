@@ -145,10 +145,50 @@ struct WorktreeListEntry {
 }
 
 #[derive(Debug, Serialize)]
+struct WorktreeAddOutput {
+    path: String,
+    already_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeLockOutput {
+    path: String,
+    locked: bool,
+    lock_reason: Option<String>,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeUnlockOutput {
+    path: String,
+    locked: bool,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeMoveOutput {
+    source: String,
+    destination: String,
+    registry_updated: bool,
+    disk_directory_moved: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreePruneOutput {
+    pruned: Vec<String>,
+    pruned_count: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct WorktreeRemoveOutput {
     path: String,
     registry_removed: bool,
     disk_directory_deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeRepairOutput {
+    changed: bool,
 }
 
 /// RAII guard that temporarily changes the process current directory.
@@ -201,16 +241,27 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
     }
 
     match command {
-        WorktreeSubcommand::Add { path } => add_worktree(path).await.map_err(worktree_io_error),
+        WorktreeSubcommand::Add { path } => {
+            let result = add_worktree(path).await.map_err(worktree_io_error)?;
+            render_add_worktree(&result, output)
+        }
         WorktreeSubcommand::List => list_worktrees(output),
         WorktreeSubcommand::Lock { path, reason } => {
-            lock_worktree(path, reason).map_err(worktree_io_error)
+            let result = lock_worktree(path, reason).map_err(worktree_io_error)?;
+            render_lock_worktree(&result, output)
         }
-        WorktreeSubcommand::Unlock { path } => unlock_worktree(path).map_err(worktree_io_error),
+        WorktreeSubcommand::Unlock { path } => {
+            let result = unlock_worktree(path).map_err(worktree_io_error)?;
+            render_unlock_worktree(&result, output)
+        }
         WorktreeSubcommand::Move { src, dest } => {
-            move_worktree(src, dest).map_err(worktree_io_error)
+            let result = move_worktree(src, dest).map_err(worktree_io_error)?;
+            render_move_worktree(&result, output)
         }
-        WorktreeSubcommand::Prune => prune_worktrees().map_err(worktree_io_error),
+        WorktreeSubcommand::Prune => {
+            let result = prune_worktrees().map_err(worktree_io_error)?;
+            render_prune_worktrees(&result, output)
+        }
         WorktreeSubcommand::Remove { path, delete_dir } => {
             let result = remove_worktree(path, delete_dir)
                 .await
@@ -221,7 +272,10 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
         WorktreeSubcommand::Umount { path, cleanup } => {
             umount_fuse_path(path, cleanup).map_err(worktree_io_error)
         }
-        WorktreeSubcommand::Repair => repair_worktrees().map_err(worktree_io_error),
+        WorktreeSubcommand::Repair => {
+            let result = repair_worktrees().map_err(worktree_io_error)?;
+            render_repair_worktrees(&result, output)
+        }
     }
 }
 
@@ -477,7 +531,7 @@ fn find_entry<'a>(state: &'a WorktreeState, path: &Path) -> Option<&'a WorktreeE
 /// - creates a `.libra` directory symlink pointing at the shared storage, and
 /// - when `HEAD` exists, populates the new worktree from committed `HEAD`
 ///   content (not staged-only index changes).
-async fn add_worktree(path: String) -> io::Result<()> {
+async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
     let storage = util::storage_path();
     let target = canonicalize(&path)?;
 
@@ -505,8 +559,10 @@ async fn add_worktree(path: String) -> io::Result<()> {
         .iter()
         .any(|w| Path::new(&w.path) == canonical_target)
     {
-        println!("worktree already exists at {}", canonical_target.display());
-        return Ok(());
+        return Ok(WorktreeAddOutput {
+            path: canonical_target.to_string_lossy().to_string(),
+            already_exists: true,
+        });
     }
 
     if target_exists && fs::read_dir(&target)?.next().transpose()?.is_some() {
@@ -578,8 +634,24 @@ async fn add_worktree(path: String) -> io::Result<()> {
         return Err(e);
     }
 
-    println!("{}", canonical_target.display());
+    Ok(WorktreeAddOutput {
+        path: canonical_target.to_string_lossy().to_string(),
+        already_exists: false,
+    })
+}
 
+fn render_add_worktree(result: &WorktreeAddOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.add", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if result.already_exists {
+        println!("worktree already exists at {}", result.path);
+    } else {
+        println!("{}", result.path);
+    }
     Ok(())
 }
 
@@ -659,7 +731,7 @@ fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
 /// Marks the specified worktree entry as locked and persists an optional
 /// human-readable reason. Locking is a state-only operation and does not
 /// alter directories on disk.
-fn lock_worktree(path: String, reason: Option<String>) -> io::Result<()> {
+fn lock_worktree(path: String, reason: Option<String>) -> io::Result<WorktreeLockOutput> {
     let mut state = load_state()?;
     let target = canonicalize(path)?;
     let entry = match find_entry_mut(&mut state, &target) {
@@ -667,11 +739,29 @@ fn lock_worktree(path: String, reason: Option<String>) -> io::Result<()> {
         None => return Err(io::Error::other("no such worktree")),
     };
     if entry.locked {
-        return Ok(());
+        return Ok(WorktreeLockOutput {
+            path: target.to_string_lossy().to_string(),
+            locked: true,
+            lock_reason: entry.lock_reason.clone(),
+            changed: false,
+        });
     }
     entry.locked = true;
     entry.lock_reason = reason;
+    let lock_reason = entry.lock_reason.clone();
     save_state(&state)?;
+    Ok(WorktreeLockOutput {
+        path: target.to_string_lossy().to_string(),
+        locked: true,
+        lock_reason,
+        changed: true,
+    })
+}
+
+fn render_lock_worktree(result: &WorktreeLockOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.lock", result, output);
+    }
     Ok(())
 }
 
@@ -679,7 +769,7 @@ fn lock_worktree(path: String, reason: Option<String>) -> io::Result<()> {
 ///
 /// Clears the lock flag and reason for the specified worktree entry if it is
 /// currently locked. Unlocking is idempotent and leaves the filesystem untouched.
-fn unlock_worktree(path: String) -> io::Result<()> {
+fn unlock_worktree(path: String) -> io::Result<WorktreeUnlockOutput> {
     let mut state = load_state()?;
     let target = canonicalize(path)?;
     let entry = match find_entry_mut(&mut state, &target) {
@@ -687,11 +777,26 @@ fn unlock_worktree(path: String) -> io::Result<()> {
         None => return Err(io::Error::other("no such worktree")),
     };
     if !entry.locked {
-        return Ok(());
+        return Ok(WorktreeUnlockOutput {
+            path: target.to_string_lossy().to_string(),
+            locked: false,
+            changed: false,
+        });
     }
     entry.locked = false;
     entry.lock_reason = None;
     save_state(&state)?;
+    Ok(WorktreeUnlockOutput {
+        path: target.to_string_lossy().to_string(),
+        locked: false,
+        changed: true,
+    })
+}
+
+fn render_unlock_worktree(result: &WorktreeUnlockOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.unlock", result, output);
+    }
     Ok(())
 }
 
@@ -704,7 +809,7 @@ fn unlock_worktree(path: String) -> io::Result<()> {
 /// - updates the registry to point at the new path and saves it, and then
 /// - renames the directory on disk, attempting to roll back registry changes
 ///   if the rename fails.
-fn move_worktree(src: String, dest: String) -> io::Result<()> {
+fn move_worktree(src: String, dest: String) -> io::Result<WorktreeMoveOutput> {
     let mut state = load_state()?;
     let src_path = canonicalize(&src)?;
     let dest_path = canonicalize(&dest)?;
@@ -752,6 +857,18 @@ fn move_worktree(src: String, dest: String) -> io::Result<()> {
         return Err(e);
     }
 
+    Ok(WorktreeMoveOutput {
+        source: src_path.to_string_lossy().to_string(),
+        destination: dest_path.to_string_lossy().to_string(),
+        registry_updated: true,
+        disk_directory_moved: true,
+    })
+}
+
+fn render_move_worktree(result: &WorktreeMoveOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.move", result, output);
+    }
     Ok(())
 }
 
@@ -760,7 +877,7 @@ fn move_worktree(src: String, dest: String) -> io::Result<()> {
 /// Any non-main worktree whose directory no longer exists on disk is removed
 /// from the registry. Before mutating state, the function prints the set of
 /// paths that will be pruned so the user can see what is being cleaned up.
-fn prune_worktrees() -> io::Result<()> {
+fn prune_worktrees() -> io::Result<WorktreePruneOutput> {
     let mut state = load_state()?;
     let to_prune: Vec<_> = state
         .worktrees
@@ -772,23 +889,36 @@ fn prune_worktrees() -> io::Result<()> {
         .map(|w| w.path.clone())
         .collect();
 
-    if to_prune.is_empty() {
+    if !to_prune.is_empty() {
+        state.worktrees.retain(|w| {
+            let path = Path::new(&w.path);
+            path.exists() || w.is_main || w.locked
+        });
+        save_state(&state)?;
+    }
+
+    Ok(WorktreePruneOutput {
+        pruned_count: to_prune.len(),
+        pruned: to_prune,
+    })
+}
+
+fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.prune", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if result.pruned.is_empty() {
         println!("No worktrees to prune");
         return Ok(());
     }
-
-    println!("Will prune {} worktrees:", to_prune.len());
-    for path in &to_prune {
+    println!("Will prune {} worktrees:", result.pruned_count);
+    for path in &result.pruned {
         println!("  {}", path);
     }
-
-    state.worktrees.retain(|w| {
-        let path = Path::new(&w.path);
-        path.exists() || w.is_main || w.locked
-    });
-    save_state(&state)?;
-
-    println!("Pruned {} worktrees", to_prune.len());
+    println!("Pruned {} worktrees", result.pruned_count);
     Ok(())
 }
 
@@ -918,7 +1048,7 @@ fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
 /// canonical path and re-applies the invariant that there is exactly one
 /// main worktree entry. The repaired state is only written back if changes
 /// were actually made.
-fn repair_worktrees() -> io::Result<()> {
+fn repair_worktrees() -> io::Result<WorktreeRepairOutput> {
     let mut state = load_state()?;
     let mut changed = false;
 
@@ -941,6 +1071,13 @@ fn repair_worktrees() -> io::Result<()> {
         save_state(&state)?;
     }
 
+    Ok(WorktreeRepairOutput { changed })
+}
+
+fn render_repair_worktrees(result: &WorktreeRepairOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.repair", result, output);
+    }
     Ok(())
 }
 
