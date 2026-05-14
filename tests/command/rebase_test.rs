@@ -3,7 +3,7 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 #![cfg(test)]
-use std::fs;
+use std::{collections::VecDeque, fs};
 
 use libra::{
     command::rebase::{RebaseArgs, execute},
@@ -80,6 +80,49 @@ fn test_rebase_json_no_state_subcommands_return_repo_state_code() {
             report.hints
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rebase_json_abort_outputs_restored_branch() {
+    use libra::{command::rebase::RebaseState, internal::head::Head};
+
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+    let _guard = ChangeDirGuard::new(repo_path);
+    let head = Head::current_commit()
+        .await
+        .expect("committed repo should have HEAD");
+
+    RebaseState {
+        head_name: "main".to_string(),
+        onto: head,
+        orig_head: head,
+        todo: VecDeque::new(),
+        done: Vec::new(),
+        stopped_sha: None,
+        current_head: head,
+    }
+    .save()
+    .await
+    .expect("failed to save rebase state");
+
+    let output = run_libra_command(&["--json", "rebase", "--abort"], repo_path);
+    assert_cli_success(&output, "json rebase abort");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "abort");
+    assert_eq!(json["data"]["branch"], "main");
+    assert_eq!(json["data"]["commit"], head.to_string());
+    assert_eq!(json["data"]["previous_commit"], head.to_string());
+    assert_eq!(json["data"]["restored"], true);
+    assert!(output.stderr.is_empty());
+    assert!(
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state")
+    );
 }
 
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {

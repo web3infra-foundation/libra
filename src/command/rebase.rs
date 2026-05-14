@@ -15,6 +15,7 @@ use git_internal::{
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
+use serde::Serialize;
 
 use crate::{
     cli_error,
@@ -30,7 +31,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path, util, worktree,
     },
 };
@@ -440,6 +441,63 @@ pub struct RebaseArgs {
     pub skip: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RebaseOutput {
+    action: String,
+    branch: String,
+    commit: String,
+    previous_commit: String,
+    restored: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RebaseError {
+    #[error("no rebase in progress")]
+    NoRebaseInProgress,
+    #[error("failed to check rebase state: {0}")]
+    StateCheck(String),
+    #[error("failed to load rebase state: {0}")]
+    StateLoad(String),
+    #[error("failed to restore branch '{branch}' during rebase abort: {detail}")]
+    BranchRestore { branch: String, detail: String },
+    #[error("failed to load original commit '{commit}': {detail}")]
+    OriginalCommitLoad { commit: String, detail: String },
+    #[error("failed to load original tree '{tree}': {detail}")]
+    OriginalTreeLoad { tree: String, detail: String },
+    #[error("failed to load current index: {0}")]
+    IndexLoad(String),
+    #[error("failed to rebuild index: {0}")]
+    IndexRebuild(String),
+    #[error("failed to save index: {0}")]
+    IndexSave(String),
+    #[error("failed to reset working directory: {0}")]
+    WorkdirReset(String),
+}
+
+impl From<RebaseError> for CliError {
+    fn from(error: RebaseError) -> Self {
+        match &error {
+            RebaseError::NoRebaseInProgress => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid),
+            RebaseError::StateCheck(..) | RebaseError::StateLoad(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            RebaseError::OriginalCommitLoad { .. } | RebaseError::OriginalTreeLoad { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+            }
+            RebaseError::BranchRestore { .. }
+            | RebaseError::IndexRebuild(..)
+            | RebaseError::IndexSave(..)
+            | RebaseError::WorkdirReset(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            RebaseError::IndexLoad(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+        }
+    }
+}
+
 /// Execute the rebase command
 ///
 /// Rebase moves or combines a sequence of commits to a new base commit.
@@ -503,7 +561,7 @@ pub async fn execute(args: RebaseArgs) {
 /// `execute()` still contains legacy `eprintln!`-style handling for deeper runtime
 /// failures, but this wrapper now returns proper [`CliError`] for invalid inputs
 /// (such as missing/unknown upstream refs) so callers receive a non-zero exit code.
-pub async fn execute_safe(args: RebaseArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // For --continue, --abort, --skip: verify that a rebase is actually in
@@ -537,7 +595,25 @@ pub async fn execute_safe(args: RebaseArgs, _output: &OutputConfig) -> CliResult
     }
 
     preflight_rebase(&args).await?;
+    if args.abort {
+        let result = run_rebase_abort().await.map_err(CliError::from)?;
+        return render_rebase_output(&result, output);
+    }
     execute(args).await;
+    Ok(())
+}
+
+fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("rebase", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    if result.action == "abort" {
+        println!("Rebase aborted. Restored branch '{}'.", result.branch);
+    }
     Ok(())
 }
 
@@ -1087,25 +1163,24 @@ async fn rebase_continue() {
 
 /// Abort the current rebase and restore the original state
 async fn rebase_abort() {
+    match run_rebase_abort().await {
+        Ok(result) => {
+            if let Err(error) = render_rebase_output(&result, &OutputConfig::default()) {
+                error.print_stderr();
+            }
+        }
+        Err(error) => CliError::from(error).print_stderr(),
+    }
+}
+
+async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
     match RebaseState::is_in_progress().await {
         Ok(true) => {}
-        Ok(false) => {
-            eprintln!("fatal: no rebase in progress");
-            return;
-        }
-        Err(e) => {
-            eprintln!("fatal: failed to check rebase state: {e}");
-            return;
-        }
+        Ok(false) => return Err(RebaseError::NoRebaseInProgress),
+        Err(e) => return Err(RebaseError::StateCheck(e)),
     }
 
-    let state = match RebaseState::load().await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fatal: failed to load rebase state: {}", e);
-            return;
-        }
-    };
+    let state = RebaseState::load().await.map_err(RebaseError::StateLoad)?;
 
     let db = get_db_conn_instance().await;
 
@@ -1150,52 +1225,39 @@ async fn rebase_abort() {
             if let Err(err) =
                 Branch::update_branch_with_conn(&db, &state.head_name, &orig_head_str, None).await
             {
-                eprintln!(
-                    "fatal: failed to restore branch '{}' during rebase abort: {err}",
-                    state.head_name
-                );
-                return;
+                return Err(RebaseError::BranchRestore {
+                    branch: state.head_name.clone(),
+                    detail: err.to_string(),
+                });
             }
         }
     }
     Head::update_with_conn(&db, Head::Branch(state.head_name.clone()), None).await;
 
     // Reset working directory to original HEAD
-    let orig_commit: Commit = match load_object(&orig_head) {
-        Ok(c) => c,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load original commit");
-            return;
-        }
-    };
-    let orig_tree: Tree = match load_object(&orig_commit.tree_id) {
-        Ok(t) => t,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load original tree");
-            return;
-        }
-    };
+    let orig_commit: Commit =
+        load_object(&orig_head).map_err(|error| RebaseError::OriginalCommitLoad {
+            commit: orig_head.to_string(),
+            detail: error.to_string(),
+        })?;
+    let orig_tree: Tree =
+        load_object(&orig_commit.tree_id).map_err(|error| RebaseError::OriginalTreeLoad {
+            tree: orig_commit.tree_id.to_string(),
+            detail: error.to_string(),
+        })?;
 
     let index_file = path::index();
-    let current_index = match git_internal::internal::index::Index::load(&index_file) {
-        Ok(idx) => idx,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load current index");
-            return;
-        }
-    };
+    let current_index = git_internal::internal::index::Index::load(&index_file)
+        .map_err(|error| RebaseError::IndexLoad(error.to_string()))?;
     let mut index = git_internal::internal::index::Index::new();
     if let Err(e) = rebuild_index_from_tree(&orig_tree, &mut index, "") {
-        eprintln!("fatal: failed to rebuild index: {}", e);
-        return;
+        return Err(RebaseError::IndexRebuild(e));
     }
     if let Err(e) = index.save(&index_file) {
-        eprintln!("fatal: failed to save index: {:?}", e);
-        return;
+        return Err(RebaseError::IndexSave(e.to_string()));
     }
     if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
-        eprintln!("fatal: failed to reset working directory: {}", e);
-        return;
+        return Err(RebaseError::WorkdirReset(e));
     }
 
     // Clean up rebase state
@@ -1203,7 +1265,13 @@ async fn rebase_abort() {
         emit_warning(format!("failed to clean up rebase state: {}", e));
     }
 
-    println!("Rebase aborted. Restored branch '{}'.", state.head_name);
+    Ok(RebaseOutput {
+        action: "abort".to_string(),
+        branch: state.head_name,
+        commit: orig_head_str,
+        previous_commit: state.current_head.to_string(),
+        restored: true,
+    })
 }
 
 /// Skip the current commit and continue with the next

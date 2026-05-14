@@ -186,7 +186,7 @@
 |------|------|--------|--------|
 | **30** | `reflog` / `checkout` | 部分落地：`reflog show/delete/exists` 已有 JSON/machine 成功路径、裸分支解析与显式错误码；`checkout` 已有 `CheckoutOutput`、JSON/machine 成功路径、render split 与 checkout-owned stable code | 剩余 `CheckoutError` typed enum 与更细 remote/pull 代理错误分层 |
 | **31** | `mv` / `rm` / `worktree` | ✅ 已落地：`mv` / `rm` / worktree 成功路径、非 FUSE worktree 错误路径、FUSE `umount` 成功路径均已有 JSON/machine；后续仅保留 FUSE mount 管理的更细错误码扩展 | destructive 路径的结果模型、显式错误码、确认消息 |
-| **32** | `merge` / `rebase` | 部分落地：[`merge`](merge.md) 已有 `run_merge()` / `render_merge_output()`、fast-forward / already-up-to-date / remote ref JSON/machine、non-fast-forward JSON error envelope 和显式错误码；[`rebase`](rebase.md) 已同步当前 human 输出文档、移除路径处理生产 `unwrap()`，并显式化 no-state JSON 错误码，但执行/渲染拆分仍待收口 | rebase 状态结构化、冲突契约、typed error；merge 后续仅做兼容 additive 扩展 |
+| **32** | `merge` / `rebase` | 部分落地：[`merge`](merge.md) 已有 `run_merge()` / `render_merge_output()`、fast-forward / already-up-to-date / remote ref JSON/machine、non-fast-forward JSON error envelope 和显式错误码；[`rebase`](rebase.md) 已同步当前 human 输出文档、移除路径处理生产 `unwrap()`，显式化 no-state JSON 错误码，并落地 `--abort` 成功 JSON/machine | rebase start/continue/skip/replay 状态结构化、冲突契约、typed error；merge 后续仅做兼容 additive 扩展 |
 | **33** | `lfs` / `cloud` | 外部系统耦合高 | JSON / progress 契约、网络/权限错误分层 |
 
 **不纳入命令级批次改进的模块：**

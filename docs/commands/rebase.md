@@ -149,7 +149,21 @@ Rebase aborted. Restored branch 'feature'.
 
 ## JSON / Machine Output
 
-`libra rebase` does not yet provide structured success output for `--json` or `--machine`. CLI/preflight failures are rendered through Libra's standard structured error envelope, but the replay, conflict, continue, abort, and skip paths still use legacy text output. The structured rebase result model is tracked as follow-up work in the command improvement plan.
+`--json` and `--machine` are currently supported for successful `--abort` output. CLI/preflight failures are rendered through Libra's standard structured error envelope, but the replay, conflict, continue, and skip paths still use legacy text output. The full structured rebase result model is tracked as follow-up work in the command improvement plan.
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "abort",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "previous_commit": "def5678...",
+    "restored": true
+  }
+}
+```
 
 ## Rebase State Persistence
 
