@@ -22,17 +22,17 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 审计结论
 
-- **阶段 1 已收口，阶段 3、4 继续收口，阶段 5 与阶段 6 已收口，阶段 2、7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
-- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读与 per-command tmp 已进入主干；内建 bwrap `--new-session`、Linux bwrap 敏感路径遮蔽、内建 bwrap、网络三态仍未进入主干实现。
+- **阶段 1 已收口，阶段 2、3、4 继续收口，阶段 5 与阶段 6 已收口，阶段 7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + Linux bwrap 参数构造层 + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读、Linux bwrap 参数构造层与 per-command tmp 已进入主干；内建 bwrap 执行选择、seccomp 注入、网络三态仍未进入主干实现。
 
 ### 分阶段状态（当前代码）
 
 | 阶段 | 目标 | 现状 |
 |---|---|---|
 | 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 已落地：`sandbox status`、`Required` 拒绝降级、`PreferStrict` 降级审批确认均已接线；默认仍保持 `BestEffort` 兼容模式 |
-| 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
-| 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；内建 bwrap `--new-session` 仍待阶段 2 |
-| 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 遮蔽仍待实现 |
+| 阶段 2 | 内建 bwrap 直调 + seccomp | 部分落地：`create_bwrap_command_args()` 已构造 bwrap 参数；真实执行选择、bwrap 探测缓存与 seccomp 注入仍待实现 |
+| 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；bwrap 参数构造已包含 `--new-session` / `--die-with-parent`，真实 bwrap 执行验收仍待阶段 2 |
+| 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 参数构造已把 `deny_read` 映射为 `--tmpfs` 遮蔽，真实 bwrap 执行验收仍待阶段 2 |
 | 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
 | 阶段 6 | 危险挂载拒绝清单 | 已落地（0.17.25） |
 | 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
@@ -42,8 +42,8 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux helper 缺失时，默认 `best_effort` 仍会 `warn` 并回退到无沙箱；`LIBRA_SANDBOX_ENFORCEMENT=required` 或 runtime config 设为 `Required` 时，`SandboxManager::transform()` 会返回 `SandboxTransformError::EnforcementFailed`；`prefer_strict` 在 shell approval 路径会先要求确认降级。
 - `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed` 仍需随阶段 7 网络三态一起引入。
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、当前 enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；`required` 模式会把内部沙箱缺失报告为将失败，而不是描述为可接受降级。
-- Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
-- macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 遮蔽仍未落地。
+- Linux 执行路径仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`）；`src/internal/ai/sandbox/runtime.rs` 已新增内建 `create_bwrap_command_args()` 参数构造层，但尚未接入真实执行选择。
+- macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 参数构造层已把 `deny_read` 映射为 `--tmpfs` 遮蔽。
 - `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
 - 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
 
@@ -226,6 +226,8 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 外部 helper 已有的 seccomp 策略继续保留作为回退
 
 **本阶段非目标**：不把外部 helper 删除（保留为用户显式关闭内建 bwrap 时的回退；由环境变量 `LIBRA_SANDBOX_PREFER_HELPER` 控制）。
+
+**0.17.161 增量状态**：`src/internal/ai/sandbox/runtime.rs` 已新增 `create_bwrap_command_args()` 参数构造层，覆盖 `--unshare-all`、默认 `--unshare-net` / full network `--share-net`、`--new-session`、`--die-with-parent`、workspace writable root bind、受保护子路径 read-only 覆盖、`--tmpfs /tmp` 与 `deny_read` 路径 `--tmpfs` 遮蔽。当前增量没有接入真实 bwrap 执行选择、可执行性探测缓存或 seccomp fd 注入，这些仍保留在阶段 2 后续任务中。
 
 ### 阶段 3：终端注入防御（P0）
 

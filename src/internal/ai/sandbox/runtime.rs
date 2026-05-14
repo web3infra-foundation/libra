@@ -426,6 +426,82 @@ fn create_linux_sandbox_command_args(
     Ok(args)
 }
 
+pub fn create_bwrap_command_args(
+    command: Vec<String>,
+    sandbox_policy: &SandboxPolicy,
+    sandbox_policy_cwd: &Path,
+    deny_read_paths: &[PathBuf],
+) -> Vec<String> {
+    let mut args = vec![
+        "--unshare-all".to_string(),
+        "--die-with-parent".to_string(),
+        "--new-session".to_string(),
+    ];
+    if sandbox_policy.has_full_network_access() {
+        args.push("--share-net".to_string());
+    } else {
+        args.push("--unshare-net".to_string());
+    }
+
+    args.extend([
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
+    ]);
+
+    for path in bwrap_read_only_host_paths() {
+        push_bwrap_mount(&mut args, "--ro-bind", &path);
+    }
+
+    let writable_roots = sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd);
+    if writable_roots.is_empty() {
+        push_bwrap_mount(&mut args, "--ro-bind", sandbox_policy_cwd);
+    } else {
+        for writable_root in writable_roots {
+            push_bwrap_mount(&mut args, "--bind", &writable_root.root);
+            for read_only_subpath in writable_root.read_only_subpaths {
+                push_bwrap_mount(&mut args, "--ro-bind", &read_only_subpath);
+            }
+        }
+    }
+
+    for path in deny_read_paths {
+        args.push("--tmpfs".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    }
+
+    args.push("--".to_string());
+    args.extend(command);
+    args
+}
+
+fn bwrap_read_only_host_paths() -> Vec<PathBuf> {
+    [
+        "/bin",
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/ssl",
+        "/etc/ca-certificates",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.exists())
+    .collect()
+}
+
+fn push_bwrap_mount(args: &mut Vec<String>, flag: &str, path: &Path) {
+    let path = path.to_string_lossy().into_owned();
+    args.push(flag.to_string());
+    args.push(path.clone());
+    args.push(path);
+}
+
 #[cfg(target_os = "macos")]
 fn create_seatbelt_command_args(
     command: Vec<String>,
@@ -682,6 +758,123 @@ mod tests {
                 .to_string()
                 .contains("Linux sandbox enforcement is required"),
             "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn create_bwrap_command_args_denies_network_by_default_with_unshare_net() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+
+        assert!(args.contains(&"--unshare-all".to_string()));
+        assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(!args.contains(&"--share-net".to_string()));
+        assert_option_value(&args, "--tmpfs", "/tmp");
+    }
+
+    #[test]
+    fn create_bwrap_command_args_allows_full_network_with_share_net() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: true,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+
+        assert!(args.contains(&"--share-net".to_string()));
+        assert!(!args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn create_bwrap_command_args_includes_new_session_and_die_with_parent() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+
+        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+
+        assert!(args.contains(&"--new-session".to_string()));
+        assert!(args.contains(&"--die-with-parent".to_string()));
+    }
+
+    #[test]
+    fn create_bwrap_command_args_binds_workspace_roots_and_protected_subpaths() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let writable_root = cwd.join("src");
+
+        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+
+        assert_mount(&args, "--bind", &writable_root);
+        assert_mount(&args, "--ro-bind", &writable_root.join(".git"));
+        assert_mount(&args, "--ro-bind", &writable_root.join(".libra"));
+    }
+
+    #[test]
+    fn create_bwrap_command_args_masks_sensitive_read_paths_with_tmpfs() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let secret = PathBuf::from("/home/tester/.ssh");
+
+        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[secret]);
+
+        assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
+    }
+
+    #[test]
+    fn create_bwrap_command_args_appends_command_after_delimiter() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+        let delimiter = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("bwrap args must include command delimiter");
+
+        assert_eq!(
+            &args[(delimiter + 1)..],
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string()
+            ]
+        );
+    }
+
+    fn command() -> Vec<String> {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo ok".to_string(),
+        ]
+    }
+
+    fn assert_mount(args: &[String], flag: &str, path: &Path) {
+        let value = path.to_string_lossy();
+        assert!(
+            args.windows(3).any(|window| {
+                window[0] == flag && window[1] == value.as_ref() && window[2] == value.as_ref()
+            }),
+            "missing {flag} pair for {value}; args: {args:?}",
+        );
+    }
+
+    fn assert_option_value(args: &[String], flag: &str, value: &str) {
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == flag && window[1] == value),
+            "missing {flag} value {value}; args: {args:?}",
         );
     }
 
