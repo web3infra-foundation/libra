@@ -8,6 +8,9 @@ import { cn } from "@/lib/utils";
 
 import { parseUnifiedDiff, type DiffFile, type DiffLine } from "./diff-parser";
 
+const MAX_RENDERED_DIFF_LINES = 300;
+const MAX_RENDERED_RAW_DIFF_CHARS = 20_000;
+
 export function ReviewView() {
   const { snapshot } = useCodeUiStore();
   const files = useMemo<DiffFile[]>(() => {
@@ -76,28 +79,60 @@ function FileDiff({ file }: { file: DiffFile }) {
         </div>
       )}
       {open &&
-        file.hunks.map((h, i) => (
-          <div key={i}>
-            <div className="mono border-b border-rule bg-paper-2 px-2.5 py-1 text-[10.5px] text-ink-3">
-              {h.header}
+        file.hunks.map((h, i) => {
+          const visibleLines = h.lines.slice(0, MAX_RENDERED_DIFF_LINES);
+          const hiddenLines = h.lines.length - visibleLines.length;
+          return (
+            <div key={i}>
+              <div className="mono border-b border-rule bg-paper-2 px-2.5 py-1 text-[10.5px] text-ink-3">
+                {h.header}
+              </div>
+              <div>
+                {visibleLines.map((ln, j) => (
+                  <DiffLineRow key={j} line={ln} />
+                ))}
+                {hiddenLines > 0 && (
+                  <CollapsedDiffNotice hiddenLines={hiddenLines} />
+                )}
+              </div>
             </div>
-            <div>
-              {h.lines.map((ln, j) => (
-                <DiffLineRow key={j} line={ln} />
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       {open && file.hunks.length === 0 && file.rawDiff && (
-        <pre className="mono m-0 whitespace-pre-wrap break-words bg-paper-2 px-2.5 py-2 text-[11px] leading-[1.5] text-ink">
-          {file.rawDiff}
-        </pre>
+        <>
+          <pre className="mono m-0 whitespace-pre-wrap break-words bg-paper-2 px-2.5 py-2 text-[11px] leading-[1.5] text-ink">
+            {file.rawDiff.slice(0, MAX_RENDERED_RAW_DIFF_CHARS)}
+          </pre>
+          {file.rawDiff.length > MAX_RENDERED_RAW_DIFF_CHARS && (
+            <CollapsedDiffNotice
+              hiddenChars={file.rawDiff.length - MAX_RENDERED_RAW_DIFF_CHARS}
+            />
+          )}
+        </>
       )}
       {open && file.hunks.length === 0 && !file.rawDiff && (
         <div className="px-2.5 py-2 text-[11px] italic text-ink-3">
           No inline diff for this change.
         </div>
       )}
+    </div>
+  );
+}
+
+function CollapsedDiffNotice({
+  hiddenLines,
+  hiddenChars,
+}: {
+  hiddenLines?: number;
+  hiddenChars?: number;
+}) {
+  const label =
+    hiddenLines !== undefined
+      ? `${hiddenLines} more diff lines hidden`
+      : `${hiddenChars ?? 0} more raw diff characters hidden`;
+  return (
+    <div className="mono border-t border-rule bg-paper-2 px-2.5 py-1.5 text-[10.5px] text-ink-3">
+      Diff collapsed: {label}.
     </div>
   );
 }

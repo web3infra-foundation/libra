@@ -78,7 +78,7 @@
 - [x] 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard；`web/package.json` 已增加 `test` 脚本用于本地回归。
 - [x] 增加 store/controller hook 测试：`web/src/lib/code-ui/store.test.tsx` 覆盖首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce；`web/src/lib/code-ui/controller.test.tsx` 覆盖 lease retry once、`CONTROLLER_CONFLICT` 不重试。
   - [x] `web/src/lib/code-ui/controller.test.tsx` 已覆盖 browser controller lazy attach、stale token retry once、`CONTROLLER_CONFLICT` 不重试、`BROWSER_CONTROL_DISABLED` error surface。
-- 增加组件测试：无 session 空态、read-only controller、`BROWSER_CONTROL_DISABLED`、pending interaction 五种 kind、streaming assistant message、empty diff、parse error、long diff collapse。
+- [x] 增加组件测试：`message.test.tsx` 覆盖 streaming assistant message；`review-view.test.tsx` 覆盖无 session 空态、empty diff、parse error、long diff collapse；`interaction-panel.test.tsx` 覆盖 read-only controller、`BROWSER_CONTROL_DISABLED` 和 pending interaction 五种 kind。
 - [x] Rust：`tests/code_ui_scenarios.rs` 已补 `browser_write_appends_redacted_control_audit`，覆盖 browser lease 的 interaction/respond、message submit、turn cancel 审计日志与 client id redaction；`/api/code/threads` invalid limit / clamp 场景已由 `tests/code_ui_remote_security_matrix.rs` + `tests/data/code_ui_remote/security_cases.json` 覆盖。
 - [x] 修复 SSE lag 可观测性：`BroadcastStream` 收到 `Lagged` 时不能静默丢弃；server 会发送一次完整 `session_updated` snapshot。
 
