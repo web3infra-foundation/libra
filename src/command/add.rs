@@ -971,11 +971,6 @@ async fn stage_a_file(
         return Ok(StagedAction::Unchanged);
     }
 
-    // Skip directories - only stage files
-    if file_abs.is_dir() {
-        return Ok(StagedAction::Unchanged);
-    }
-
     let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
         path: file.to_path_buf(),
     })?;
