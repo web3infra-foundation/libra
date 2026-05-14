@@ -181,18 +181,35 @@ fn default_control_paths_restart_after_stale_pid_takeover() -> Result<()> {
 }
 
 /// Browser-controller end-to-end smoke. Spawns `libra code` with
-/// `--browser-control loopback`, attaches as a browser (no automation
-/// control token), submits a chat through the browser write surface, and
-/// confirms the snapshot reflects the browser ownership + transcript turn.
+/// `--browser-control loopback`, verifies the loopback browser receives the
+/// embedded Web app rather than stale mock content, attaches as a browser (no
+/// automation control token), submits a chat through the browser write surface,
+/// and confirms the snapshot reflects the browser ownership + transcript turn.
 /// Ends with a clean detach.
 #[cfg(feature = "test-provider")]
 #[test]
 #[serial]
-fn browser_controller_attach_submit_detach_roundtrip() -> Result<()> {
+fn browser_static_app_loads_and_submit_updates_snapshot() -> Result<()> {
     let mut session = CodeSession::spawn(
-        CodeSessionOptions::new("browser-roundtrip", fixture("basic_chat"))
+        CodeSessionOptions::new("browser-static-submit", fixture("basic_chat"))
             .with_browser_control_loopback(),
     )?;
+
+    let (page_status, page_html) = session.get_web_path("/")?;
+    assert!(
+        page_status.is_success(),
+        "loopback Web app must load, got {page_status}",
+    );
+    assert!(
+        page_html.contains("Libra — Agent Workspace"),
+        "loopback Web app should serve the embedded Next.js page",
+    );
+    for stale_text in ["src/lib/query.ts", "useMutation", "optimistic mutation"] {
+        assert!(
+            !page_html.contains(stale_text),
+            "loopback Web app should not contain stale mock text '{stale_text}'",
+        );
+    }
 
     let token = session.attach_browser("scenario-browser-roundtrip")?;
     session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {

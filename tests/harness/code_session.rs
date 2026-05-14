@@ -657,6 +657,27 @@ impl CodeSession {
         self.redact_known_secrets(context)
     }
 
+    /// Fetch a path from the static Web UI origin rather than the `/api/code`
+    /// namespace. Browser smoke tests use this to assert the embedded Next.js
+    /// app is what a loopback browser receives before driving write APIs.
+    pub fn get_web_path(&self, path: &str) -> Result<(StatusCode, String)> {
+        let normalized = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, normalized))
+            .send()
+            .with_context(|| format!("failed to GET web path {normalized}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .with_context(|| format!("failed to read web path {normalized} response body"))?;
+        Ok((status, body))
+    }
+
     pub fn attach_automation(&mut self, client_id: &str) -> Result<String> {
         let response = self
             .client
