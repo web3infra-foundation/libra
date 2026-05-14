@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
+use serde::Serialize;
 
 use crate::{
     command::{
@@ -16,7 +17,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -34,6 +35,7 @@ EXAMPLES:
     libra checkout main                    Switch to a branch (prefer: libra switch main)
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
+    libra --json checkout main             Structured compatibility output
     libra checkout --quiet main            Switch without informational stdout";
 
 #[derive(Parser, Debug)]
@@ -45,6 +47,28 @@ pub struct CheckoutArgs {
     /// Create and switch to a new branch with the same content as the current branch
     #[clap(short = 'b', group = "sub")]
     new_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CheckoutOutput {
+    action: String,
+    previous_branch: Option<String>,
+    previous_commit: Option<String>,
+    branch: Option<String>,
+    commit: Option<String>,
+    short_commit: Option<String>,
+    switched: bool,
+    created: bool,
+    pulled: bool,
+    already_on: bool,
+    detached: bool,
+    tracking: Option<CheckoutTrackingOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CheckoutTrackingOutput {
+    remote: String,
+    remote_branch: String,
 }
 
 pub async fn execute(args: CheckoutArgs) {
@@ -67,13 +91,19 @@ pub async fn execute(args: CheckoutArgs) {
 /// changes would be overwritten, branch creation fails, or checkout/restore
 /// writes fail.
 pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_checkout(args, output).await?;
+    render_checkout_output(&result, output)
+}
+
+async fn run_checkout(args: CheckoutArgs, output: &OutputConfig) -> CliResult<CheckoutOutput> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH
     {
         return Err(CliError::fatal(format!(
             "checking out '{}' branch is not allowed",
             INTENT_BRANCH
-        )));
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
     if let Some(ref new_branch_name) = args.new_branch
         && new_branch_name == INTENT_BRANCH
@@ -81,16 +111,32 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         return Err(CliError::fatal(format!(
             "creating/switching to '{}' branch is not allowed",
             INTENT_BRANCH
-        )));
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
+
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
 
     // Match Git behavior: checking out the current branch is a no-op and should
     // not be blocked by unrelated local changes.
     if let Some(ref target_branch) = args.branch
-        && get_current_branch().await == Some(target_branch.clone())
+        && previous_branch.as_ref() == Some(target_branch)
     {
-        info_println!(output, "Already on {target_branch}");
-        return Ok(());
+        return Ok(CheckoutOutput {
+            action: "already-on".to_string(),
+            previous_branch,
+            previous_commit: previous_commit.clone(),
+            branch: Some(target_branch.clone()),
+            commit: previous_commit.clone(),
+            short_commit: previous_commit.as_deref().map(short_oid),
+            switched: false,
+            created: false,
+            pulled: false,
+            already_on: true,
+            detached: false,
+            tracking: None,
+        });
     }
 
     let target_commit = if let Some(ref branch_name) = args.branch {
@@ -109,24 +155,46 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
 
     match clean_status {
         Ok(()) => {}
-        Err(
-            switch::SwitchError::DirtyUnstaged
-            | switch::SwitchError::DirtyUncommitted
-            | switch::SwitchError::UntrackedOverwrite(..),
-        ) => {
-            return Err(CliError::failure(
-                "local changes would be overwritten by checkout",
-            ));
+        Err(switch::SwitchError::DirtyUnstaged | switch::SwitchError::DirtyUncommitted) => {
+            return Err(
+                CliError::failure("local changes would be overwritten by checkout")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid),
+            );
+        }
+        Err(switch::SwitchError::UntrackedOverwrite(..)) => {
+            return Err(
+                CliError::failure("local changes would be overwritten by checkout")
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            );
         }
         Err(err) => return Err(CliError::from(err)),
     }
 
     match (args.branch, args.new_branch) {
-        (Some(target_branch), _) => check_and_switch_branch(&target_branch, output).await?,
-        (None, Some(new_branch)) => create_and_switch_new_branch(&new_branch, output).await?,
-        (None, None) => show_current_branch(output).await,
+        (Some(target_branch), _) => {
+            check_and_switch_branch(&target_branch, previous_branch, previous_commit, output).await
+        }
+        (None, Some(new_branch)) => {
+            let child_output = silent_child_output(output);
+            let commit = create_and_switch_new_branch(&new_branch, &child_output).await?;
+            let commit = commit.to_string();
+            Ok(CheckoutOutput {
+                action: "create".to_string(),
+                previous_branch,
+                previous_commit,
+                branch: Some(new_branch),
+                short_commit: Some(short_oid(&commit)),
+                commit: Some(commit),
+                switched: true,
+                created: true,
+                pulled: false,
+                already_on: false,
+                detached: false,
+                tracking: None,
+            })
+        }
+        (None, None) => show_current_branch(previous_branch, previous_commit).await,
     }
-    Ok(())
 }
 
 fn checkout_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
@@ -147,55 +215,69 @@ pub async fn get_current_branch() -> Option<String> {
     }
 }
 
-async fn show_current_branch(output: &OutputConfig) {
-    match Head::current().await {
-        Head::Detached(commit_hash) => {
-            info_println!(output, "HEAD detached at {}", &commit_hash.to_string()[..8]);
-        }
-        Head::Branch(current_branch) => {
-            info_println!(output, "Current branch is {current_branch}.");
-        }
-    }
+async fn current_commit_string() -> CliResult<Option<String>> {
+    Head::current_commit_result()
+        .await
+        .map(|commit| commit.map(|hash| hash.to_string()))
+        .map_err(|error| checkout_branch_store_error("resolve HEAD commit", error))
 }
 
 pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
-    switch_branch_with_output(branch_name, &OutputConfig::default()).await
+    switch_branch_with_output(branch_name, &OutputConfig::default())
+        .await
+        .map(|_| ())
 }
 
-async fn switch_branch_with_output(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
+async fn switch_branch_with_output(
+    branch_name: &str,
+    output: &OutputConfig,
+) -> CliResult<ObjectHash> {
     if branch_name == INTENT_BRANCH {
         return Err(CliError::fatal(format!(
             "switching to '{}' branch is not allowed",
             INTENT_BRANCH
-        )));
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
     let target_branch = Branch::find_branch_result(branch_name, None)
         .await
         .map_err(|error| checkout_branch_store_error("resolve branch", error))?
-        .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
+        .ok_or_else(|| {
+            CliError::fatal(format!("branch '{}' not found", branch_name))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+        })?;
+    let target_commit = target_branch.commit;
     restore_to_commit(target_branch.commit, output).await?;
     let head = Head::Branch(branch_name.to_string());
     Head::update(head, None).await;
-    Ok(())
+    Ok(target_commit)
 }
 
-async fn create_and_switch_new_branch(new_branch: &str, output: &OutputConfig) -> CliResult<()> {
+async fn create_and_switch_new_branch(
+    new_branch: &str,
+    output: &OutputConfig,
+) -> CliResult<ObjectHash> {
     branch::create_branch_safe(new_branch.to_string(), get_current_branch().await).await?;
-    switch_branch_with_output(new_branch, output).await?;
-    info_println!(output, "Switched to a new branch '{new_branch}'");
-    Ok(())
+    switch_branch_with_output(new_branch, output).await
 }
 
-async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
+async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<ObjectHash> {
     let remote_branch_name: String = format!("origin/{branch_name}");
+    let child_output = silent_child_output(output);
 
-    create_and_switch_new_branch(branch_name, output).await?;
+    create_and_switch_new_branch(branch_name, &child_output).await?;
     // Set branch upstream
-    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, output).await?;
+    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, &child_output).await?;
     // Synchronous branches
     // Use the pull command to update the local branch with the latest changes from the remote branch
-    pull::execute_safe(pull::PullArgs::make(None, None), output).await?;
-    Ok(())
+    pull::execute_safe(pull::PullArgs::make(None, None), &child_output).await?;
+    Head::current_commit_result()
+        .await
+        .map_err(|error| checkout_branch_store_error("resolve checkout result", error))?
+        .ok_or_else(|| {
+            CliError::fatal("checkout remote branch left HEAD without a commit")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+        })
 }
 
 /// Returns `Ok(Some(true))` if remote branch found, `Ok(Some(false))` if local branch found,
@@ -232,7 +314,8 @@ async fn check_branch_with_output(
             Err(CliError::fatal(format!(
                 "path specification '{}' did not match any files known to libra",
                 branch_name
-            )))
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget))
         }
     } else {
         info_println!(output, "Switched to branch '{branch_name}'");
@@ -240,13 +323,68 @@ async fn check_branch_with_output(
     }
 }
 
-async fn check_and_switch_branch(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
-    match check_branch_with_output(branch_name, output).await? {
-        Some(true) => get_remote(branch_name, output).await?,
-        Some(false) => switch_branch_with_output(branch_name, output).await?,
-        None => (),
+async fn check_and_switch_branch(
+    branch_name: &str,
+    previous_branch: Option<String>,
+    previous_commit: Option<String>,
+    output: &OutputConfig,
+) -> CliResult<CheckoutOutput> {
+    let child_output = silent_child_output(output);
+    match check_branch_with_output(branch_name, &child_output).await? {
+        Some(true) => {
+            let commit = get_remote(branch_name, output).await?.to_string();
+            Ok(CheckoutOutput {
+                action: "track".to_string(),
+                previous_branch,
+                previous_commit,
+                branch: Some(branch_name.to_string()),
+                commit: Some(commit.clone()),
+                short_commit: Some(short_oid(&commit)),
+                switched: true,
+                created: true,
+                pulled: true,
+                already_on: false,
+                detached: false,
+                tracking: Some(CheckoutTrackingOutput {
+                    remote: "origin".to_string(),
+                    remote_branch: format!("origin/{branch_name}"),
+                }),
+            })
+        }
+        Some(false) => {
+            let commit = switch_branch_with_output(branch_name, &child_output)
+                .await?
+                .to_string();
+            Ok(CheckoutOutput {
+                action: "switch".to_string(),
+                previous_branch,
+                previous_commit,
+                branch: Some(branch_name.to_string()),
+                commit: Some(commit.clone()),
+                short_commit: Some(short_oid(&commit)),
+                switched: true,
+                created: false,
+                pulled: false,
+                already_on: false,
+                detached: false,
+                tracking: None,
+            })
+        }
+        None => Ok(CheckoutOutput {
+            action: "already-on".to_string(),
+            previous_branch: previous_branch.clone(),
+            previous_commit: previous_commit.clone(),
+            branch: Some(branch_name.to_string()),
+            commit: previous_commit.clone(),
+            short_commit: previous_commit.as_deref().map(short_oid),
+            switched: false,
+            created: false,
+            pulled: false,
+            already_on: true,
+            detached: false,
+            tracking: None,
+        }),
     }
-    Ok(())
 }
 
 async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliResult<()> {
@@ -257,6 +395,104 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         pathspec: vec![util::working_dir_string()],
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await
+}
+
+async fn show_current_branch(
+    current_branch: Option<String>,
+    current_commit: Option<String>,
+) -> CliResult<CheckoutOutput> {
+    match Head::current().await {
+        Head::Detached(commit_hash) => {
+            let commit = commit_hash.to_string();
+            Ok(CheckoutOutput {
+                action: "show-current".to_string(),
+                previous_branch: current_branch,
+                previous_commit: current_commit,
+                branch: None,
+                commit: Some(commit.clone()),
+                short_commit: Some(short_oid(&commit)),
+                switched: false,
+                created: false,
+                pulled: false,
+                already_on: false,
+                detached: true,
+                tracking: None,
+            })
+        }
+        Head::Branch(current_branch) => Ok(CheckoutOutput {
+            action: "show-current".to_string(),
+            previous_branch: Some(current_branch.clone()),
+            previous_commit: current_commit.clone(),
+            branch: Some(current_branch),
+            commit: current_commit.clone(),
+            short_commit: current_commit.as_deref().map(short_oid),
+            switched: false,
+            created: false,
+            pulled: false,
+            already_on: false,
+            detached: false,
+            tracking: None,
+        }),
+    }
+}
+
+fn render_checkout_output(result: &CheckoutOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("checkout", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    match result.action.as_str() {
+        "show-current" if result.detached => {
+            if let Some(short_commit) = &result.short_commit {
+                println!("HEAD detached at {short_commit}");
+            }
+        }
+        "show-current" => {
+            if let Some(branch) = &result.branch {
+                println!("Current branch is {branch}.");
+            }
+        }
+        "already-on" => {
+            if let Some(branch) = &result.branch {
+                println!("Already on {branch}");
+            }
+        }
+        "create" => {
+            if let Some(branch) = &result.branch {
+                println!("Switched to a new branch '{branch}'");
+            }
+        }
+        "switch" => {
+            if let Some(branch) = &result.branch {
+                println!("Switched to branch '{branch}'");
+            }
+        }
+        "track" => {
+            if let (Some(branch), Some(tracking)) = (&result.branch, &result.tracking) {
+                println!(
+                    "branch '{branch}' set up to track '{}'.",
+                    tracking.remote_branch
+                );
+                println!("Switched to a new branch '{branch}'");
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(8).collect()
+}
+
+fn silent_child_output(output: &OutputConfig) -> OutputConfig {
+    let mut child = output.child_output_config();
+    child.quiet = true;
+    child
 }
 
 /// Unit tests for the checkout module

@@ -801,10 +801,16 @@ fn machine_checkout_existing_branch_suppresses_human_output() {
     assert_cli_success(&output, "machine checkout foo");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.trim().is_empty(),
-        "machine checkout should not emit human text, got: {stdout}"
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "machine checkout should emit one JSON line, got: {stdout}"
     );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON output, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["command"], "checkout");
+    assert_eq!(parsed["data"]["action"], "switch");
+    assert_eq!(parsed["data"]["branch"], "foo");
 }
 
 #[test]
