@@ -131,33 +131,12 @@ function KV({ k, v }: { k: string; v: string }) {
 }
 
 function IntentDetail({ intent }: { intent: IntentDoc }) {
-  const md = [
-    `# ${intent.title}`,
-    "",
-    intent.summary,
-    "",
-    "## Constraints",
-    "",
-    ...intent.constraints.map((c) => `- ${c}`),
-    "",
-    "## Context",
-    "",
-    `The caller surface is \`useMutation<T>\` in \`src/hooks/useMutation.ts\`, which today awaits \`fetcher(input)\` before touching the cache. Subscribers don't see the write until the round-trip finishes, so the UI feels sluggish on slow links.`,
-    "",
-    "## Approach",
-    "",
-    `1. Snapshot the cache entry under a per-key revision counter before the mutation fires.`,
-    `2. Apply the optimistic patch synchronously so subscribers rerender immediately.`,
-    `3. On success, reconcile the server response against the snapshot's revision — if a concurrent write landed first, keep the newer value.`,
-    `4. On error, roll back to the snapshot and rethrow to \`onError\`.`,
-    "",
-    "## Out of scope",
-    "",
-    `- Changes to \`MutationOptions<T>\`'s public shape beyond adding an optional \`optimistic\` field.`,
-    `- Server-driven cache invalidation — that stays in \`queryClient.invalidate\`.`,
-  ].join("\n");
+  const lines = [`# ${intent.title}`, "", intent.summary || "No intent summary is available yet."];
+  if (intent.constraints.length > 0) {
+    lines.push("", "## Constraints", "", ...intent.constraints.map((c) => `- ${c}`));
+  }
 
-  return <Markdown source={md} />;
+  return <Markdown source={lines.join("\n")} />;
 }
 
 function PlanStepDetail({
@@ -199,20 +178,11 @@ function PlanStepDetail({
         </div>
       </Section>
 
-      {step.status !== "queued" && (
-        <Section label="Tool calls">
-          <ToolCall name="read" arg="src/lib/query.ts" result="214 lines" />
-          <ToolCall name="edit" arg="src/lib/query.ts" result="patchset ps-07" />
-          {step.status === "running" && (
-            <ToolCall
-              name="test"
-              arg="useMutation.test.ts"
-              result="running…"
-              running
-            />
-          )}
-        </Section>
-      )}
+      <Section label="Runtime data">
+        <div className="text-[12px] leading-[1.55] text-ink-3">
+          This snapshot does not attach tool-call details directly to plan steps yet. Tool output appears under Execution Runs and Terminal.
+        </div>
+      </Section>
 
       <Section label="Sibling steps">
         <div className="text-[12px] text-ink-3">
@@ -251,41 +221,20 @@ function RunDetail({ run }: { run: ExecutionRun }) {
         <KV k="Run ID" v={run.id} />
         <KV k="Step" v={run.step} />
         <KV k="Result" v={run.result} />
-        <KV k="Patch" v={run.patch} />
+        <KV k="Summary" v={run.label || "—"} />
         <KV k="Finished" v={run.ago} />
-        <KV k="Sandbox" v="libra-sbx-04 · rw" />
       </Section>
 
       <Section label="Output" mono>
-        <pre className="mono m-0 whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">{`$ cargo test --lib optimistic
-   Compiling libra-cache v0.3.1
-    Finished test [unoptimized + debuginfo]
-     Running tests/useMutation.test.ts
-  ✓ snapshot captures prior cache state
-  ✓ optimistic patch visible synchronously
-  ${run.result === "running" ? "… revision-guarded rollback" : "✓ revision-guarded rollback"}
-  ${run.result === "pass" ? "ok. 3 passed; 0 failed" : ""}`}</pre>
-      </Section>
-
-      <Section label="Patch">
-        <div className="overflow-hidden rounded-md border border-rule">
-          <div className="mono border-b border-rule bg-paper-2 px-3 py-1.5 text-[11px]">
-            src/lib/query.ts ·{" "}
-            <span className="mono text-ink-3">{run.patch}</span>
+        {run.details ? (
+          <pre className="mono m-0 whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">
+            {run.details}
+          </pre>
+        ) : (
+          <div className="text-[12px] leading-[1.55] text-ink-3">
+            No detailed tool output is attached to this run.
           </div>
-          <pre className="mono m-0 whitespace-pre-wrap break-words bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">{`@@ useMutation ()
-- const result = await fetcher(input);
-- cache.set(key, result);
-+ const snap = cache.snapshot(key);
-+ cache.patch(key, optimistic);
-+ try {
-+   const result = await fetcher(input);
-+   cache.reconcile(key, snap.rev, result);
-+ } catch (err) {
-+   cache.rollback(key, snap);
-+   throw err;
-+ }`}</pre>
-        </div>
+        )}
       </Section>
     </>
   );
@@ -363,35 +312,6 @@ function ReleaseDetail() {
         </div>
       </Section>
     </>
-  );
-}
-
-function ToolCall({
-  name,
-  arg,
-  result,
-  running,
-}: {
-  name: string;
-  arg: string;
-  result: string;
-  running?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-2 border-b border-rule py-1.5">
-      <span className="mono text-[10.5px] font-semibold text-accent">{name}</span>
-      <span className="mono flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-ink">
-        {arg}
-      </span>
-      <span
-        className={cn(
-          "mono inline-flex items-center gap-1 text-[10.5px]",
-          running ? "text-accent" : "text-ink-3",
-        )}
-      >
-        {running && <span className="libra-spin" />} {result}
-      </span>
-    </div>
   );
 }
 

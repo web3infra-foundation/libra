@@ -102,7 +102,8 @@ function deriveRuns(toolCalls: CodeUiToolCallSnapshot[]): ExecutionRun[] {
       step: tool.toolName,
       result,
       ago: relativeAgo(tool.updatedAt),
-      patch: tool.summary ?? "",
+      label: tool.summary ?? tool.toolName,
+      details: tool.details,
     };
   });
 }
