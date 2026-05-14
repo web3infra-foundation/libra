@@ -23,6 +23,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
     str::FromStr,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -38,11 +39,16 @@ use serde::{Deserialize, Serialize};
 use crate::{
     command::{cloud, load_object, status},
     internal::{
+        ai::history::HistoryManager,
         branch::Branch,
         config::ConfigKv,
+        db,
         head::Head,
         publish::{
-            ai_export::{AiExportPlan, AiExportRequest, build_ai_export_plan},
+            ai_export::{
+                AiExportPlan, AiExportRequest, HistoryAiExportRequest, build_ai_export_plan,
+                collect_publish_ai_objects_from_history,
+            },
             contract::{
                 AiBundleAssociatedIds, PUBLISH_SCHEMA_VERSION, RedactionMode, SiteVisibility,
             },
@@ -72,7 +78,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
-        storage::publish_storage::PublishStorage,
+        storage::{local::LocalStorage, publish_storage::PublishStorage},
         util,
     },
 };
@@ -1258,14 +1264,55 @@ trait PublishAiExportPlanner {
     ) -> CliResult<AiExportPlan>;
 }
 
-struct EmptyPublishAiExportPlanner;
+struct HistoryBackedPublishAiExportPlanner {
+    history: HistoryManager,
+    storage: Arc<LocalStorage>,
+}
+
+impl HistoryBackedPublishAiExportPlanner {
+    async fn new() -> CliResult<Self> {
+        let repo_path = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
+        let storage = Arc::new(LocalStorage::new(repo_path.join("objects")));
+        let db_path = repo_path.join(util::DATABASE);
+        let db_conn = db::get_db_conn_instance_for_path(&db_path)
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to open repository database '{}': {source}",
+                    db_path.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+            })?;
+        let history = HistoryManager::new(storage.clone(), repo_path, Arc::new(db_conn));
+        Ok(Self { history, storage })
+    }
+}
 
 #[async_trait]
-impl PublishAiExportPlanner for EmptyPublishAiExportPlanner {
+impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
     async fn plan_revision_ai_export(
         &self,
         input: PublishAiExportPlanInput,
     ) -> CliResult<AiExportPlan> {
+        let objects = collect_publish_ai_objects_from_history(
+            &self.history,
+            self.storage.as_ref(),
+            HistoryAiExportRequest {
+                site_id: input.site_id.clone(),
+                revision_oid: input.revision_oid.clone(),
+                source_ref: format!("revision/{}", input.revision_oid),
+                redaction_mode: input.redaction_mode,
+                redaction_rules_version: input.redaction_rules_version.clone(),
+            },
+        )
+        .await
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to collect publish AI history objects: {source}"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+
         build_ai_export_plan(AiExportRequest {
             repo_id: input.repo_id,
             site_id: input.site_id,
@@ -1279,7 +1326,7 @@ impl PublishAiExportPlanner for EmptyPublishAiExportPlanner {
                 tree_oid: Some(input.tree_oid),
                 ..AiBundleAssociatedIds::default()
             },
-            objects: Vec::new(),
+            objects,
         })
         .map_err(|source| {
             CliError::fatal(format!("failed to build publish AI export plan: {source}"))
@@ -1296,7 +1343,7 @@ async fn run_publish_sync_selected_refs_with_sink(
     warnings: Vec<String>,
     sink: &mut dyn PublishSyncSink,
 ) -> CliResult<PublishSyncOutput> {
-    let ai_planner = EmptyPublishAiExportPlanner;
+    let ai_planner = HistoryBackedPublishAiExportPlanner::new().await?;
     run_publish_sync_selected_refs_with_sink_and_ai_planner(
         args,
         site,
@@ -2987,14 +3034,18 @@ fn render_policy_name(policy: RenderPolicy) -> &'static str {
 mod tests {
     use std::{collections::VecDeque, fs};
 
-    use git_internal::internal::object::tree::{TreeItem, TreeItemMode};
+    use git_internal::internal::object::{
+        intent::Intent,
+        tree::{TreeItem, TreeItemMode},
+        types::ActorRef,
+    };
     use serde_json::Value;
 
     use super::*;
     use crate::{
         command::save_object,
         internal::publish::contract::{AiObjectLayer, AiObjectRedaction, PublishAiObject},
-        utils::test,
+        utils::{storage_ext::StorageExt, test},
     };
 
     fn default_init_args() -> InitArgs {
@@ -3546,6 +3597,59 @@ mod tests {
         assert_eq!(sink.sync_runs[0].ai_bundle_count, 1);
         assert_eq!(sink.sync_runs[1].ai_object_count, 1);
         assert_eq!(sink.sync_runs[1].ai_bundle_count, 1);
+    }
+
+    #[tokio::test]
+    async fn publish_sync_non_dry_run_default_planner_exports_history_ai_objects() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        test::setup_with_new_libra_in(temp.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp.path());
+
+        let libra_dir = temp.path().join(".libra");
+        let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+        let db_conn = Arc::new(
+            db::get_db_conn_instance_for_path(&libra_dir.join(util::DATABASE))
+                .await
+                .expect("db should open"),
+        );
+        let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
+        let intent = Intent::new(
+            ActorRef::human("publish-test").expect("actor"),
+            "Publish history-backed AI objects",
+        )
+        .expect("intent");
+        storage
+            .put_tracked(&intent, &history)
+            .await
+            .expect("intent should be written to history");
+
+        let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
+        let revision_oid = commit.id.to_string();
+        let site = publish_sync_site_context();
+        let args = sync_args(false);
+        let mut sink = FakePublishSyncSink::default();
+
+        let output = run_publish_sync_selected_refs_with_sink(
+            &args,
+            &site,
+            vec![publish_local_ref(
+                "refs/heads/main",
+                &revision_oid,
+                &revision_oid,
+            )],
+            Some("refs/heads/main".to_string()),
+            Vec::new(),
+            &mut sink,
+        )
+        .await
+        .expect("default planner should export AI history objects");
+
+        assert_eq!(output.ai_object_count, 1);
+        assert_eq!(sink.ai_objects.len(), 1);
+        assert_eq!(sink.ai_objects[0].object_type, "Intent");
+        assert_eq!(sink.revisions[0].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[0].ai_object_count, 1);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 1);
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
