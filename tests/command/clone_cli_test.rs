@@ -3,6 +3,7 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -12,6 +13,7 @@ use std::{
     thread,
 };
 
+use chrono::{TimeZone, Utc};
 use git_internal::internal::object::{
     ObjectTrait,
     blob::Blob,
@@ -23,8 +25,10 @@ use libra::{
         model::reference,
         publish::{
             contract::{
-                AiObjectLayer, AiObjectRedaction, PUBLISH_SCHEMA_VERSION, PublishAiObject,
-                RedactionMode,
+                AiBundleAssociatedIds, AiBundleIndexes, AiBundleObjectEntry, AiBundleRedaction,
+                AiGraphNode, AiObjectLayer, AiObjectRedaction, PUBLISH_SCHEMA_VERSION,
+                PublishAiBundle, PublishAiGraph, PublishAiIndex, PublishAiIndexBundleEntry,
+                PublishAiObject, RedactionMode,
             },
             snapshot::sha256_hex,
         },
@@ -508,10 +512,32 @@ fn create_cloud_clone_cli_fixture() -> CloudCloneCliFixture {
             "site_123",
         )
         .expect("publish storage should build for mock R2");
+        let ai_model = mock_publish_ai_model(&commit.id.to_string());
+        publish_store
+            .put_json(
+                &mock_ai_index_relative_key(&commit.id.to_string()),
+                &ai_model.index,
+            )
+            .await
+            .expect("AI index should write to mock R2");
+        publish_store
+            .put_json(
+                &mock_ai_graph_relative_key(&commit.id.to_string()),
+                &ai_model.graph,
+            )
+            .await
+            .expect("AI graph should write to mock R2");
+        publish_store
+            .put_json(
+                &mock_ai_bundle_relative_key(&commit.id.to_string()),
+                &ai_model.bundle,
+            )
+            .await
+            .expect("AI bundle should write to mock R2");
         publish_store
             .put_json(
                 &mock_ai_object_relative_key(&commit.id.to_string()),
-                &mock_publish_ai_object(&commit.id.to_string()),
+                &ai_model.object,
             )
             .await
             .expect("AI object should write to mock R2");
@@ -520,6 +546,7 @@ fn create_cloud_clone_cli_fixture() -> CloudCloneCliFixture {
     let data = MockD1Data {
         commit_oid: commit.id.to_string(),
         ai_objects: vec![mock_ai_object_row(&commit.id.to_string())],
+        ai_versions: vec![mock_ai_version_row(&commit.id.to_string())],
         objects: vec![
             mock_object_row(&blob.id.to_string(), "blob", blob.to_data().unwrap().len()),
             mock_object_row(&tree.id.to_string(), "tree", tree.to_data().unwrap().len()),
@@ -565,6 +592,7 @@ fn mock_object_row(o_id: &str, o_type: &str, o_size: usize) -> Value {
 struct MockD1Data {
     commit_oid: String,
     ai_objects: Vec<Value>,
+    ai_versions: Vec<Value>,
     objects: Vec<Value>,
 }
 
@@ -728,6 +756,12 @@ fn mock_d1_rows(sql: &str, params: &[Value], data: &MockD1Data) -> Result<Vec<Va
     {
         return Ok(data.ai_objects.clone());
     }
+    if sql.contains("FROM publish_ai_versions")
+        && param_str(params, 0) == Some("site_123")
+        && param_str(params, 1) == Some(data.commit_oid.as_str())
+    {
+        return Ok(data.ai_versions.clone());
+    }
     if sql.contains("FROM object_index WHERE repo_id = ?1") {
         return Ok(if param_str(params, 0) == Some("repo_456") {
             data.objects.clone()
@@ -791,7 +825,11 @@ fn mock_publish_revision_row(revision_oid: &str, ai_object_count: i64) -> Value 
         "revision_oid": revision_oid,
         "status": "published",
         "code_manifest_key": null,
-        "ai_index_key": null,
+        "ai_index_key": if ai_object_count > 0 {
+            serde_json::Value::String(mock_ai_index_r2_key(revision_oid))
+        } else {
+            serde_json::Value::Null
+        },
         "file_count": 1,
         "ai_object_count": ai_object_count,
         "ai_bundle_count": if ai_object_count > 0 { 1 } else { 0 },
@@ -812,13 +850,22 @@ fn assert_cloud_clone_ai_history(repo: &Path, home: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout
-            .lines()
-            .filter_map(|line| line.split_once('\t').map(|(object_type, _)| object_type))
-            .any(|object_type| object_type == "publish_ai_intent"),
-        "cloud clone should restore publish AI objects into local AI history, got: {stdout}"
-    );
+    let restored_types = stdout
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(object_type, _)| object_type))
+        .collect::<Vec<_>>();
+    for expected in [
+        "publish_ai_bundle",
+        "publish_ai_graph",
+        "publish_ai_index",
+        "publish_ai_intent",
+        "publish_ai_version",
+    ] {
+        assert!(
+            restored_types.contains(&expected),
+            "cloud clone should restore {expected} into local AI history, got: {stdout}"
+        );
+    }
 }
 
 fn mock_ai_object_relative_key(revision_oid: &str) -> String {
@@ -829,6 +876,32 @@ fn mock_ai_object_r2_key(revision_oid: &str) -> String {
     format!(
         "repo_456/publish/sites/site_123/{}",
         mock_ai_object_relative_key(revision_oid)
+    )
+}
+
+fn mock_ai_index_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/index.json")
+}
+
+fn mock_ai_index_r2_key(revision_oid: &str) -> String {
+    format!(
+        "repo_456/publish/sites/site_123/{}",
+        mock_ai_index_relative_key(revision_oid)
+    )
+}
+
+fn mock_ai_graph_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/graph.json")
+}
+
+fn mock_ai_bundle_relative_key(revision_oid: &str) -> String {
+    format!("revisions/{revision_oid}/ai/bundles/ai-{revision_oid}.json")
+}
+
+fn mock_ai_bundle_r2_key(revision_oid: &str) -> String {
+    format!(
+        "repo_456/publish/sites/site_123/{}",
+        mock_ai_bundle_relative_key(revision_oid)
     )
 }
 
@@ -847,6 +920,39 @@ fn mock_ai_object_row(revision_oid: &str) -> Value {
         "schema_version": 1,
         "created_at": "2026-05-13T00:00:00Z"
     })
+}
+
+fn mock_ai_version_row(revision_oid: &str) -> Value {
+    let bundle = mock_publish_ai_bundle(revision_oid);
+    let bytes = serde_json::to_vec(&bundle).expect("AI bundle should serialize");
+    serde_json::json!({
+        "site_id": "site_123",
+        "ai_version_id": format!("ai-{revision_oid}"),
+        "revision_oid": revision_oid,
+        "bundle_key": mock_ai_bundle_r2_key(revision_oid),
+        "bundle_sha256": sha256_hex(&bytes),
+        "object_count": 1,
+        "redaction_mode": "default",
+        "redaction_rules_version": "1",
+        "schema_version": 1,
+        "created_at": "2026-05-13T00:00:00Z"
+    })
+}
+
+struct MockPublishAiModel {
+    object: PublishAiObject,
+    index: PublishAiIndex,
+    graph: PublishAiGraph,
+    bundle: PublishAiBundle,
+}
+
+fn mock_publish_ai_model(revision_oid: &str) -> MockPublishAiModel {
+    MockPublishAiModel {
+        object: mock_publish_ai_object(revision_oid),
+        index: mock_publish_ai_index(revision_oid),
+        graph: mock_publish_ai_graph(revision_oid),
+        bundle: mock_publish_ai_bundle(revision_oid),
+    }
 }
 
 fn mock_publish_ai_object(revision_oid: &str) -> PublishAiObject {
@@ -869,6 +975,87 @@ fn mock_publish_ai_object(revision_oid: &str) -> PublishAiObject {
             rules_version: "1".to_string(),
         },
         removed_fields: Vec::new(),
+    }
+}
+
+fn mock_ai_generated_at() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 13, 0, 0, 0).unwrap()
+}
+
+fn mock_ai_object_entry(revision_oid: &str) -> AiBundleObjectEntry {
+    let object = mock_publish_ai_object(revision_oid);
+    let bytes = serde_json::to_vec(&object).expect("AI object should serialize");
+    AiBundleObjectEntry {
+        object_type: "Intent".to_string(),
+        object_id: "intent-1".to_string(),
+        layer: AiObjectLayer::Snapshot,
+        r2_key: mock_ai_object_r2_key(revision_oid),
+        payload_sha256: sha256_hex(&bytes),
+    }
+}
+
+fn mock_ai_redaction() -> AiBundleRedaction {
+    AiBundleRedaction {
+        mode: RedactionMode::Default,
+        rules_version: "1".to_string(),
+        removed_field_count: 0,
+        removed_fields_by_type: BTreeMap::new(),
+        object_counts_by_type: BTreeMap::from([("Intent".to_string(), 1)]),
+    }
+}
+
+fn mock_publish_ai_index(revision_oid: &str) -> PublishAiIndex {
+    let bundle = mock_publish_ai_bundle(revision_oid);
+    let bundle_bytes = serde_json::to_vec(&bundle).expect("AI bundle should serialize");
+    PublishAiIndex {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        site_id: "site_123".to_string(),
+        revision_oid: revision_oid.to_string(),
+        objects: vec![mock_ai_object_entry(revision_oid)],
+        bundles: vec![PublishAiIndexBundleEntry {
+            ai_version_id: format!("ai-{revision_oid}"),
+            bundle_key: mock_ai_bundle_r2_key(revision_oid),
+            bundle_sha256: sha256_hex(&bundle_bytes),
+            object_count: 1,
+            created_at: mock_ai_generated_at(),
+        }],
+        redaction: mock_ai_redaction(),
+        generated_at: mock_ai_generated_at(),
+    }
+}
+
+fn mock_publish_ai_graph(revision_oid: &str) -> PublishAiGraph {
+    PublishAiGraph {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        site_id: "site_123".to_string(),
+        revision_oid: revision_oid.to_string(),
+        ai_version_id: format!("ai-{revision_oid}"),
+        nodes: vec![AiGraphNode {
+            object_type: "Intent".to_string(),
+            object_id: "intent-1".to_string(),
+            layer: AiObjectLayer::Snapshot,
+            r2_key: mock_ai_object_r2_key(revision_oid),
+        }],
+        edges: Vec::new(),
+        generated_at: mock_ai_generated_at(),
+    }
+}
+
+fn mock_publish_ai_bundle(revision_oid: &str) -> PublishAiBundle {
+    PublishAiBundle {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+        site_id: "site_123".to_string(),
+        revision_oid: revision_oid.to_string(),
+        ai_version_id: format!("ai-{revision_oid}"),
+        objects: vec![mock_ai_object_entry(revision_oid)],
+        relationships: Vec::new(),
+        indexes: AiBundleIndexes::default(),
+        redaction: mock_ai_redaction(),
+        associated_ids: AiBundleAssociatedIds {
+            tree_oid: Some(revision_oid.to_string()),
+            ..AiBundleAssociatedIds::default()
+        },
     }
 }
 

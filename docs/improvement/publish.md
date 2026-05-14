@@ -863,7 +863,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.133) Cloudflare clone resolved-plan restore 回归覆盖 local branch/tag refs metadata 一并恢复，并覆盖 `?ref=refs/tags/v1.0.0` 选择 tag revision 时 checkout 为 detached HEAD、worktree 与输出 revision 一致。
 - [x] (v0.17.134) Cloudflare clone CLI 级 mock D1/R2 闭环覆盖真实二进制入口的 slug default-ref restore、full tag ref detached checkout、`repo/<repo_id>` slug-rename restore，以及恢复后 HEAD/worktree/source revision 一致性。
 - [x] (v0.17.141) Cloudflare clone 从 D1 `publish_ai_objects` 行读取 R2 AI object envelope，校验 D1/R2 envelope 和 `payload_sha256` 一致后写入本地 AI history 的 `publish_ai_*` 类型，作为后续本地 AI 版本索引和 projection/query indexes 重建的基线；不得从 redaction 后的 payload 反推被移除字段。
-- [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。
+- [x] (v0.17.142) 恢复完整 AI object model 到本地 AI history：`publish_ai_index` 保存 AI 版本索引，`publish_ai_graph` 保存关系图，`publish_ai_bundle` 保存 bundle query indexes，`publish_ai_version` 保存 D1 version row，具体 snapshot/event/projection objects 保存到 `publish_ai_*` 类型；所有对象校验 D1/R2 envelope 与 checksum，不从 redaction 后的 publish payload 反推被移除字段。
 - [x] (v0.17.56) `--branch`、`--depth`、`--single-branch`、`--bare` 与 `libra+cloud://` 的首版兼容策略按 [clone.md](clone.md) 执行：这些首版未支持组合在 clone-domain config 读取和目标目录创建前返回 `LBR-CLI-002`，不得静默降级。
 - [x] (v0.17.131) `--json` / `--machine` 成功输出仍只有一个 clone envelope；Cloudflare clone 通过可选 `source_kind` / `cloud_site` 字段输出 clone domain、site、repo、ref 和 revision，普通 Git clone schema 继续省略这些字段。
 - [x] (v0.17.112) publish 实现完成前，Cloudflare clone source 的测试必须纳入同一交付检查，不能移出 v1 范围。
@@ -993,7 +993,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.134) `libra clone "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"` 能 checkout 指定 tag 对应 revision；同名短 ref 必须要求完整 ref。
 - [x] (v0.17.134) `libra clone libra+cloud://code.example.com/repo/<repo_id>` 在 slug rename 后仍能恢复同一 repo。
 - [x] (v0.17.55/v0.17.78, verified v0.17.91) 未配置 `clone_domains.code.example.com` 时 clone 失败并给出配置 hint，不尝试从 Worker 页面下载。
-- [ ] AI object model、关系图和 projection/query indexes 能从 cloud baseline 恢复，且不依赖 publish redacted 字段。
+- [x] (v0.17.142) AI object model、关系图和 projection/query indexes 能从 cloud baseline 恢复到本地 AI history，且不依赖 publish redacted 字段。
 - [x] (v0.17.132) 缺失 object 或 refs metadata 不完整时 clone 失败并清理目标目录：缺失 object 由 R2 preflight 在建目录前阻断，缺失/无 HEAD metadata 在 restore transaction 中硬失败并清理。
 - [x] (v0.17.134) `libra clone libra+cloud://code.example.com/kepler-ledger --json` 的输出 schema 已落地为单个 clone envelope 的可选 Cloudflare source 字段，并通过 mock D1/R2 CLI 级测试覆盖。
 - [x] (v0.17.134) restore transaction 和 CLI 级 mock D1/R2 测试已覆盖 branch/tag refs、HEAD、checkout 文件和 full tag ref selector。
