@@ -1356,3 +1356,57 @@ async fn test_worktree_remove_with_delete_dir_clean_path() {
         "registry should no longer track wt_delete, paths: {paths:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+/// `worktree remove --delete-dir` refuses dirty worktrees and leaves both disk and registry intact.
+async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_dirty_delete"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_dirty_delete");
+    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("failed to dirty worktree");
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "wt_dirty_delete",
+        ],
+        repo_dir.path(),
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "dirty --delete-dir must fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let report: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert!(
+        report["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot delete dirty worktree")),
+        "error should explain dirty worktree refusal: {report}",
+    );
+
+    assert!(
+        wt_path.is_dir(),
+        "dirty rejected --delete-dir must keep the directory on disk"
+    );
+    let paths = worktree_paths();
+    assert!(
+        paths.iter().any(|p| p.ends_with("wt_dirty_delete")),
+        "dirty rejected --delete-dir must keep registry entry, paths: {paths:?}"
+    );
+}

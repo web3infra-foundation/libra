@@ -144,7 +144,7 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 |-----|-----|-----|
 | [`src/command/worktree.rs`](../../../src/command/worktree.rs) | 修改 | `WorktreeSubcommand::Remove` 加 `--delete-dir`；`remove` handler 加删盘分支 + dirty 检查 |
 | [`src/utils/error.rs`](../../../src/utils/error.rs) | 复核/必要时修改 | 优先复用 `ConflictOperationBlocked` / `IoWriteFailed`；仅在确有跨命令需求时新增更细错误码 |
-| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 已修改 / 继续补齐 | 已覆盖默认不删盘、clean `--delete-dir` 删盘，以及 `worktree list` JSON / machine；dirty + `--delete-dir` 拒绝仍需补回归 |
+| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 已修改 | 已覆盖默认不删盘、clean `--delete-dir` 删盘、dirty + `--delete-dir` 拒绝，以及 `worktree list` JSON / machine |
 | [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) | 已新建 / 继续补齐 | 当前固定 help / examples surface；dirty 行为差异跨场景断言仍需补 |
 | [`docs/commands/worktree.md`](../../commands/worktree.md) | 修改 | 默认行为 vs `--delete-dir` 的差异说明 |
 | [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 修改 | worktree 行 notes 更新 |
@@ -154,11 +154,12 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 - [x] `cargo run -- worktree remove --help` 列出 `--delete-dir`。
 - [x] `worktree remove <path>`（默认）后，`<path>` 目录仍存在；registry 中已移除。
 - [x] `worktree remove --delete-dir <path>` 后，`<path>` 目录已不存在；`ls <path>` 报 not-found。
-- [ ] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
-- [ ] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。（当前已覆盖 clean + delete-dir 与默认不带 flag；dirty 拒绝待补）
+- [x] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
+- [x] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。
 - [x] `COMPATIBILITY.md` worktree 行已更新为默认保留目录、`--delete-dir` opt-in 删除。
 - [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test worktree_test`。
 - [x] (v0.17.162) `worktree list` JSON / machine schema 已落地并由 `test_worktree_list_json_outputs_structured_entries`、`test_worktree_list_machine_outputs_single_json_line` 覆盖。
+- [x] (v0.17.163) dirty `--delete-dir` 拒绝由 `test_worktree_remove_with_delete_dir_dirty_path_is_rejected` 覆盖，断言 `LBR-CONFLICT-002`、目录保留和 registry 保留。
 
 ## 风险与缓解
 
