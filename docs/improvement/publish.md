@@ -958,7 +958,8 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [x] (v0.17.144) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` / `LIBRA_PUBLISH_LIVE_SLUG` / `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 后执行已部署 Worker refs/tree/file API smoke；该入口不启动 MCP Server。
-- [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
+- [x] (v0.17.146) live cloud gate 在真实 D1/R2 环境中能完成唯一 test repo/site 的 `cloud sync` Git object baseline + all-refs `publish sync` -> `libra clone libra+cloud://<clone-domain>/<slug>` restore，并验证恢复后的文件和 tag ref；该入口不启动 MCP Server。
+- [ ] live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
 
@@ -967,7 +968,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.103) `cargo test publish_incremental_test`
 - [x] (v0.17.92) `cargo test publish_redaction_contract_test`
 - [x] (v0.17.144) `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live_gate_prerequisites_are_explicit -- --test-threads=1`
-- [ ] `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
+- [x] (v0.17.146) `LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud publish_live -- --test-threads=1`
 
 **Dependencies:** Phase 5, Phase 7
 
@@ -1071,7 +1072,7 @@ cargo test --features test-live-cloud publish_live -- --test-threads=1
 ```
 
 当前 `publish_live_gate_prerequisites_are_explicit` 会从进程环境或
-仓库 `.env.test` 读取 live 配置，验证 D1/R2 凭据并报告缺失的 deploy-smoke 输入。完整 live gate 仍要求提供
+仓库 `.env.test` 读取 live 配置，验证 D1/R2 凭据，创建唯一 test repo/site，执行 `cloud sync` Git object baseline、all-refs publish sync 和 `libra+cloud://` clone restore，并报告缺失的 deploy-smoke 输入。完整 live gate 仍要求提供
 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`、`LIBRA_PUBLISH_LIVE_SLUG`、
 `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`，并完成 all-refs sync、`libra+cloud`
 clone restore 和已部署 Worker refs/tree/file API smoke。
