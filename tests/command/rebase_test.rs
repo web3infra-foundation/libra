@@ -53,6 +53,35 @@ fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_rebase_json_no_state_subcommands_return_repo_state_code() {
+    let repo = create_committed_repo_via_cli();
+
+    for flag in ["--continue", "--abort", "--skip"] {
+        let output = run_libra_command(&["--json", "rebase", flag], repo.path());
+        assert_eq!(output.status.code(), Some(128), "flag: {flag}");
+        assert!(
+            output.stdout.is_empty(),
+            "expected empty stdout for {flag}, got: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-REPO-003", "flag: {flag}");
+        assert_eq!(report.category, "repo", "flag: {flag}");
+        assert_eq!(report.exit_code, 128, "flag: {flag}");
+        assert_eq!(report.message, "no rebase in progress", "flag: {flag}");
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.contains(&format!("cannot {flag}"))),
+            "expected hint for {flag}, got {:?}",
+            report.hints
+        );
+    }
+}
+
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
     let mut messages = Vec::new();
     let mut current = Some(*start);

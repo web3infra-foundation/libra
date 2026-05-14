@@ -27,7 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
-        error::{CliError, CliResult, emit_warning},
+        error::{CliError, CliResult, StableErrorCode, emit_warning},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         output::OutputConfig,
@@ -521,14 +521,17 @@ pub async fn execute_safe(args: RebaseArgs, _output: &OutputConfig) -> CliResult
                 } else {
                     "continue"
                 };
-                return Err(CliError::fatal("no rebase in progress").with_hint(format!(
-                    "cannot --{verb} because there is no rebase in progress."
-                )));
+                return Err(CliError::fatal("no rebase in progress")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_hint(format!(
+                        "cannot --{verb} because there is no rebase in progress."
+                    )));
             }
             Err(err) => {
-                return Err(CliError::fatal(format!(
-                    "failed to check rebase state: {err}"
-                )));
+                return Err(
+                    CliError::fatal(format!("failed to check rebase state: {err}"))
+                        .with_stable_code(StableErrorCode::IoReadFailed),
+                );
             }
         }
     }
@@ -551,6 +554,7 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
     match RebaseState::is_in_progress().await {
         Ok(true) => {
             return Err(CliError::fatal("rebase already in progress")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("use 'libra rebase --continue' to continue rebasing.")
                 .with_hint(
                     "use 'libra rebase --abort' to abort and restore the original branch.",
@@ -558,9 +562,10 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         }
         Ok(false) => {}
         Err(err) => {
-            return Err(CliError::fatal(format!(
-                "failed to check rebase state: {err}"
-            )));
+            return Err(
+                CliError::fatal(format!("failed to check rebase state: {err}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed),
+            );
         }
     }
 

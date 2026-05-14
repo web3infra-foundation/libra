@@ -7,6 +7,7 @@
 ## 当前已落地
 
 - CLI/preflight 入口 `execute_safe(args, output)` 已能对仓库缺失、缺少 upstream、无效 upstream、无 rebase in progress 等前置错误返回标准 `CliError`。
+- `--abort` / `--continue` / `--skip` 无 rebase state 的 JSON 错误已显式返回 `LBR-REPO-003`，不再依赖字符串推断。
 - 命令文档已同步当前 human 输出，包括 `Found common ancestor`、`Rebasing N commits`、`Applied:`、conflict 提示、abort 恢复消息和 fast-forward 消息。
 - 创建树和重置工作区时的路径处理不再使用生产 `unwrap()`；空路径和非 UTF-8 路径会返回带上下文的错误。
 
@@ -19,10 +20,9 @@
 
 ## 后续切片建议
 
-1. 先为 `--abort` / `--continue` / `--skip` 的 no-state 路径补齐显式 stable code 测试，避免继续依赖 substring inference。
-2. 把 `rebase_abort()` 提升为 `run_rebase_abort() -> Result<RebaseOutput, RebaseError>`，先收口 abort 成功和失败路径。
-3. 再拆 `rebase_continue()` 与 `rebase_skip()`，把 stopped commit、resolved index、empty todo 等状态纳入 typed result。
-4. 最后拆 `start_rebase()` / `continue_replay()`，落地完整 `RebaseOutput`、conflict result 和 JSON/machine 成功输出。
+1. 把 `rebase_abort()` 提升为 `run_rebase_abort() -> Result<RebaseOutput, RebaseError>`，先收口 abort 成功和失败路径。
+2. 再拆 `rebase_continue()` 与 `rebase_skip()`，把 stopped commit、resolved index、empty todo 等状态纳入 typed result。
+3. 最后拆 `start_rebase()` / `continue_replay()`，落地完整 `RebaseOutput`、conflict result 和 JSON/machine 成功输出。
 
 ## 非目标
 
