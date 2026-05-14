@@ -20,7 +20,7 @@ use libra::{
         bisect::{BisectState, execute_safe},
         commit,
     },
-    internal::{config::ConfigKv, head::Head},
+    internal::{branch::Branch, config::ConfigKv, head::Head},
     utils::{
         output::OutputConfig,
         test::{self, ChangeDirGuard},
@@ -333,6 +333,39 @@ async fn test_bisect_reset() {
 
     // Should be back to original HEAD
     assert_eq!(Head::current_commit().await.unwrap().to_string(), orig_head);
+}
+
+/// `bisect reset` must surface corrupt storage for the original branch instead
+/// of silently treating it as a deleted branch and falling back to detached
+/// checkout. Otherwise a storage-corruption bug can be hidden behind a
+/// successful reset.
+#[tokio::test]
+#[serial]
+async fn test_bisect_reset_surfaces_corrupt_original_branch_storage() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    create_linear_commits(3).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: None,
+            good: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+    Branch::update_branch("main", "not-a-valid-hash", None)
+        .await
+        .unwrap();
+
+    let error = execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .expect_err("bisect reset must fail when the original branch row is corrupt");
+    assert_eq!(error.stable_code().as_str(), "LBR-REPO-002");
 }
 
 /// Scenario: `bisect skip` must record the current commit in

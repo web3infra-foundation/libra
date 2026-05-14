@@ -39,9 +39,14 @@ use crate::{
         status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
     },
     info_println,
-    internal::{branch::Branch, config::ConfigKv, db::get_db_conn_instance, head::Head},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        config::ConfigKv,
+        db::get_db_conn_instance,
+        head::Head,
+    },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         ignore::IgnorePolicy,
         object_ext::TreeExt,
         output::OutputConfig,
@@ -802,7 +807,10 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
         (resolve_ref(&rev).await?, None)
     } else if let Some(ref branch_name) = state.orig_head_name {
         // Restore to original branch - use its current commit (branch may have moved during bisect)
-        match Branch::find_branch(branch_name, None).await {
+        match Branch::find_branch_result(branch_name, None)
+            .await
+            .map_err(|error| map_bisect_branch_store_error(branch_name, error))?
+        {
             Some(branch) => (branch.commit, Some(branch_name.clone())),
             None => {
                 // Branch no longer exists - fall back to orig_head commit
@@ -830,6 +838,29 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     );
 
     Ok(())
+}
+
+fn map_bisect_branch_store_error(branch_name: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => CliError::fatal(format!(
+            "failed to restore original branch '{branch_name}': failed to query branch storage: {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+        .with_hint("repair branch storage or reset to an explicit revision with 'libra bisect reset <rev>'."),
+        BranchStoreError::Corrupt { .. } => CliError::fatal(format!(
+            "failed to restore original branch '{branch_name}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+        .with_hint("repair branch storage or reset to an explicit revision with 'libra bisect reset <rev>'."),
+        BranchStoreError::NotFound(_) => CliError::fatal(format!(
+            "failed to restore original branch '{branch_name}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+        BranchStoreError::Delete { .. } => CliError::fatal(format!(
+            "failed to restore original branch '{branch_name}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
+    }
 }
 
 /// Re-attach HEAD to `branch_name` and restore the worktree to `commit_hash`.
