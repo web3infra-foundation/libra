@@ -39,14 +39,15 @@ use serde::{Deserialize, Serialize};
 use crate::{
     command::{cloud, load_object, status},
     internal::{
-        ai::history::HistoryManager,
+        ai::{history::HistoryManager, projection::ProjectionRebuilder},
         branch::Branch,
         config::ConfigKv,
         db,
         head::Head,
         publish::{
             ai_export::{
-                AiExportPlan, AiExportRequest, HistoryAiExportRequest, build_ai_export_plan,
+                AiExportPlan, AiExportRequest, HistoryAiExportRequest, ProjectionAiExportRequest,
+                build_ai_export_plan, build_publish_ai_projection_objects,
                 collect_publish_ai_objects_from_history,
             },
             contract::{
@@ -1294,7 +1295,7 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
         &self,
         input: PublishAiExportPlanInput,
     ) -> CliResult<AiExportPlan> {
-        let objects = collect_publish_ai_objects_from_history(
+        let mut objects = collect_publish_ai_objects_from_history(
             &self.history,
             self.storage.as_ref(),
             HistoryAiExportRequest {
@@ -1312,6 +1313,37 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
             ))
             .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
+        let projection_rebuilder = ProjectionRebuilder::new(self.storage.as_ref(), &self.history);
+        if let Some(rebuild) =
+            projection_rebuilder
+                .rebuild_latest_thread()
+                .await
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to rebuild publish AI projection objects: {source:#}"
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?
+        {
+            objects.extend(
+                build_publish_ai_projection_objects(
+                    &rebuild,
+                    ProjectionAiExportRequest {
+                        site_id: input.site_id.clone(),
+                        revision_oid: input.revision_oid.clone(),
+                        source_ref: format!("revision/{}", input.revision_oid),
+                        redaction_mode: input.redaction_mode,
+                        redaction_rules_version: input.redaction_rules_version.clone(),
+                    },
+                )
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to build publish AI projection objects: {source}"
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?,
+            );
+        }
 
         build_ai_export_plan(AiExportRequest {
             repo_id: input.repo_id,
@@ -3644,12 +3676,33 @@ mod tests {
         .await
         .expect("default planner should export AI history objects");
 
-        assert_eq!(output.ai_object_count, 1);
-        assert_eq!(sink.ai_objects.len(), 1);
-        assert_eq!(sink.ai_objects[0].object_type, "Intent");
-        assert_eq!(sink.revisions[0].ai_object_count, 1);
-        assert_eq!(sink.sync_runs[0].ai_object_count, 1);
-        assert_eq!(sink.sync_runs[1].ai_object_count, 1);
+        let object_types = sink
+            .ai_objects
+            .iter()
+            .map(|object| object.object_type.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "Intent",
+            "Thread",
+            "Scheduler",
+            "QueryIndex",
+            "LiveContextWindow",
+            "ReadyQueue",
+            "ParallelGroup",
+            "Checkpoint",
+            "RetryRoute",
+            "UiCurrentView",
+        ] {
+            assert!(
+                object_types.contains(expected),
+                "default planner should export {expected}, got {object_types:?}"
+            );
+        }
+        assert_eq!(output.ai_object_count, 10);
+        assert_eq!(sink.ai_objects.len(), 10);
+        assert_eq!(sink.revisions[0].ai_object_count, 10);
+        assert_eq!(sink.sync_runs[0].ai_object_count, 10);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 10);
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser

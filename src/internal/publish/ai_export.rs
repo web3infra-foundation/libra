@@ -18,7 +18,13 @@ use super::{
     },
     snapshot::sha256_hex,
 };
-use crate::{internal::ai::history::HistoryManager, utils::storage::Storage};
+use crate::{
+    internal::ai::{
+        history::HistoryManager,
+        projection::{LiveContextPinKind, MaterializedProjection},
+    },
+    utils::storage::Storage,
+};
 
 /// Index bucket used for the AI object model relationship projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,6 +311,16 @@ pub struct HistoryAiExportRequest {
     pub redaction_rules_version: String,
 }
 
+/// Inputs needed to convert rebuilt runtime projections into publish envelopes.
+#[derive(Clone, Debug)]
+pub struct ProjectionAiExportRequest {
+    pub site_id: String,
+    pub revision_oid: String,
+    pub source_ref: String,
+    pub redaction_mode: RedactionMode,
+    pub redaction_rules_version: String,
+}
+
 /// Planned R2/D1 outputs for one revision's AI object model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AiExportPlan {
@@ -491,6 +507,199 @@ where
                 right.object_id.as_str(),
             ))
     });
+    Ok(objects)
+}
+
+/// Convert a rebuilt Libra projection into publish AI object envelopes.
+pub fn build_publish_ai_projection_objects(
+    rebuild: &MaterializedProjection,
+    request: ProjectionAiExportRequest,
+) -> Result<Vec<PublishAiObject>, AiExportError> {
+    let thread_id = rebuild.thread.thread_id.to_string();
+    let source_ref = format!("projection/rebuild/thread/{thread_id}");
+    let scheduler_relationships = vec![projection_relationship(
+        "Scheduler",
+        &thread_id,
+        "schedules",
+        "Thread",
+        &thread_id,
+    )];
+    let scheduler_ref = || {
+        vec![projection_relationship(
+            "LiveContextWindow",
+            &thread_id,
+            "belongsTo",
+            "Scheduler",
+            &thread_id,
+        )]
+    };
+
+    let ready_queue = rebuild
+        .scheduler
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("ready_queue"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let checkpoint_frames = rebuild
+        .scheduler
+        .live_context_window
+        .iter()
+        .filter(|frame| matches!(frame.pin_kind, Some(LiveContextPinKind::Checkpoint)))
+        .collect::<Vec<_>>();
+
+    let mut objects = Vec::new();
+    objects.push(projection_object(
+        "Thread",
+        &thread_id,
+        serde_json::to_value(&rebuild.thread).map_err(|source| AiExportError::Serialize {
+            artifact: "AI Thread projection",
+            source,
+        })?,
+        Vec::new(),
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "Scheduler",
+        &thread_id,
+        serde_json::to_value(&rebuild.scheduler).map_err(|source| AiExportError::Serialize {
+            artifact: "AI Scheduler projection",
+            source,
+        })?,
+        scheduler_relationships,
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "QueryIndex",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "intentPlan": rebuild.intent_plan_index,
+            "intentTask": rebuild.intent_task_index,
+            "planStepTask": rebuild.plan_step_task_index,
+            "taskRun": rebuild.task_run_index,
+            "runEvent": rebuild.run_event_index,
+            "runPatchset": rebuild.run_patchset_index,
+            "intentContextFrame": rebuild.intent_context_frame_index,
+        }),
+        vec![projection_relationship(
+            "QueryIndex",
+            &thread_id,
+            "indexes",
+            "Thread",
+            &thread_id,
+        )],
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "LiveContextWindow",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "frames": rebuild.scheduler.live_context_window,
+        }),
+        scheduler_ref(),
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "ReadyQueue",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "taskIds": ready_queue,
+        }),
+        vec![projection_relationship(
+            "ReadyQueue",
+            &thread_id,
+            "belongsTo",
+            "Scheduler",
+            &thread_id,
+        )],
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "ParallelGroup",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "groups": [],
+        }),
+        vec![projection_relationship(
+            "ParallelGroup",
+            &thread_id,
+            "belongsTo",
+            "Scheduler",
+            &thread_id,
+        )],
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "Checkpoint",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "contextFrames": checkpoint_frames,
+        }),
+        vec![projection_relationship(
+            "Checkpoint",
+            &thread_id,
+            "belongsTo",
+            "Scheduler",
+            &thread_id,
+        )],
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "RetryRoute",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "routes": [],
+        }),
+        vec![projection_relationship(
+            "RetryRoute",
+            &thread_id,
+            "belongsTo",
+            "Scheduler",
+            &thread_id,
+        )],
+        &request,
+        &source_ref,
+    ));
+    objects.push(projection_object(
+        "UiCurrentView",
+        &thread_id,
+        serde_json::json!({
+            "threadId": thread_id,
+            "currentIntentId": rebuild.thread.current_intent_id,
+            "latestIntentId": rebuild.thread.latest_intent_id,
+            "selectedPlanIds": rebuild.scheduler.selected_plan_ids,
+            "currentPlanHeads": rebuild.scheduler.current_plan_heads,
+            "activeTaskId": rebuild.scheduler.active_task_id,
+            "activeRunId": rebuild.scheduler.active_run_id,
+            "liveContextWindow": rebuild.scheduler.live_context_window,
+        }),
+        vec![
+            projection_relationship("UiCurrentView", &thread_id, "renders", "Thread", &thread_id),
+            projection_relationship(
+                "UiCurrentView",
+                &thread_id,
+                "reads",
+                "Scheduler",
+                &thread_id,
+            ),
+        ],
+        &request,
+        &source_ref,
+    ));
+
     Ok(objects)
 }
 
@@ -838,6 +1047,52 @@ fn sort_index_values(indexes: &mut AiBundleIndexes) {
             values.sort();
             values.dedup();
         }
+    }
+}
+
+fn projection_object(
+    object_type: &str,
+    object_id: &str,
+    payload: serde_json::Value,
+    relationships: Vec<AiObjectRelationship>,
+    request: &ProjectionAiExportRequest,
+    projection_source_ref: &str,
+) -> PublishAiObject {
+    let (payload, removed_fields) = redact_history_payload(payload, request.redaction_mode);
+    PublishAiObject {
+        schema_version: PUBLISH_SCHEMA_VERSION,
+        site_id: request.site_id.clone(),
+        revision_oid: request.revision_oid.clone(),
+        object_type: object_type.to_string(),
+        object_id: object_id.to_string(),
+        layer: AiObjectLayer::Projection,
+        source_refs: vec![
+            request.source_ref.clone(),
+            projection_source_ref.to_string(),
+        ],
+        relationships,
+        payload,
+        redaction: AiObjectRedaction {
+            mode: request.redaction_mode,
+            rules_version: request.redaction_rules_version.clone(),
+        },
+        removed_fields,
+    }
+}
+
+fn projection_relationship(
+    from_object_type: &str,
+    from_object_id: &str,
+    kind: &str,
+    to_object_type: &str,
+    to_object_id: &str,
+) -> AiObjectRelationship {
+    AiObjectRelationship {
+        kind: kind.to_string(),
+        from_object_type: from_object_type.to_string(),
+        from_object_id: from_object_id.to_string(),
+        to_object_type: to_object_type.to_string(),
+        to_object_id: to_object_id.to_string(),
     }
 }
 
