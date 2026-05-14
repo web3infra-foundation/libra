@@ -1398,7 +1398,7 @@ fn collect_tree_items_and_paths<'a>(
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        path::PathBuf,
+        path::{Path, PathBuf},
     };
 
     use git_internal::{
@@ -1406,7 +1406,36 @@ mod tests {
         internal::object::tree::{Tree, TreeItem, TreeItemMode},
     };
 
-    use super::{classify_relative_to_base, collect_tree_items_and_paths, resolve_three_way};
+    use super::{
+        classify_relative_to_base, collect_tree_items_and_paths, path_to_index_key,
+        resolve_three_way, tree_item_name,
+    };
+
+    #[test]
+    fn tree_item_name_rejects_paths_without_file_name() {
+        let err = tree_item_name(Path::new("")).expect_err("empty path should fail");
+        assert!(err.contains("path has no file name"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_item_name_rejects_non_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let path = PathBuf::from(OsString::from_vec(vec![0x66, 0x80]));
+        let err = tree_item_name(&path).expect_err("non-UTF-8 path should fail");
+        assert!(err.contains("path is not valid UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_to_index_key_rejects_non_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let path = PathBuf::from(OsString::from_vec(vec![0x66, 0x80]));
+        let err = path_to_index_key(&path).expect_err("non-UTF-8 path should fail");
+        assert!(err.contains("path is not valid UTF-8"));
+    }
 
     #[test]
     fn collect_tree_items_and_paths_unions_paths_and_preserves_items() {
@@ -2077,7 +2106,7 @@ fn create_tree_from_items_map(items: &HashMap<PathBuf, ObjectHash>) -> Result<Ob
     for (path, hash) in items {
         let item = git_internal::internal::object::tree::TreeItem {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
+            name: tree_item_name(path)?,
             id: *hash,
         };
         // TODO: Handle file modes properly - currently assumes all files are blobs
@@ -2113,12 +2142,7 @@ fn build_tree_recursively(
 
     // Recursively process each subdirectory
     for subdir_path in subdirs {
-        let subdir_name = subdir_path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
+        let subdir_name = tree_item_name(&subdir_path)?;
 
         let subtree_hash = build_tree_recursively(&subdir_path, entries_map)?;
 
@@ -2161,10 +2185,10 @@ fn reset_workdir_tracked_only(
     }
 
     for path_buf in new_index.tracked_files() {
-        let path_str = path_buf.to_str().unwrap();
+        let path_str = path_to_index_key(&path_buf)?;
         if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
-            let target_path = workdir.join(path_str);
+            let target_path = workdir.join(&path_buf);
 
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -2174,6 +2198,20 @@ fn reset_workdir_tracked_only(
     }
 
     Ok(())
+}
+
+fn tree_item_name(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("path has no file name: {}", path.display()))?;
+    name.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
+fn path_to_index_key(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
 }
 
 /// Rebuild an index from a tree object by recursively adding all files
