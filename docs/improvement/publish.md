@@ -923,7 +923,7 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差必须记录在 PR 说明中。
+- [x] (v0.17.143) 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差记录在 [publish-worker-design-handoff.md](publish-worker-design-handoff.md)，作为无 PR 上下文时的 durable handoff。
 - [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
 - [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；完整云端 sync/status 对比仍归 Phase 4。
 - [x] (v0.17.14) Next.js + React 前端能展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
@@ -937,6 +937,7 @@ v1 使用 gitignore 子集：
 **Verification:**
 
 - [x] (v0.17.59) `pnpm --dir worker build`
+- [x] (v0.17.143) `pnpm --dir worker build`
 - [x] (v0.17.60) `pnpm --dir worker e2e`
 - [x] (v0.17.61) `cargo test --test command_test publish_deploy`
 - [x] (v0.17.62) `cargo test --test command_test publish_unpublish`

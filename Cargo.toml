@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.142"
+version = "0.17.143"
 edition = "2024"
 
 [features]
