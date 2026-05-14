@@ -157,7 +157,7 @@ and which commit it resolves to.
 | `-d` / `--dereference` | Not yet implemented | Yes | N/A |
 | JSON output | `--json` | No | No |
 | Ref storage | SQLite `reference` table | Loose files + packed-refs | Operation log |
-| Remote-tracking refs | Not yet (TODO) | Yes (`refs/remotes/`) | Via `jj git fetch` |
+| Remote-tracking refs | Yes (`refs/remotes/`) | Yes (`refs/remotes/`) | Via `jj git fetch` |
 
 ## Error Handling
 
