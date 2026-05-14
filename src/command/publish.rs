@@ -1314,16 +1314,15 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
             .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         let projection_rebuilder = ProjectionRebuilder::new(self.storage.as_ref(), &self.history);
-        if let Some(rebuild) =
-            projection_rebuilder
-                .rebuild_latest_thread()
-                .await
-                .map_err(|source| {
-                    CliError::fatal(format!(
-                        "failed to rebuild publish AI projection objects: {source:#}"
-                    ))
-                    .with_stable_code(StableErrorCode::InternalInvariant)
-                })?
+        for rebuild in projection_rebuilder
+            .rebuild_all_threads()
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!(
+                    "failed to rebuild publish AI projection objects: {source:#}"
+                ))
+                .with_stable_code(StableErrorCode::InternalInvariant)
+            })?
         {
             objects.extend(
                 build_publish_ai_projection_objects(
@@ -3654,6 +3653,15 @@ mod tests {
             .put_tracked(&intent, &history)
             .await
             .expect("intent should be written to history");
+        let second_intent = Intent::new(
+            ActorRef::human("publish-test").expect("actor"),
+            "Publish second history-backed thread",
+        )
+        .expect("second intent");
+        storage
+            .put_tracked(&second_intent, &history)
+            .await
+            .expect("second intent should be written to history");
 
         let commit = commit_with_single_file("README.md", "ai\n", "ai fixture");
         let revision_oid = commit.id.to_string();
@@ -3698,11 +3706,19 @@ mod tests {
                 "default planner should export {expected}, got {object_types:?}"
             );
         }
-        assert_eq!(output.ai_object_count, 10);
-        assert_eq!(sink.ai_objects.len(), 10);
-        assert_eq!(sink.revisions[0].ai_object_count, 10);
-        assert_eq!(sink.sync_runs[0].ai_object_count, 10);
-        assert_eq!(sink.sync_runs[1].ai_object_count, 10);
+        assert_eq!(
+            sink.ai_objects
+                .iter()
+                .filter(|object| object.object_type == "Thread")
+                .count(),
+            2,
+            "default planner must rebuild every independent thread component",
+        );
+        assert_eq!(output.ai_object_count, 20);
+        assert_eq!(sink.ai_objects.len(), 20);
+        assert_eq!(sink.revisions[0].ai_object_count, 20);
+        assert_eq!(sink.sync_runs[0].ai_object_count, 20);
+        assert_eq!(sink.sync_runs[1].ai_object_count, 20);
     }
 
     /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
