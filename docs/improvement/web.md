@@ -75,7 +75,7 @@
 
 **任务：**
 
-- 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard。
+- [x] 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard；`web/package.json` 已增加 `test` 脚本用于本地回归。
 - 增加 store/controller hook 测试：首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce、lease retry once、`CONTROLLER_CONFLICT` 不重试。
 - 增加组件测试：无 session 空态、read-only controller、`BROWSER_CONTROL_DISABLED`、pending interaction 五种 kind、streaming assistant message、empty diff、parse error、long diff collapse。
 - [x] Rust：`tests/code_ui_scenarios.rs` 已补 `browser_write_appends_redacted_control_audit`，覆盖 browser lease 的 interaction/respond、message submit、turn cancel 审计日志与 client id redaction；`/api/code/threads` invalid limit / clamp 场景已由 `tests/code_ui_remote_security_matrix.rs` + `tests/data/code_ui_remote/security_cases.json` 覆盖。
