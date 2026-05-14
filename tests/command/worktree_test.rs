@@ -65,6 +65,84 @@ fn worktree_paths() -> Vec<String> {
 
 #[tokio::test]
 #[serial]
+async fn test_worktree_list_json_outputs_structured_entries() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let wt_path = repo_dir.path().join("wt_json");
+
+    let add = run_libra_command(&["worktree", "add", "wt_json"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let lock = run_libra_command(
+        &["worktree", "lock", "wt_json", "--reason", "review"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&lock, "worktree lock");
+
+    let output = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&output, "json worktree list");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree list should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "worktree.list");
+
+    let worktrees = parsed["data"]["worktrees"]
+        .as_array()
+        .expect("worktrees should be an array");
+    let main_path = repo_dir.path().canonicalize().unwrap();
+    let main_entry = worktrees
+        .iter()
+        .find(|entry| entry["path"] == main_path.to_string_lossy().as_ref())
+        .expect("json list should include main worktree");
+    assert_eq!(main_entry["kind"], "main");
+    assert_eq!(main_entry["is_main"], true);
+    assert_eq!(main_entry["locked"], false);
+    assert_eq!(main_entry["exists"], true);
+
+    let linked_path = wt_path.canonicalize().unwrap();
+    let linked_entry = worktrees
+        .iter()
+        .find(|entry| entry["path"] == linked_path.to_string_lossy().as_ref())
+        .expect("json list should include linked worktree");
+    assert_eq!(linked_entry["kind"], "worktree");
+    assert_eq!(linked_entry["is_main"], false);
+    assert_eq!(linked_entry["locked"], true);
+    assert_eq!(linked_entry["lock_reason"], "review");
+    assert_eq!(linked_entry["exists"], true);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_machine_outputs_single_json_line() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    let output = run_libra_command(&["--machine", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&output, "machine worktree list");
+    assert!(
+        output.stderr.is_empty(),
+        "machine worktree list should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["command"], "worktree.list");
+}
+
+#[tokio::test]
+#[serial]
 /// `worktree add` creates a linked directory with a `.libra` storage link.
 async fn test_worktree_add_creates_linked_directory() {
     let repo_dir = tempdir().unwrap();

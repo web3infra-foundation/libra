@@ -52,7 +52,13 @@ List all registered worktrees and their state.
 
 ```bash
 libra worktree list
+libra --json worktree list
+libra --machine worktree list
 ```
+
+Structured output uses the `worktree.list` command envelope. Each entry reports
+`kind`, `path`, `is_main`, `locked`, `lock_reason`, and whether the path currently
+exists on disk.
 
 ### Subcommand: `lock`
 

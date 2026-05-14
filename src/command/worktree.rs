@@ -20,7 +20,7 @@ use crate::{
     internal::head::Head,
     utils::{
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -129,6 +129,21 @@ struct WorktreeState {
     worktrees: Vec<WorktreeEntry>,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeListOutput {
+    worktrees: Vec<WorktreeListEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeListEntry {
+    kind: &'static str,
+    path: String,
+    is_main: bool,
+    locked: bool,
+    lock_reason: Option<String>,
+    exists: bool,
+}
+
 /// RAII guard that temporarily changes the process current directory.
 ///
 /// When created with `change_to`, it switches the current directory to the
@@ -167,7 +182,7 @@ pub async fn execute(args: WorktreeArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to the appropriate worktree sub-command
 /// (add, list, lock, unlock, move, prune, remove, repair, and Unix umount).
-pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResult<()> {
     let command = args.command;
     #[cfg(unix)]
     let needs_repo = !matches!(&command, WorktreeSubcommand::Umount { .. });
@@ -179,18 +194,29 @@ pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResu
     }
 
     match command {
-        WorktreeSubcommand::Add { path } => add_worktree(path).await,
-        WorktreeSubcommand::List => list_worktrees(),
-        WorktreeSubcommand::Lock { path, reason } => lock_worktree(path, reason),
-        WorktreeSubcommand::Unlock { path } => unlock_worktree(path),
-        WorktreeSubcommand::Move { src, dest } => move_worktree(src, dest),
-        WorktreeSubcommand::Prune => prune_worktrees(),
-        WorktreeSubcommand::Remove { path, delete_dir } => remove_worktree(path, delete_dir).await,
+        WorktreeSubcommand::Add { path } => add_worktree(path).await.map_err(worktree_io_error),
+        WorktreeSubcommand::List => list_worktrees(output),
+        WorktreeSubcommand::Lock { path, reason } => {
+            lock_worktree(path, reason).map_err(worktree_io_error)
+        }
+        WorktreeSubcommand::Unlock { path } => unlock_worktree(path).map_err(worktree_io_error),
+        WorktreeSubcommand::Move { src, dest } => {
+            move_worktree(src, dest).map_err(worktree_io_error)
+        }
+        WorktreeSubcommand::Prune => prune_worktrees().map_err(worktree_io_error),
+        WorktreeSubcommand::Remove { path, delete_dir } => remove_worktree(path, delete_dir)
+            .await
+            .map_err(worktree_io_error),
         #[cfg(unix)]
-        WorktreeSubcommand::Umount { path, cleanup } => umount_fuse_path(path, cleanup),
-        WorktreeSubcommand::Repair => repair_worktrees(),
+        WorktreeSubcommand::Umount { path, cleanup } => {
+            umount_fuse_path(path, cleanup).map_err(worktree_io_error)
+        }
+        WorktreeSubcommand::Repair => repair_worktrees().map_err(worktree_io_error),
     }
-    .map_err(|e| CliError::fatal(e.to_string()))
+}
+
+fn worktree_io_error(error: io::Error) -> CliError {
+    CliError::fatal(error.to_string())
 }
 
 /// Returns the path to the on-disk worktree state file.
@@ -570,9 +596,32 @@ fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
 /// Each registered worktree is printed on its own line as either
 /// `main <path>` or `worktree <path>`, with optional `[locked: <reason>]`
 /// suffix when the entry is locked.
-fn list_worktrees() -> io::Result<()> {
+fn run_list_worktrees() -> io::Result<WorktreeListOutput> {
     let state = load_state()?;
-    for w in state.worktrees {
+    let worktrees = state
+        .worktrees
+        .into_iter()
+        .map(|w| WorktreeListEntry {
+            kind: if w.is_main { "main" } else { "worktree" },
+            exists: Path::new(&w.path).exists(),
+            path: w.path,
+            is_main: w.is_main,
+            locked: w.locked,
+            lock_reason: w.lock_reason,
+        })
+        .collect();
+    Ok(WorktreeListOutput { worktrees })
+}
+
+fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
+    let result = run_list_worktrees().map_err(worktree_io_error)?;
+    if output.is_json() {
+        return emit_json_data("worktree.list", &result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    for w in result.worktrees {
         let mut line = String::new();
         if w.is_main {
             line.push_str("main ");

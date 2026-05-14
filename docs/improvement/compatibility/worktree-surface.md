@@ -10,14 +10,14 @@ C5（Audit P2）
 - [`src/command/worktree.rs`](../../../src/command/worktree.rs) 已实现 `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair`，以及 Unix 下的 `umount` 子命令。
 - `worktree remove` 当前默认**不删除磁盘目录**，继续保持非破坏默认。
 - `WorktreeSubcommand::Remove { path, delete_dir }` 已暴露 `--delete-dir`；显式传入后会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除。
-- 第 31 批"mv / rm / worktree 结构化输出"尚未启动；当前 worktree 没有 `WorktreeOutput` schema 或 `WorktreeError` typed enum。
+- 第 31 批"mv / rm / worktree 结构化输出"已在 worktree `list` 上启动；当前 `worktree list` 已有 `worktree.list` JSON / machine schema，destructive 子命令的 `WorktreeOutput` / `WorktreeError` typed enum 仍待后续切片。
 - [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，并包含 `--delete-dir` on/off 与 dirty 拒绝路径。
 - [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) 已固定对外兼容契约：默认保留目录，`--delete-dir` 删除 clean 目录，dirty 时拒绝并保留 registry/目录。
 
 ### 基于当前代码的 Review 结论
 - C5 的行为对齐已经落地：Libra 默认非破坏，显式 `--delete-dir` 才走 Git-style 删除目录。
 - 脏工作树保护已经是当前契约的一部分，不能在后续结构化输出批次中放宽或静默降级。
-- 第 31 批仍只拥有 `WorktreeOutput` / `WorktreeError` / JSON-machine 的完整现代化，不再拥有 `--delete-dir` 行为本身。
+- 第 31 批仍拥有 destructive 子命令的 `WorktreeOutput` / `WorktreeError` / JSON-machine 完整现代化，不再拥有 `--delete-dir` 行为本身；`list` 的结构化输出已独立落地。
 
 ## 目标与非目标
 
@@ -144,8 +144,8 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 |-----|-----|-----|
 | [`src/command/worktree.rs`](../../../src/command/worktree.rs) | 修改 | `WorktreeSubcommand::Remove` 加 `--delete-dir`；`remove` handler 加删盘分支 + dirty 检查 |
 | [`src/utils/error.rs`](../../../src/utils/error.rs) | 复核/必要时修改 | 优先复用 `ConflictOperationBlocked` / `IoWriteFailed`；仅在确有跨命令需求时新增更细错误码 |
-| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 修改 | 新增 ≥3 条用例（默认不删盘、`--delete-dir` 删盘、dirty + `--delete-dir` 拒绝） |
-| [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) | 新建 | `--delete-dir` on/off 行为差异跨场景断言 |
+| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 已修改 / 继续补齐 | 已覆盖默认不删盘、clean `--delete-dir` 删盘，以及 `worktree list` JSON / machine；dirty + `--delete-dir` 拒绝仍需补回归 |
+| [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) | 已新建 / 继续补齐 | 当前固定 help / examples surface；dirty 行为差异跨场景断言仍需补 |
 | [`docs/commands/worktree.md`](../../commands/worktree.md) | 修改 | 默认行为 vs `--delete-dir` 的差异说明 |
 | [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 修改 | worktree 行 notes 更新 |
 
@@ -154,10 +154,11 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 - [x] `cargo run -- worktree remove --help` 列出 `--delete-dir`。
 - [x] `worktree remove <path>`（默认）后，`<path>` 目录仍存在；registry 中已移除。
 - [x] `worktree remove --delete-dir <path>` 后，`<path>` 目录已不存在；`ls <path>` 报 not-found。
-- [x] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
-- [x] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。
+- [ ] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
+- [ ] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。（当前已覆盖 clean + delete-dir 与默认不带 flag；dirty 拒绝待补）
 - [x] `COMPATIBILITY.md` worktree 行已更新为默认保留目录、`--delete-dir` opt-in 删除。
 - [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test worktree_test`。
+- [x] (v0.17.162) `worktree list` JSON / machine schema 已落地并由 `test_worktree_list_json_outputs_structured_entries`、`test_worktree_list_machine_outputs_single_json_line` 覆盖。
 
 ## 风险与缓解
 
