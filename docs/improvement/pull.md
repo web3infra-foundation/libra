@@ -35,7 +35,7 @@
 **已完成目标：**
 - 引入 `PullError` typed error enum，覆盖 pull 层面的错误场景
 - 所有 `PullError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_pull(args) -> Result<PullOutput, PullError>` 纯执行入口
+- 拆分执行层与渲染层：新增 `run_pull(args, output) -> Result<PullOutput, PullError>` 纯执行入口
 - 复用 `fetch.rs` / `merge.rs` 已落地的 typed helper 与静默子级输出边界
 
 > **依赖现状（已变更）**：原计划把"fetch / merge 的最小 typed helper"列为前置依赖；当前 `fetch` 第五批改造已整体落地（README #22），`fetch.rs` 已暴露 `FetchOutput` 顶层结果与可静默复用的内部接口；`merge` 命令的完整改造仍归 README 第六批（merge / rebase 状态机），本批 pull 只需要 merge 的"fast-forward / already-up-to-date / requires-manual-merge"最小接口，已可直接消费。**因此 pull 不再有任何阻塞性前置依赖**，剩余工作纯粹是 pull 自身的执行/渲染拆分与错误码补齐。
@@ -83,16 +83,13 @@ pub enum PullError {
     RemoteNotFound(String),
 
     #[error("pull failed during fetch phase: {0}")]
-    FetchFailed(String),
+    Fetch(#[source] fetch::FetchError),
 
     #[error("pull requires a non-fast-forward merge from '{upstream}'")]
     ManualMergeRequired { upstream: String },
 
     #[error("pull failed during merge phase: {0}")]
-    MergeFailed(String),
-
-    #[error("failed to read repository state: {0}")]
-    RepoState(String),
+    Merge(#[source] merge::PullMergeError),
 }
 ```
 
@@ -103,14 +100,13 @@ pub enum PullError {
 | `NotOnBranch` | `RepoStateInvalid` | 128 | `checkout a branch before pulling` + `use 'libra switch <branch>' to switch` |
 | `NoTrackingInfo` | `RepoStateInvalid` | 128 | `specify the remote and branch: 'libra pull <remote> <branch>'` + `or set upstream with 'libra branch --set-upstream-to=<remote>/<branch>'` |
 | `RemoteNotFound` | `CliInvalidTarget` | 129 | `use 'libra remote -v' to see configured remotes` |
-| `FetchFailed` | 保留原始错误码 | 128 | 保留原始 hint + 添加 `this error occurred during the fetch phase of pull` |
+| `Fetch` | 保留 fetch 映射后的根因错误码 | 128 | 保留根因 hint + 添加 `details.phase == "fetch"` |
 | `ManualMergeRequired` | `ConflictOperationBlocked` | 128 | `run 'libra fetch' first if needed, then merge manually with 'libra merge <upstream>'` |
-| `MergeFailed` | 保留原始错误码 | 128 | 保留原始 hint + 添加 `this error occurred during the merge phase of pull` |
-| `RepoState` | `RepoCorrupt` | 128 | `try 'libra status' to verify repository state` |
+| `Merge` | 保留 merge 映射后的根因错误码 | 128 | 保留根因 hint + 添加 `details.phase == "merge"` |
 
-> **阶段错误透传策略：** `FetchFailed` 和 `MergeFailed` 保留原始错误的 `StableErrorCode`（通过 `CliError::with_detail("phase", "fetch")` 附加阶段信息），而不是覆盖为新的错误码。这样 Agent 可以同时获取根因错误码和阶段上下文。
+> **阶段错误透传策略：** `Fetch` 和 `Merge` 先通过 fetch / merge 的 typed error mapper 转换为根因 `StableErrorCode`，再通过 `CliError::with_detail("phase", "...")` 附加阶段信息，而不是覆盖为新的 pull 专属错误码。这样 Agent 可以同时获取根因错误码和阶段上下文。
 >
-> **实现注意：** 为了真正透传原始错误码，`FetchFailed` / `MergeFailed` 的内部载体应为 `CliError`（或 `Box<CliError>`），而不是 `String`。`From<PullError> for CliError` 实现中直接取出内部 `CliError`，附加 `with_detail("phase", ...)` 后返回，避免错误码丢失。若内部 typed helper 返回的不是 `CliError` 而是自身的 error enum，则需要在 pull 层先转换为 `CliError` 再包装。
+> **实现注意：** 当前代码的 `PullError::Fetch(fetch::FetchError)` 与 `PullError::Merge(merge::PullMergeError)` 保留 typed source error；`From<PullError> for CliError` 中再调用 `map_fetch_error_to_cli()` / `map_merge_error_to_cli()`，避免通过字符串丢失错误类别。
 
 ### 特性 2：执行层与渲染层拆分
 
@@ -164,7 +160,7 @@ pub struct PullOutput {
 ```
 
 改造后的调用链：
-- `execute_safe(args, output)` → `run_pull(args)` → 返回 `PullOutput`
+- `execute_safe(args, output)` → `run_pull(args, output)` → 返回 `PullOutput`
 - `run_pull()` 内部分别调用 fetch 和 merge 的内部 typed helper（而非 `execute_safe()`），收集结构化结果
 - `execute_safe()` 根据 `OutputConfig` 选择渲染：human / JSON / machine
 
@@ -331,7 +327,7 @@ Already up to date.
 | **A** | 退出码 `0/128/129` | 参数错误（无效 remote 名）→ exit `129`；运行时错误（网络失败、认证失败、manual merge required、no tracking info、not on branch）→ exit `128`；成功 / already-up-to-date → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | remote 名不匹配时提示 `did you mean '<closest>'?`（复用 push 的 fuzzy match 逻辑） |
-| **G** | Issues URL | 仅在 `RepoState` / `MergeFailed` 等内部不变式错误时输出 Issues URL。网络/认证/manual-merge-required 等用户可修复问题不输出 |
+| **G** | Issues URL | 仅在 merge / fetch typed mapper 判定为内部不变式或仓库损坏时输出 Issues URL。网络、认证、manual-merge-required 等用户可修复问题不输出 |
 
 ### `--help` EXAMPLES 段
 
@@ -357,7 +353,7 @@ EXAMPLES:
 - **已覆盖already-up-to-date**：本地与远端一致时返回 up-to-date 结果
 - **已覆盖`--quiet` 静默**：成功路径下 stdout 为空
 
-#### `tests/command/pull_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/pull_json_test.rs`（JSON schema 稳定性，已新增）
 
 - **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性：
   - `branch` 是 string
@@ -372,7 +368,7 @@ EXAMPLES:
 - **阶段上下文**：fetch 阶段失败的错误 JSON 包含 `details.phase == "fetch"`
 - **结构化输出隔离**：`--json` / `--machine` 成功路径下 stderr 不出现 fetch/merge 的 human 输出或 progress 文本
 
-#### CLI 错误码验证（放入 `tests/command/pull_test.rs`）
+#### CLI 错误码验证（已放入 `tests/command/pull_test.rs`）
 
 - `NotOnBranch` 返回 `LBR-REPO-003`
 - `NoTrackingInfo` 返回 `LBR-REPO-003`
@@ -395,7 +391,6 @@ EXAMPLES:
 | `src/command/pull.rs` | **重构** | 从 81 行薄包装扩展为完整的组合命令；新增 `PullError` typed enum；新增 `PullOutput` / `PullFetchResult` / `PullMergeResult` 结构体；新增 `run_pull()` 纯执行入口；`PullError → CliError` 显式 `StableErrorCode` 映射；fetch/merge 子级 `OutputConfig` 隔离；补齐 `--help` EXAMPLES |
 | `src/command/fetch.rs` | **复用已落地能力** | 已具备 `FetchOutput` 顶层结果（fetch.md 第五批已整体落地）；pull 直接消费现有 typed 接口与静默 child-output 边界，无需在本批额外改造 fetch |
 | `src/command/merge.rs` | **复用最小接口** | merge 当前稳定支持 `Already up to date` / fast-forward / `requires-manual-merge` 三态，pull 已可消费；three-way merge 与冲突结构化输出由 README 第六批 merge / rebase 状态机改造交付，不在本批 pull 范围 |
-| `tests/command/pull_test.rs` | **重大扩展** | 新增 `PullError` 变体覆盖、fast-forward、up-to-date、quiet 场景 |
-| `tests/command/pull_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/pull_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode、阶段上下文） |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `tests/command/pull_test.rs` | **已扩展** | 覆盖 `PullError` 变体、fast-forward、up-to-date、quiet、错误码和阶段上下文场景 |
+| `tests/command/pull_json_test.rs` | **已新增** | JSON schema 完整性、fast-forward / up-to-date JSON、machine 单行和结构化输出隔离验证 |
+| `tests/command/mod.rs` | **已修改** | 注册 `pull_json_test` 与 `pull_test` |
