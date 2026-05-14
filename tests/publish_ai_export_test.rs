@@ -1,12 +1,12 @@
 use chrono::{TimeZone, Utc};
 use libra::internal::publish::{
     ai_export::{
-        AiExportError, AiExportRequest, build_ai_export_plan, publish_ai_bundle_key,
-        publish_ai_graph_key, publish_ai_index_key, publish_ai_object_key,
+        AiExportError, AiExportRequest, ai_object_model_type_specs, build_ai_export_plan,
+        publish_ai_bundle_key, publish_ai_graph_key, publish_ai_index_key, publish_ai_object_key,
     },
     contract::{
-        AiBundleAssociatedIds, AiObjectLayer, AiObjectRedaction, AiObjectRelationship,
-        PUBLISH_SCHEMA_VERSION, PublishAiObject, RedactionMode,
+        AiBundleAssociatedIds, AiBundleIndexes, AiObjectLayer, AiObjectRedaction,
+        AiObjectRelationship, PUBLISH_SCHEMA_VERSION, PublishAiObject, RedactionMode,
     },
     snapshot::sha256_hex,
 };
@@ -114,6 +114,79 @@ fn publish_ai_export_test_builds_index_graph_bundle_and_storage_keys() {
 }
 
 #[test]
+fn publish_ai_export_test_accepts_every_reference_object_type() {
+    let generated_at = timestamp();
+    let objects = ai_object_model_type_specs()
+        .iter()
+        .map(|spec| {
+            let object_id = format!("{}-1", spec.object_type);
+            object(
+                spec.object_type,
+                &object_id,
+                spec.layer,
+                serde_json::json!({
+                    "objectType": spec.object_type,
+                    "objectId": object_id,
+                    "layer": spec.layer,
+                }),
+                vec![],
+                vec![edge(
+                    spec.object_type,
+                    &object_id,
+                    "self",
+                    spec.object_type,
+                    &object_id,
+                )],
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let plan = build_ai_export_plan(AiExportRequest {
+        repo_id: REPO_ID.to_string(),
+        site_id: SITE_ID.to_string(),
+        revision_oid: REVISION_OID.to_string(),
+        ai_version_id: AI_VERSION_ID.to_string(),
+        generated_at,
+        ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+        redaction_mode: RedactionMode::Default,
+        redaction_rules_version: RULES_VERSION.to_string(),
+        associated_ids: AiBundleAssociatedIds::default(),
+        objects,
+    })
+    .expect("all reference AI object types should export");
+
+    assert_eq!(plan.index.objects.len(), ai_object_model_type_specs().len());
+    for spec in ai_object_model_type_specs() {
+        let object_id = format!("{}-1", spec.object_type);
+        assert_eq!(
+            plan.bundle
+                .redaction
+                .object_counts_by_type
+                .get(spec.object_type),
+            Some(&1),
+            "{} should be counted in redaction summary",
+            spec.object_type
+        );
+        let indexed = plan
+            .index
+            .objects
+            .iter()
+            .find(|entry| entry.object_type == spec.object_type)
+            .unwrap_or_else(|| panic!("{} should be listed in ai/index", spec.object_type));
+        assert_eq!(
+            indexed.layer, spec.layer,
+            "{} should use the reference layer",
+            spec.object_type
+        );
+        assert!(
+            any_index_bucket_contains(&plan.bundle.indexes, &object_id),
+            "{} should have a relationship index bucket",
+            spec.object_type
+        );
+    }
+}
+
+#[test]
 fn publish_ai_export_test_rejects_relationships_with_missing_endpoint() {
     let err = build_ai_export_plan(AiExportRequest {
         repo_id: REPO_ID.to_string(),
@@ -137,6 +210,21 @@ fn publish_ai_export_test_rejects_relationships_with_missing_endpoint() {
             ..
         } if from_object_type == "Run" && to_object_type == "Plan"
     ));
+}
+
+fn any_index_bucket_contains(indexes: &AiBundleIndexes, object_id: &str) -> bool {
+    [
+        &indexes.by_thread,
+        &indexes.by_intent,
+        &indexes.by_plan,
+        &indexes.by_task,
+        &indexes.by_run,
+        &indexes.by_patchset,
+        &indexes.by_event,
+        &indexes.by_context,
+    ]
+    .into_iter()
+    .any(|bucket| bucket.contains_key(object_id))
 }
 
 #[test]

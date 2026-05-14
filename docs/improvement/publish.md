@@ -797,6 +797,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.120) 全量非 dry-run `publish sync` 上传 `refs.json`、`latest.json`，并为每个唯一 revision 上传 `code-manifest.json`。
 - [x] (v0.17.124) `upload_ai_export_artifacts()` 可将 `AiExportPlan` 写入 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并生成 `publish_ai_objects` / `publish_ai_versions` D1 rows；重复调用默认跳过已存在对象，`--force` 可重写。
 - [x] (v0.17.126) `publish sync` orchestration 对每个唯一 revision 调用 AI export planner，生成并上传 `ai/index.json`、AI object JSON、AI graph index 和 AI bundle，并写入 `publish_ai_objects` / `publish_ai_versions` rows 与 revision/sync-run 计数；默认 planner 暂时输出空 AI bundle，完整对象来源覆盖见下方未完成项。
+- [x] (v0.17.135) `ai_export` 内置 AI object model type manifest 覆盖 reference 的 snapshot/event/projection 全部对象类型，并将所有类型接入 bundle relationship index buckets；真实 history/projection 数据源导出仍由下方未完成项跟踪。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
 - [ ] projection/runtime 对象缺失时，按 reference 的 rebuild/read contract 从 snapshot/event history 重建；无法重建时 sync 失败并记录缺失对象类型。
 - [x] (v0.17.110) redaction manifest 覆盖对象级和字段级 redaction，包含 `removedFields`、`rulesVersion`、object counts 和 type counts。
@@ -806,7 +807,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.97) `cargo test publish_snapshot_test`
 - [x] (v0.17.98) `cargo test publish_preflight_test`
 - [x] (v0.17.99) `cargo test publish_ai_object_model_contract_test`
-- [x] (v0.17.100) `cargo test publish_ai_export_test`
+- [x] (v0.17.135) `LIBRA_SKIP_WEB_BUILD=1 cargo test publish_ai_export_test --test publish_ai_export_test`
 
 **Dependencies:** Phase 1, Phase 2
 

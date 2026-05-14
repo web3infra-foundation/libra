@@ -17,6 +17,160 @@ use super::{
     snapshot::sha256_hex,
 };
 
+/// Index bucket used for the AI object model relationship projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AiObjectModelIndexBucket {
+    Thread,
+    Intent,
+    Plan,
+    Task,
+    Run,
+    PatchSet,
+    Event,
+    Context,
+}
+
+/// One object type from `docs/agent/ai-object-model-reference.md`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AiObjectModelTypeSpec {
+    pub object_type: &'static str,
+    pub layer: AiObjectLayer,
+    pub index_bucket: AiObjectModelIndexBucket,
+}
+
+const AI_OBJECT_MODEL_TYPE_SPECS: &[AiObjectModelTypeSpec] = &[
+    AiObjectModelTypeSpec {
+        object_type: "Intent",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Intent,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Plan",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Plan,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Task",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Task,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Run",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Run,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "PatchSet",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::PatchSet,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "ContextSnapshot",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Context,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Provenance",
+        layer: AiObjectLayer::Snapshot,
+        index_bucket: AiObjectModelIndexBucket::Run,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "IntentEvent",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Intent,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "TaskEvent",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Task,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "RunEvent",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Run,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "PlanStepEvent",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Plan,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "RunUsage",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Run,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "ToolInvocation",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Event,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Evidence",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Event,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Decision",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Event,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "ContextFrame",
+        layer: AiObjectLayer::Event,
+        index_bucket: AiObjectModelIndexBucket::Context,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Thread",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Thread,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Scheduler",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Thread,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "QueryIndex",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Context,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "LiveContextWindow",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Context,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "ReadyQueue",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Task,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "ParallelGroup",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Task,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "Checkpoint",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Event,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "RetryRoute",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Event,
+    },
+    AiObjectModelTypeSpec {
+        object_type: "UiCurrentView",
+        layer: AiObjectLayer::Projection,
+        index_bucket: AiObjectModelIndexBucket::Context,
+    },
+];
+
+/// Return the publish AI object model coverage manifest.
+pub fn ai_object_model_type_specs() -> &'static [AiObjectModelTypeSpec] {
+    AI_OBJECT_MODEL_TYPE_SPECS
+}
+
 /// Inputs needed to build the AI publish artefact set for one revision.
 #[derive(Clone, Debug)]
 pub struct AiExportRequest {
@@ -412,16 +566,18 @@ fn bucket_for_type<'a>(
     indexes: &'a mut AiBundleIndexes,
     object_type: &str,
 ) -> Option<&'a mut BTreeMap<String, Vec<String>>> {
-    match object_type {
-        "Thread" => Some(&mut indexes.by_thread),
-        "Intent" | "IntentEvent" => Some(&mut indexes.by_intent),
-        "Plan" | "PlanStepEvent" => Some(&mut indexes.by_plan),
-        "Task" | "TaskEvent" => Some(&mut indexes.by_task),
-        "Run" | "RunEvent" | "RunUsage" => Some(&mut indexes.by_run),
-        "PatchSet" => Some(&mut indexes.by_patchset),
-        "ToolInvocation" | "Evidence" | "Decision" => Some(&mut indexes.by_event),
-        "ContextSnapshot" | "ContextFrame" => Some(&mut indexes.by_context),
-        _ => None,
+    let spec = AI_OBJECT_MODEL_TYPE_SPECS
+        .iter()
+        .find(|spec| spec.object_type == object_type)?;
+    match spec.index_bucket {
+        AiObjectModelIndexBucket::Thread => Some(&mut indexes.by_thread),
+        AiObjectModelIndexBucket::Intent => Some(&mut indexes.by_intent),
+        AiObjectModelIndexBucket::Plan => Some(&mut indexes.by_plan),
+        AiObjectModelIndexBucket::Task => Some(&mut indexes.by_task),
+        AiObjectModelIndexBucket::Run => Some(&mut indexes.by_run),
+        AiObjectModelIndexBucket::PatchSet => Some(&mut indexes.by_patchset),
+        AiObjectModelIndexBucket::Event => Some(&mut indexes.by_event),
+        AiObjectModelIndexBucket::Context => Some(&mut indexes.by_context),
     }
 }
 
