@@ -350,10 +350,13 @@ environment variables or as key/value lines in the repository
 - `LIBRA_STORAGE_SECRET_KEY`
 
 The deployed Worker refs/tree/file API smoke additionally requires
-`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`, `LIBRA_PUBLISH_LIVE_SLUG`, and
-`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`; set
-`LIBRA_PUBLISH_LIVE_FILE_PATH` when the root tree has no direct file
-entry to probe.
+`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`, pointing at a Worker deployed with
+the same D1/R2 bindings. By default the live gate seeds a fresh slug in
+that Worker's host namespace and probes it. Set
+`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` when the Worker host differs from
+the D1 `clone_domain`, set `LIBRA_PUBLISH_LIVE_SLUG` only when probing
+a pre-existing deployed site, and set `LIBRA_PUBLISH_LIVE_FILE_PATH`
+when the root tree has no direct file entry to probe.
 
 ## See also
 

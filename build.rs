@@ -30,6 +30,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBRA_PNPM");
     println!("cargo:rerun-if-env-changed=NODE_OPTIONS");
     println!("cargo:rerun-if-env-changed=LIBRA_SKIP_WEB_BUILD");
+    println!("cargo:rerun-if-env-changed=CI");
 
     if should_skip_web_build() {
         ensure_stub_web_out(&web_dir);
@@ -120,6 +121,11 @@ fn run_pnpm_build(web_dir: &Path) {
 
 fn pnpm_command(pnpm: &str) -> Command {
     let mut command = Command::new(pnpm);
+    if env::var_os("CI").is_none() {
+        // pnpm 11 prompts before purging an incompatible node_modules directory.
+        // Cargo build scripts are non-interactive, so force pnpm's CI behavior.
+        command.env("CI", "true");
+    }
     if let Some(node_options) = node_options_with_sqlite_flag() {
         command.env("NODE_OPTIONS", node_options);
     }

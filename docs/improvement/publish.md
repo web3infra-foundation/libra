@@ -360,8 +360,8 @@ libra publish init --slug libra-demo --clone-domain code.example.com --visibilit
 行为：
 
 - 确认当前目录是 Libra repo。
-- 复用或生成 `libra.repoid`。
-- 写入 `ConfigKv`：
+- 物化当前仓库根目录下的 Worker 模板和 manifest。
+- 接受下列 site-shaping flags 并做 clap 形状校验；当前实现不把这些值写入 `ConfigKv`，实际 `publish sync` 的 site 绑定仍来自仓库配置中的 `publish.site_id` 和 D1 `publish_sites` row：
   - `publish.site_id`
   - `publish.slug`
   - `publish.clone_domain`
@@ -370,7 +370,7 @@ libra publish init --slug libra-demo --clone-domain code.example.com --visibilit
   - `publish.visibility`
   - `publish.worker_name`
   - `publish.max_preview_bytes`
-- 检查 D1/R2 配置是否可解析，但不要求连通性成功才能写本地配置。
+- 不检查 D1/R2 连通性；Cloudflare 凭据由后续 `publish sync` / `publish status --site-id` / `libra+cloud://` clone 流程读取。
 - 从 Libra 二进制内置 Worker 模板生成根目录下的 `worker/` 项目骨架，已存在时按 manifest patch，不覆盖用户修改。
 
 ### `libra publish sync`
@@ -957,7 +957,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.126) `publish sync` 接入 AI artifact 幂等上传，重复 sync 不重复上传未变化的 AI objects 和 AI bundle，`--force` 复用同一路径强制重写。
 - [x] (v0.17.106) CAS latest revision 冲突有清晰错误和 `--force` 路径。
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
-- [x] (v0.17.144) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` / `LIBRA_PUBLISH_LIVE_SLUG` / `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 后执行已部署 Worker refs/tree/file API smoke；该入口不启动 MCP Server。
+- [x] (v0.17.147) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 后复用本次 live gate 创建的 slug 执行已部署 Worker refs/tree/file API smoke；`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 和 `LIBRA_PUBLISH_LIVE_SLUG` 仅作为覆盖项使用；该入口不启动 MCP Server。
 - [x] (v0.17.146) live cloud gate 在真实 D1/R2 环境中能完成唯一 test repo/site 的 `cloud sync` Git object baseline + all-refs `publish sync` -> `libra clone libra+cloud://<clone-domain>/<slug>` restore，并验证恢复后的文件和 tag ref；该入口不启动 MCP Server。
 - [ ] live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
@@ -1073,9 +1073,8 @@ cargo test --features test-live-cloud publish_live -- --test-threads=1
 
 当前 `publish_live_gate_prerequisites_are_explicit` 会从进程环境或
 仓库 `.env.test` 读取 live 配置，验证 D1/R2 凭据，创建唯一 test repo/site，执行 `cloud sync` Git object baseline、all-refs publish sync 和 `libra+cloud://` clone restore，并报告缺失的 deploy-smoke 输入。完整 live gate 仍要求提供
-`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`、`LIBRA_PUBLISH_LIVE_SLUG`、
-`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`，并完成 all-refs sync、`libra+cloud`
-clone restore 和已部署 Worker refs/tree/file API smoke。
+`LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 指向绑定同一 D1/R2 的已部署 Worker；默认使用本次 live gate 创建的 slug，并从 Worker origin host 推导 `clone_domain`。只有在 Worker host 与 D1 `clone_domain` 不一致或需要探测预置站点时，才设置
+`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` / `LIBRA_PUBLISH_LIVE_SLUG` 覆盖项。验收必须完成 all-refs sync、`libra+cloud` clone restore 和已部署 Worker refs/tree/file API smoke。
 
 ## 范围管理
 

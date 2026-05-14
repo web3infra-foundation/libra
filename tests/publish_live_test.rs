@@ -10,10 +10,11 @@
 //! live D1 API token and R2 S3 credentials can be used by the same clients publish
 //! sync/clone use, then performs a real `cloud sync`, all-refs `publish sync`,
 //! and `libra+cloud://` clone restore against unique live D1/R2 rows. A deployed
-//! Worker API smoke can be layered on by setting `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`,
-//! `LIBRA_PUBLISH_LIVE_SLUG`, and `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`; until those
-//! are present, the test reports the missing deploy-smoke inputs and exits after
-//! the D1/R2 sync/clone checks.
+//! Worker API smoke can be layered on by setting `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`.
+//! The smoke reuses the slug created by this live gate and derives the clone
+//! domain from the Worker origin host unless `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`
+//! is set. `LIBRA_PUBLISH_LIVE_SLUG` remains available when a pre-existing
+//! deployed site must be probed instead.
 
 use std::{
     collections::HashMap,
@@ -46,13 +47,15 @@ const REQUIRED_CLOUD_VARS: &[&str] = &[
     "LIBRA_STORAGE_SECRET_KEY",
 ];
 
-const DEPLOY_SMOKE_VARS: &[&str] = &[
-    "LIBRA_PUBLISH_LIVE_WORKER_ORIGIN",
-    "LIBRA_PUBLISH_LIVE_SLUG",
-    "LIBRA_PUBLISH_LIVE_CLONE_DOMAIN",
-];
+const DEPLOY_SMOKE_REQUIRED_VARS: &[&str] = &["LIBRA_PUBLISH_LIVE_WORKER_ORIGIN"];
 
 static DOT_ENV_TEST: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+struct LivePublishSite {
+    slug: String,
+    clone_domain: String,
+}
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -143,9 +146,19 @@ fn r2_storage_from_env(repo_id: &str) -> RemoteStorage {
     RemoteStorage::new_with_prefix(Arc::new(s3), repo_id.to_string())
 }
 
-fn worker_api_url(path: &[&str]) -> Url {
-    let origin = required_env("LIBRA_PUBLISH_LIVE_WORKER_ORIGIN");
-    let mut url = Url::parse(origin.trim_end_matches('/')).expect("parse live Worker origin");
+fn worker_origin_url() -> Option<Url> {
+    config_value("LIBRA_PUBLISH_LIVE_WORKER_ORIGIN")
+        .map(|origin| Url::parse(origin.trim_end_matches('/')).expect("parse live Worker origin"))
+}
+
+fn live_gate_clone_domain(worker_origin: Option<&Url>) -> String {
+    config_value("LIBRA_PUBLISH_LIVE_CLONE_DOMAIN")
+        .or_else(|| worker_origin.and_then(|url| url.host_str().map(str::to_string)))
+        .unwrap_or_else(|| "live-gate.example.com".to_string())
+}
+
+fn worker_api_url(origin: &Url, path: &[&str]) -> Url {
+    let mut url = origin.clone();
     url.path_segments_mut()
         .expect("live Worker origin must be a base URL")
         .extend(path);
@@ -229,15 +242,15 @@ async fn seed_publish_site(
     .expect("seed publish_sites row for live gate");
 }
 
-async fn smoke_all_refs_sync_and_cloud_clone(d1: &D1Client) {
+async fn smoke_all_refs_sync_and_cloud_clone(d1: &D1Client) -> LivePublishSite {
     let repo = tempdir().expect("create live publish repo tempdir");
     let home = repo.path().join(".home");
     let repo_id = format!("publish-live-repo-{}", Uuid::new_v4());
     let site_id = Uuid::new_v4().to_string();
     let slug = format!("publish-live-{}", Uuid::new_v4().simple());
     let cloud_name = format!("publish-live-name-{}", Uuid::new_v4());
-    let clone_domain = config_value("LIBRA_PUBLISH_LIVE_CLONE_DOMAIN")
-        .unwrap_or_else(|| "live-gate.example.com".to_string());
+    let worker_origin = worker_origin_url();
+    let clone_domain = live_gate_clone_domain(worker_origin.as_ref());
 
     seed_publish_site(d1, &repo_id, &site_id, &clone_domain, &slug).await;
 
@@ -339,6 +352,8 @@ async fn smoke_all_refs_sync_and_cloud_clone(d1: &D1Client) {
     let tag_args = ["show-ref", "--tags", "v1.0.0"];
     let tag_output = run_libra(&clone_dest, &home, &tag_args);
     assert_libra_success(&tag_output, &tag_args);
+
+    LivePublishSite { slug, clone_domain }
 }
 
 async fn get_json(client: &reqwest::Client, url: Url) -> Value {
@@ -395,28 +410,30 @@ async fn publish_live_gate_prerequisites_are_explicit() {
     assert_eq!(data, blob.data);
     assert_eq!(object_type, blob.get_type());
 
-    smoke_all_refs_sync_and_cloud_clone(&d1).await;
+    let live_site = smoke_all_refs_sync_and_cloud_clone(&d1).await;
 
-    let missing_deploy = missing_vars(DEPLOY_SMOKE_VARS);
+    let missing_deploy = missing_vars(DEPLOY_SMOKE_REQUIRED_VARS);
     if !missing_deploy.is_empty() {
         eprintln!(
-            "skipped Worker deploy/API smoke (missing: {}). Full publish live gate still requires deployed Worker refs/tree/file checks.",
+            "skipped Worker deploy/API smoke (missing: {}). Set LIBRA_PUBLISH_LIVE_WORKER_ORIGIN to a deployed Worker bound to the same D1/R2 resources; LIBRA_PUBLISH_LIVE_CLONE_DOMAIN and LIBRA_PUBLISH_LIVE_SLUG are optional overrides. Full publish live gate still requires deployed Worker refs/tree/file checks.",
             missing_deploy.join(", ")
         );
         return;
     }
 
-    smoke_deployed_worker_api().await;
+    smoke_deployed_worker_api(&live_site).await;
 }
 
-async fn smoke_deployed_worker_api() {
-    let slug = required_env("LIBRA_PUBLISH_LIVE_SLUG");
+async fn smoke_deployed_worker_api(live_site: &LivePublishSite) {
+    let origin =
+        worker_origin_url().expect("LIBRA_PUBLISH_LIVE_WORKER_ORIGIN is required for deploy smoke");
+    let slug = config_value("LIBRA_PUBLISH_LIVE_SLUG").unwrap_or_else(|| live_site.slug.clone());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .expect("build Worker API smoke client");
 
-    let refs_url = worker_api_url(&["api", "sites", &slug, "refs"]);
+    let refs_url = worker_api_url(&origin, &["api", "sites", &slug, "refs"]);
     let refs_body = get_json(&client, refs_url).await;
     let refs = refs_body
         .pointer("/data/refs")
@@ -424,10 +441,11 @@ async fn smoke_deployed_worker_api() {
         .expect("Worker refs response should include data.refs");
     assert!(
         !refs.is_empty(),
-        "Worker refs API returned no refs; run a full all-refs publish sync before the live gate"
+        "Worker refs API returned no refs for slug {slug} on clone domain {}; run a full all-refs publish sync before the live gate",
+        live_site.clone_domain,
     );
 
-    let tree_url = worker_api_url(&["api", "sites", &slug, "tree"]);
+    let tree_url = worker_api_url(&origin, &["api", "sites", &slug, "tree"]);
     let tree_body = get_json(&client, tree_url).await;
     let entries = tree_body
         .pointer("/data/entries")
@@ -450,7 +468,7 @@ async fn smoke_deployed_worker_api() {
         "Worker tree root has no file entry; set LIBRA_PUBLISH_LIVE_FILE_PATH to a published file",
     );
 
-    let mut file_url = worker_api_url(&["api", "sites", &slug, "file"]);
+    let mut file_url = worker_api_url(&origin, &["api", "sites", &slug, "file"]);
     file_url.query_pairs_mut().append_pair("path", &file_path);
     let file_body = get_json(&client, file_url).await;
     assert!(
