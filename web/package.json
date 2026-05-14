@@ -1,6 +1,6 @@
 {
   "name": "libra",
-  "version": "0.17.150",
+  "version": "0.17.151",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -28,6 +28,7 @@
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",
     "eslint-config-next": "16.1.6",
+    "happy-dom": "^20.9.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.6"
