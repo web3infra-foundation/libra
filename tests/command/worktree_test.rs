@@ -1328,6 +1328,45 @@ async fn test_worktree_remove_default_keeps_disk_directory() {
 
 #[tokio::test]
 #[serial]
+/// `worktree remove --json` reports that the registry entry was removed while the directory remained.
+async fn test_worktree_remove_json_reports_kept_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_keep_json"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_keep_json");
+    let canonical = wt_path.canonicalize().expect("worktree should exist");
+    let output = run_libra_command(
+        &["--json", "worktree", "remove", "wt_keep_json"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "json worktree remove");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree remove should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "worktree.remove");
+    assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(parsed["data"]["registry_removed"], true);
+    assert_eq!(parsed["data"]["disk_directory_deleted"], false);
+    assert!(
+        wt_path.is_dir(),
+        "json remove without --delete-dir must keep directory"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// `worktree remove --delete-dir` removes both the registry entry and the
 /// on-disk directory when the worktree is clean.
 async fn test_worktree_remove_with_delete_dir_clean_path() {
@@ -1354,6 +1393,55 @@ async fn test_worktree_remove_with_delete_dir_clean_path() {
     assert!(
         !paths.iter().any(|p| p.ends_with("wt_delete")),
         "registry should no longer track wt_delete, paths: {paths:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `worktree remove --delete-dir --machine` reports single-line JSON and deletes the directory.
+async fn test_worktree_remove_machine_reports_deleted_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_delete_machine"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_delete_machine");
+    let canonical = wt_path.canonicalize().expect("worktree should exist");
+    let output = run_libra_command(
+        &[
+            "--machine",
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "wt_delete_machine",
+        ],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "machine worktree remove --delete-dir");
+    assert!(
+        output.stderr.is_empty(),
+        "machine worktree remove should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["command"], "worktree.remove");
+    assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(parsed["data"]["registry_removed"], true);
+    assert_eq!(parsed["data"]["disk_directory_deleted"], true);
+    assert!(
+        !wt_path.exists(),
+        "machine remove --delete-dir must delete directory"
     );
 }
 

@@ -144,6 +144,13 @@ struct WorktreeListEntry {
     exists: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeRemoveOutput {
+    path: String,
+    registry_removed: bool,
+    disk_directory_deleted: bool,
+}
+
 /// RAII guard that temporarily changes the process current directory.
 ///
 /// When created with `change_to`, it switches the current directory to the
@@ -204,9 +211,12 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             move_worktree(src, dest).map_err(worktree_io_error)
         }
         WorktreeSubcommand::Prune => prune_worktrees().map_err(worktree_io_error),
-        WorktreeSubcommand::Remove { path, delete_dir } => remove_worktree(path, delete_dir)
-            .await
-            .map_err(worktree_io_error),
+        WorktreeSubcommand::Remove { path, delete_dir } => {
+            let result = remove_worktree(path, delete_dir)
+                .await
+                .map_err(worktree_io_error)?;
+            render_remove_worktree(&result, output)
+        }
         #[cfg(unix)]
         WorktreeSubcommand::Umount { path, cleanup } => {
             umount_fuse_path(path, cleanup).map_err(worktree_io_error)
@@ -787,10 +797,10 @@ fn prune_worktrees() -> io::Result<()> {
 /// Defaults to preserving the directory on disk (Libra's intentional
 /// non-destructive behavior — see [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)).
 /// With `--delete-dir`, the worktree must be clean (no staged or unstaged
-/// changes) and the directory is removed after the registry entry is dropped.
-/// Order matters: registry first, then disk — a half-completed delete cannot
-/// leave an orphan registry pointer.
-async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<()> {
+/// changes) and the directory is removed before the registry entry is dropped.
+/// Order matters: registry last — a half-completed delete cannot silently
+/// unregister a worktree whose directory is still present.
+async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<WorktreeRemoveOutput> {
     let mut state = load_state()?;
     let target = canonicalize(path)?;
 
@@ -841,6 +851,31 @@ async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<()> {
     state.worktrees.remove(index);
     save_state(&state)?;
 
+    Ok(WorktreeRemoveOutput {
+        path: target.to_string_lossy().into_owned(),
+        registry_removed: true,
+        disk_directory_deleted: delete_dir,
+    })
+}
+
+fn render_remove_worktree(result: &WorktreeRemoveOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.remove", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if result.disk_directory_deleted {
+        println!(
+            "Removed worktree '{}' from registry and deleted directory.",
+            result.path
+        );
+    } else {
+        println!(
+            "Removed worktree '{}' from registry. Directory kept on disk.",
+            result.path
+        );
+    }
     Ok(())
 }
 

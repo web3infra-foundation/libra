@@ -185,7 +185,7 @@
 | 顺序 | 命令 | 当前状态 | 后续重点 |
 |------|------|--------|--------|
 | **30** | `reflog` / `checkout` | 兼容层和旧 CLI 形态并存 | CLI 形态收口、typed error、JSON / machine |
-| **31** | `mv` / `rm` / `worktree` | 部分落地：`worktree list` 已有 JSON/machine；`mv` / `rm` / worktree destructive 子命令仍缺结构化输出 | destructive 路径的结果模型、显式错误码、确认消息 |
+| **31** | `mv` / `rm` / `worktree` | 部分落地：`worktree list` 与 `worktree remove` 成功路径已有 JSON/machine；`mv` / `rm` / worktree 其余 destructive 子命令仍缺结构化输出 | destructive 路径的结果模型、显式错误码、确认消息 |
 | **32** | `merge` / `rebase` | 状态机复杂，风险高 | merge / rebase 状态结构化、冲突契约、typed error |
 | **33** | `lfs` / `cloud` | 外部系统耦合高 | JSON / progress 契约、网络/权限错误分层 |
 

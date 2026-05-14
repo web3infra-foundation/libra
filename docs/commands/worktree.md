@@ -126,9 +126,11 @@ worktree.
 ```bash
 # Default — keep the directory on disk
 libra worktree remove ../my-feature
+libra --json worktree remove ../my-feature
 
 # Git-style — also delete the directory (clean worktree only)
 libra worktree remove --delete-dir ../my-feature
+libra --machine worktree remove --delete-dir ../my-feature
 
 # Refused when dirty:
 $ libra worktree remove --delete-dir ../dirty-feature
@@ -213,6 +215,13 @@ worktree /Users/alice/projects/my-feature
 worktree /Users/alice/projects/hotfix [locked: production hotfix in progress]
 ```
 
+**`worktree remove`**:
+
+```text
+Removed worktree '/Users/alice/projects/my-feature' from registry. Directory kept on disk.
+Removed worktree '/Users/alice/projects/my-feature' from registry and deleted directory.
+```
+
 **`worktree prune`** (with stale entries):
 
 ```text
@@ -226,6 +235,43 @@ Pruned 2 worktrees
 
 ```text
 No worktrees to prune
+```
+
+## JSON Output
+
+**`worktree list`** uses the `worktree.list` command envelope:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.list",
+  "data": {
+    "worktrees": [
+      {
+        "kind": "main",
+        "path": "/Users/alice/projects/my-repo",
+        "is_main": true,
+        "locked": false,
+        "lock_reason": null,
+        "exists": true
+      }
+    ]
+  }
+}
+```
+
+**`worktree remove`** uses the `worktree.remove` command envelope:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.remove",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "registry_removed": true,
+    "disk_directory_deleted": false
+  }
+}
 ```
 
 ## Design Rationale
