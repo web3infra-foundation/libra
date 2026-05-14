@@ -19,7 +19,7 @@ use crate::{
     command::restore::{self, RestoreArgs},
     internal::head::Head,
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
         util,
     },
@@ -191,6 +191,102 @@ struct WorktreeRepairOutput {
     changed: bool,
 }
 
+type WorktreeResult<T> = Result<T, WorktreeError>;
+
+#[derive(Debug)]
+enum WorktreeError {
+    InvalidTarget(String),
+    OperationBlocked(String),
+    NoSuchWorktree { path: String },
+    MainWorktree { action: &'static str, path: String },
+    LockedWorktree { action: &'static str, path: String },
+    DirtyWorktree { path: String },
+    StateRead { path: PathBuf, source: io::Error },
+    StateWrite { path: PathBuf, source: io::Error },
+    StateCorrupt { path: PathBuf, source: String },
+    StateRepair { source: io::Error },
+    IoRead(String),
+    IoWrite(String),
+}
+
+impl WorktreeError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::InvalidTarget(_)
+            | Self::NoSuchWorktree { .. }
+            | Self::MainWorktree { .. }
+            | Self::LockedWorktree { .. } => StableErrorCode::CliInvalidTarget,
+            Self::OperationBlocked(_) | Self::DirtyWorktree { .. } => {
+                StableErrorCode::ConflictOperationBlocked
+            }
+            Self::StateCorrupt { .. } | Self::StateRepair { .. } => StableErrorCode::RepoCorrupt,
+            Self::StateRead { .. } | Self::IoRead(_) => StableErrorCode::IoReadFailed,
+            Self::StateWrite { .. } | Self::IoWrite(_) => StableErrorCode::IoWriteFailed,
+        }
+    }
+
+    fn into_cli_error(self) -> CliError {
+        let code = self.stable_code();
+        let mut error = CliError::fatal(self.to_string()).with_stable_code(code);
+        if matches!(self, Self::DirtyWorktree { .. }) {
+            error = error.with_hint(
+                "commit or stash changes, or remove without --delete-dir to keep the directory",
+            );
+        }
+        error
+    }
+}
+
+impl std::fmt::Display for WorktreeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTarget(message)
+            | Self::OperationBlocked(message)
+            | Self::IoRead(message)
+            | Self::IoWrite(message) => f.write_str(message),
+            Self::NoSuchWorktree { path } => write!(f, "no such worktree: {path}"),
+            Self::MainWorktree { action, path } => {
+                write!(f, "cannot {action} main worktree: {path}")
+            }
+            Self::LockedWorktree { action, path } => {
+                write!(f, "cannot {action} locked worktree: {path}")
+            }
+            Self::DirtyWorktree { path } => {
+                write!(
+                    f,
+                    "cannot delete dirty worktree '{path}' (uncommitted changes)"
+                )
+            }
+            Self::StateRead { path, source } => {
+                write!(
+                    f,
+                    "failed to read worktree state '{}': {source}",
+                    path.display()
+                )
+            }
+            Self::StateWrite { path, source } => {
+                write!(
+                    f,
+                    "failed to write worktree state '{}': {source}",
+                    path.display()
+                )
+            }
+            Self::StateCorrupt { path, source } => {
+                write!(
+                    f,
+                    "worktree state '{}' is corrupt: {source}",
+                    path.display()
+                )
+            }
+            Self::StateRepair { source } => {
+                write!(f, "failed to repair worktree state invariant: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorktreeError {}
+
 /// RAII guard that temporarily changes the process current directory.
 ///
 /// When created with `change_to`, it switches the current directory to the
@@ -242,30 +338,32 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
 
     match command {
         WorktreeSubcommand::Add { path } => {
-            let result = add_worktree(path).await.map_err(worktree_io_error)?;
+            let result = add_worktree(path)
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
             render_add_worktree(&result, output)
         }
         WorktreeSubcommand::List => list_worktrees(output),
         WorktreeSubcommand::Lock { path, reason } => {
-            let result = lock_worktree(path, reason).map_err(worktree_io_error)?;
+            let result = lock_worktree(path, reason).map_err(WorktreeError::into_cli_error)?;
             render_lock_worktree(&result, output)
         }
         WorktreeSubcommand::Unlock { path } => {
-            let result = unlock_worktree(path).map_err(worktree_io_error)?;
+            let result = unlock_worktree(path).map_err(WorktreeError::into_cli_error)?;
             render_unlock_worktree(&result, output)
         }
         WorktreeSubcommand::Move { src, dest } => {
-            let result = move_worktree(src, dest).map_err(worktree_io_error)?;
+            let result = move_worktree(src, dest).map_err(WorktreeError::into_cli_error)?;
             render_move_worktree(&result, output)
         }
         WorktreeSubcommand::Prune => {
-            let result = prune_worktrees().map_err(worktree_io_error)?;
+            let result = prune_worktrees().map_err(WorktreeError::into_cli_error)?;
             render_prune_worktrees(&result, output)
         }
         WorktreeSubcommand::Remove { path, delete_dir } => {
             let result = remove_worktree(path, delete_dir)
                 .await
-                .map_err(worktree_io_error)?;
+                .map_err(WorktreeError::into_cli_error)?;
             render_remove_worktree(&result, output)
         }
         #[cfg(unix)]
@@ -273,7 +371,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             umount_fuse_path(path, cleanup).map_err(worktree_io_error)
         }
         WorktreeSubcommand::Repair => {
-            let result = repair_worktrees().map_err(worktree_io_error)?;
+            let result = repair_worktrees().map_err(WorktreeError::into_cli_error)?;
             render_repair_worktrees(&result, output)
         }
     }
@@ -293,25 +391,33 @@ fn state_path() -> PathBuf {
 /// If the state file does not exist or is empty, this function initializes a
 /// fresh state with a single main worktree derived from the storage path, then
 /// persists it before returning.
-fn load_state() -> io::Result<WorktreeState> {
+fn load_state() -> WorktreeResult<WorktreeState> {
     let path = state_path();
     if !path.exists() {
         let mut state = WorktreeState::default();
-        let _ = ensure_main_entry(&mut state)?;
-        save_state(&state)?;
+        let _ = ensure_main_entry(&mut state)
+            .map_err(|source| WorktreeError::StateRepair { source })?;
+        write_state(&state)?;
         return Ok(state);
     }
-    let data = fs::read(&path)?;
+    let data = fs::read(&path).map_err(|source| WorktreeError::StateRead {
+        path: path.clone(),
+        source,
+    })?;
     if data.is_empty() {
         let mut state = WorktreeState::default();
-        let _ = ensure_main_entry(&mut state)?;
-        save_state(&state)?;
+        let _ = ensure_main_entry(&mut state)
+            .map_err(|source| WorktreeError::StateRepair { source })?;
+        write_state(&state)?;
         return Ok(state);
     }
     let mut state: WorktreeState =
-        serde_json::from_slice(&data).map_err(|e| io::Error::other(e.to_string()))?;
-    if ensure_main_entry(&mut state)? {
-        save_state(&state)?;
+        serde_json::from_slice(&data).map_err(|source| WorktreeError::StateCorrupt {
+            path: path.clone(),
+            source: source.to_string(),
+        })?;
+    if ensure_main_entry(&mut state).map_err(|source| WorktreeError::StateRepair { source })? {
+        write_state(&state)?;
     }
     Ok(state)
 }
@@ -349,6 +455,21 @@ fn save_state(state: &WorktreeState) -> io::Result<()> {
         fs::rename(&tmp, &path)?;
     }
     Ok(())
+}
+
+fn write_state(state: &WorktreeState) -> WorktreeResult<()> {
+    let path = state_path();
+    save_state(state).map_err(|source| WorktreeError::StateWrite { path, source })
+}
+
+fn resolve_path(path: impl AsRef<Path>, role: &'static str) -> WorktreeResult<PathBuf> {
+    let path = path.as_ref();
+    canonicalize(path).map_err(|source| {
+        WorktreeError::IoRead(format!(
+            "failed to resolve {role} '{}': {source}",
+            path.display()
+        ))
+    })
 }
 
 /// Normalizes the given path into an absolute, canonical path where possible.
@@ -531,26 +652,31 @@ fn find_entry<'a>(state: &'a WorktreeState, path: &Path) -> Option<&'a WorktreeE
 /// - creates a `.libra` directory symlink pointing at the shared storage, and
 /// - when `HEAD` exists, populates the new worktree from committed `HEAD`
 ///   content (not staged-only index changes).
-async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
+async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
     let storage = util::storage_path();
-    let target = canonicalize(&path)?;
+    let target = resolve_path(&path, "worktree path")?;
 
     if util::is_sub_path(&target, &storage) {
-        return Err(io::Error::other(
-            "worktree path cannot be inside .libra storage",
-        ));
+        return Err(WorktreeError::InvalidTarget(format!(
+            "worktree path cannot be inside .libra storage: {}",
+            target.display()
+        )));
     }
 
     let target_exists = target.exists();
     if target_exists && !target.is_dir() {
-        return Err(io::Error::other("target exists and is not a directory"));
+        return Err(WorktreeError::InvalidTarget(format!(
+            "target exists and is not a directory: {}",
+            target.display()
+        )));
     }
 
-    let canonical_target = canonicalize(&target)?;
+    let canonical_target = resolve_path(&target, "worktree path")?;
     if util::is_sub_path(&canonical_target, &storage) {
-        return Err(io::Error::other(
-            "worktree path cannot be inside .libra storage",
-        ));
+        return Err(WorktreeError::InvalidTarget(format!(
+            "worktree path cannot be inside .libra storage: {}",
+            canonical_target.display()
+        )));
     }
 
     let mut state = load_state()?;
@@ -565,22 +691,55 @@ async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
         });
     }
 
-    if target_exists && fs::read_dir(&target)?.next().transpose()?.is_some() {
-        return Err(io::Error::other("target directory exists and is not empty"));
+    if target_exists
+        && fs::read_dir(&target)
+            .map_err(|source| {
+                WorktreeError::IoRead(format!(
+                    "failed to read target directory '{}': {source}",
+                    target.display()
+                ))
+            })?
+            .next()
+            .transpose()
+            .map_err(|source| {
+                WorktreeError::IoRead(format!(
+                    "failed to read target directory '{}': {source}",
+                    target.display()
+                ))
+            })?
+            .is_some()
+    {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "target directory exists and is not empty: {}",
+            target.display()
+        )));
     }
 
     let mut created_target = false;
     if !target.exists() {
-        fs::create_dir_all(&target)?;
+        fs::create_dir_all(&target).map_err(|source| {
+            WorktreeError::IoWrite(format!(
+                "failed to create worktree directory '{}': {source}",
+                target.display()
+            ))
+        })?;
         created_target = true;
     }
 
     let link_path = target.join(util::ROOT_DIR);
     if link_path.exists() {
-        return Err(io::Error::other("target already contains a .libra entry"));
+        return Err(WorktreeError::OperationBlocked(format!(
+            "target already contains a .libra entry: {}",
+            link_path.display()
+        )));
     }
 
-    create_worktree_storage_link(&storage, &link_path)?;
+    create_worktree_storage_link(&storage, &link_path).map_err(|source| {
+        WorktreeError::IoWrite(format!(
+            "failed to link shared .libra storage into '{}': {source}",
+            link_path.display()
+        ))
+    })?;
 
     let rollback_partial_add = || {
         let _ = remove_worktree_storage_link(&link_path);
@@ -603,7 +762,10 @@ async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
             Ok(g) => g,
             Err(e) => {
                 rollback_partial_add();
-                return Err(e);
+                return Err(WorktreeError::IoRead(format!(
+                    "failed to enter worktree directory '{}': {e}",
+                    target.display()
+                )));
             }
         };
         // Populate from HEAD so new worktrees reflect committed state instead
@@ -617,8 +779,9 @@ async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
         .await
         {
             rollback_partial_add();
-            return Err(io::Error::other(format!(
-                "failed to populate worktree: {e}"
+            return Err(WorktreeError::IoWrite(format!(
+                "failed to populate worktree '{}': {e}",
+                target.display()
             )));
         }
     }
@@ -629,7 +792,7 @@ async fn add_worktree(path: String) -> io::Result<WorktreeAddOutput> {
         locked: false,
         lock_reason: None,
     });
-    if let Err(e) = save_state(&state) {
+    if let Err(e) = write_state(&state) {
         rollback_partial_add();
         return Err(e);
     }
@@ -678,7 +841,7 @@ fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
 /// Each registered worktree is printed on its own line as either
 /// `main <path>` or `worktree <path>`, with optional `[locked: <reason>]`
 /// suffix when the entry is locked.
-fn run_list_worktrees() -> io::Result<WorktreeListOutput> {
+fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
     let state = load_state()?;
     let worktrees = state
         .worktrees
@@ -696,7 +859,7 @@ fn run_list_worktrees() -> io::Result<WorktreeListOutput> {
 }
 
 fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
-    let result = run_list_worktrees().map_err(worktree_io_error)?;
+    let result = run_list_worktrees().map_err(WorktreeError::into_cli_error)?;
     if output.is_json() {
         return emit_json_data("worktree.list", &result, output);
     }
@@ -731,12 +894,12 @@ fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
 /// Marks the specified worktree entry as locked and persists an optional
 /// human-readable reason. Locking is a state-only operation and does not
 /// alter directories on disk.
-fn lock_worktree(path: String, reason: Option<String>) -> io::Result<WorktreeLockOutput> {
+fn lock_worktree(path: String, reason: Option<String>) -> WorktreeResult<WorktreeLockOutput> {
     let mut state = load_state()?;
-    let target = canonicalize(path)?;
+    let target = resolve_path(&path, "worktree path")?;
     let entry = match find_entry_mut(&mut state, &target) {
         Some(e) => e,
-        None => return Err(io::Error::other("no such worktree")),
+        None => return Err(WorktreeError::NoSuchWorktree { path }),
     };
     if entry.locked {
         return Ok(WorktreeLockOutput {
@@ -749,7 +912,7 @@ fn lock_worktree(path: String, reason: Option<String>) -> io::Result<WorktreeLoc
     entry.locked = true;
     entry.lock_reason = reason;
     let lock_reason = entry.lock_reason.clone();
-    save_state(&state)?;
+    write_state(&state)?;
     Ok(WorktreeLockOutput {
         path: target.to_string_lossy().to_string(),
         locked: true,
@@ -769,12 +932,12 @@ fn render_lock_worktree(result: &WorktreeLockOutput, output: &OutputConfig) -> C
 ///
 /// Clears the lock flag and reason for the specified worktree entry if it is
 /// currently locked. Unlocking is idempotent and leaves the filesystem untouched.
-fn unlock_worktree(path: String) -> io::Result<WorktreeUnlockOutput> {
+fn unlock_worktree(path: String) -> WorktreeResult<WorktreeUnlockOutput> {
     let mut state = load_state()?;
-    let target = canonicalize(path)?;
+    let target = resolve_path(&path, "worktree path")?;
     let entry = match find_entry_mut(&mut state, &target) {
         Some(e) => e,
-        None => return Err(io::Error::other("no such worktree")),
+        None => return Err(WorktreeError::NoSuchWorktree { path }),
     };
     if !entry.locked {
         return Ok(WorktreeUnlockOutput {
@@ -785,7 +948,7 @@ fn unlock_worktree(path: String) -> io::Result<WorktreeUnlockOutput> {
     }
     entry.locked = false;
     entry.lock_reason = None;
-    save_state(&state)?;
+    write_state(&state)?;
     Ok(WorktreeUnlockOutput {
         path: target.to_string_lossy().to_string(),
         locked: false,
@@ -809,52 +972,67 @@ fn render_unlock_worktree(result: &WorktreeUnlockOutput, output: &OutputConfig) 
 /// - updates the registry to point at the new path and saves it, and then
 /// - renames the directory on disk, attempting to roll back registry changes
 ///   if the rename fails.
-fn move_worktree(src: String, dest: String) -> io::Result<WorktreeMoveOutput> {
+fn move_worktree(src: String, dest: String) -> WorktreeResult<WorktreeMoveOutput> {
     let mut state = load_state()?;
-    let src_path = canonicalize(&src)?;
-    let dest_path = canonicalize(&dest)?;
+    let src_path = resolve_path(&src, "source worktree path")?;
+    let dest_path = resolve_path(&dest, "destination worktree path")?;
     let storage = util::storage_path();
 
     if util::is_sub_path(&dest_path, &storage) {
-        return Err(io::Error::other(
-            "destination cannot be inside .libra storage",
-        ));
+        return Err(WorktreeError::InvalidTarget(format!(
+            "destination cannot be inside .libra storage: {}",
+            dest_path.display()
+        )));
     }
 
     if find_entry(&state, &dest_path).is_some() {
-        return Err(io::Error::other(
-            "destination already registered as worktree",
-        ));
+        return Err(WorktreeError::OperationBlocked(format!(
+            "destination already registered as worktree: {}",
+            dest_path.display()
+        )));
     }
 
     let index = state
         .worktrees
         .iter()
         .position(|w| Path::new(&w.path) == src_path)
-        .ok_or_else(|| io::Error::other("no such worktree"))?;
+        .ok_or(WorktreeError::NoSuchWorktree { path: src })?;
 
     if state.worktrees[index].is_main {
-        return Err(io::Error::other("cannot move main worktree"));
+        return Err(WorktreeError::MainWorktree {
+            action: "move",
+            path: src_path.to_string_lossy().to_string(),
+        });
     }
     if state.worktrees[index].locked {
-        return Err(io::Error::other("cannot move locked worktree"));
+        return Err(WorktreeError::LockedWorktree {
+            action: "move",
+            path: src_path.to_string_lossy().to_string(),
+        });
     }
 
     if dest_path.exists() {
-        return Err(io::Error::other("destination already exists"));
+        return Err(WorktreeError::OperationBlocked(format!(
+            "destination already exists: {}",
+            dest_path.display()
+        )));
     }
 
     let old_path = state.worktrees[index].path.clone();
     state.worktrees[index].path = dest_path.to_string_lossy().to_string();
-    if let Err(e) = save_state(&state) {
+    if let Err(e) = write_state(&state) {
         state.worktrees[index].path = old_path;
         return Err(e);
     }
 
     if let Err(e) = fs::rename(&src_path, &dest_path) {
         state.worktrees[index].path = old_path;
-        save_state(&state)?;
-        return Err(e);
+        write_state(&state)?;
+        return Err(WorktreeError::IoWrite(format!(
+            "failed to move worktree directory '{}' to '{}': {e}",
+            src_path.display(),
+            dest_path.display()
+        )));
     }
 
     Ok(WorktreeMoveOutput {
@@ -877,7 +1055,7 @@ fn render_move_worktree(result: &WorktreeMoveOutput, output: &OutputConfig) -> C
 /// Any non-main worktree whose directory no longer exists on disk is removed
 /// from the registry. Before mutating state, the function prints the set of
 /// paths that will be pruned so the user can see what is being cleaned up.
-fn prune_worktrees() -> io::Result<WorktreePruneOutput> {
+fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
     let mut state = load_state()?;
     let to_prune: Vec<_> = state
         .worktrees
@@ -894,7 +1072,7 @@ fn prune_worktrees() -> io::Result<WorktreePruneOutput> {
             let path = Path::new(&w.path);
             path.exists() || w.is_main || w.locked
         });
-        save_state(&state)?;
+        write_state(&state)?;
     }
 
     Ok(WorktreePruneOutput {
@@ -930,22 +1108,28 @@ fn render_prune_worktrees(result: &WorktreePruneOutput, output: &OutputConfig) -
 /// changes) and the directory is removed before the registry entry is dropped.
 /// Order matters: registry last — a half-completed delete cannot silently
 /// unregister a worktree whose directory is still present.
-async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<WorktreeRemoveOutput> {
+async fn remove_worktree(path: String, delete_dir: bool) -> WorktreeResult<WorktreeRemoveOutput> {
     let mut state = load_state()?;
-    let target = canonicalize(path)?;
+    let target = resolve_path(&path, "worktree path")?;
 
     let index = state
         .worktrees
         .iter()
         .position(|w| Path::new(&w.path) == target)
-        .ok_or_else(|| io::Error::other("no such worktree"))?;
+        .ok_or(WorktreeError::NoSuchWorktree { path })?;
 
     let entry = &state.worktrees[index];
     if entry.is_main {
-        return Err(io::Error::other("cannot remove main worktree"));
+        return Err(WorktreeError::MainWorktree {
+            action: "remove",
+            path: target.to_string_lossy().to_string(),
+        });
     }
     if entry.locked {
-        return Err(io::Error::other("cannot remove locked worktree"));
+        return Err(WorktreeError::LockedWorktree {
+            action: "remove",
+            path: target.to_string_lossy().to_string(),
+        });
     }
 
     if delete_dir {
@@ -954,24 +1138,25 @@ async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<WorktreeR
         // resolution match what the user would see if they ran `libra status`
         // there.
         let _guard = DirGuard::change_to(&target).map_err(|e| {
-            io::Error::other(format!("cannot enter worktree '{}': {e}", target.display()))
+            WorktreeError::IoRead(format!("cannot enter worktree '{}': {e}", target.display()))
         })?;
         let staged = crate::command::status::changes_to_be_committed_safe()
             .await
-            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
-        let unstaged = crate::command::status::changes_to_be_staged()
-            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
+            .map_err(|e| {
+                WorktreeError::IoRead(format!("failed to inspect worktree status: {e}"))
+            })?;
+        let unstaged = crate::command::status::changes_to_be_staged().map_err(|e| {
+            WorktreeError::IoRead(format!("failed to inspect worktree status: {e}"))
+        })?;
         if !staged.is_empty() || !unstaged.is_empty() {
-            return Err(io::Error::other(format!(
-                "cannot delete dirty worktree '{}' (uncommitted changes)\n\
-                 Hint: commit or stash changes, or remove without --delete-dir to keep the directory",
-                target.display()
-            )));
+            return Err(WorktreeError::DirtyWorktree {
+                path: target.to_string_lossy().to_string(),
+            });
         }
         // Drop the guard so the cwd is restored before we rm -rf the target.
         drop(_guard);
         fs::remove_dir_all(&target).map_err(|e| {
-            io::Error::other(format!(
+            WorktreeError::IoWrite(format!(
                 "failed to delete worktree directory '{}': {e}",
                 target.display()
             ))
@@ -979,7 +1164,7 @@ async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<WorktreeR
     }
 
     state.worktrees.remove(index);
-    save_state(&state)?;
+    write_state(&state)?;
 
     Ok(WorktreeRemoveOutput {
         path: target.to_string_lossy().into_owned(),
@@ -1048,7 +1233,7 @@ fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
 /// canonical path and re-applies the invariant that there is exactly one
 /// main worktree entry. The repaired state is only written back if changes
 /// were actually made.
-fn repair_worktrees() -> io::Result<WorktreeRepairOutput> {
+fn repair_worktrees() -> WorktreeResult<WorktreeRepairOutput> {
     let mut state = load_state()?;
     let mut changed = false;
 
@@ -1063,12 +1248,12 @@ fn repair_worktrees() -> io::Result<WorktreeRepairOutput> {
         }
     });
 
-    if ensure_main_entry(&mut state)? {
+    if ensure_main_entry(&mut state).map_err(|source| WorktreeError::StateRepair { source })? {
         changed = true;
     }
 
     if changed {
-        save_state(&state)?;
+        write_state(&state)?;
     }
 
     Ok(WorktreeRepairOutput { changed })

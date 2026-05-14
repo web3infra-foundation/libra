@@ -416,14 +416,17 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-IO-001` | Worktree path cannot be inside `.libra` storage |
-| `LBR-IO-001` | Target exists and is not a directory |
-| `LBR-IO-001` | Target directory exists and is not empty |
-| `LBR-IO-001` | Target already contains a `.libra` entry |
+| `LBR-REPO-002` | `worktrees.json` is corrupt |
+| `LBR-CLI-003` | Worktree path cannot be inside `.libra` storage |
+| `LBR-CLI-003` | Target exists and is not a directory |
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |
 | `LBR-CLI-003` | Cannot move or remove locked worktree |
-| `LBR-IO-001` | Destination already exists (for move) |
-| `LBR-IO-001` | Destination already registered as worktree (for move) |
+| `LBR-CONFLICT-002` | Target directory exists and is not empty |
+| `LBR-CONFLICT-002` | Target already contains a `.libra` entry |
+| `LBR-CONFLICT-002` | Destination already exists (for move) |
+| `LBR-CONFLICT-002` | Destination already registered as worktree (for move) |
+| `LBR-CONFLICT-002` | `--delete-dir` refused because the worktree is dirty |
+| `LBR-IO-001` | Failed to read or inspect worktree paths/state/status |
 | `LBR-IO-002` | Failed to write worktrees.json |
-| `LBR-IO-001` | Failed to populate worktree from HEAD |
+| `LBR-IO-002` | Failed to populate worktree from HEAD |

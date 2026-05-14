@@ -10,14 +10,14 @@ C5（Audit P2）
 - [`src/command/worktree.rs`](../../../src/command/worktree.rs) 已实现 `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair`，以及 Unix 下的 `umount` 子命令。
 - `worktree remove` 当前默认**不删除磁盘目录**，继续保持非破坏默认。
 - `WorktreeSubcommand::Remove { path, delete_dir }` 已暴露 `--delete-dir`；显式传入后会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除。
-- 第 31 批"mv / rm / worktree 结构化输出"已在 `mv` / `rm` / worktree 常用成功路径上启动；当前 `mv` / `rm` 已有成功 JSON / machine schema，worktree `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair` 已有成功 JSON / machine schema，FUSE `umount` 与 `WorktreeError` typed enum 仍待后续切片。
-- [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，并包含 `--delete-dir` on/off 与 dirty 拒绝路径。
+- 第 31 批"mv / rm / worktree 结构化输出"已在 `mv` / `rm` / worktree 常用成功路径上启动；当前 `mv` / `rm` 已有成功 JSON / machine schema，worktree `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair` 已有成功 JSON / machine schema，非 FUSE worktree 错误已通过 `WorktreeError` typed enum 显式映射 `StableErrorCode`。FUSE `umount` 的结构化成功/错误输出仍待后续切片。
+- [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，包含 `--delete-dir` on/off、dirty 拒绝路径，以及 no-such/main/locked/destination-exists/storage-path/corrupt-state 的 JSON/machine 负向错误契约。
 - [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) 已固定对外兼容契约：默认保留目录，`--delete-dir` 删除 clean 目录，dirty 时拒绝并保留 registry/目录。
 
 ### 基于当前代码的 Review 结论
 - C5 的行为对齐已经落地：Libra 默认非破坏，显式 `--delete-dir` 才走 Git-style 删除目录。
 - 脏工作树保护已经是当前契约的一部分，不能在后续结构化输出批次中放宽或静默降级。
-- 第 31 批仍拥有 destructive 子命令的 `WorktreeOutput` / `WorktreeError` / JSON-machine 完整现代化，不再拥有 `--delete-dir` 行为本身；`list` 与 `remove` 成功路径的结构化输出已独立落地。
+- 第 31 批仍拥有 FUSE `umount` 的 JSON-machine 完整现代化，不再拥有 `--delete-dir` 行为本身；非 FUSE worktree 成功与错误路径的结构化输出已独立落地。
 
 ## 目标与非目标
 
@@ -33,7 +33,7 @@ C5（Audit P2）
 
 **非目标：**
 - 不翻转默认（不切到 Git 风格删盘默认）——这会破坏现有脚本，已被用户决策排除。
-- 不在本批引入 `WorktreeOutput` / `WorktreeError` typed enum；第 31 批拥有这些。
+- C5 原批次不引入完整 `WorktreeOutput` / `WorktreeError` typed enum；第 31 批已经补齐非 FUSE worktree success schema 与 typed error，FUSE `umount` 仍单独留后续。
 - 不实现 `worktree remove --force`；当前没有该 flag，本批只为 `--delete-dir` 提供最小 dirty 检查（dirty 时拒绝）。
 - 不动 `worktree add` / `list` / `lock` / `move` / `prune` / `repair` / `unlock` 的行为。
 
@@ -79,7 +79,7 @@ fn render_remove_worktree(result: &WorktreeRemoveOutput, output: &OutputConfig) 
 **注意**：
 1. `remove_worktree` 已从同步 `fn` 改为 `async fn`，并在 `execute_safe` 的 match 分支中追加 `.await` 与 `render_remove_worktree(...)`。
 2. dirty 检查复用 `crate::command::status` 的公开函数（`changes_to_be_committed_safe` / `changes_to_be_staged`），通过 `DirGuard` 把检查范围限定到目标 worktree 目录。
-3. 当前切片只固定 `worktree.remove` success schema；第 31 批后续引入完整 `WorktreeError` 时再把 dirty / delete-dir 失败吸收到 typed variant。
+3. v0.17.167 已把 dirty / delete-dir 失败、no-such/main/locked/destination/storage/corrupt-state 等非 FUSE 错误吸收到 `WorktreeError` typed variant，并固定 JSON / machine 负向契约。
 
 ### 非破坏行为保留
 
@@ -109,19 +109,19 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 
 ### 与第 31 批的协同
 
-第 31 批落地 `WorktreeOutput` / `WorktreeError` 完整 typed enum 时：
+第 31 批已落地非 FUSE worktree success / error 结构化契约：
 
-- C5 的 conflict / IO 错误自然吸收为未来 `WorktreeError::DirtyWorktree` / `DeleteDirFailed` 等 typed variant。
-- 当前 `worktree.remove` success schema 已固定 `path` / `registry_removed` / `disk_directory_deleted`；后续完整 `WorktreeOutput::Remove` typed enum 应保持字段兼容。
-- `--delete-dir` 字段已经在当前 success schema 中体现为 `disk_directory_deleted: bool`，第 31 批后续只继续补 typed error 与其余 worktree 子命令。
+- C5 的 dirty conflict 已吸收到 `WorktreeError::DirtyWorktree`，delete-dir 失败映射为 `LBR-IO-002`。
+- 当前 `worktree.remove` success schema 已固定 `path` / `registry_removed` / `disk_directory_deleted`，并保持字段兼容。
+- `--delete-dir` 字段已经在当前 success schema 中体现为 `disk_directory_deleted: bool`；后续只继续补 FUSE `umount` 的结构化成功/错误输出。
 
 ## 关键文件与改动
 
 | 文件 | 操作 | 说明 |
 |-----|-----|-----|
-| [`src/command/worktree.rs`](../../../src/command/worktree.rs) | 修改 | `WorktreeSubcommand::Remove` 加 `--delete-dir`；`remove` handler 加删盘分支 + dirty 检查 |
+| [`src/command/worktree.rs`](../../../src/command/worktree.rs) | 已修改 | `WorktreeSubcommand::Remove` 加 `--delete-dir`；`remove` handler 加删盘分支 + dirty 检查；非 FUSE `WorktreeError` typed enum 显式映射稳定错误码 |
 | [`src/utils/error.rs`](../../../src/utils/error.rs) | 复核/必要时修改 | 优先复用 `ConflictOperationBlocked` / `IoWriteFailed`；仅在确有跨命令需求时新增更细错误码 |
-| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 已修改 | 已覆盖默认不删盘、clean `--delete-dir` 删盘、dirty + `--delete-dir` 拒绝，以及 `worktree list` JSON / machine |
+| [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) | 已修改 | 已覆盖默认不删盘、clean `--delete-dir` 删盘、dirty + `--delete-dir` 拒绝、成功 JSON / machine，以及非 FUSE 负向 JSON / machine 错误契约 |
 | [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) | 已新建 | 固定 help / examples surface、默认保留目录、clean delete 与 dirty 拒绝行为 |
 | [`docs/commands/worktree.md`](../../commands/worktree.md) | 修改 | 默认行为 vs `--delete-dir` 的差异说明，以及 `worktree.list` / `worktree.remove` 结构化输出示例 |
 | [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 修改 | worktree 行 notes 更新 |
@@ -139,10 +139,11 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 - [x] (v0.17.163) dirty `--delete-dir` 拒绝由 `test_worktree_remove_with_delete_dir_dirty_path_is_rejected` 覆盖，断言 `LBR-CONFLICT-002`、目录保留和 registry 保留。
 - [x] (v0.17.164) `worktree remove` 成功路径 JSON / machine schema 已落地并由 `test_worktree_remove_json_reports_kept_directory`、`test_worktree_remove_machine_reports_deleted_directory` 覆盖，断言 canonical `path`、`registry_removed` 与 `disk_directory_deleted`。
 - [x] (v0.17.166) worktree `add` / `lock` / `unlock` / `move` / `prune` / `repair` 成功路径 JSON / machine schema 已落地，命令文档已补每个 envelope 示例。
+- [x] (v0.17.167) 非 FUSE worktree `WorktreeError` typed enum 已落地；`test_worktree_lock_json_no_such_worktree_reports_invalid_target`、`test_worktree_remove_machine_rejects_main_with_stable_error`、`test_worktree_remove_json_rejects_locked_with_stable_error`、`test_worktree_move_machine_destination_exists_reports_conflict`、`test_worktree_add_json_rejects_storage_path_as_invalid_target`、`test_worktree_list_json_corrupt_state_reports_repo_corrupt` 固定 JSON / machine 负向错误契约。
 
 ## 风险与缓解
 
 1. **`std::fs::remove_dir_all` 跨平台行为差异（macOS / Linux / Windows）** → 缓解：测试用例在 `compat-offline-core` job 上运行；macOS / Windows 行为差异在 `docs/commands/worktree.md` 显式注明。
 2. **dirty 检查与现有 worktree 状态读取耦合** → 缓解：复用 `crate::command::status::changes_to_be_committed_safe` / `changes_to_be_staged` 公开函数，通过 `DirGuard` 限定检查范围到目标 worktree；不在本批新写状态扫描。
 3. **用户脚本依赖现有"不删盘"默认** → 缓解：默认行为不变；新 flag 是 opt-in；`--help` 与 `COMPATIBILITY.md` 显式说明默认。
-4. **第 31 批后续继续扩展时字段兼容风险** → 缓解：当前 `worktree.remove` success schema 已固定 `path` / `registry_removed` / `disk_directory_deleted`，后续 typed enum 需保持这些字段兼容。
+4. **第 31 批后续继续扩展时字段兼容风险** → 缓解：当前 `worktree.remove` success schema 已固定 `path` / `registry_removed` / `disk_directory_deleted`，非 FUSE typed error 已覆盖负向契约；后续 FUSE `umount` 结构化输出必须保持既有字段兼容。
