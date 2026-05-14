@@ -29,12 +29,17 @@ export type DerivedChatMessage = {
   role: ChatRole;
   time: string;
   body: string;
+  fullBody?: string;
+  hiddenChars?: number;
   streaming: boolean;
   /** Original transcript entry kind so callers can decorate non-text entries. */
   kind: CodeUiTranscriptEntry["kind"];
   /** Optional title/lead for `tool_call` / `plan_summary` / `info_note` entries. */
   title?: string;
 };
+
+export const CHAT_TRANSCRIPT_MESSAGE_LIMIT = 200;
+export const CHAT_MESSAGE_PREVIEW_CHARS = 32 * 1024;
 
 /**
  * Map snapshot transcript entries to the chat pane message list. All six
@@ -50,18 +55,22 @@ export function deriveChatMessages(
   snapshot: CodeUiSessionSnapshot | null,
 ): DerivedChatMessage[] {
   if (!snapshot) return [];
-  return snapshot.transcript.map((entry) => {
+  const hiddenEntries = Math.max(0, snapshot.transcript.length - CHAT_TRANSCRIPT_MESSAGE_LIMIT);
+  const transcript = hiddenEntries > 0
+    ? snapshot.transcript.slice(hiddenEntries)
+    : snapshot.transcript;
+  const messages: DerivedChatMessage[] = transcript.map((entry): DerivedChatMessage => {
     const time = formatTime(entry.updatedAt);
-    const body = entry.content ?? "";
+    const body = truncateChatBody(entry.content ?? "");
     switch (entry.kind) {
       case "user_message":
-        return { id: entry.id, role: "user", time, body, streaming: false, kind: entry.kind };
+        return { id: entry.id, role: "user", time, ...body, streaming: false, kind: entry.kind };
       case "assistant_message":
         return {
           id: entry.id,
           role: "assistant",
           time,
-          body,
+          ...body,
           streaming: entry.streaming,
           kind: entry.kind,
           title: entry.title,
@@ -71,7 +80,7 @@ export function deriveChatMessages(
           id: entry.id,
           role: "tool",
           time,
-          body,
+          ...body,
           streaming: false,
           kind: entry.kind,
           title: entry.title ?? "tool call",
@@ -81,7 +90,7 @@ export function deriveChatMessages(
           id: entry.id,
           role: "info",
           time,
-          body,
+          ...body,
           streaming: false,
           kind: entry.kind,
           title: entry.title ?? "plan summary",
@@ -91,7 +100,7 @@ export function deriveChatMessages(
           id: entry.id,
           role: "info",
           time,
-          body,
+          ...body,
           streaming: false,
           kind: entry.kind,
           title: entry.title ?? "diff",
@@ -101,13 +110,40 @@ export function deriveChatMessages(
           id: entry.id,
           role: "info",
           time,
-          body,
+          ...body,
           streaming: false,
           kind: entry.kind,
           title: entry.title,
         };
     }
   });
+  if (hiddenEntries > 0) {
+    messages.unshift({
+      id: `transcript-collapsed-${hiddenEntries}`,
+      role: "info",
+      time: transcript[0] ? formatTime(transcript[0].updatedAt) : "--:--",
+      body: `Transcript collapsed: ${hiddenEntries} earlier entries hidden.`,
+      streaming: false,
+      kind: "info_note",
+      title: "transcript",
+    });
+  }
+  return messages;
+}
+
+function truncateChatBody(body: string): {
+  body: string;
+  fullBody?: string;
+  hiddenChars?: number;
+} {
+  if (body.length <= CHAT_MESSAGE_PREVIEW_CHARS) {
+    return { body };
+  }
+  return {
+    body: body.slice(0, CHAT_MESSAGE_PREVIEW_CHARS),
+    fullBody: body,
+    hiddenChars: body.length - CHAT_MESSAGE_PREVIEW_CHARS,
+  };
 }
 
 export type WorkflowSummary = {

@@ -34,7 +34,7 @@
 |------|--------|----------|
 | Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden；`docs/commands/code.md` 已补稳定字段表、thread list envelope 与 Code UI error code 表 | 后续新增字段/错误码时继续同步 Rust/TS/wire test/命令文档 |
 | API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | API client、组件、browser audit scenario 已有回归；后续新增字段/错误码时继续同步测试 |
-| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 diff 与长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；仍需补长 transcript 保护和 browser smoke |
+| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；仍需补 browser smoke |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
 | Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
@@ -148,7 +148,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 **验收：**
 
 - 页面无 demo 文案；空态明确。
-- 长 transcript、长 diff、长 tool output 不阻塞主线程、不撑坏布局。
+- 长 transcript、长 diff、长 tool output 不阻塞主线程、不撑坏布局；chat pane 默认只渲染最新 transcript 窗口，单条超长消息按需展开。
 - capability flag 改变时对应控件立即禁用或只读。
 
 ### Phase E：CI、文档与发布门

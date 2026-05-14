@@ -48,4 +48,35 @@ describe("Message", () => {
 
     unmount();
   });
+
+  it("expands truncated assistant messages on demand", () => {
+    const { container, unmount } = render(
+      <Message
+        message={{
+          id: "assistant-2",
+          role: "assistant",
+          time: "12:01",
+          body: "preview body",
+          fullBody: "preview body plus the hidden tail",
+          hiddenChars: 21,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain("preview body");
+    expect(container.textContent).not.toContain("hidden tail");
+
+    const expandButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Show full message"));
+    expect(expandButton).toBeDefined();
+
+    act(() => {
+      expandButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("hidden tail");
+    expect(container.textContent).toContain("Show less");
+
+    unmount();
+  });
 });

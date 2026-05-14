@@ -134,6 +134,8 @@ export function Chat() {
                 role: m.role === "user" ? "user" : "assistant",
                 time: m.time,
                 body: m.body,
+                fullBody: m.fullBody,
+                hiddenChars: m.hiddenChars,
                 streaming: m.streaming,
                 kind: m.kind,
                 title: m.title,
