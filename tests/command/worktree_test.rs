@@ -350,6 +350,56 @@ async fn test_worktree_repair_json_reports_changed_state() {
     assert_eq!(parsed["data"]["changed"], true);
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_worktree_umount_json_reports_cleanup() {
+    let temp = tempdir().expect("create temp dir");
+    let cleanup_root = temp
+        .path()
+        .join("libra-task-worktree-fuse-29353-019ddec6-de60-7383");
+    let workspace = cleanup_root.join("workspace");
+    fs::create_dir_all(&workspace).expect("create task workspace");
+    let canonical_cleanup_root = cleanup_root.canonicalize().expect("canonical cleanup root");
+    let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+    let cleanup_arg = cleanup_root.to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "umount",
+            cleanup_arg.as_str(),
+            "--cleanup",
+        ],
+        temp.path(),
+    );
+
+    assert_cli_success(&output, "json worktree umount --cleanup");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree umount should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.umount");
+    assert_eq!(
+        parsed["data"]["mountpoint"],
+        canonical_workspace.to_string_lossy().as_ref()
+    );
+    assert_eq!(parsed["data"]["unmounted"], true);
+    assert_eq!(parsed["data"]["cleanup_requested"], true);
+    assert_eq!(
+        parsed["data"]["cleanup_root"],
+        canonical_cleanup_root.to_string_lossy().as_ref()
+    );
+    assert_eq!(parsed["data"]["cleanup_root_removed"], true);
+    assert!(
+        !cleanup_root.exists(),
+        "cleanup should remove the task worktree root"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_worktree_lock_json_no_such_worktree_reports_invalid_target() {

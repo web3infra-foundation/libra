@@ -191,6 +191,16 @@ struct WorktreeRepairOutput {
     changed: bool,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Serialize)]
+struct WorktreeUmountOutput {
+    mountpoint: String,
+    unmounted: bool,
+    cleanup_requested: bool,
+    cleanup_root: Option<String>,
+    cleanup_root_removed: bool,
+}
+
 type WorktreeResult<T> = Result<T, WorktreeError>;
 
 #[derive(Debug)]
@@ -368,17 +378,14 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
         }
         #[cfg(unix)]
         WorktreeSubcommand::Umount { path, cleanup } => {
-            umount_fuse_path(path, cleanup).map_err(worktree_io_error)
+            let result = umount_fuse_path(path, cleanup).map_err(WorktreeError::into_cli_error)?;
+            render_umount_fuse_path(&result, output)
         }
         WorktreeSubcommand::Repair => {
             let result = repair_worktrees().map_err(WorktreeError::into_cli_error)?;
             render_repair_worktrees(&result, output)
         }
     }
-}
-
-fn worktree_io_error(error: io::Error) -> CliError {
-    CliError::fatal(error.to_string())
 }
 
 /// Returns the path to the on-disk worktree state file.
@@ -1195,35 +1202,58 @@ fn render_remove_worktree(result: &WorktreeRemoveOutput, output: &OutputConfig) 
 }
 
 #[cfg(unix)]
-fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
-    let target = canonicalize(path)?;
+fn umount_fuse_path(path: String, cleanup: bool) -> WorktreeResult<WorktreeUmountOutput> {
+    let target = resolve_path(&path, "FUSE worktree path")?;
     let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
-    fuse_utils::force_unmount_path(&mountpoint).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to unmount FUSE path {}: {}",
-                mountpoint.display(),
-                err
-            ),
-        )
+    fuse_utils::force_unmount_path(&mountpoint).map_err(|source| {
+        WorktreeError::IoWrite(format!(
+            "failed to unmount FUSE path {}: {source}",
+            mountpoint.display()
+        ))
     })?;
-    println!("unmounted {}", mountpoint.display());
 
+    let mut cleanup_root = None;
+    let mut cleanup_root_removed = false;
     if cleanup {
-        let cleanup_root =
-            fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
-                io::Error::other(format!(
-                    "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
-                    mountpoint.display()
+        let root = fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+            WorktreeError::InvalidTarget(format!(
+                "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
+                mountpoint.display()
+            ))
+        })?;
+        if root.exists() {
+            fs::remove_dir_all(&root).map_err(|source| {
+                WorktreeError::IoWrite(format!(
+                    "failed to remove FUSE worktree root '{}': {source}",
+                    root.display()
                 ))
             })?;
-        if cleanup_root.exists() {
-            fs::remove_dir_all(&cleanup_root)?;
+            cleanup_root_removed = true;
         }
-        println!("removed {}", cleanup_root.display());
+        cleanup_root = Some(root.to_string_lossy().to_string());
     }
 
+    Ok(WorktreeUmountOutput {
+        mountpoint: mountpoint.to_string_lossy().to_string(),
+        unmounted: true,
+        cleanup_requested: cleanup,
+        cleanup_root,
+        cleanup_root_removed,
+    })
+}
+
+#[cfg(unix)]
+fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.umount", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    println!("unmounted {}", result.mountpoint);
+    if let Some(cleanup_root) = &result.cleanup_root {
+        println!("removed {}", cleanup_root);
+    }
     Ok(())
 }
 
@@ -1280,10 +1310,23 @@ mod tests {
             .join("libra-task-worktree-fuse-29353-019ddec6-de60-7383");
         let workspace = cleanup_root.join("workspace");
         fs::create_dir_all(&workspace).expect("create task workspace");
+        let canonical_cleanup_root = cleanup_root.canonicalize().expect("canonical cleanup root");
+        let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
 
-        umount_fuse_path(cleanup_root.to_string_lossy().to_string(), true)
+        let output = umount_fuse_path(cleanup_root.to_string_lossy().to_string(), true)
             .expect("umount cleanup should succeed for inactive task workspace");
 
+        assert_eq!(
+            output.mountpoint,
+            canonical_workspace.to_string_lossy().as_ref()
+        );
+        assert!(output.unmounted);
+        assert!(output.cleanup_requested);
+        assert_eq!(
+            output.cleanup_root.as_deref(),
+            Some(canonical_cleanup_root.to_string_lossy().as_ref())
+        );
+        assert!(output.cleanup_root_removed);
         assert!(!cleanup_root.exists());
     }
 }

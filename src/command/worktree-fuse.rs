@@ -33,9 +33,9 @@ use crate::{
     },
     internal::head::Head,
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         fuse as fuse_utils,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -118,6 +118,48 @@ struct FuseWorktreeEntry {
 struct FuseWorktreeState {
     worktrees: Vec<FuseWorktreeEntry>,
 }
+
+#[derive(Debug, Serialize)]
+struct WorktreeUmountOutput {
+    mountpoint: String,
+    unmounted: bool,
+    cleanup_requested: bool,
+    cleanup_root: Option<String>,
+    cleanup_root_removed: bool,
+}
+
+#[derive(Debug)]
+enum FuseUmountError {
+    InvalidTarget(String),
+    IoRead(String),
+    IoWrite(String),
+}
+
+impl FuseUmountError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::InvalidTarget(_) => StableErrorCode::CliInvalidTarget,
+            Self::IoRead(_) => StableErrorCode::IoReadFailed,
+            Self::IoWrite(_) => StableErrorCode::IoWriteFailed,
+        }
+    }
+
+    fn into_cli_error(self) -> CliError {
+        CliError::fatal(self.to_string()).with_stable_code(self.stable_code())
+    }
+}
+
+impl std::fmt::Display for FuseUmountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTarget(message) | Self::IoRead(message) | Self::IoWrite(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for FuseUmountError {}
 
 trait IntoMountHandleResult {
     fn into_mount_handle_result(self) -> io::Result<MountHandle>;
@@ -251,9 +293,12 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Umount { path, cleanup } => umount_fuse_path(path, cleanup)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string())),
+        WorktreeSubcommand::Umount { path, cleanup } => {
+            let result = umount_fuse_path(path, cleanup)
+                .await
+                .map_err(FuseUmountError::into_cli_error)?;
+            render_umount_fuse_path(&result, output)
+        }
         WorktreeSubcommand::Move { src, dest } => {
             legacy::execute_safe(
                 legacy::WorktreeArgs {
@@ -689,34 +734,64 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
     fuse_utils::force_unmount_path(&path)
 }
 
-async fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
-    let target = canonicalize_like_worktree(path)?;
-    let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
-    unmount_path(&mountpoint).await.map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to unmount FUSE path {}: {}",
-                mountpoint.display(),
-                err
-            ),
-        )
+async fn umount_fuse_path(
+    path: String,
+    cleanup: bool,
+) -> Result<WorktreeUmountOutput, FuseUmountError> {
+    let target = canonicalize_like_worktree(&path).map_err(|source| {
+        FuseUmountError::IoRead(format!(
+            "failed to resolve FUSE worktree path '{}': {source}",
+            path
+        ))
     })?;
-    println!("unmounted {}", mountpoint.display());
+    let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    unmount_path(&mountpoint).await.map_err(|source| {
+        FuseUmountError::IoWrite(format!(
+            "failed to unmount FUSE path {}: {source}",
+            mountpoint.display()
+        ))
+    })?;
 
+    let mut cleanup_root = None;
+    let mut cleanup_root_removed = false;
     if cleanup {
-        let cleanup_root =
-            fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
-                io::Error::other(format!(
-                    "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
-                    mountpoint.display()
+        let root = fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+            FuseUmountError::InvalidTarget(format!(
+                "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
+                mountpoint.display()
+            ))
+        })?;
+        if root.exists() {
+            fs::remove_dir_all(&root).map_err(|source| {
+                FuseUmountError::IoWrite(format!(
+                    "failed to remove FUSE worktree root '{}': {source}",
+                    root.display()
                 ))
             })?;
-        if cleanup_root.exists() {
-            fs::remove_dir_all(&cleanup_root)?;
+            cleanup_root_removed = true;
         }
-        println!("removed {}", cleanup_root.display());
+        cleanup_root = Some(root.to_string_lossy().to_string());
     }
 
+    Ok(WorktreeUmountOutput {
+        mountpoint: mountpoint.to_string_lossy().to_string(),
+        unmounted: true,
+        cleanup_requested: cleanup,
+        cleanup_root,
+        cleanup_root_removed,
+    })
+}
+
+fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.umount", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    println!("unmounted {}", result.mountpoint);
+    if let Some(cleanup_root) = &result.cleanup_root {
+        println!("removed {}", cleanup_root);
+    }
     Ok(())
 }

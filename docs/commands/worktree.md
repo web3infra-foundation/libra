@@ -166,6 +166,23 @@ Alias: `unmount`
 
 ```bash
 libra worktree umount /repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id/workspace --cleanup
+libra --json worktree umount /repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id --cleanup
+```
+
+JSON / machine output envelope:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.umount",
+  "data": {
+    "mountpoint": "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id/workspace",
+    "unmounted": true,
+    "cleanup_requested": true,
+    "cleanup_root": "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id",
+    "cleanup_root_removed": true
+  }
+}
 ```
 
 ### Subcommand: `repair`
@@ -422,6 +439,7 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |
 | `LBR-CLI-003` | Cannot move or remove locked worktree |
+| `LBR-CLI-003` | `worktree umount --cleanup` was requested for a non-task FUSE worktree path |
 | `LBR-CONFLICT-002` | Target directory exists and is not empty |
 | `LBR-CONFLICT-002` | Target already contains a `.libra` entry |
 | `LBR-CONFLICT-002` | Destination already exists (for move) |
