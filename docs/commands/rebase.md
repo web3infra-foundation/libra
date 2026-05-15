@@ -149,7 +149,7 @@ Rebase aborted. Restored branch 'feature'.
 
 ## JSON / Machine Output
 
-`--json` and `--machine` are currently supported for successful `--abort` output. CLI/preflight failures are rendered through Libra's standard structured error envelope, but the replay, conflict, continue, and skip paths still use legacy text output. The full structured rebase result model is tracked as follow-up work in the command improvement plan.
+`--json` and `--machine` are currently supported for successful `--abort`, `--continue`, and `--skip` output. CLI/preflight failures and unresolved-conflict `--continue` failures are rendered through Libra's standard structured error envelope. Rebase start and deeper replay/conflict-stop output are still tracked as follow-up work in the command improvement plan.
 
 ```json
 {
@@ -157,10 +157,56 @@ Rebase aborted. Restored branch 'feature'.
   "command": "rebase",
   "data": {
     "action": "abort",
+    "status": "aborted",
     "branch": "feature",
     "commit": "abc1234...",
     "previous_commit": "def5678...",
     "restored": true
+  }
+}
+```
+
+Continue after resolving a conflict:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "continue",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "onto": "fedcba9...",
+    "previous_commit": "def5678...",
+    "applied_commits": [
+      {
+        "original_commit": "0123456...",
+        "commit": "abc1234...",
+        "subject": "Feature modifies conflict.txt"
+      }
+    ],
+    "remaining": 0
+  }
+}
+```
+
+Skip the stopped commit:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "skip",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "onto": "fedcba9...",
+    "previous_commit": "def5678...",
+    "skipped_commit": "0123456...",
+    "skipped_subject": "Feature modifies conflict.txt",
+    "remaining": 0
   }
 }
 ```
@@ -242,8 +288,10 @@ Note: jj does not stop on conflicts during rebase. Instead, conflicts are materi
 | Missing upstream | `LBR-CLI-002` (CliInvalidArgument) | 129 | Usage error from clap |
 | Upstream ref cannot be resolved | `LBR-CLI-003` (CliInvalidTarget) | 129 | Error indicating the ref is not valid |
 | `--continue` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
+| `--continue` with unresolved conflicts | `LBR-CONFLICT-001` (ConflictUnresolved) | 128 | Error indicating conflicts must be staged with `libra add <file>` |
 | `--abort` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
 | `--skip` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
+| `--skip` without stopped or pending commit | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating there is no commit to skip |
 | No common ancestor found | pending typed mapping | 128 | Legacy text error refusing to rebase unrelated histories |
 | Conflict during commit replay | pending typed mapping | 128 | Rebase stops, state is saved, user prompted to resolve |
 | Failed to create rebased commit | pending typed mapping | 128 | Legacy text error with commit details |

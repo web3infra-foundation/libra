@@ -3,7 +3,7 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 #![cfg(test)]
-use std::{collections::VecDeque, fs};
+use std::{collections::VecDeque, fs, path::Path};
 
 use libra::{
     command::rebase::{RebaseArgs, execute},
@@ -123,6 +123,139 @@ async fn test_rebase_json_abort_outputs_restored_branch() {
             .await
             .expect("failed to query rebase state")
     );
+}
+
+fn commit_file_via_cli(repo: &Path, path: &str, contents: &str, message: &str) {
+    fs::write(repo.join(path), contents).expect("failed to write test file");
+
+    let output = run_libra_command(&["add", path], repo);
+    assert_cli_success(&output, "failed to stage test file");
+
+    let output = run_libra_command(&["commit", "-m", message, "--no-verify"], repo);
+    assert_cli_success(&output, "failed to commit test file");
+}
+
+fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "conflict.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(
+        repo_path,
+        "conflict.txt",
+        "feature\n",
+        "Feature modifies conflict.txt",
+    );
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(
+        repo_path,
+        "conflict.txt",
+        "main\n",
+        "Main modifies conflict.txt",
+    );
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    let output = run_libra_command(&["rebase", "main"], repo_path);
+    assert!(
+        output.status.success(),
+        "legacy rebase start should preserve its current process status: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("CONFLICT"),
+        "expected conflict setup to stop rebase, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    repo
+}
+
+#[test]
+fn test_rebase_json_continue_with_unresolved_conflicts_returns_structured_error() {
+    let repo = create_cli_rebase_conflict_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "--continue"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        output.stdout.is_empty(),
+        "expected empty stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    assert_eq!(report.category, "conflict");
+    assert_eq!(
+        report.message,
+        "you must resolve all conflicts before continuing"
+    );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint.contains("libra add <file>")),
+        "expected conflict-resolution hint, got {:?}",
+        report.hints
+    );
+}
+
+#[test]
+fn test_rebase_json_continue_outputs_completed_result() {
+    let repo = create_cli_rebase_conflict_repo();
+    fs::write(repo.path().join("conflict.txt"), "merged\n").expect("failed to resolve conflict");
+    let output = run_libra_command(&["add", "conflict.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage resolved conflict");
+
+    let output = run_libra_command(&["--json", "rebase", "--continue"], repo.path());
+    assert_cli_success(&output, "json rebase continue");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "continue");
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["applied_commits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["data"]["applied_commits"][0]["subject"],
+        "Feature modifies conflict.txt"
+    );
+    assert!(json["data"]["commit"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["previous_commit"].as_str().unwrap().len() >= 7);
+}
+
+#[test]
+fn test_rebase_machine_skip_outputs_completed_result() {
+    let repo = create_cli_rebase_conflict_repo();
+
+    let output = run_libra_command(&["--machine", "rebase", "--skip"], repo.path());
+    assert_cli_success(&output, "machine rebase skip");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "skip");
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(
+        json["data"]["skipped_subject"],
+        "Feature modifies conflict.txt"
+    );
+    assert!(json["data"]["skipped_commit"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["commit"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
 }
 
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
