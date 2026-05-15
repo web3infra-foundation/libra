@@ -22,7 +22,17 @@ use crate::utils::{path, path_ext::PathExt, util};
 lazy_static! {
     static ref LFS_PATTERNS: Vec<String> = { // cache
         let attr_path = path::attributes().to_string_or_panic();
-        extract_lfs_patterns(&attr_path).unwrap()
+        match extract_lfs_patterns(&attr_path) {
+            Ok(patterns) => patterns,
+            Err(err) => {
+                tracing::warn!(
+                    attributes = %attr_path,
+                    error = %err,
+                    "failed to parse LFS patterns from attributes file; treating as no LFS patterns"
+                );
+                Vec::new()
+            }
+        }
     };
 
     pub static ref LFS_HEADERS: HeaderMap = {
@@ -37,6 +47,10 @@ lazy_static! {
 /// - support Glob pattern matching
 /// - only check root attributes file now, should check all attributes files in sub-dirs
 /// - absolute path
+///
+/// Returns `false` on any internal failure (malformed pattern, non-UTF-8 path,
+/// gitignore build error) so a corrupt `.libraattributes` cannot crash `libra add`
+/// or other LFS-aware flows. Errors are logged via `tracing::warn!`.
 pub fn is_lfs_tracked<P>(path: P) -> bool
 where
     P: AsRef<Path>,
@@ -51,13 +65,36 @@ where
     patterns.iter().for_each(|&s| {
         let _ = gitignore.add_line(None, s);
     });
-    let gitignore = gitignore.build().unwrap();
-    let match_gitignore = gitignore.matched(&path, false);
-    let gitignore_matched = matches!(match_gitignore, Match::Ignore(_));
+    let gitignore_matched = match gitignore.build() {
+        Ok(gitignore) => matches!(gitignore.matched(&path, false), Match::Ignore(_)),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to build gitignore from LFS patterns; treating path as not tracked"
+            );
+            false
+        }
+    };
 
     let path = util::to_workdir_path(path);
-    let glob = wax::any(patterns).unwrap();
-    glob.is_match(path.to_str().unwrap()) || gitignore_matched
+    let glob = match wax::any(patterns) {
+        Ok(glob) => glob,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to compile LFS glob pattern; falling back to gitignore-only match"
+            );
+            return gitignore_matched;
+        }
+    };
+    let Some(path_str) = path.to_str() else {
+        tracing::warn!(
+            path = %path.display(),
+            "skipping LFS glob check for non-UTF-8 path; using gitignore-only result"
+        );
+        return gitignore_matched;
+    };
+    glob.is_match(path_str) || gitignore_matched
 }
 
 const LFS_VERSION: &str = "https://git-lfs.github.com/spec/v1";
