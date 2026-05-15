@@ -243,8 +243,10 @@ pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error>
 
 /// Load the storage path with optional given repository
 pub fn storage_path() -> PathBuf {
-    // unwrap is safe here: this function is only called after verifying we're in a repo
-    try_get_storage_path(None).unwrap()
+    // INVARIANT: this function is documented to panic when called outside a
+    // repository. Callers that handle the missing-repo case should use
+    // `try_get_storage_path` directly.
+    try_get_storage_path(None).expect("storage_path() called outside a libra repository")
 }
 
 /// Return an error instead of printing when the current directory is not a repository.
@@ -305,8 +307,11 @@ pub fn reset_objects_storage_cache_for_path(base_path: &Path) {
 /// Get the working directory of the repository
 /// - panics if the current directory is not a repository
 pub fn working_dir() -> PathBuf {
-    // unwrap is safe here: documented to panic if not in a repository
-    let (_, workdir) = try_get_paths(None).unwrap();
+    // INVARIANT: this function is documented to panic when called outside a
+    // repository. Callers that handle the missing-repo case should use
+    // `try_working_dir` directly.
+    let (_, workdir) =
+        try_get_paths(None).expect("working_dir() called outside a libra repository");
     workdir
 }
 
@@ -318,8 +323,12 @@ pub fn try_working_dir() -> io::Result<PathBuf> {
 
 /// Get the working directory of the repository as a string, panics if the path is not valid utf-8
 pub fn working_dir_string() -> String {
-    // unwrap is safe here: documented to panic on non-UTF-8 paths
-    working_dir().to_str().unwrap().to_string()
+    // INVARIANT: this function is documented to panic on non-UTF-8 paths.
+    // Callers that handle non-UTF-8 paths should use `try_working_dir_string`.
+    working_dir()
+        .to_str()
+        .expect("working_dir_string() called with non-UTF-8 working directory path")
+        .to_string()
 }
 
 /// Get the working directory of the repository as UTF-8.
@@ -979,8 +988,10 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
     progress_bar.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.magenta} [{elapsed_precise}] [{bar:40.green/white}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
-            // unwrap is safe: template string is valid and well-tested
-            .unwrap()
+            // INVARIANT: the template string is a compile-time literal whose
+            // placeholders are validated by indicatif at parse time; this is
+            // covered by every command that uses default_progress_bar().
+            .expect("default progress bar template is a valid indicatif format string")
             .progress_chars("=> "),
     );
     progress_bar
@@ -1023,8 +1034,15 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
         let mut parent_dir = if target_file.is_dir() {
             target_file.clone()
         } else {
-            // unwrap is safe: if target_file is not a dir and has no parent, it's a bug
-            target_file.parent().unwrap().to_path_buf()
+            // INVARIANT: this branch only fires when `target_file` is a file
+            // (not a directory). Files always have a parent directory, even
+            // for relative paths like "foo" whose parent is "". The function
+            // asserts `target_file.starts_with(work_dir)` above, so the
+            // parent walk always reaches the workdir.
+            target_file
+                .parent()
+                .expect("non-directory path always has a parent")
+                .to_path_buf()
         };
 
         while parent_dir.starts_with(work_dir) {
