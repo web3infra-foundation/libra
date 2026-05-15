@@ -278,7 +278,11 @@ async fn test_branch() {
         author: None,
     };
     commit::execute(commit_args).await;
-    let first_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
+    let first_commit_id = Branch::find_branch_result("main", None)
+        .await
+        .expect("failed to query main branch")
+        .expect("main branch should exist")
+        .commit;
 
     let commit_args = CommitArgs {
         message: Some("second".to_string()),
@@ -294,7 +298,11 @@ async fn test_branch() {
         author: None,
     };
     commit::execute(commit_args).await;
-    let second_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
+    let second_commit_id = Branch::find_branch_result("main", None)
+        .await
+        .expect("failed to query main branch")
+        .expect("main branch should exist")
+        .commit;
 
     {
         // create branch with first commit
@@ -323,7 +331,10 @@ async fn test_branch() {
             _ => panic!("should be branch"),
         };
 
-        let first_branch = Branch::find_branch(&first_branch_name, None).await.unwrap();
+        let first_branch = Branch::find_branch_result(&first_branch_name, None)
+            .await
+            .expect("failed to query first branch")
+            .expect("first_branch should exist");
         assert_eq!(first_branch.commit, first_commit_id);
         assert_eq!(first_branch.name, first_branch_name);
     }
@@ -346,9 +357,10 @@ async fn test_branch() {
             no_contains: vec![],
         };
         execute(args).await;
-        let second_branch = Branch::find_branch(&second_branch_name, None)
+        let second_branch = Branch::find_branch_result(&second_branch_name, None)
             .await
-            .unwrap();
+            .expect("failed to query second branch")
+            .expect("second_branch should exist");
         assert_eq!(second_branch.commit, second_commit_id);
         assert_eq!(second_branch.name, second_branch_name);
     }
@@ -423,8 +435,9 @@ async fn test_create_branch_from_remote() {
     };
     execute(args).await;
 
-    let branch = Branch::find_branch("test_new", None)
+    let branch = Branch::find_branch_result("test_new", None)
         .await
+        .expect("failed to query test_new branch")
         .expect("branch create failed found");
     assert_eq!(branch.commit, hash);
 }
@@ -476,8 +489,9 @@ async fn test_create_branch_from_remote_tracking_ref() {
     })
     .await;
 
-    let branch = Branch::find_branch("tracking-copy", None)
+    let branch = Branch::find_branch_result("tracking-copy", None)
         .await
+        .expect("failed to query tracking-copy branch")
         .expect("branch create from tracking ref failed");
     assert_eq!(branch.commit, hash);
 }
@@ -632,7 +646,9 @@ async fn test_invalid_branch_name() {
     assert!(!libra::command::branch::is_valid_git_branch_name("@{mega}"));
 
     // Ensure no branch was created
-    let branch = Branch::find_branch("@{mega}", None).await;
+    let branch = Branch::find_branch_result("@{mega}", None)
+        .await
+        .expect("failed to query @{mega} branch");
     assert!(branch.is_none(), "invalid branch should not be created");
 }
 
@@ -682,7 +698,9 @@ async fn test_branch_rename() {
     execute(args).await;
 
     // Verify old branch exists
-    let old_branch = Branch::find_branch("old_name", None).await;
+    let old_branch = Branch::find_branch_result("old_name", None)
+        .await
+        .expect("failed to query old_name branch");
     assert!(old_branch.is_some(), "old branch should exist");
     assert_eq!(old_branch.unwrap().commit, commit_id_1);
 
@@ -704,14 +722,18 @@ async fn test_branch_rename() {
     execute(args).await;
 
     // Verify old branch no longer exists
-    let old_branch = Branch::find_branch("old_name", None).await;
+    let old_branch = Branch::find_branch_result("old_name", None)
+        .await
+        .expect("failed to query old_name branch");
     assert!(
         old_branch.is_none(),
         "old branch should not exist after rename"
     );
 
     // Verify new branch exists with same commit
-    let new_branch = Branch::find_branch("new_name", None).await;
+    let new_branch = Branch::find_branch_result("new_name", None)
+        .await
+        .expect("failed to query new_name branch");
     assert!(new_branch.is_some(), "new branch should exist");
     assert_eq!(new_branch.unwrap().commit, commit_id_1);
 }
@@ -792,14 +814,18 @@ async fn test_rename_current_branch() {
     }
 
     // Verify old branch no longer exists
-    let old_branch = Branch::find_branch(&feature_branch, None).await;
+    let old_branch = Branch::find_branch_result(&feature_branch, None)
+        .await
+        .expect("failed to query feature branch");
     assert!(
         old_branch.is_none(),
         "feature branch should not exist after rename"
     );
 
     // Verify new branch exists with same commit
-    let new_branch = Branch::find_branch(&feature_new, None).await;
+    let new_branch = Branch::find_branch_result(&feature_new, None)
+        .await
+        .expect("failed to query feature_new branch");
     assert!(new_branch.is_some(), "feature_new branch should exist");
     assert_eq!(new_branch.unwrap().commit, commit_id);
 }
@@ -882,8 +908,18 @@ async fn test_rename_to_existing_branch() {
     execute(args).await;
 
     // Verify both branches still exist
-    assert!(Branch::find_branch("branch1", None).await.is_some());
-    assert!(Branch::find_branch("branch2", None).await.is_some());
+    assert!(
+        Branch::find_branch_result("branch1", None)
+            .await
+            .expect("failed to query branch1")
+            .is_some()
+    );
+    assert!(
+        Branch::find_branch_result("branch2", None)
+            .await
+            .expect("failed to query branch2")
+            .is_some()
+    );
 }
 
 /// Scenario: `branch -a` must list both local and remote branches
@@ -959,11 +995,22 @@ async fn test_list_all_branches() {
     execute(args).await; // This will print to stdout, which is fine for tests
 
     // Verify branches exist
-    assert!(Branch::find_branch("main", None).await.is_some());
-    assert!(Branch::find_branch("feature_branch", None).await.is_some());
     assert!(
-        Branch::find_branch("remote_branch", Some("origin"))
+        Branch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
+            .is_some()
+    );
+    assert!(
+        Branch::find_branch_result("feature_branch", None)
+            .await
+            .expect("failed to query feature_branch")
+            .is_some()
+    );
+    assert!(
+        Branch::find_branch_result("remote_branch", Some("origin"))
+            .await
+            .expect("failed to query remote_branch")
             .is_some()
     );
 }
@@ -1063,7 +1110,12 @@ async fn test_branch_delete_safe() {
     .await;
 
     // Feature branch should still exist
-    assert!(Branch::find_branch("feature", None).await.is_some());
+    assert!(
+        Branch::find_branch_result("feature", None)
+            .await
+            .expect("failed to query feature branch")
+            .is_some()
+    );
 
     // Now merge feature into master
     switch::execute(SwitchArgs {
@@ -1083,7 +1135,11 @@ async fn test_branch_delete_safe() {
     .await;
 
     // Fast-forward merge (just update master to feature's commit)
-    let feature_commit = Branch::find_branch("feature", None).await.unwrap().commit;
+    let feature_commit = Branch::find_branch_result("feature", None)
+        .await
+        .expect("failed to query feature branch")
+        .expect("feature branch should exist")
+        .commit;
     Branch::update_branch("main", &feature_commit.to_string(), None)
         .await
         .unwrap();
@@ -1106,7 +1162,12 @@ async fn test_branch_delete_safe() {
     .await;
 
     // Feature branch should be deleted
-    assert!(Branch::find_branch("feature", None).await.is_none());
+    assert!(
+        Branch::find_branch_result("feature", None)
+            .await
+            .expect("failed to query feature branch")
+            .is_none()
+    );
 }
 
 /// Scenario: comprehensive coverage of `--contains` and `--no-contains`
@@ -1231,7 +1292,9 @@ async fn test_branch_contains_commit_filter() {
         let contains: Vec<String> = contains.iter().map(|s| s.to_string()).collect();
         let no_contains: Vec<String> = no_contains.iter().map(|s| s.to_string()).collect();
         async move {
-            let mut branches = Branch::list_branches(None).await;
+            let mut branches = Branch::list_branches_result(None)
+                .await
+                .expect("failed to list branches");
             branches.retain(|b| b.name != "libra/intent");
             filter_branches(
                 &mut branches,
