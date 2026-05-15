@@ -128,12 +128,31 @@ impl LocalStorage {
             return Vec::new();
         }
         let mut packs = Vec::new();
-        if let Ok(entries) = fs::read_dir(pack_dir) {
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_file() && path.extension().unwrap() == "pack" {
-                    packs.push(path);
+        let entries = match fs::read_dir(&pack_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::warn!(
+                    pack_dir = %pack_dir.display(),
+                    error = %err,
+                    "failed to read pack directory, skipping"
+                );
+                return packs;
+            }
+        };
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(err) => {
+                    tracing::warn!(
+                        pack_dir = %pack_dir.display(),
+                        error = %err,
+                        "skipping unreadable pack directory entry"
+                    );
+                    continue;
                 }
+            };
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "pack") {
+                packs.push(path);
             }
         }
         packs
@@ -156,18 +175,27 @@ impl LocalStorage {
             };
 
             if needs_rebuild {
-                if want_v2 {
-                    command::index_pack::build_index_v2(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
+                let (Some(pack_str), Some(idx_str)) = (pack.to_str(), idx.to_str()) else {
+                    tracing::warn!(
+                        pack = %pack.display(),
+                        idx = %idx.display(),
+                        "skipping pack with non-UTF-8 path; cannot pass to build_index"
+                    );
+                    continue;
+                };
+                let build_result = if want_v2 {
+                    command::index_pack::build_index_v2(pack_str, idx_str)
                 } else {
-                    command::index_pack::build_index_v1(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
+                    command::index_pack::build_index_v1(pack_str, idx_str)
+                };
+                if let Err(err) = build_result {
+                    tracing::warn!(
+                        pack = %pack.display(),
+                        idx = %idx.display(),
+                        error = %err,
+                        "failed to (re)build pack index; skipping this pack"
+                    );
+                    continue;
                 }
             }
             idxs.push(idx);
