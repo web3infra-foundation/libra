@@ -654,28 +654,60 @@ impl LFSClient {
     }
 
     /// Only for MonoRepo (mega)
+    ///
+    /// Returns `Err(())` whenever the chunks endpoint isn't usable for any reason —
+    /// invalid URL, network error, 404/403 ("server doesn't support Chunks API"),
+    /// non-success status, or undecodable JSON body. The caller already treats this
+    /// as a fallback to the non-chunked download path, so we just log and bail
+    /// instead of panicking.
     async fn fetch_chunks(&self, obj_link: &str) -> Result<Vec<ChunkDownloadObject>, ()> {
-        let mut url = Url::parse(obj_link).unwrap();
+        let mut url = match Url::parse(obj_link) {
+            Ok(u) => u,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to parse LFS chunk URL, falling back to non-chunked download"
+                );
+                return Err(());
+            }
+        };
         let path = url.path().trim_end_matches('/');
         url.set_path(&(path.to_owned() + "/chunks")); // reserve query params (for GitHub link)
 
-        let resp = BasicAuth::send(|| async { self.client.get(url.clone()) })
-            .await
-            .unwrap();
+        let resp = match BasicAuth::send(|| async { self.client.get(url.clone()) }).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "LFS chunks request failed, falling back to non-chunked download"
+                );
+                return Err(());
+            }
+        };
         let code = resp.status();
         if code == StatusCode::NOT_FOUND || code == StatusCode::FORBIDDEN {
             // GitHub maybe return 403
             tracing::info!("Remote LFS Server not support Chunks API, or forbidden.");
             return Err(());
         } else if !code.is_success() {
+            let body = resp.text().await.unwrap_or_default();
             tracing::debug!(
                 "fatal: LFS get chunk hrefs failed. Status: {}, Message: {}",
                 code,
-                resp.text().await.unwrap()
+                body
             );
             return Err(());
         }
-        let mut res = resp.json::<FetchchunkResponse>().await.unwrap();
+        let mut res = match resp.json::<FetchchunkResponse>().await {
+            Ok(res) => res,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to decode LFS chunks response, falling back to non-chunked download"
+                );
+                return Err(());
+            }
+        };
         // sort by offset
         res.chunks.sort_by_key(|a| a.offset);
         Ok(res.chunks)
