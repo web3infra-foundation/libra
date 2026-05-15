@@ -180,6 +180,42 @@ Unsynced objects:
   789012abc345... (blob, 512 bytes)
 ```
 
+## Structured Output
+
+`--json` and `--machine` are currently supported for `cloud status`.
+`--json` emits a command envelope and `--machine` emits the same envelope as a
+single NDJSON line.
+
+```json
+{
+  "ok": true,
+  "command": "cloud.status",
+  "data": {
+    "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "total_objects": 42,
+    "synced": 40,
+    "pending": 2,
+    "synced_percent": 95,
+    "by_type": [
+      {
+        "object_type": "blob",
+        "total": 32,
+        "synced": 30,
+        "pending": 2
+      }
+    ]
+  }
+}
+```
+
+When `--verbose` is set, the status payload also includes up to 20
+`unsynced_objects` entries with `oid`, `object_type`, and `size`.
+
+`cloud sync` and `cloud restore` still use their legacy human progress streams on
+success. Their structured success/progress contracts remain follow-up work in
+the command improvement plan; failures are still rendered through Libra's
+standard CLI error machinery.
+
 ## Environment Variables
 
 Cloud operations require the following environment variables (or equivalent `vault.env.*` config entries):
