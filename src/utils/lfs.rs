@@ -475,4 +475,42 @@ size 10
         );
         assert_eq!(res.1, 10);
     }
+
+    /// Regression for v0.17.203: pointer-shaped bytes whose oid region contains
+    /// non-UTF-8 bytes must return `None` rather than panicking inside the old
+    /// `String::from_utf8(...).unwrap()`.
+    #[test]
+    fn parse_pointer_data_non_utf8_oid_returns_none() {
+        let mut data = b"version https://git-lfs.github.com/spec/v1\noid sha256:".to_vec();
+        // 64 non-UTF-8 bytes where the oid hex chars should be.
+        data.extend(std::iter::repeat_n(0xFFu8, LFS_OID_LEN));
+        data.push(b'\n');
+        data.extend_from_slice(b"size 10\n");
+        assert!(
+            parse_pointer_data(&data).is_none(),
+            "non-UTF-8 oid bytes should yield None, not panic"
+        );
+    }
+
+    /// Regression for v0.17.203: a too-short payload that matches the prefix
+    /// but ends before the oid terminator must return `None` rather than
+    /// slice-panicking on `data[LFS_OID_LEN]`.
+    #[test]
+    fn parse_pointer_data_short_payload_returns_none() {
+        let mut data = b"version https://git-lfs.github.com/spec/v1\noid sha256:".to_vec();
+        // Only 10 bytes where 64 hex chars + a newline are expected.
+        data.extend_from_slice(b"abcdef0123");
+        assert!(
+            parse_pointer_data(&data).is_none(),
+            "short payload should yield None, not slice-panic"
+        );
+    }
+
+    /// Pointer-shaped bytes that exceed the max size cap should return None
+    /// without even attempting to parse.
+    #[test]
+    fn parse_pointer_data_oversized_returns_none() {
+        let data = vec![b'a'; LFS_POINTER_MAX_SIZE + 1];
+        assert!(parse_pointer_data(&data).is_none());
+    }
 }
