@@ -94,7 +94,7 @@
 | **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地；第 30 批补充结构化输出 | 已完成 `SwitchError` 变体匹配适配、`--help` EXAMPLES、`CheckoutOutput`、JSON/machine 成功路径与 checkout-owned stable code；剩余 `CheckoutError` typed enum 另行处理（详见 [checkout.md](checkout.md)） |
 | **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
 | **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
-| **12** | `branch` | 主改造已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪 | 继续把旧调用点迁移到 `internal::branch::*_result` fallible API，减少 legacy best-effort 查询路径（详见 [branch.md](branch.md)） |
+| **12** | `branch` | ✅ 已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪；v0.17.211 → v0.17.217 已把 `tests/command/*` 全部迁到 `*_result` 并删除 8 个 lossy wrapper（详见 [branch.md](branch.md)） | 后续仅维护回归测试和文档同步 |
 
 **理由：** 这些命令改变仓库状态，必须告知用户发生了什么。`checkout` 的兼容收口随 `switch` 一起落地，因为 `switch` 的 `ensure_clean_status()` 签名变更强制要求 `checkout` 同步适配。
 
@@ -292,7 +292,7 @@ agent.md 内部分工：
 - [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第 30 批）
 - [Reset 命令改进详细计划](reset.md) ✅ 已落地
 - [Tag 命令改进详细计划](tag.md) ✅ 已落地
-- [Branch 命令改进详细计划](branch.md) ✅ 已落地（仍有少量 legacy wrapper 待继续迁移）
+- [Branch 命令改进详细计划](branch.md) ✅ 已落地（v0.17.217 已删除 8 个 lossy wrapper，所有 `tests/command/*` 已迁到 `*_result` API）
 - [Log 命令改进详细计划](log.md) ✅ 已落地（内部统一重构留后续全局收口）
 - [Diff 命令改进详细计划](diff.md) ✅ 已落地
 - [Show 命令改进详细计划](show.md) ✅ 已落地（内部统一重构留后续全局收口）
