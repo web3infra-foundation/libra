@@ -823,7 +823,7 @@ pub async fn run_cloud_sync(
 
     let _ = db_conn.execute(builder.build(&stmt)).await;
 
-    let repo_id = ensure_repo_id().await?;
+    let repo_id = ensure_repo_id().await;
 
     // Determine project name from config 'cloud.name' or current directory name.
     let project_name = ConfigKv::get("cloud.name")
@@ -1680,12 +1680,18 @@ async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
     }
 }
 
-async fn ensure_repo_id() -> Result<String, String> {
+/// Resolve or mint the repository's stable `libra.repoid` identifier.
+///
+/// Always returns a value (mints a fresh UUIDv4 when no usable id is on file
+/// and ignores best-effort persistence failures), so the return type is bare
+/// `String` rather than `Result<String, _>`. Cloud sync uses this as the
+/// stable key for D1 + R2 namespacing.
+async fn ensure_repo_id() -> String {
     if let Some(entry) = ConfigKv::get("libra.repoid").await.ok().flatten()
         && !entry.value.is_empty()
         && entry.value != "unknown-repo"
     {
-        return Ok(entry.value);
+        return entry.value;
     }
 
     let repo_id = Uuid::new_v4().to_string();
@@ -1698,7 +1704,7 @@ async fn ensure_repo_id() -> Result<String, String> {
         .exec(&db_conn)
         .await;
 
-    Ok(repo_id)
+    repo_id
 }
 
 fn calculate_metadata_hash(json: &[u8]) -> u64 {
