@@ -1027,4 +1027,43 @@ mod tests {
             .await;
         assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    /// Regression for v0.17.193: `LFSClient::push_object` previously
+    /// `assert_eq!(resp.objects.len(), 1, ...)` and would crash the entire
+    /// binary if the LFS server returned a batch response with the wrong
+    /// number of objects. After v0.17.193 it returns a typed `LfsPushError`
+    /// whose detail names the actual object count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_object_rejects_batch_response_with_zero_objects() {
+        use axum::{Router, routing::post};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/objects/batch",
+            post(|| async {
+                // Server-side bug: returns an empty objects array.
+                r#"{"transfer":"basic","objects":[],"hash_algo":"sha256"}"#
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("payload.bin");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let err = client
+            .push_object("deadbeef", &file_path)
+            .await
+            .expect_err("empty objects array should be rejected by push_object");
+        assert!(
+            err.detail.contains("LFS batch upload returned 0 objects"),
+            "unexpected detail: {}",
+            err.detail
+        );
+    }
 }
