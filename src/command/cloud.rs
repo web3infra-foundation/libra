@@ -526,9 +526,14 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
                     .await
                     .map_err(|e| cloud_cli_error("sync", e))?;
                 if report.failed_count > 0 {
-                    return Err(cloud_cli_error(
+                    // Variant is known here — skip the String -> CloudError
+                    // classification round-trip and surface PartialTransfer directly.
+                    return Err(cloud_cli_error_typed(
                         "sync",
-                        format!("{} objects failed to sync", report.failed_count),
+                        CloudError::PartialTransfer(format!(
+                            "{} objects failed to sync",
+                            report.failed_count
+                        )),
                     ));
                 }
                 render_cloud_sync_output(&report, output)?;
@@ -639,8 +644,19 @@ impl CloudError {
 }
 
 fn cloud_cli_error(operation: &str, error: String) -> CliError {
-    let cloud_error: CloudError = error.into();
-    cloud_error
+    cloud_cli_error_typed(operation, error.into())
+}
+
+/// Map an already-typed [`CloudError`] onto a [`CliError`] for the given
+/// top-level `operation` without re-running the String classification path.
+///
+/// Prefer this at call sites that already know which CloudError variant they
+/// want to surface (e.g. a partial-sync result builder constructing
+/// `CloudError::PartialTransfer` directly). String-shaped error sites should
+/// continue to use [`cloud_cli_error`] until their callee is migrated to
+/// return `CloudError` natively.
+fn cloud_cli_error_typed(operation: &str, error: CloudError) -> CliError {
+    error
         .into_cli_error(operation)
         .with_detail("operation", operation)
         .with_detail("component", "cloud")
