@@ -733,7 +733,9 @@ impl ClientStorage {
                         current = self.get_parent_commit(&current, 1)?;
                     }
                 }
-                _ => unreachable!(),
+                // INVARIANT: regex `(\^|~)(\d*)` only captures "^" or "~" in
+                // group 1, so `symbol` cannot hold any other value here.
+                _ => unreachable!("regex capture group 1 is restricted to \"^\" or \"~\""),
             }
         }
         Ok(current)

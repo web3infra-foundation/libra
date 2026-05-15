@@ -765,7 +765,10 @@ fn navigate_commit_path_typed(
                     current = nth_parent_commit_typed(&current, 1, display_name)?;
                 }
             }
-            _ => unreachable!(),
+            // INVARIANT: the leading `symbol != '^' && symbol != '~'` guard at
+            // line 727 returns InvalidReference for every other character, so
+            // by this match the only reachable values are '^' and '~'.
+            _ => unreachable!("symbol guard above rejects all other chars"),
         }
     }
 
