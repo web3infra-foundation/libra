@@ -311,10 +311,25 @@ impl LocalStorage {
     }
 
     fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
-        let file_name = pack_file.file_name().unwrap().to_str().unwrap().to_owned();
+        let file_name = pack_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                GitError::InvalidObjectInfo(format!(
+                    "pack path has no UTF-8 file name: {}",
+                    pack_file.display()
+                ))
+            })?
+            .to_owned();
         let cache_key = format!("{:?}-{}", file_name, offset);
 
-        if let Some(cached) = PACK_OBJ_CACHE.lock().unwrap().get(&cache_key) {
+        // INVARIANT: PACK_OBJ_CACHE mutex poisoning would require an earlier
+        // panic while holding the lock; treated as unrecoverable here.
+        if let Some(cached) = PACK_OBJ_CACHE
+            .lock()
+            .expect("PACK_OBJ_CACHE mutex poisoned")
+            .get(&cache_key)
+        {
             return Ok(cached.clone());
         }
 
@@ -335,16 +350,27 @@ impl LocalStorage {
         })?;
         let full_obj = match obj.object_type() {
             ObjectType::OffsetDelta => {
-                let delta = obj.offset_delta().unwrap();
+                // INVARIANT: obj.object_type() == OffsetDelta implies offset_delta() is Some.
+                let delta = obj
+                    .offset_delta()
+                    .expect("OffsetDelta object must have offset_delta");
                 let base_offset = offset - delta as u64;
                 let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
             }
             ObjectType::HashDelta => {
-                let base_hash = obj.hash_delta().unwrap();
+                // INVARIANT: obj.object_type() == HashDelta implies hash_delta() is Some.
+                let base_hash = obj
+                    .hash_delta()
+                    .expect("HashDelta object must have hash_delta");
                 let idx_file = pack_file.with_extension("idx");
-                let base_offset = Self::read_idx(&idx_file, &base_hash)?.unwrap();
+                let base_offset = Self::read_idx(&idx_file, &base_hash)?.ok_or_else(|| {
+                    GitError::InvalidObjectInfo(format!(
+                        "HashDelta base {base_hash} not found in pack idx {}",
+                        idx_file.display()
+                    ))
+                })?;
                 let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
@@ -354,7 +380,7 @@ impl LocalStorage {
 
         if PACK_OBJ_CACHE
             .lock()
-            .unwrap()
+            .expect("PACK_OBJ_CACHE mutex poisoned")
             .insert(cache_key, full_obj.clone())
             .is_err()
         {
@@ -436,7 +462,10 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let path = self_clone.get_obj_path(&hash);
-            let dir = path.parent().unwrap();
+            // INVARIANT: get_obj_path always returns `objects/AB/CD...` so it has a parent.
+            let dir = path
+                .parent()
+                .expect("get_obj_path output always has a parent directory");
             fs::create_dir_all(dir)?;
 
             let header = format!("{} {}\0", obj_type, data.len());
@@ -444,7 +473,12 @@ impl Storage for LocalStorage {
 
             let mut file = fs::File::create(&path)?;
             file.write_all(&Self::compress_zlib(&full_content)?)?;
-            Ok(path.to_str().unwrap().to_string())
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                GitError::InvalidArgument(format!(
+                    "loose object path is not valid UTF-8: {}",
+                    path.display()
+                ))
+            })
         })
         .await
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
@@ -459,7 +493,23 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let path = self_clone.get_obj_path(&hash);
-            Path::exists(&path) || self_clone.get_from_pack(&hash).unwrap().is_some()
+            if Path::exists(&path) {
+                return true;
+            }
+            match self_clone.get_from_pack(&hash) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(err) => {
+                    // exist() returns bool, so any pack-read failure is treated as "not present".
+                    // Log so a corrupt pack doesn't silently cause re-fetch loops.
+                    tracing::warn!(
+                        hash = %hash,
+                        error = %err,
+                        "failed to consult pack while checking object existence; assuming missing"
+                    );
+                    false
+                }
+            }
         })
         .await
         .unwrap_or(false)
