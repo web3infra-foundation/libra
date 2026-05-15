@@ -859,4 +859,124 @@ mod tests {
         let expected = lfs::format_pointer_string(test_oid, test_size);
         assert_eq!(contents, expected, "file should contain the LFS pointer");
     }
+
+    fn test_lfs_client(base_url: &str) -> LFSClient {
+        LFSClient {
+            batch_url: Url::parse(&format!("{base_url}objects/batch")).unwrap(),
+            lfs_url: Url::parse(base_url).unwrap(),
+            client: Client::builder().no_proxy().build().unwrap(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_locks_returns_lock_list_from_mock_server() {
+        use axum::{Json, Router, routing::get};
+        use serde_json::json;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/locks",
+            get(|| async {
+                Json(json!({
+                    "locks": [{
+                        "id": "lock-1",
+                        "path": "tracked.txt",
+                        "locked_at": "2026-01-01T00:00:00Z",
+                        "owner": { "name": "tester" }
+                    }],
+                    "next_cursor": ""
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let result = client
+            .get_locks(LockListQuery {
+                path: "tracked.txt".to_string(),
+                id: String::new(),
+                cursor: String::new(),
+                limit: "10".to_string(),
+                refspec: "refs/heads/main".to_string(),
+            })
+            .await
+            .expect("get_locks should parse successful mock response");
+        assert_eq!(result.locks.len(), 1);
+        assert_eq!(result.locks[0].id, "lock-1");
+        assert_eq!(result.locks[0].path, "tracked.txt");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_locks_maps_forbidden_to_http_error() {
+        use axum::{Router, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/locks", get(|| async { StatusCode::FORBIDDEN }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let err = client
+            .get_locks(LockListQuery {
+                path: String::new(),
+                id: String::new(),
+                cursor: String::new(),
+                limit: String::new(),
+                refspec: String::new(),
+            })
+            .await
+            .expect_err("forbidden lock list should return an HTTP error");
+        match err {
+            LockListError::Http { status, .. } => assert_eq!(status, StatusCode::FORBIDDEN),
+            other => panic!("expected LockListError::Http, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_returns_conflict_status_from_mock_server() {
+        use axum::{Router, routing::post};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/locks", post(|| async { StatusCode::CONFLICT }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let code = client
+            .lock("tracked.txt".to_string(), "refs/heads/main".to_string())
+            .await;
+        assert_eq!(code, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unlock_returns_unexpected_status_from_mock_server() {
+        use axum::{Router, routing::post};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/locks/{id}/unlock",
+            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let code = client
+            .unlock("lock-1".to_string(), "refs/heads/main".to_string(), false)
+            .await;
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

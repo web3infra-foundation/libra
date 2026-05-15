@@ -388,21 +388,93 @@ impl RebaseState {
 pub enum ReplayResult {
     /// Commit was successfully replayed; contains the new commit hash.
     Success(ObjectHash),
-    /// A replay failure occurred.
+    /// A user-visible merge conflict was hit while replaying the commit.
     ///
-    /// - `paths` lists files that are in a conflicted state and require manual resolution.
-    ///   This is empty when the replay failed for a non-conflict reason (e.g. tree/index
-    ///   errors), in which case `message` should be present.
-    /// - `message` carries a human-readable error describing a non-conflict failure, or
-    ///   is `None` when the failure is a merge conflict that can be resolved by the user.
-    ///
-    /// Callers should treat `paths.is_empty()` + `message.is_some()` as a hard error and
-    /// abort the rebase, while `paths` with conflicts should surface guidance for resolving
-    /// those files before retrying.
+    /// - `paths` lists files left in a conflicted state and waiting for manual resolution.
+    /// - `message` is `None` for a clean conflict; it is populated when an IO failure
+    ///   happened while materializing the conflict state on disk (e.g. failed to save the
+    ///   index with stage 1/2/3 entries, or failed to write a working-tree file).
     Conflict {
         paths: Vec<PathBuf>,
         message: Option<String>,
     },
+    /// A non-conflict internal failure occurred (e.g. object load, tree creation,
+    /// commit save, index/workdir IO). `kind` classifies the cause so the caller can
+    /// surface a precise stable error code; `detail` carries the human-readable cause.
+    Internal {
+        kind: ReplayErrorKind,
+        detail: String,
+    },
+}
+
+/// Categorizes the cause of a non-conflict failure inside
+/// [`replay_commit_with_conflict_detection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayErrorKind {
+    IndexLoad,
+    CommitLoad,
+    MissingParent,
+    BaseTreeLoad,
+    TheirTreeLoad,
+    OurTreeLoad,
+    UntrackedOverwrite,
+    ConflictMarker,
+    TreeCreate,
+    CommitSave,
+    NewTreeLoad,
+    IndexRebuild,
+    IndexSave,
+    WorkdirReset,
+}
+
+impl ReplayErrorKind {
+    /// Snake-case identifier surfaced in JSON error details and human messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReplayErrorKind::IndexLoad => "index_load",
+            ReplayErrorKind::CommitLoad => "commit_load",
+            ReplayErrorKind::MissingParent => "missing_parent",
+            ReplayErrorKind::BaseTreeLoad => "base_tree_load",
+            ReplayErrorKind::TheirTreeLoad => "their_tree_load",
+            ReplayErrorKind::OurTreeLoad => "our_tree_load",
+            ReplayErrorKind::UntrackedOverwrite => "untracked_overwrite",
+            ReplayErrorKind::ConflictMarker => "conflict_marker",
+            ReplayErrorKind::TreeCreate => "tree_create",
+            ReplayErrorKind::CommitSave => "commit_save",
+            ReplayErrorKind::NewTreeLoad => "new_tree_load",
+            ReplayErrorKind::IndexRebuild => "index_rebuild",
+            ReplayErrorKind::IndexSave => "index_save",
+            ReplayErrorKind::WorkdirReset => "workdir_reset",
+        }
+    }
+
+    /// Maps this internal failure cause to its stable error code so distinct
+    /// kinds no longer collapse to `ConflictUnresolved`.
+    pub fn stable_code(self) -> StableErrorCode {
+        match self {
+            ReplayErrorKind::IndexLoad => StableErrorCode::IoReadFailed,
+            ReplayErrorKind::CommitLoad
+            | ReplayErrorKind::MissingParent
+            | ReplayErrorKind::BaseTreeLoad
+            | ReplayErrorKind::TheirTreeLoad
+            | ReplayErrorKind::OurTreeLoad
+            | ReplayErrorKind::NewTreeLoad => StableErrorCode::RepoCorrupt,
+            ReplayErrorKind::UntrackedOverwrite => StableErrorCode::ConflictOperationBlocked,
+            ReplayErrorKind::ConflictMarker
+            | ReplayErrorKind::TreeCreate
+            | ReplayErrorKind::CommitSave
+            | ReplayErrorKind::IndexRebuild
+            | ReplayErrorKind::IndexSave
+            | ReplayErrorKind::WorkdirReset => StableErrorCode::IoWriteFailed,
+        }
+    }
+}
+
+impl std::fmt::Display for ReplayErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl ReplayResult {
@@ -413,10 +485,10 @@ impl ReplayResult {
         }
     }
 
-    fn error(message: impl Into<String>) -> Self {
-        ReplayResult::Conflict {
-            paths: Vec::new(),
-            message: Some(message.into()),
+    fn internal(kind: ReplayErrorKind, detail: impl Into<String>) -> Self {
+        ReplayResult::Internal {
+            kind,
+            detail: detail.into(),
         }
     }
 }
@@ -515,6 +587,13 @@ enum RebaseError {
         paths: Vec<PathBuf>,
         message: Option<String>,
     },
+    #[error("rebase stopped while applying {commit}: {kind} failed ({detail})")]
+    ReplayInternal {
+        commit: String,
+        subject: String,
+        kind: ReplayErrorKind,
+        detail: String,
+    },
     #[error("failed to restore branch '{branch}' during rebase abort: {detail}")]
     BranchRestore { branch: String, detail: String },
     #[error("failed to load commit '{commit}': {detail}")]
@@ -608,6 +687,18 @@ impl From<RebaseError> for CliError {
                 }
                 error
             }
+            RebaseError::ReplayInternal {
+                commit,
+                subject,
+                kind,
+                detail,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(kind.stable_code())
+                .with_hint("run 'libra rebase --abort' to return to the original branch.")
+                .with_detail("commit", commit.clone())
+                .with_detail("subject", subject.clone())
+                .with_detail("kind", kind.as_str())
+                .with_detail("detail", detail.clone()),
             RebaseError::CommitLoad { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
             }
@@ -1421,30 +1512,48 @@ async fn continue_replay(
                         eprintln!("fatal: {}", message);
                     }
 
-                    if !paths.is_empty() {
-                        eprintln!("CONFLICT in {} file(s):", paths.len());
-                        for path in &paths {
-                            eprintln!("  {}", path.display());
-                        }
-                        eprintln!();
-                        eprintln!("After resolving conflicts, mark them with 'libra add <file>'");
-                        eprintln!("then run 'libra rebase --continue'");
-                        eprintln!("To skip this commit, run 'libra rebase --skip'");
-                        eprintln!(
-                            "To abort and return to the original branch, run 'libra rebase --abort'"
-                        );
-                    } else {
-                        eprintln!("Rebase stopped due to an internal error.");
-                        eprintln!(
-                            "To abort and return to the original branch, run 'libra rebase --abort'"
-                        );
+                    eprintln!("CONFLICT in {} file(s):", paths.len());
+                    for path in &paths {
+                        eprintln!("  {}", path.display());
                     }
+                    eprintln!();
+                    eprintln!("After resolving conflicts, mark them with 'libra add <file>'");
+                    eprintln!("then run 'libra rebase --continue'");
+                    eprintln!("To skip this commit, run 'libra rebase --skip'");
+                    eprintln!(
+                        "To abort and return to the original branch, run 'libra rebase --abort'"
+                    );
                 }
                 return Err(RebaseError::ReplayConflict {
                     commit: commit_id.to_string(),
                     subject,
                     paths,
                     message,
+                });
+            }
+            ReplayResult::Internal { kind, detail } => {
+                let subject = commit_subject_lossy(&commit_id, emit_human);
+                state.stopped_sha = Some(commit_id);
+                if let Err(e) = state.save().await {
+                    return Err(RebaseError::StateSave(e));
+                }
+
+                if emit_human {
+                    eprintln!(
+                        "error: could not apply {}: {}",
+                        short_object_id(&commit_id),
+                        subject
+                    );
+                    eprintln!("fatal: {}: {}", kind.as_str(), detail);
+                    eprintln!(
+                        "To abort and return to the original branch, run 'libra rebase --abort'"
+                    );
+                }
+                return Err(RebaseError::ReplayInternal {
+                    commit: commit_id.to_string(),
+                    subject,
+                    kind,
+                    detail,
                 });
             }
         }
@@ -1924,9 +2033,131 @@ mod tests {
     };
 
     use super::{
-        classify_relative_to_base, collect_tree_items_and_paths, path_to_index_key,
-        resolve_three_way, tree_item_name,
+        RebaseError, ReplayErrorKind, classify_relative_to_base, collect_tree_items_and_paths,
+        path_to_index_key, resolve_three_way, tree_item_name,
     };
+    use crate::utils::error::{CliError, StableErrorCode};
+
+    #[test]
+    fn replay_error_kind_stable_codes_route_distinct_failures() {
+        // Object load failures point at repository corruption.
+        for kind in [
+            ReplayErrorKind::CommitLoad,
+            ReplayErrorKind::MissingParent,
+            ReplayErrorKind::BaseTreeLoad,
+            ReplayErrorKind::TheirTreeLoad,
+            ReplayErrorKind::OurTreeLoad,
+            ReplayErrorKind::NewTreeLoad,
+        ] {
+            assert_eq!(
+                kind.stable_code(),
+                StableErrorCode::RepoCorrupt,
+                "{kind:?} should map to RepoCorrupt"
+            );
+        }
+
+        // Pure index read maps to IO read.
+        assert_eq!(
+            ReplayErrorKind::IndexLoad.stable_code(),
+            StableErrorCode::IoReadFailed
+        );
+
+        // Untracked file collision is a blocked operation, not an unresolved conflict.
+        assert_eq!(
+            ReplayErrorKind::UntrackedOverwrite.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+
+        // Write/save side failures all surface as IO write failed.
+        for kind in [
+            ReplayErrorKind::ConflictMarker,
+            ReplayErrorKind::TreeCreate,
+            ReplayErrorKind::CommitSave,
+            ReplayErrorKind::IndexRebuild,
+            ReplayErrorKind::IndexSave,
+            ReplayErrorKind::WorkdirReset,
+        ] {
+            assert_eq!(
+                kind.stable_code(),
+                StableErrorCode::IoWriteFailed,
+                "{kind:?} should map to IoWriteFailed"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_error_kind_serializes_snake_case_identifiers() {
+        assert_eq!(ReplayErrorKind::IndexLoad.as_str(), "index_load");
+        assert_eq!(ReplayErrorKind::CommitLoad.as_str(), "commit_load");
+        assert_eq!(ReplayErrorKind::MissingParent.as_str(), "missing_parent");
+        assert_eq!(ReplayErrorKind::BaseTreeLoad.as_str(), "base_tree_load");
+        assert_eq!(ReplayErrorKind::TheirTreeLoad.as_str(), "their_tree_load");
+        assert_eq!(ReplayErrorKind::OurTreeLoad.as_str(), "our_tree_load");
+        assert_eq!(
+            ReplayErrorKind::UntrackedOverwrite.as_str(),
+            "untracked_overwrite"
+        );
+        assert_eq!(ReplayErrorKind::ConflictMarker.as_str(), "conflict_marker");
+        assert_eq!(ReplayErrorKind::TreeCreate.as_str(), "tree_create");
+        assert_eq!(ReplayErrorKind::CommitSave.as_str(), "commit_save");
+        assert_eq!(ReplayErrorKind::NewTreeLoad.as_str(), "new_tree_load");
+        assert_eq!(ReplayErrorKind::IndexRebuild.as_str(), "index_rebuild");
+        assert_eq!(ReplayErrorKind::IndexSave.as_str(), "index_save");
+        assert_eq!(ReplayErrorKind::WorkdirReset.as_str(), "workdir_reset");
+    }
+
+    #[test]
+    fn replay_internal_error_maps_to_typed_cli_error() {
+        let rebase_err = RebaseError::ReplayInternal {
+            commit: "deadbeef".to_string(),
+            subject: "refactor: split error kinds".to_string(),
+            kind: ReplayErrorKind::CommitSave,
+            detail: "disk full".to_string(),
+        };
+        let cli_err: CliError = rebase_err.into();
+        let json: serde_json::Value = serde_json::from_str(&cli_err.render_json())
+            .expect("CliError JSON payload should parse");
+
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("LBR-IO-002")
+        );
+        assert_eq!(
+            json.pointer("/details/kind").and_then(|v| v.as_str()),
+            Some("commit_save")
+        );
+        assert_eq!(
+            json.pointer("/details/commit").and_then(|v| v.as_str()),
+            Some("deadbeef")
+        );
+        assert_eq!(
+            json.pointer("/details/detail").and_then(|v| v.as_str()),
+            Some("disk full")
+        );
+    }
+
+    #[test]
+    fn replay_internal_repo_corrupt_kind_keeps_separate_code() {
+        let rebase_err = RebaseError::ReplayInternal {
+            commit: "feedface".to_string(),
+            subject: "feat: add provider".to_string(),
+            kind: ReplayErrorKind::BaseTreeLoad,
+            detail: "object 1234 not found".to_string(),
+        };
+        let cli_err: CliError = rebase_err.into();
+        let json: serde_json::Value = serde_json::from_str(&cli_err.render_json())
+            .expect("CliError JSON payload should parse");
+
+        // Was previously LBR-CONFLICT-001; now distinct from real merge conflicts.
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("LBR-REPO-002")
+        );
+        assert_eq!(
+            json.pointer("/details/kind").and_then(|v| v.as_str()),
+            Some("base_tree_load")
+        );
+    }
 
     #[test]
     fn tree_item_name_rejects_paths_without_file_name() {
@@ -2327,35 +2558,39 @@ async fn replay_commit_with_conflict_detection(
     let index_file = path::index();
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
         Ok(idx) => idx,
-        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
+        Err(e) => {
+            return ReplayResult::internal(ReplayErrorKind::IndexLoad, format!("{:?}", e));
+        }
     };
 
     let commit_to_replay: Commit = match load_object(commit_to_replay_id) {
         Ok(c) => c,
-        Err(e) => return ReplayResult::error(format!("error: {}", e)),
+        Err(e) => return ReplayResult::internal(ReplayErrorKind::CommitLoad, e.to_string()),
     };
 
     let original_parent_id = match commit_to_replay.parent_commit_ids.first() {
         Some(id) => id,
-        None => return ReplayResult::error("commit has no parents"),
+        None => {
+            return ReplayResult::internal(ReplayErrorKind::MissingParent, "commit has no parents");
+        }
     };
 
     // Load the three trees needed for the three-way merge
     let base_tree: Tree =
         match load_object::<Commit>(original_parent_id).and_then(|c| load_object(&c.tree_id)) {
             Ok(t) => t,
-            Err(e) => return ReplayResult::error(format!("base tree: {}", e)),
+            Err(e) => return ReplayResult::internal(ReplayErrorKind::BaseTreeLoad, e.to_string()),
         };
 
     let their_tree: Tree = match load_object(&commit_to_replay.tree_id) {
         Ok(t) => t,
-        Err(e) => return ReplayResult::error(format!("their tree: {}", e)),
+        Err(e) => return ReplayResult::internal(ReplayErrorKind::TheirTreeLoad, e.to_string()),
     };
 
     let our_tree: Tree =
         match load_object::<Commit>(new_parent_id).and_then(|c| load_object(&c.tree_id)) {
             Ok(t) => t,
-            Err(e) => return ReplayResult::error(format!("our tree: {}", e)),
+            Err(e) => return ReplayResult::internal(ReplayErrorKind::OurTreeLoad, e.to_string()),
         };
 
     // Get all items from each tree and a union of their paths.
@@ -2373,7 +2608,7 @@ async fn replay_commit_with_conflict_detection(
     let marker_eol = conflict_marker_eol();
     let untracked_paths = match worktree::untracked_workdir_paths(&current_index) {
         Ok(paths) => paths,
-        Err(e) => return ReplayResult::error(format!("untracked workdir: {e}")),
+        Err(e) => return ReplayResult::internal(ReplayErrorKind::IndexLoad, e.to_string()),
     };
 
     for path in all_paths {
@@ -2411,16 +2646,19 @@ async fn replay_commit_with_conflict_detection(
             }
         }
         if let Some(conflict) = untracked_conflict {
-            return ReplayResult::error(format!(
-                "untracked working tree file would be overwritten by rebase: {}",
-                conflict.display()
-            ));
+            return ReplayResult::internal(
+                ReplayErrorKind::UntrackedOverwrite,
+                format!(
+                    "untracked working tree file would be overwritten by rebase: {}",
+                    conflict.display()
+                ),
+            );
         }
 
         for (path, kind) in &conflict_items {
             if let Err(e) = write_conflict_markers(&workdir, path, marker_eol, commit_short, *kind)
             {
-                return ReplayResult::error(e);
+                return ReplayResult::internal(ReplayErrorKind::ConflictMarker, e);
             }
         }
 
@@ -2528,30 +2766,30 @@ async fn replay_commit_with_conflict_detection(
     // No conflicts - create the merged tree and commit
     let new_tree_id = match create_tree_from_items_map(&merged_items) {
         Ok(id) => id,
-        Err(e) => return ReplayResult::error(format!("tree creation: {}", e)),
+        Err(e) => return ReplayResult::internal(ReplayErrorKind::TreeCreate, e.to_string()),
     };
 
     let new_commit =
         Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
 
     if let Err(e) = save_object(&new_commit, &new_commit.id) {
-        return ReplayResult::error(format!("commit save: {}", e));
+        return ReplayResult::internal(ReplayErrorKind::CommitSave, e.to_string());
     }
 
     // Update index and working directory
     let mut index = git_internal::internal::index::Index::new();
     let new_tree: Tree = match load_object(&new_tree_id) {
         Ok(tree) => tree,
-        Err(e) => return ReplayResult::error(format!("new tree load: {}", e)),
+        Err(e) => return ReplayResult::internal(ReplayErrorKind::NewTreeLoad, e.to_string()),
     };
     if let Err(e) = rebuild_index_from_tree(&new_tree, &mut index, "") {
-        return ReplayResult::error(format!("index rebuild: {}", e));
+        return ReplayResult::internal(ReplayErrorKind::IndexRebuild, e.to_string());
     }
     if let Err(e) = index.save(&index_file) {
-        return ReplayResult::error(format!("index save: {}", e));
+        return ReplayResult::internal(ReplayErrorKind::IndexSave, e.to_string());
     }
     if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
-        return ReplayResult::error(format!("workdir reset: {}", e));
+        return ReplayResult::internal(ReplayErrorKind::WorkdirReset, e.to_string());
     }
 
     ReplayResult::Success(new_commit.id)

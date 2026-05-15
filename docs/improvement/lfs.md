@@ -13,13 +13,14 @@
 - `lfs locks` 的 human path-width 计算不再使用生产 `unwrap()`。
 - `LFSClient::get_locks()` 不再使用 `unwrap()`，改为 typed `LockListError`（request/http/decode）；`lfs` 命令层已映射到稳定错误码（`LBR-NET-001` / `LBR-NET-002` / `LBR-AUTH-002`）。
 - `src/command/lfs.rs` 增加 `map_lock_list_error()` 单测，覆盖 forbidden、decode、http-5xx detail 映射。
+- `src/internal/protocol/lfs_client.rs` 新增本地 mock server 合约测试，覆盖 lock API 关键路径：`get_locks` 成功解析、`get_locks` 403、`lock` 409、`unlock` 500。
 
 ## 当前未完成
 
-- 远端 lock API 的 mock server / contract test 仍未补齐。
+- `lfs` 命令层（`tests/command/lfs_test.rs`）尚未补充 lock/unlock/locks 的 CLI 级 mock 回归。
 - `LfsOutput` 仍是命令内 schema；如后续和 `push` 的 LFS upload summary 共享字段，需要再抽公共类型。
 
 ## 后续切片建议
 
-1. 为 `locks` / `lock` / `unlock` 建 LFS mock server，覆盖成功、403、409、unexpected status。
+1. 在 `tests/command/lfs_test.rs` 增加 lock/unlock/locks CLI 级 mock 回归，验证稳定错误码与 JSON envelope（当前只有 client 层 mock 覆盖）。
 2. 视需要扩展 `ls-files` JSON：增加 `full_oid`，保持当前 `oid` 显示语义向后兼容。
