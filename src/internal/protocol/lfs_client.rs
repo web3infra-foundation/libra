@@ -430,17 +430,22 @@ impl LFSClient {
         }
     }
 
-    /// Just for resume download
-    async fn update_file_checksum(file: &mut tokio::fs::File, checksum: &mut Context) {
-        file.seek(tokio::io::SeekFrom::Start(0)).await.unwrap();
+    /// Re-hash the already-downloaded prefix of a resumed download so the running
+    /// SHA-256 context matches the bytes on disk before more chunks are appended.
+    async fn update_file_checksum(
+        file: &mut tokio::fs::File,
+        checksum: &mut Context,
+    ) -> std::io::Result<()> {
+        file.seek(tokio::io::SeekFrom::Start(0)).await?;
         let mut buf = [0u8; 8192];
         loop {
-            let n = file.read(&mut buf).await.unwrap();
+            let n = file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
             checksum.update(&buf[..n]);
         }
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -523,17 +528,19 @@ impl LFSClient {
         })?;
 
         let mut is_chunked = false;
-        // Chunk API
-        let chunk_size; // infer that all chunks are the same size!
+        // Chunk API — infer that all chunks share the same size, falling back to the
+        // total object size when the server reports a single-chunk download.
+        let chunk_size: i64;
         let links = match self.fetch_chunks(&link.href).await {
-            Ok(chunks) => {
+            Ok(chunks) if !chunks.is_empty() => {
                 is_chunked = true;
-                chunk_size = chunks.first().map(|c| c.size);
+                // INVARIANT: matched the `!chunks.is_empty()` guard above.
+                chunk_size = chunks.first().expect("non-empty checked above").size;
                 tracing::info!("LFS Chunk API supported.");
                 chunks.into_iter().map(|c| c.link).collect()
             }
-            Err(_) => {
-                chunk_size = Some(size as i64);
+            _ => {
+                chunk_size = size as i64;
                 vec![link.clone()]
             }
         };
@@ -558,7 +565,7 @@ impl LFSClient {
                 file.set_len(0).await?; // clear
                 file.seek(tokio::io::SeekFrom::Start(0)).await?;
             } else if file_len > 0 {
-                let chunk_size = chunk_size.unwrap() as u64;
+                let chunk_size = chunk_size as u64;
                 got_parts = file_len / chunk_size;
                 let file_offset = got_parts * chunk_size;
                 println!(
@@ -567,7 +574,7 @@ impl LFSClient {
                     got_parts + 1
                 );
                 file.set_len(file_offset).await?; // truncate
-                Self::update_file_checksum(&mut file, &mut checksum).await; // resume checksum
+                Self::update_file_checksum(&mut file, &mut checksum).await?; // resume checksum
                 file.seek(tokio::io::SeekFrom::End(0)).await?;
             }
             file
@@ -602,10 +609,10 @@ impl LFSClient {
             }
 
             let cur_chunk_size = if (got_parts as usize) < parts {
-                chunk_size.unwrap() as u64
+                chunk_size as u64
             } else {
                 // last part
-                size - (parts as u64 - 1) * chunk_size.unwrap() as u64
+                size - (parts as u64 - 1) * chunk_size as u64
             };
             let pb = util::default_progress_bar(cur_chunk_size);
             let mut stream = response.bytes_stream();
