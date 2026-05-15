@@ -206,8 +206,7 @@ impl LFSClient {
                     .ours
                     .iter()
                     .filter(|l| {
-                        let oid = lfs::get_oid_by_path(&l.path);
-                        oids.contains(&oid)
+                        lfs::get_oid_by_path(&l.path).is_some_and(|oid| oids.contains(&oid))
                     })
                     .collect::<Vec<_>>();
                 if !ours.is_empty() {
@@ -220,8 +219,7 @@ impl LFSClient {
                     .theirs
                     .iter()
                     .filter(|l| {
-                        let oid = lfs::get_oid_by_path(&l.path);
-                        oids.contains(&oid)
+                        lfs::get_oid_by_path(&l.path).is_some_and(|oid| oids.contains(&oid))
                     })
                     .collect::<Vec<_>>();
                 if !theirs.is_empty() {

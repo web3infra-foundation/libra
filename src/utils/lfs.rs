@@ -214,15 +214,45 @@ pub fn lfs_object_path(oid: &str) -> PathBuf {
         .join(oid)
 }
 
-/// Get LFS file oid by path (through `Index`), NOT re-calculate
-pub fn get_oid_by_path(path: &str) -> String {
+/// Get LFS file oid by path (through `Index`), NOT re-calculate.
+///
+/// Returns `None` if any of:
+/// - the index file fails to load
+/// - the path is not in the index
+/// - the index entry's object is missing from storage
+/// - the stored bytes are not a valid LFS pointer
+///
+/// Diagnostic warnings are emitted via `tracing::warn!` so a corrupt LFS
+/// pointer or missing object during a lock check does not crash `libra push`.
+pub fn get_oid_by_path(path: &str) -> Option<String> {
     let index_file = path::index();
-    let index = Index::load(&index_file).unwrap();
-    let hash = index.get_hash(path, 0).unwrap();
+    let index = match Index::load(&index_file) {
+        Ok(index) => index,
+        Err(err) => {
+            tracing::warn!(
+                index = %index_file.display(),
+                error = ?err,
+                "failed to load index while resolving LFS oid by path"
+            );
+            return None;
+        }
+    };
+    let hash = index.get_hash(path, 0)?;
     let storage = util::objects_storage();
-    let data = storage.get(&hash).unwrap();
-    let (oid, _) = parse_pointer_data(&data).unwrap();
-    oid
+    let data = match storage.get(&hash) {
+        Ok(data) => data,
+        Err(err) => {
+            tracing::warn!(
+                path = %path,
+                hash = %hash,
+                error = %err,
+                "failed to read LFS pointer object from storage"
+            );
+            return None;
+        }
+    };
+    let (oid, _) = parse_pointer_data(&data)?;
+    Some(oid)
 }
 
 /// Copy LFS file to `.libra/lfs/objects`
@@ -234,7 +264,12 @@ where
     let path = path.as_ref();
     let backup_path = lfs_object_path(oid);
     if !backup_path.exists() {
-        fs::create_dir_all(backup_path.parent().unwrap())?;
+        // INVARIANT: lfs_object_path() always returns `.libra/lfs/objects/AB/CD/<oid>`
+        // which has a parent.
+        let parent = backup_path
+            .parent()
+            .expect("lfs_object_path always produces a path with a parent");
+        fs::create_dir_all(parent)?;
         fs::copy(path, backup_path)?;
     }
     Ok(())
