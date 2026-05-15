@@ -204,7 +204,7 @@
 | **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
 | **D** | log/diff/blame/show TTY 下使用 pager | 独立改进 |
 | **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
-| **F** | 拼写纠错建议（确认 clap suggest 已启用） | 独立改进 |
+| **F** | 拼写纠错建议（确认 clap suggest 已启用） | ✅ 已落地：clap fuzzy suggestion 已启用，并由 `cli::tests::clap_fuzzy_suggests_similar_command` 覆盖 `initt -> init` |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |
 | **I** | **Git surface 兼容性补齐** → 见 [compatibility/README.md](compatibility/README.md)：4-tier `COMPATIBILITY.md` / 仓库治理 / CI 兼容矩阵 / stash・bisect 子命令面 / worktree 与 checkout 行为差异 | 与各命令批次并行 |
