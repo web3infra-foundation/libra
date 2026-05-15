@@ -480,7 +480,12 @@ impl LFSClient {
             serde_json::from_str::<serde_json::Value>(&text)?
         );
         let resp = serde_json::from_str::<LfsBatchResponse>(&text)?;
-        let obj = resp.objects.first().expect("No object"); // Only get first
+        let obj = resp.objects.first().ok_or_else(|| {
+            anyhow!(
+                "LFS batch download response contained no objects for oid {oid}; \
+                 the remote returned an empty `objects` array"
+            )
+        })?;
         if obj.error.is_some() || obj.actions.is_none() {
             let unknown_err = ObjectError {
                 code: 0,
@@ -506,12 +511,16 @@ impl LFSClient {
             return Err(anyhow!("LFS download failed."));
         }
 
-        let link = obj
+        // INVARIANT: actions.is_none() already returned above, so as_ref().unwrap()
+        // here is safe. The Download action, however, can legitimately be absent
+        // (e.g. server only returns Upload), so handle that case explicitly.
+        let actions = obj
             .actions
             .as_ref()
-            .unwrap()
-            .get(&Action::Download)
-            .unwrap();
+            .expect("actions.is_none() checked above");
+        let link = actions.get(&Action::Download).ok_or_else(|| {
+            anyhow!("LFS batch download response missing 'download' action for oid {oid}")
+        })?;
 
         let mut is_chunked = false;
         // Chunk API
