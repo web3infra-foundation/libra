@@ -238,10 +238,10 @@ impl LocalStorage {
         idx_file.seek(io::SeekFrom::Start(fanout_offset))?;
         let mut fanout: [u32; 256] = [0; 256];
         let mut buf = [0; 4];
-        fanout.iter_mut().for_each(|x| {
-            idx_file.read_exact(&mut buf).unwrap();
-            *x = u32::from_be_bytes(buf);
-        });
+        for slot in fanout.iter_mut() {
+            idx_file.read_exact(&mut buf)?;
+            *slot = u32::from_be_bytes(buf);
+        }
         Ok((version, fanout))
     }
 
