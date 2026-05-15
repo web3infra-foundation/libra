@@ -559,33 +559,91 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
     Ok(())
 }
 
+/// Typed classification of cloud operation failures, derived from the raw error
+/// string emitted by the underlying D1/R2/repo-name/metadata/agent-capture
+/// helpers. Centralises the string-matching previously scattered through
+/// [`cloud_cli_error`] so the mapping to [`StableErrorCode`] has a single
+/// source of truth and is unit-testable in isolation.
+///
+/// Variants document the trigger conditions; the contained `String` carries
+/// the original detail so the human / JSON error envelope can preserve it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CloudError {
+    /// Required env / vault key set missing — carries the comma-separated key
+    /// list parsed out of the underlying "Missing: …" message.
+    MissingEnv(Vec<String>),
+    /// Repository name is already claimed by another repository in D1.
+    NameAlreadyTaken(String),
+    /// Repository name is not registered in D1.
+    NameNotFound(String),
+    /// Some objects failed to sync or restore during a bulk transfer. Both
+    /// directions surface as the same conflict-blocked stable code.
+    PartialTransfer(String),
+    /// D1 (control-plane / metadata DB) protocol / API failure.
+    D1(String),
+    /// R2 (object store) transport / reachability failure.
+    R2(String),
+    /// Anything else — kept as the original detail string.
+    Generic(String),
+}
+
+impl From<String> for CloudError {
+    fn from(error: String) -> Self {
+        if let Some(missing_keys) = parse_missing_cloud_env_keys(&error) {
+            CloudError::MissingEnv(missing_keys)
+        } else if error.contains("already taken by another repository") {
+            CloudError::NameAlreadyTaken(error)
+        } else if error.contains("Repository with name '") && error.contains("not found") {
+            CloudError::NameNotFound(error)
+        } else if error.contains("objects failed to sync")
+            || error.contains("objects failed to restore")
+        {
+            CloudError::PartialTransfer(error)
+        } else if error.contains("D1") {
+            CloudError::D1(error)
+        } else if error.contains("R2") {
+            CloudError::R2(error)
+        } else {
+            CloudError::Generic(error)
+        }
+    }
+}
+
+impl CloudError {
+    /// Map the typed cloud error onto a [`CliError`] for the given top-level
+    /// `operation` ("sync" / "restore" / "status").
+    fn into_cli_error(self, operation: &str) -> CliError {
+        match self {
+            CloudError::MissingEnv(missing_keys) => {
+                CliError::auth(format!("missing cloud configuration for {operation}"))
+                    .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                    .with_detail("missing_keys", missing_keys)
+                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
+            }
+            CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            CloudError::NameNotFound(detail) => {
+                CliError::fatal(detail).with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+            CloudError::PartialTransfer(detail) => CliError::conflict(detail)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            CloudError::D1(detail) => {
+                CliError::network(detail).with_stable_code(StableErrorCode::NetworkProtocol)
+            }
+            CloudError::R2(detail) => {
+                CliError::network(detail).with_stable_code(StableErrorCode::NetworkUnavailable)
+            }
+            CloudError::Generic(detail) => CliError::fatal(format!("{operation} failed: {detail}")),
+        }
+    }
+}
+
 fn cloud_cli_error(operation: &str, error: String) -> CliError {
-    let mut cli_error = if let Some(missing_keys) = parse_missing_cloud_env_keys(&error) {
-        CliError::auth(format!("missing cloud configuration for {operation}"))
-            .with_stable_code(StableErrorCode::AuthMissingCredentials)
-            .with_detail("missing_keys", missing_keys)
-            .with_hint("set the missing variables in env or vault.env.* before retrying.")
-    } else if error.contains("already taken by another repository") {
-        CliError::conflict(error.clone())
-            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-    } else if error.contains("Repository with name '") && error.contains("not found") {
-        CliError::fatal(error.clone()).with_stable_code(StableErrorCode::CliInvalidTarget)
-    } else if error.contains("objects failed to sync")
-        || error.contains("objects failed to restore")
-    {
-        CliError::conflict(error.clone())
-            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-    } else if error.contains("D1") {
-        CliError::network(error.clone()).with_stable_code(StableErrorCode::NetworkProtocol)
-    } else if error.contains("R2") {
-        CliError::network(error.clone()).with_stable_code(StableErrorCode::NetworkUnavailable)
-    } else {
-        CliError::fatal(format!("{operation} failed: {error}"))
-    };
-    cli_error = cli_error
+    let cloud_error: CloudError = error.into();
+    cloud_error
+        .into_cli_error(operation)
         .with_detail("operation", operation)
-        .with_detail("component", "cloud");
-    cli_error
+        .with_detail("component", "cloud")
 }
 
 fn parse_missing_cloud_env_keys(error: &str) -> Option<Vec<String>> {
@@ -2304,6 +2362,86 @@ mod tests {
     fn cloud_cli_error_maps_d1_failure_to_network_protocol() {
         let err = cloud_cli_error("sync", "Failed to query D1: upstream timeout".to_string());
         assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+    }
+
+    #[test]
+    fn cloud_error_classifies_each_failure_shape() {
+        assert_eq!(
+            CloudError::from(
+                "Cloud backup requires D1 + R2 configuration. Missing: A, B".to_string()
+            ),
+            CloudError::MissingEnv(vec!["A".to_string(), "B".to_string()])
+        );
+        assert!(matches!(
+            CloudError::from(
+                "Repository name 'demo' already taken by another repository".to_string()
+            ),
+            CloudError::NameAlreadyTaken(_)
+        ));
+        assert!(matches!(
+            CloudError::from("Repository with name 'demo' not found".to_string()),
+            CloudError::NameNotFound(_)
+        ));
+        assert!(matches!(
+            CloudError::from("2 objects failed to sync".to_string()),
+            CloudError::PartialTransfer(_)
+        ));
+        assert!(matches!(
+            CloudError::from("1 objects failed to restore".to_string()),
+            CloudError::PartialTransfer(_)
+        ));
+        assert!(matches!(
+            CloudError::from("Failed to query D1: timeout".to_string()),
+            CloudError::D1(_)
+        ));
+        assert!(matches!(
+            CloudError::from("R2 PUT failed".to_string()),
+            CloudError::R2(_)
+        ));
+        assert!(matches!(
+            CloudError::from("something unexpected".to_string()),
+            CloudError::Generic(_)
+        ));
+    }
+
+    #[test]
+    fn cloud_error_into_cli_error_attaches_stable_codes() {
+        assert_eq!(
+            CloudError::MissingEnv(vec!["KEY".to_string()])
+                .into_cli_error("sync")
+                .stable_code(),
+            StableErrorCode::AuthMissingCredentials
+        );
+        assert_eq!(
+            CloudError::NameAlreadyTaken("x".to_string())
+                .into_cli_error("sync")
+                .stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert_eq!(
+            CloudError::NameNotFound("x".to_string())
+                .into_cli_error("restore")
+                .stable_code(),
+            StableErrorCode::CliInvalidTarget
+        );
+        assert_eq!(
+            CloudError::PartialTransfer("x".to_string())
+                .into_cli_error("sync")
+                .stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert_eq!(
+            CloudError::D1("x".to_string())
+                .into_cli_error("sync")
+                .stable_code(),
+            StableErrorCode::NetworkProtocol
+        );
+        assert_eq!(
+            CloudError::R2("x".to_string())
+                .into_cli_error("sync")
+                .stable_code(),
+            StableErrorCode::NetworkUnavailable
+        );
     }
 
     #[test]
