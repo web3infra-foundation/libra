@@ -1,11 +1,6 @@
 //! Implementation of `fsck` command for verifying repository integrity.
 //!
 //! This command checks the integrity of objects, refs, and index in a Libra repository.
-//! It diagnoses the same issues as git fsck:
-//! - `missing <type> <object>`: Object is referenced but doesn't exist
-//! - `hash mismatch <object>`: Object's hash doesn't match its content
-//! - `dangling <type> <object>`: Object exists but is not referenced
-//! - `unreachable <type> <object>`: Object is not reachable from any ref
 
 use std::{
     collections::HashSet,

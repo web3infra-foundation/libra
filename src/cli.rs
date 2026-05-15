@@ -285,12 +285,6 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
-    #[command(about = "Show changes between commits, commit and working tree, etc")]
-    Diff(command::diff::DiffArgs),
-    #[command(about = "Search for patterns in tracked files")]
-    Grep(command::grep::GrepArgs),
-    #[command(about = "Show author and history of each line of a file")]
-    Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -304,12 +298,6 @@ enum Commands {
 
     #[command(subcommand, about = "Manage set of tracked repositories")]
     Remote(command::remote::RemoteCmds),
-    #[command(about = "Download objects and refs from another repository")]
-    Fetch(command::fetch::FetchArgs),
-    #[command(about = "Fetch from and integrate with another repository or a local branch")]
-    Pull(command::pull::PullArgs),
-    #[command(about = "Update remote refs along with associated objects")]
-    Push(command::push::PushArgs),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
