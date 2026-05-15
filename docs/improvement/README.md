@@ -203,7 +203,7 @@
 | **B** | 每个子命令 --help 添加 EXAMPLES 段 | 与各命令改进同步进行 |
 | **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
 | **D** | log/diff/blame/show TTY 下使用 pager | 独立改进 |
-| **E** | 顶层 help 按场景分组 | 独立改进 |
+| **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
 | **F** | 拼写纠错建议（确认 clap suggest 已启用） | 独立改进 |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |

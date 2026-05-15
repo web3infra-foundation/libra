@@ -1201,6 +1201,20 @@ fn help_shows_global_flags() {
         stdout.contains("--exit-code-on-warning"),
         "help should mention --exit-code-on-warning"
     );
+    for heading in [
+        "Repository Setup",
+        "Working Tree",
+        "History Inspection",
+        "Commit And Branching",
+        "Remote And Cloud",
+        "AI And Automation",
+        "Maintenance And Plumbing",
+    ] {
+        assert!(
+            stdout.contains(heading),
+            "help should group subcommands under {heading}: {stdout}"
+        );
+    }
 }
 
 // ─── subcommand --help shows inherited flags ─────────────────────────────────
