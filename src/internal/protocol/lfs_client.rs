@@ -166,11 +166,19 @@ impl LFSClient {
 
         {
             // verify locks
+            let refspec = command::lfs::current_refspec()
+                .await
+                .ok_or_else(|| LfsPushError {
+                    path: None,
+                    oid: None,
+                    detail:
+                        "HEAD is detached; check out a branch before pushing LFS objects so the \
+                     remote can verify locks against a refspec."
+                            .to_string(),
+                })?;
             let (code, locks) = self
                 .verify_locks(VerifiableLockRequest {
-                    refs: Ref {
-                        name: command::lfs::current_refspec().await.unwrap(),
-                    },
+                    refs: Ref { name: refspec },
                     ..Default::default()
                 })
                 .await;
