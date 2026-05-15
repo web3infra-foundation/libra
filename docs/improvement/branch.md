@@ -40,8 +40,7 @@
 后续维护项：
 
 - **生产调用点已迁移到 fallible API 并加回归守卫**：v0.17.148 已把 `stash branch` 的 branch-name 占用检查迁到 `exists_result()`，`bisect reset` 恢复原分支时已迁到 `find_branch_result()`；`tests/compat/branch_lossy_wrapper_guard.rs` 会扫描 `src/`，防止生产代码重新调用 `find_branch()` / `list_branches()` / `delete_branch()` / `exists()` 这类 lossy wrapper。
-- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` / `exists_with_conn()` 仍为旧测试和兼容调用保留 `Vec` / `Option` / `()` / `bool` wrapper；这是测试/兼容债，不再是生产路径风险。
-- **旧测试 helper 可继续迁移到 fallible API**：剩余 `tests/command/*` 里直接调用 lossy wrapper 的断言可逐步改成 `*_result`，最终删除兼容 wrapper。
+- **`internal::branch` lossy wrapper 已删除**：v0.17.211 → v0.17.216 把 `log_test` / `fetch_test` / `reset_test` / `rebase_test` / `switch_test` / `commit_test` / `remote_test` / `branch_test` 共 39 处 lossy 调用全部迁到 `*_result` API；v0.17.217 删除 `list_branches[_with_conn]()` / `find_branch[_with_conn]()` / `delete_branch[_with_conn]()` / `exists[_with_conn]()` 全部 8 个 wrapper。后续重新引入 lossy 行为需要显式新增，`branch_lossy_wrapper_guard.rs` 仍作为防御性扫描保留。
 - **`DelegatedCli` 是兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；后续如需更细粒度 typed error 可再拆分
 
 ### 目标与非目标
@@ -131,7 +130,7 @@ pub enum BranchError {
 
 > **`NotFound` 携带 `similar` 列表**：与 `SwitchError::BranchNotFound` 模式一致，在错误构造点预计算 Levenshtein ≤ 2 近似分支名列表，`impl From<BranchError> for CliError` 只负责渲染 hint。Levenshtein 距离计算复用 switch 批次落地的共享工具函数（~10 行，位于 `src/utils/` 或 `src/command/mod.rs`）。
 
-> **关于底层 branch store 的后续收口**：当前命令层已经引入 `BranchError`，生产调用点已经迁到 `*_result` API，并由 `tests/compat/branch_lossy_wrapper_guard.rs` 防止回退。`src/internal/branch.rs` 仍保留 `list_branches_with_conn()`、`find_branch_with_conn()`、`delete_branch_with_conn()`、`exists_with_conn()` 这组兼容 wrapper，主要债务是旧测试 helper 仍在直接调用；后续可继续把这些测试迁移到 `*_result` API，最终删除 lossy wrapper。
+> **关于底层 branch store 的后续收口**：当前命令层已经引入 `BranchError`，生产调用点已经迁到 `*_result` API，并由 `tests/compat/branch_lossy_wrapper_guard.rs` 防止回退。`src/internal/branch.rs` 中原本保留的 `list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` / `exists_with_conn()` 一组共 8 个 lossy wrapper 已在 v0.17.217 删除（依赖前置 v0.17.211 → v0.17.216 把 `tests/command/*` 全部迁到 `*_result` API）。
 
 **`BranchError → CliError` 显式映射：**
 

@@ -282,56 +282,12 @@ impl Branch {
         resolved
     }
 
-    /// Lossy compatibility wrapper. Prefer `list_branches_result_with_conn` in
-    /// production paths so storage failures are not downgraded to an empty list.
-    pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
-    where
-        C: ConnectionTrait,
-    {
-        match Self::list_branches_result_with_conn(db, remote).await {
-            Ok(branches) => branches,
-            Err(error) => {
-                log_branch_store_error("failed to list branches", &error);
-                Vec::new()
-            }
-        }
-    }
-
-    /// Lossy compatibility wrapper. Prefer `list_branches_result` in production
-    /// paths so storage failures are not downgraded to an empty list.
-    pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
-        let db_conn = get_db_conn_instance().await;
-        Self::list_branches_with_conn(&db_conn, remote).await
-    }
-
-    /// Result-returning variant of [`list_branches`] that acquires its own
-    /// connection from the pool. Use the `_with_conn` form inside transactions.
+    /// Result-returning variant of [`list_branches_result_with_conn`] that
+    /// acquires its own connection from the pool. Use the `_with_conn` form
+    /// inside transactions.
     pub async fn list_branches_result(remote: Option<&str>) -> Result<Vec<Self>, BranchStoreError> {
         let db_conn = get_db_conn_instance().await;
         Self::list_branches_result_with_conn(&db_conn, remote).await
-    }
-
-    /// Lossy compatibility wrapper. Prefer `exists_result_with_conn` in
-    /// production paths so storage failures are not downgraded to `false`.
-    ///
-    /// Boundary conditions:
-    /// - Hardcodes `remote = None` (local branches only). For remote-tracking
-    ///   branches, call [`Branch::exists_result_with_conn`] explicitly.
-    pub async fn exists_with_conn<C>(db: &C, branch_name: &str) -> bool
-    where
-        C: ConnectionTrait,
-    {
-        let branch = Self::find_branch_with_conn(db, branch_name, None).await;
-        branch.is_some()
-    }
-
-    /// Lossy compatibility wrapper that only checks **local** branches
-    /// (hardcodes `remote = None`). Prefer `exists_result` in production paths
-    /// so storage failures are not downgraded to `false` and a remote scope can
-    /// be specified.
-    pub async fn exists(branch_name: &str) -> bool {
-        let db_conn = get_db_conn_instance().await;
-        Self::exists_with_conn(&db_conn, branch_name).await
     }
 
     /// Result-returning existence check.
@@ -361,41 +317,6 @@ impl Branch {
     ) -> Result<bool, BranchStoreError> {
         let db_conn = get_db_conn_instance().await;
         Self::exists_result_with_conn(&db_conn, branch_name, remote).await
-    }
-
-    /// Lossy compatibility wrapper. Prefer `find_branch_result_with_conn` in
-    /// production paths so storage failures are not downgraded to `None`.
-    pub async fn find_branch_with_conn<C>(
-        db: &C,
-        branch_name: &str,
-        remote: Option<&str>,
-    ) -> Option<Self>
-    where
-        C: ConnectionTrait,
-    {
-        match Self::find_branch_result_with_conn(db, branch_name, remote).await {
-            Ok(branch) => branch,
-            Err(error) => {
-                log_branch_store_error(
-                    &format!(
-                        "failed to resolve branch lookup for '{}'{}",
-                        branch_name,
-                        remote
-                            .map(|name| format!(" on remote '{name}'"))
-                            .unwrap_or_default()
-                    ),
-                    &error,
-                );
-                None
-            }
-        }
-    }
-
-    /// Lossy compatibility wrapper. Prefer `find_branch_result` in production
-    /// paths so storage failures are not downgraded to `None`.
-    pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
-        let db_conn = get_db_conn_instance().await;
-        Self::find_branch_with_conn(&db_conn, branch_name, remote).await
     }
 
     /// Result-returning branch lookup keyed by `(name, remote)`.
@@ -602,33 +523,6 @@ impl Branch {
     ) -> Result<(), DbErr> {
         let db_conn = get_db_conn_instance().await;
         Self::update_branch_with_conn(&db_conn, branch_name, commit_hash, remote).await
-    }
-
-    /// Lossy variant of [`delete_branch_result_with_conn`]: errors are logged
-    /// via [`tracing::error!`] but not returned. Used by callers that already
-    /// resolved the branch and want a fire-and-forget cleanup path.
-    pub async fn delete_branch_with_conn<C>(db: &C, branch_name: &str, remote: Option<&str>)
-    where
-        C: ConnectionTrait,
-    {
-        if let Err(error) = Self::delete_branch_result_with_conn(db, branch_name, remote).await {
-            log_branch_store_error(
-                &format!(
-                    "failed to delete branch '{}'{}",
-                    branch_name,
-                    remote
-                        .map(|name| format!(" on remote '{name}'"))
-                        .unwrap_or_default()
-                ),
-                &error,
-            );
-        }
-    }
-
-    /// Pool-acquiring lossy delete. See [`delete_branch_with_conn`].
-    pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {
-        let db_conn = get_db_conn_instance().await;
-        Self::delete_branch_with_conn(&db_conn, branch_name, remote).await
     }
 
     /// Result-returning branch delete.
