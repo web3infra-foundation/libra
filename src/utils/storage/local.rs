@@ -676,3 +676,72 @@ impl LocalStorage {
         Ok(objs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit-test the loose-object header parser. Validates the v0.17.226
+    //! `Result<_, GitError>` migration — each corruption shape that used to
+    //! panic is now a `GitError::InvalidObjectInfo` with a descriptive detail.
+
+    use super::*;
+
+    /// Build a valid loose-object header for `(type, payload)`.
+    fn header_bytes(obj_type: &str, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("{} {}\0", obj_type, payload.len()).into_bytes();
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn parse_header_accepts_well_formed_header() {
+        let data = header_bytes("blob", b"hello world");
+        let (kind, size, end) = LocalStorage::parse_header(&data).expect("valid header parses");
+        assert_eq!(kind, "blob");
+        assert_eq!(size, b"hello world".len());
+        assert_eq!(end, "blob 11".len());
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_terminator() {
+        let err = LocalStorage::parse_header(b"blob 4abcd")
+            .expect_err("missing NUL terminator should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("missing header terminator")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_size_segment() {
+        let mut data = b"blob\0".to_vec();
+        data.extend_from_slice(b"payload");
+        let err = LocalStorage::parse_header(&data).expect_err("missing size segment should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("missing object size")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_non_numeric_size() {
+        let mut data = b"blob abc\0".to_vec();
+        data.extend_from_slice(b"xyz");
+        let err = LocalStorage::parse_header(&data).expect_err("non-numeric size should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-numeric object size")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_size_mismatch() {
+        // Header claims size 100 but only 5 payload bytes follow.
+        let mut data = b"blob 100\0".to_vec();
+        data.extend_from_slice(b"short");
+        let err = LocalStorage::parse_header(&data).expect_err("size mismatch should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("object size mismatch")),
+            "unexpected err: {err:?}"
+        );
+    }
+}
