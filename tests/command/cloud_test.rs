@@ -123,3 +123,58 @@ fn test_cloud_sync_json_preflight_failure_has_no_human_progress() {
         Some(&serde_json::json!("cloud"))
     );
 }
+
+/// `cloud sync --json --progress=json` should emit NDJSON progress events on
+/// stderr without leaking legacy human progress lines.
+#[test]
+fn test_cloud_sync_json_progress_emits_start_event() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(
+        &["--json=compact", "--progress=json", "cloud", "sync"],
+        repo.path(),
+    );
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "failed json sync should not emit success envelope: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event\":\"cloud_sync.start\""),
+        "expected cloud sync progress start event in stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Starting cloud sync..."),
+        "json progress mode must not leak legacy start message: {stderr}"
+    );
+}
+
+/// `cloud sync --progress=json` in human mode should switch from legacy stdout
+/// progress lines to structured stderr events.
+#[test]
+fn test_cloud_sync_human_progress_json_emits_event_without_stdout_progress() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--progress=json", "cloud", "sync"], repo.path());
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "progress=json should suppress legacy stdout progress: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event\":\"cloud_sync.start\""),
+        "expected cloud sync progress start event in stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Starting cloud sync..."),
+        "progress=json must not leak legacy start message: {stderr}"
+    );
+}

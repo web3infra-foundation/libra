@@ -34,7 +34,7 @@ use crate::{
     utils::{
         d1_client::{AgentCheckpointRow, AgentSessionRow, D1Client, ObjectIndexRow},
         error::{CliError, CliResult, StableErrorCode, emit_warning},
-        output::{OutputConfig, emit_json_data},
+        output::{OutputConfig, ProgressMode, emit_json_data},
         path,
         storage::{
             Storage, local::LocalStorage, publish_storage::PublishStorage, remote::RemoteStorage,
@@ -320,6 +320,118 @@ struct SilentCloudSyncProgress;
 
 impl CloudSyncProgress for SilentCloudSyncProgress {}
 
+struct JsonCloudSyncProgress;
+
+impl JsonCloudSyncProgress {
+    fn emit(event: serde_json::Value) {
+        eprintln!("{event}");
+    }
+}
+
+impl CloudSyncProgress for JsonCloudSyncProgress {
+    fn on_starting(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.start",
+        }));
+    }
+    fn on_no_objects(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.none",
+        }));
+    }
+    fn on_object_total(&self, total: usize) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.total",
+            "total": total,
+        }));
+    }
+    fn on_batch_progress(&self, synced: usize, total: usize, failed: usize) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.progress",
+            "synced": synced,
+            "total": total,
+            "failed": failed,
+        }));
+    }
+    fn on_object_error(&self, oid: &str, err: &str) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.error",
+            "oid": oid,
+            "error": err,
+        }));
+    }
+    fn on_local_status_warning(&self, oid: &str, err: &str) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.warning",
+            "oid": oid,
+            "error": err,
+        }));
+    }
+    fn on_sync_complete(&self, synced: usize, failed: usize) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.objects.complete",
+            "synced": synced,
+            "failed": failed,
+        }));
+    }
+    fn on_metadata_starting(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.metadata.start",
+        }));
+    }
+    fn on_metadata_skipped(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.metadata.skipped",
+        }));
+    }
+    fn on_metadata_synced(&self, references: usize) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.metadata.synced",
+            "references": references,
+        }));
+    }
+    fn on_agent_capture_starting(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.agent_capture.start",
+        }));
+    }
+    fn on_agent_capture_session_warning(&self, session_id: &str, err: &str) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.agent_capture.session_warning",
+            "session_id": session_id,
+            "error": err,
+        }));
+    }
+    fn on_agent_capture_checkpoint_warning(&self, checkpoint_id: &str, err: &str) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.agent_capture.checkpoint_warning",
+            "checkpoint_id": checkpoint_id,
+            "error": err,
+        }));
+    }
+    fn on_agent_capture_done(
+        &self,
+        sessions_synced: usize,
+        sessions_failed: usize,
+        checkpoints_synced: usize,
+        checkpoints_failed: usize,
+    ) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.agent_capture.complete",
+            "sessions_synced": sessions_synced,
+            "sessions_failed": sessions_failed,
+            "checkpoints_synced": checkpoints_synced,
+            "checkpoints_failed": checkpoints_failed,
+        }));
+    }
+    fn on_agent_capture_warning(&self, err: &str) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.agent_capture.warning",
+            "error": err,
+        }));
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CloudStatusOutput {
     repo_id: String,
@@ -368,12 +480,18 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     match args.command {
         CloudCommand::Sync(sync_args) => {
-            if output.is_json() || output.quiet {
+            if output.is_json() || output.quiet || matches!(output.progress, ProgressMode::Json) {
                 let ctx = CloudSyncContext {
                     batch_size: sync_args.batch_size,
                     force: sync_args.force,
                 };
-                let report = run_cloud_sync(ctx, &SilentCloudSyncProgress)
+                let progress: &dyn CloudSyncProgress =
+                    if matches!(output.progress, ProgressMode::Json) {
+                        &JsonCloudSyncProgress
+                    } else {
+                        &SilentCloudSyncProgress
+                    };
+                let report = run_cloud_sync(ctx, progress)
                     .await
                     .map_err(|e| cloud_cli_error("sync", e))?;
                 if report.failed_count > 0 {

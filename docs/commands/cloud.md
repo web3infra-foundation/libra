@@ -238,10 +238,22 @@ When `--verbose` is set, the status payload also includes up to 20
 }
 ```
 
-`cloud sync` success progress is still human-oriented in default output mode.
-`cloud sync --progress=json` event streams and `cloud restore` structured success
-schema remain follow-up work in the improvement plan. Failures continue through
-Libra's standard CLI error machinery.
+`cloud sync --progress=json` emits NDJSON progress events to stderr (no legacy
+human progress text on stdout). Event names cover object, metadata, and
+agent-capture phases, for example:
+
+```json
+{"event":"cloud_sync.start"}
+{"event":"cloud_sync.objects.total","total":42}
+{"event":"cloud_sync.objects.progress","synced":42,"total":42,"failed":0}
+{"event":"cloud_sync.metadata.synced","references":3}
+{"event":"cloud_sync.agent_capture.complete","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0}
+```
+
+`cloud sync` default mode still uses the legacy human progress output.
+`cloud restore` structured success schema remains follow-up work in the
+improvement plan. Failures continue through Libra's standard CLI error
+machinery.
 
 ## Environment Variables
 
