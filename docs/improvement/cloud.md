@@ -19,10 +19,11 @@
 - CLI 回归测试覆盖 `cloud sync --json --progress=json` 与 `cloud sync --progress=json` 失败前置校验路径，验证存在 `cloud_sync.start` 事件并且无 `Starting cloud sync...` human 文本。
 - `cloud restore` 在 `--json` / `--machine` / `--quiet` 路径下接入 `run_cloud_restore()`，成功路径输出 `cloud.restore` envelope（metadata-only、对象恢复统计、metadata/agent-capture status）。
 - `cloud restore` 的 structured 路径已静默 worktree/agent-capture human stdout（保留 stderr warning），避免污染 JSON stdout。
+- `cloud_cli_error()` 已新增分类映射：缺失云端配置 → `LBR-AUTH-001`、repo-name not found → `LBR-CLI-003`、D1 失败 → `LBR-NET-002`、对象恢复/同步失败 → `LBR-CONFLICT-002`。
 
 ## 当前未完成
 
-- 远端 D1/R2 错误目前仍多以字符串形式进入 `cloud_cli_error()`，尚未拆成 typed `CloudError`。
+- 远端 D1/R2 错误虽然已做稳定错误码分类，但仍是字符串分类分支，尚未替换成 typed `CloudError` 执行链。
 
 ## 后续切片建议
 

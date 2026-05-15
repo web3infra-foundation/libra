@@ -560,9 +560,43 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
 }
 
 fn cloud_cli_error(operation: &str, error: String) -> CliError {
-    CliError::fatal(format!("{operation} failed: {error}"))
+    let mut cli_error = if let Some(missing_keys) = parse_missing_cloud_env_keys(&error) {
+        CliError::auth(format!("missing cloud configuration for {operation}"))
+            .with_stable_code(StableErrorCode::AuthMissingCredentials)
+            .with_detail("missing_keys", missing_keys)
+            .with_hint("set the missing variables in env or vault.env.* before retrying.")
+    } else if error.contains("already taken by another repository") {
+        CliError::conflict(error.clone())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+    } else if error.contains("Repository with name '") && error.contains("not found") {
+        CliError::fatal(error.clone()).with_stable_code(StableErrorCode::CliInvalidTarget)
+    } else if error.contains("objects failed to sync")
+        || error.contains("objects failed to restore")
+    {
+        CliError::conflict(error.clone())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+    } else if error.contains("D1") {
+        CliError::network(error.clone()).with_stable_code(StableErrorCode::NetworkProtocol)
+    } else if error.contains("R2") {
+        CliError::network(error.clone()).with_stable_code(StableErrorCode::NetworkUnavailable)
+    } else {
+        CliError::fatal(format!("{operation} failed: {error}"))
+    };
+    cli_error = cli_error
         .with_detail("operation", operation)
-        .with_detail("component", "cloud")
+        .with_detail("component", "cloud");
+    cli_error
+}
+
+fn parse_missing_cloud_env_keys(error: &str) -> Option<Vec<String>> {
+    let (_, missing_raw) = error.split_once("Missing: ")?;
+    let keys = missing_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if keys.is_empty() { None } else { Some(keys) }
 }
 
 fn cloud_sync_output_from_report(report: &CloudSyncReport) -> CloudSyncOutput {
@@ -2239,6 +2273,37 @@ mod tests {
     fn test_restore_args_missing() {
         let result = RestoreArgs::try_parse_from(["restore"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cloud_cli_error_maps_missing_env_to_auth_missing_credentials() {
+        let err = cloud_cli_error(
+            "sync",
+            "Cloud backup requires D1 + R2 configuration. Missing: LIBRA_D1_API_TOKEN, LIBRA_STORAGE_BUCKET".to_string(),
+        );
+        assert_eq!(err.stable_code(), StableErrorCode::AuthMissingCredentials);
+        assert_eq!(
+            err.details().get("missing_keys"),
+            Some(&serde_json::json!([
+                "LIBRA_D1_API_TOKEN",
+                "LIBRA_STORAGE_BUCKET"
+            ]))
+        );
+    }
+
+    #[test]
+    fn cloud_cli_error_maps_missing_repo_name_to_invalid_target() {
+        let err = cloud_cli_error(
+            "restore",
+            "Repository with name 'demo' not found".to_string(),
+        );
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+    }
+
+    #[test]
+    fn cloud_cli_error_maps_d1_failure_to_network_protocol() {
+        let err = cloud_cli_error("sync", "Failed to query D1: upstream timeout".to_string());
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
     }
 
     #[test]
