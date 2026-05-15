@@ -1241,8 +1241,11 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         rebased_head, orig_head,
         "rebase should rewrite the feature tip"
     );
-    let branch_after_rebase = Branch::find_branch("feature", None)
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "feature branch should exist".
+    let branch_after_rebase = Branch::find_branch_result("feature", None)
         .await
+        .expect("failed to query feature branch")
         .expect("feature branch should exist");
     assert_eq!(branch_after_rebase.commit, rebased_head);
 
@@ -1275,8 +1278,10 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     })
     .await;
 
-    let branch_after_abort = Branch::find_branch("feature", None)
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    let branch_after_abort = Branch::find_branch_result("feature", None)
         .await
+        .expect("failed to query feature branch after abort")
         .expect("feature branch should exist");
     assert_eq!(
         branch_after_abort.commit, orig_head,
