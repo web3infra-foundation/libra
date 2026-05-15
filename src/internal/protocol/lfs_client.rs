@@ -271,7 +271,7 @@ impl LFSClient {
             })?;
         tracing::debug!(
             "LFS push response:\n {:#?}",
-            serde_json::to_value(&resp).unwrap()
+            serde_json::to_value(&resp).unwrap_or_default()
         );
 
         // TODO: parallel upload
@@ -329,16 +329,20 @@ impl LFSClient {
             })?;
         tracing::debug!(
             "LFS push response:\n {:#?}",
-            serde_json::to_value(&resp).unwrap()
+            serde_json::to_value(&resp).unwrap_or_default()
         );
-        assert_eq!(
-            resp.objects.len(),
-            1,
-            "fatal: LFS push failed. No object found."
-        );
-
-        // self.upload_object(resp.objects).await?;
-        let obj = resp.objects.into_iter().next().unwrap();
+        if resp.objects.len() != 1 {
+            return Err(LfsPushError {
+                path: Some(file.display().to_string()),
+                oid: Some(oid.to_string()),
+                detail: format!(
+                    "LFS batch upload returned {} objects, expected exactly 1",
+                    resp.objects.len()
+                ),
+            });
+        }
+        // INVARIANT: len() == 1 checked above.
+        let obj = resp.objects.into_iter().next().expect("len checked");
         let uploaded = self.upload_object(obj, file).await?;
         println!("LFS objects push completed.");
         Ok(uploaded)
