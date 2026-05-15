@@ -3321,6 +3321,129 @@ mod tests {
         }
     }
 
+    /// Helper for the cloud-clone-option-compatibility regression tests:
+    /// build a minimal `CloneArgs` skeleton with a `libra+cloud://` remote
+    /// and every flag at its non-cloud default. Each test then flips the
+    /// single unsupported flag it cares about.
+    fn cloud_clone_args_baseline() -> CloneArgs {
+        CloneArgs {
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+        }
+    }
+
+    /// Regression for [`docs/improvement/clone.md`] §"第一批 Cloudflare clone
+    /// 只保证完整 non-bare clone" — every Cloudflare-incompatible flag must
+    /// surface `CloneError::UnsupportedCloudCloneOption` whose `option` field
+    /// names the rejected flag, never silently fall back to a vanilla clone.
+    /// The mapping from `UnsupportedCloudCloneOption` to a `CliError` carrying
+    /// `StableErrorCode::CliInvalidArguments` is covered separately by
+    /// `cloud_clone_unsupported_option_maps_to_cli_invalid_arguments`.
+    #[test]
+    fn validate_cloud_clone_option_compatibility_accepts_no_extra_flags() {
+        let args = cloud_clone_args_baseline();
+        validate_cloud_clone_option_compatibility(&args)
+            .expect("baseline libra+cloud:// args without extra flags must pass compatibility");
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_branch_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.branch = Some("main".to_string());
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--branch must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--branch");
+                assert!(
+                    hint.contains("?ref="),
+                    "branch hint should redirect to ?ref=: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_depth_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.depth = Some(1);
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--depth must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--depth");
+                assert!(
+                    hint.contains("--depth"),
+                    "depth hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_single_branch_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.single_branch = true;
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--single-branch must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--single-branch");
+                assert!(
+                    hint.contains("?ref="),
+                    "single-branch hint should redirect to ?ref=: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_bare_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.bare = true;
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--bare must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--bare");
+                assert!(
+                    hint.contains("--bare"),
+                    "bare hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    /// Verifies the mapping from `UnsupportedCloudCloneOption` into the CLI
+    /// error envelope: stable code must be `CliInvalidArguments`, exit code
+    /// must be 129 (parameter error), and the structured `option` detail
+    /// must round-trip the rejected flag name.
+    #[test]
+    fn cloud_clone_unsupported_option_maps_to_cli_invalid_arguments() {
+        let cli: CliError = CloneError::UnsupportedCloudCloneOption {
+            option: "--bare",
+            reason: "Cloudflare restore currently targets a non-bare working repository",
+            hint: "`--bare` is only supported for Git remotes until libra+cloud:// restore grows \
+                   bare-repository support.",
+        }
+        .into();
+
+        assert_eq!(cli.stable_code(), StableErrorCode::CliInvalidArguments);
+        assert_eq!(cli.exit_code(), 129);
+        assert_eq!(
+            cli.details().get("option").and_then(|v| v.as_str()),
+            Some("--bare")
+        );
+    }
+
     #[test]
     fn cloud_clone_restore_plan_resolves_revision_latest_from_site_row() {
         let source = CloudPublishSource {
