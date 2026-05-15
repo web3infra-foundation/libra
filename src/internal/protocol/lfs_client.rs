@@ -1107,4 +1107,50 @@ mod tests {
             err.detail
         );
     }
+
+    /// Regression for the upload-side missing-action branch in
+    /// `LFSClient::upload_object` (src/internal/protocol/lfs_client.rs:365):
+    /// when the LFS batch endpoint returns a well-formed response whose
+    /// object lacks an `upload` action (for example, a download-only mirror
+    /// or a partial-permission token), `push_object` must surface a typed
+    /// `LfsPushError` whose detail names the missing action, not panic.
+    /// Mirrors the analogous `download_object_rejects_batch_response_missing_download_action`
+    /// regression test, inverting upload↔download.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_object_rejects_batch_response_missing_upload_action() {
+        use axum::{Router, routing::post};
+
+        let test_oid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/objects/batch",
+            post(|| async {
+                // Object is present, no error, but `actions` only carries a download
+                // action — the upload action is intentionally missing.
+                r#"{"objects":[{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","size":5,"actions":{"download":{"href":"http://example.invalid/dl","header":{},"expires_at":"2099-01-01T00:00:00Z"}}}]}"#
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("payload.bin");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let err = client
+            .push_object(test_oid, &file_path)
+            .await
+            .expect_err("missing upload action should surface a typed LfsPushError");
+        assert!(
+            err.detail
+                .contains("remote did not provide an upload action"),
+            "unexpected detail: {}",
+            err.detail
+        );
+        assert_eq!(err.oid.as_deref(), Some(test_oid));
+    }
 }
