@@ -1549,18 +1549,6 @@ pub fn changes_to_be_staged_split_safe() -> Result<(Changes, Changes), StatusErr
     changes_to_be_staged_split_with_index(&workdir, &index)
 }
 
-/// Like `changes_to_be_staged_split_safe` but recurses into ignored directories.
-/// Used by `add --force` to discover files inside ignored directories.
-pub fn changes_to_be_staged_split_force() -> Result<(Changes, Changes), StatusError> {
-    let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
-    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
-    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
-        path: index_path.clone(),
-        source,
-    })?;
-    changes_to_be_staged_split_force_with_index(&workdir, &index)
-}
-
 fn changes_to_be_staged_split_with_index(
     workdir: &PathBuf,
     index: &Index,
@@ -1610,56 +1598,6 @@ fn changes_to_be_staged_split_with_index(
     Ok((visible, ignored))
 }
 
-fn changes_to_be_staged_split_force_with_index(
-    workdir: &PathBuf,
-    index: &Index,
-) -> Result<(Changes, Changes), StatusError> {
-    let mut visible = Changes::default();
-    let mut ignored = Changes::default();
-    let tracked_files = index.tracked_files();
-    for file in tracked_files.iter() {
-        let file_str = file
-            .to_str()
-            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
-        let file_abs = workdir.join(file);
-        if !file_abs.exists() {
-            visible.deleted.push(file.clone());
-        } else if index.is_modified(file_str, 0, workdir) {
-            let file_hash =
-                calc_file_blob_hash(&file_abs).map_err(|source| StatusError::FileHash {
-                    path: file_abs.clone(),
-                    source,
-                })?;
-            if !index.verify_hash(file_str, 0, &file_hash) {
-                visible.modified.push(file.clone());
-            }
-        }
-    }
-    let (files, ignored_files) = list_workdir_files_split_force(workdir).map_err(|source| {
-        StatusError::ListWorkdirFiles {
-            path: workdir.clone(),
-            source,
-        }
-    })?;
-    for file in files {
-        let file_str = file
-            .to_str()
-            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
-        if !index.tracked(file_str, 0) {
-            visible.new.push(file);
-        }
-    }
-    for file in ignored_files {
-        let file_str = file
-            .to_str()
-            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
-        if !index.tracked(file_str, 0) {
-            ignored.new.push(file);
-        }
-    }
-    Ok((visible, ignored))
-}
-
 fn list_workdir_files_split_safe(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut files = Vec::new();
     let mut ignored = Vec::new();
@@ -1683,45 +1621,6 @@ fn list_workdir_files_split_safe(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>,
                     ignored.push(relative);
                 } else {
                     pending_dirs.push(path);
-                }
-            } else if file_type.is_file() {
-                if util::check_gitignore(workdir, &path) {
-                    ignored.push(relative);
-                } else {
-                    files.push(relative);
-                }
-            }
-        }
-    }
-
-    Ok((files, ignored))
-}
-
-/// Like `list_workdir_files_split_safe` but recurses into ignored directories.
-/// Used by `add --force` to discover files inside ignored directories.
-fn list_workdir_files_split_force(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut files = Vec::new();
-    let mut ignored = Vec::new();
-    let mut pending_dirs = vec![workdir.clone()];
-
-    while let Some(dir) = pending_dirs.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_name() == std::ffi::OsStr::new(util::ROOT_DIR) {
-                continue;
-            }
-
-            let file_type = entry.file_type()?;
-            let relative = path
-                .strip_prefix(workdir)
-                .map_err(|err| io::Error::other(err.to_string()))?
-                .to_path_buf();
-            if file_type.is_dir() {
-                // Always recurse into directories, even ignored ones
-                pending_dirs.push(path.clone());
-                if util::check_gitignore(workdir, &path) {
-                    ignored.push(relative);
                 }
             } else if file_type.is_file() {
                 if util::check_gitignore(workdir, &path) {

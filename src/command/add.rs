@@ -422,17 +422,16 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     })?;
     let current_dir = env::current_dir().map_err(|source| AddError::Workdir { source })?;
 
-    let (mut visible_changes, mut ignored_changes) = if args.force {
-        // Use force variant to recurse into ignored directories
-        status::changes_to_be_staged_split_force().map_err(|source| AddError::Status { source })?
-    } else {
-        status::changes_to_be_staged_split_safe().map_err(|source| AddError::Status { source })?
-    };
-    // When --force is set, merge ignored changes into visible changes
+    let (mut visible_changes, ignored_changes) =
+        status::changes_to_be_staged_split_safe().map_err(|source| AddError::Status { source })?;
     if args.force {
         visible_changes.extend(ignored_changes.clone());
-        ignored_changes = Changes::default();
     }
+    let ignored_changes = if args.force {
+        Changes::default()
+    } else {
+        ignored_changes
+    };
 
     let validated = validate_pathspecs(
         &args.pathspec,
@@ -969,11 +968,6 @@ async fn stage_a_file(
         });
     }
     if util::is_sub_path(&file_abs, storage_path) {
-        return Ok(StagedAction::Unchanged);
-    }
-
-    // Skip directories - only stage files
-    if file_abs.is_dir() {
         return Ok(StagedAction::Unchanged);
     }
 
