@@ -107,12 +107,32 @@ const LFS_POINTER_MAX_SIZE: usize = 300; // bytes
 /// Generate lfs pointer file string
 /// - return (pointer content, lfs oid)
 /// - absolute path
+///
+/// **Panics** if `path` cannot be read (LFS hash + size require the file to
+/// exist at this point). Callers are expected to have verified existence
+/// via `is_lfs_tracked` / `Path::exists` before invoking this. The
+/// `.unwrap_or_else()` wrappers name the path so the panic surfaces which
+/// file failed if the contract is ever violated.
 pub fn generate_pointer_file(path: impl AsRef<Path>) -> (String, String) {
     let path = path.as_ref();
     // calc file hash without type
-    let oid = calc_lfs_file_hash(path).unwrap();
+    let oid = calc_lfs_file_hash(path).unwrap_or_else(|err| {
+        panic!(
+            "generate_pointer_file({}): calc_lfs_file_hash failed: {err}",
+            path.display()
+        )
+    });
 
-    let pointer = format_pointer_string(&oid, path.metadata().unwrap().len());
+    let size = path
+        .metadata()
+        .unwrap_or_else(|err| {
+            panic!(
+                "generate_pointer_file({}): metadata read failed: {err}",
+                path.display()
+            )
+        })
+        .len();
+    let pointer = format_pointer_string(&oid, size);
     (pointer, oid)
 }
 
