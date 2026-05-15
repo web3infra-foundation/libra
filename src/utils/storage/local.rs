@@ -108,21 +108,44 @@ impl LocalStorage {
         Ok(compressed_data)
     }
 
-    /// Parses the header of a loose object, which has the format "type size\0". This is used after decompressing a loose object's data to extract its type and size.
-    fn parse_header(data: &[u8]) -> (String, usize, usize) {
+    /// Parses the header of a loose object, which has the format "type size\0".
+    /// This is used after decompressing a loose object's data to extract its
+    /// type and size.
+    ///
+    /// Returns [`GitError::InvalidObjectInfo`] for any of the corruption shapes
+    /// that previously panicked: missing `\0` terminator, non-UTF-8 header bytes,
+    /// missing type prefix, missing size, non-numeric size, or size mismatch
+    /// against the decompressed payload.
+    fn parse_header(data: &[u8]) -> Result<(String, usize, usize), GitError> {
         let end_of_header = data
             .iter()
             .position(|&b| b == b'\0')
-            .expect("Invalid object: no header terminator");
-        let header_str =
-            std::str::from_utf8(&data[..end_of_header]).expect("Invalid UTF-8 in header");
+            .ok_or_else(|| GitError::InvalidObjectInfo("missing header terminator".to_string()))?;
+        let header_str = std::str::from_utf8(&data[..end_of_header])
+            .map_err(|e| GitError::InvalidObjectInfo(format!("non-UTF-8 header bytes: {e}")))?;
 
         let mut parts = header_str.splitn(2, ' ');
-        let obj_type = parts.next().expect("No object type in header").to_string();
-        let size_str = parts.next().expect("No size in header");
-        let size = size_str.parse::<usize>().expect("Invalid size in header");
-        assert_eq!(size, data.len() - 1 - end_of_header, "Invalid object size");
-        (obj_type, size, end_of_header)
+        let obj_type = parts
+            .next()
+            .ok_or_else(|| {
+                GitError::InvalidObjectInfo("missing object type in header".to_string())
+            })?
+            .to_string();
+        let size_str = parts.next().ok_or_else(|| {
+            GitError::InvalidObjectInfo("missing object size in header".to_string())
+        })?;
+        let size = size_str.parse::<usize>().map_err(|e| {
+            GitError::InvalidObjectInfo(format!(
+                "non-numeric object size '{size_str}' in header: {e}"
+            ))
+        })?;
+        let expected = data.len() - 1 - end_of_header;
+        if size != expected {
+            return Err(GitError::InvalidObjectInfo(format!(
+                "object size mismatch: header says {size}, payload is {expected}"
+            )));
+        }
+        Ok((obj_type, size, end_of_header))
     }
 
     // --- Pack related methods ---
@@ -438,7 +461,7 @@ impl Storage for LocalStorage {
             if self_clone.exist_loosely(&hash) {
                 let raw_data = self_clone.read_raw_data(&hash)?;
                 let data = Self::decompress_zlib(&raw_data)?;
-                let (type_str, _, end_of_header) = Self::parse_header(&data);
+                let (type_str, _, end_of_header) = Self::parse_header(&data)?;
                 let obj_type = ObjectType::from_string(&type_str)?;
                 Ok((data[end_of_header + 1..].to_vec(), obj_type))
             } else {
