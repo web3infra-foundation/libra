@@ -740,7 +740,13 @@ impl LFSClient {
     /// lock an LFS file
     /// - `refspec` is must in Mega Server, but optional in Git Doc
     pub async fn lock(&self, path: String, refspec: String) -> StatusCode {
-        let url = self.lfs_url.join("locks").unwrap();
+        // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
+        // construction; joining a static relative URL onto a valid base URL
+        // cannot fail.
+        let url = self
+            .lfs_url
+            .join("locks")
+            .expect("'locks' is a valid relative URL");
         let resp = BasicAuth::send(|| async {
             self.client.post(url.clone()).json(&LockRequest {
                 path: path.clone(),
@@ -784,7 +790,13 @@ impl LFSClient {
         &self,
         query: VerifiableLockRequest,
     ) -> (StatusCode, VerifiableLockList) {
-        let url = self.lfs_url.join("locks/verify").unwrap();
+        // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
+        // construction; joining a static relative URL onto a valid base URL
+        // cannot fail.
+        let url = self
+            .lfs_url
+            .join("locks/verify")
+            .expect("'locks/verify' is a valid relative URL");
         let resp = BasicAuth::send(|| async { self.client.post(url.clone()).json(&query) })
             .await
             .unwrap();
