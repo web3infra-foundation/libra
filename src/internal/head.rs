@@ -88,34 +88,6 @@ impl Head {
         unreachable!("sqlite retry loop must return")
     }
 
-    async fn query_local_head_with_conn<C>(db: &C) -> reference::Model
-    where
-        C: ConnectionTrait,
-    {
-        for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
-            match reference::Entity::find()
-                .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
-                .filter(reference::Column::Remote.is_null())
-                .one(db)
-                .await
-            {
-                Ok(Some(model)) => return model,
-                Ok(None) => panic!("fatal: storage broken, HEAD not found"),
-                Err(err)
-                    if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
-                {
-                    sleep(Duration::from_millis(
-                        Self::SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
-                    ))
-                    .await;
-                }
-                Err(err) => panic!("fatal: failed to query HEAD: {err}"),
-            }
-        }
-
-        unreachable!("sqlite retry loop must return")
-    }
-
     async fn query_remote_head_with_conn<C>(db: &C, remote: &str) -> Option<reference::Model>
     where
         C: ConnectionTrait,
@@ -154,14 +126,16 @@ impl Head {
     where
         C: ConnectionTrait,
     {
-        let head = Self::query_local_head_with_conn(db).await;
-        match head.name {
-            Some(name) => Head::Branch(name),
-            None => {
-                let commit_hash = head.commit.expect("detached head without commit");
-                Head::Detached(ObjectHash::from_str(commit_hash.as_str()).unwrap())
-            }
-        }
+        // INVARIANT: HEAD is always either a branch reference or a detached
+        // commit whose hash is a valid 40-char hex string stored by Libra's
+        // own write path. A failure here means the SQLite `reference` table
+        // is corrupt (HEAD row exists but lacks both a name and a parseable
+        // commit hash). The Result-returning `current_result_with_conn`
+        // siblings surface this case as `BranchStoreError::Corrupt` for
+        // callers that want graceful handling; lossy callers panic.
+        Self::current_result_with_conn(db)
+            .await
+            .expect("HEAD row in reference table is corrupt")
     }
 
     pub async fn current() -> Head {
@@ -201,15 +175,40 @@ impl Head {
     where
         C: ConnectionTrait,
     {
-        match Self::query_remote_head_with_conn(db, remote).await {
-            Some(head) => Some(match head.name {
-                Some(name) => Head::Branch(name),
-                None => {
-                    let commit_hash = head.commit.expect("detached head without commit");
-                    Head::Detached(ObjectHash::from_str(commit_hash.as_str()).unwrap())
-                }
-            }),
-            None => None,
+        // INVARIANT: like `current_with_conn`, this fails the process when
+        // the persisted remote HEAD row is corrupt (no name and no parseable
+        // commit hash). Callers that want graceful handling should use
+        // `remote_current_result_with_conn`.
+        Self::remote_current_result_with_conn(db, remote)
+            .await
+            .expect("remote HEAD row in reference table is corrupt")
+    }
+
+    pub async fn remote_current_result_with_conn<C>(
+        db: &C,
+        remote: &str,
+    ) -> Result<Option<Head>, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        let Some(head) = Self::query_remote_head_with_conn(db, remote).await else {
+            return Ok(None);
+        };
+        match head.name {
+            Some(name) => Ok(Some(Head::Branch(name))),
+            None => {
+                let commit_hash = head.commit.ok_or_else(|| BranchStoreError::Corrupt {
+                    name: format!("refs/remotes/{remote}/HEAD"),
+                    detail: "detached remote HEAD is missing commit hash".to_string(),
+                })?;
+                let commit_hash = ObjectHash::from_str(commit_hash.as_str()).map_err(|error| {
+                    BranchStoreError::Corrupt {
+                        name: format!("refs/remotes/{remote}/HEAD"),
+                        detail: format!("invalid detached remote HEAD commit hash: {error}"),
+                    }
+                })?;
+                Ok(Some(Head::Detached(commit_hash)))
+            }
         }
     }
 
