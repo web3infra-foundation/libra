@@ -50,7 +50,12 @@ pub struct LocalStorage {
 
 impl LocalStorage {
     pub fn new(base_path: PathBuf) -> Self {
-        fs::create_dir_all(&base_path).expect("Create directory failed!");
+        fs::create_dir_all(&base_path).unwrap_or_else(|err| {
+            panic!(
+                "LocalStorage::new({}): create_dir_all failed: {err}",
+                base_path.display()
+            )
+        });
         Self {
             base_path,
             hash_kind: Some(get_hash_kind()),
