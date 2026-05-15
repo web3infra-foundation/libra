@@ -64,3 +64,62 @@ fn test_cloud_status_machine_output_empty_repo() {
     assert_eq!(json["command"], "cloud.status");
     assert_eq!(json["data"]["total_objects"], 0);
 }
+
+/// `cloud sync --quiet` should not emit legacy stdout progress even when
+/// preflight env validation fails.
+#[test]
+fn test_cloud_sync_quiet_preflight_failure_has_no_stdout_progress() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--quiet", "cloud", "sync"], repo.path());
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "quiet sync should not print legacy progress to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        !human.contains("Starting cloud sync..."),
+        "quiet sync must not leak legacy start message: {human}"
+    );
+    assert_eq!(
+        report.details.get("operation"),
+        Some(&serde_json::json!("sync"))
+    );
+    assert_eq!(
+        report.details.get("component"),
+        Some(&serde_json::json!("cloud"))
+    );
+}
+
+/// `cloud sync --json` failure path should avoid emitting legacy human progress.
+#[test]
+fn test_cloud_sync_json_preflight_failure_has_no_human_progress() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--json=compact", "cloud", "sync"], repo.path());
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "failed json sync should not emit success envelope: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        !human.contains("Starting cloud sync..."),
+        "json sync must not leak legacy start message: {human}"
+    );
+    assert_eq!(
+        report.details.get("operation"),
+        Some(&serde_json::json!("sync"))
+    );
+    assert_eq!(
+        report.details.get("component"),
+        Some(&serde_json::json!("cloud"))
+    );
+}

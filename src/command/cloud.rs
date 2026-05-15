@@ -158,6 +158,39 @@ pub struct CloudSyncReport {
     pub agent_capture: AgentCaptureSyncOutcome,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CloudSyncOutput {
+    repo_id: String,
+    project_name: String,
+    total_unsynced: usize,
+    synced_count: usize,
+    failed_count: usize,
+    metadata: CloudMetadataSyncOutput,
+    agent_capture: CloudAgentCaptureSyncOutput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudMetadataSyncOutput {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    references: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudAgentCaptureSyncOutput {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sessions_synced: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sessions_failed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoints_synced: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoints_failed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 /// Summary returned after restoring Git objects listed in D1 `object_index`.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(crate) struct ObjectRestoreReport {
@@ -283,6 +316,10 @@ impl CloudSyncProgress for ConsoleCloudSyncProgress {
     }
 }
 
+struct SilentCloudSyncProgress;
+
+impl CloudSyncProgress for SilentCloudSyncProgress {}
+
 #[derive(Debug, Clone, Serialize)]
 struct CloudStatusOutput {
     repo_id: String,
@@ -330,9 +367,28 @@ pub async fn execute(args: CloudArgs) -> CliResult<()> {
 pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     match args.command {
-        CloudCommand::Sync(sync_args) => execute_sync(sync_args)
-            .await
-            .map_err(|e| cloud_cli_error("sync", e))?,
+        CloudCommand::Sync(sync_args) => {
+            if output.is_json() || output.quiet {
+                let ctx = CloudSyncContext {
+                    batch_size: sync_args.batch_size,
+                    force: sync_args.force,
+                };
+                let report = run_cloud_sync(ctx, &SilentCloudSyncProgress)
+                    .await
+                    .map_err(|e| cloud_cli_error("sync", e))?;
+                if report.failed_count > 0 {
+                    return Err(cloud_cli_error(
+                        "sync",
+                        format!("{} objects failed to sync", report.failed_count),
+                    ));
+                }
+                render_cloud_sync_output(&report, output)?;
+            } else {
+                execute_sync(sync_args)
+                    .await
+                    .map_err(|e| cloud_cli_error("sync", e))?;
+            }
+        }
         CloudCommand::Restore(restore_args) => execute_restore(restore_args)
             .await
             .map_err(|e| cloud_cli_error("restore", e))?,
@@ -349,6 +405,79 @@ fn cloud_cli_error(operation: &str, error: String) -> CliError {
     CliError::fatal(format!("{operation} failed: {error}"))
         .with_detail("operation", operation)
         .with_detail("component", "cloud")
+}
+
+fn cloud_sync_output_from_report(report: &CloudSyncReport) -> CloudSyncOutput {
+    let metadata = match &report.metadata {
+        MetadataSyncOutcome::NotRun => CloudMetadataSyncOutput {
+            status: "not_run".to_string(),
+            references: None,
+        },
+        MetadataSyncOutcome::Synced { references } => CloudMetadataSyncOutput {
+            status: "synced".to_string(),
+            references: Some(*references),
+        },
+        MetadataSyncOutcome::Skipped => CloudMetadataSyncOutput {
+            status: "skipped".to_string(),
+            references: None,
+        },
+    };
+    let agent_capture = match &report.agent_capture {
+        AgentCaptureSyncOutcome::NotRun => CloudAgentCaptureSyncOutput {
+            status: "not_run".to_string(),
+            sessions_synced: None,
+            sessions_failed: None,
+            checkpoints_synced: None,
+            checkpoints_failed: None,
+            error: None,
+        },
+        AgentCaptureSyncOutcome::SkippedLegacySchema => CloudAgentCaptureSyncOutput {
+            status: "skipped_legacy_schema".to_string(),
+            sessions_synced: None,
+            sessions_failed: None,
+            checkpoints_synced: None,
+            checkpoints_failed: None,
+            error: None,
+        },
+        AgentCaptureSyncOutcome::Completed {
+            sessions_synced,
+            sessions_failed,
+            checkpoints_synced,
+            checkpoints_failed,
+        } => CloudAgentCaptureSyncOutput {
+            status: "completed".to_string(),
+            sessions_synced: Some(*sessions_synced),
+            sessions_failed: Some(*sessions_failed),
+            checkpoints_synced: Some(*checkpoints_synced),
+            checkpoints_failed: Some(*checkpoints_failed),
+            error: None,
+        },
+        AgentCaptureSyncOutcome::Failed { error } => CloudAgentCaptureSyncOutput {
+            status: "failed".to_string(),
+            sessions_synced: None,
+            sessions_failed: None,
+            checkpoints_synced: None,
+            checkpoints_failed: None,
+            error: Some(error.clone()),
+        },
+    };
+    CloudSyncOutput {
+        repo_id: report.repo_id.clone(),
+        project_name: report.project_name.clone(),
+        total_unsynced: report.total_unsynced,
+        synced_count: report.synced_count,
+        failed_count: report.failed_count,
+        metadata,
+        agent_capture,
+    }
+}
+
+fn render_cloud_sync_output(report: &CloudSyncReport, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        let cloud_output = cloud_sync_output_from_report(report);
+        return emit_json_data("cloud.sync", &cloud_output, output);
+    }
+    Ok(())
 }
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
@@ -1767,6 +1896,67 @@ mod tests {
     fn test_restore_args_missing() {
         let result = RestoreArgs::try_parse_from(["restore"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cloud_sync_output_maps_synced_and_completed_outcomes() {
+        let report = CloudSyncReport {
+            repo_id: "repo-1".to_string(),
+            project_name: "project-1".to_string(),
+            total_unsynced: 4,
+            synced_count: 4,
+            failed_count: 0,
+            metadata: MetadataSyncOutcome::Synced { references: 3 },
+            agent_capture: AgentCaptureSyncOutcome::Completed {
+                sessions_synced: 2,
+                sessions_failed: 0,
+                checkpoints_synced: 5,
+                checkpoints_failed: 0,
+            },
+        };
+
+        let output = cloud_sync_output_from_report(&report);
+        assert_eq!(output.repo_id, "repo-1");
+        assert_eq!(output.project_name, "project-1");
+        assert_eq!(output.total_unsynced, 4);
+        assert_eq!(output.synced_count, 4);
+        assert_eq!(output.failed_count, 0);
+        assert_eq!(output.metadata.status, "synced");
+        assert_eq!(output.metadata.references, Some(3));
+        assert_eq!(output.agent_capture.status, "completed");
+        assert_eq!(output.agent_capture.sessions_synced, Some(2));
+        assert_eq!(output.agent_capture.sessions_failed, Some(0));
+        assert_eq!(output.agent_capture.checkpoints_synced, Some(5));
+        assert_eq!(output.agent_capture.checkpoints_failed, Some(0));
+        assert!(output.agent_capture.error.is_none());
+    }
+
+    #[test]
+    fn cloud_sync_output_maps_skipped_and_failed_outcomes() {
+        let report = CloudSyncReport {
+            repo_id: "repo-2".to_string(),
+            project_name: "project-2".to_string(),
+            total_unsynced: 0,
+            synced_count: 0,
+            failed_count: 0,
+            metadata: MetadataSyncOutcome::Skipped,
+            agent_capture: AgentCaptureSyncOutcome::Failed {
+                error: "network timeout".to_string(),
+            },
+        };
+
+        let output = cloud_sync_output_from_report(&report);
+        assert_eq!(output.metadata.status, "skipped");
+        assert!(output.metadata.references.is_none());
+        assert_eq!(output.agent_capture.status, "failed");
+        assert_eq!(
+            output.agent_capture.error.as_deref(),
+            Some("network timeout")
+        );
+        assert!(output.agent_capture.sessions_synced.is_none());
+        assert!(output.agent_capture.sessions_failed.is_none());
+        assert!(output.agent_capture.checkpoints_synced.is_none());
+        assert!(output.agent_capture.checkpoints_failed.is_none());
     }
 
     /// Scenario: metadata restore into a freshly initialized repo where local refs
