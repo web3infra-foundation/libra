@@ -14,7 +14,10 @@ use serde::Serialize;
 
 use crate::{
     command::status,
-    internal::{head::Head, protocol::lfs_client::LFSClient},
+    internal::{
+        head::Head,
+        protocol::lfs_client::{LFSClient, LockListError},
+    },
     lfs_structs::{Lock, LockListQuery},
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
@@ -173,6 +176,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                 })?
                 .get_locks(query)
                 .await
+                .map_err(map_lock_list_error)?
                 .locks;
             Ok(LfsOutput {
                 action: "locks".to_string(),
@@ -252,6 +256,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                             limit: "".to_string(),
                         })
                         .await
+                        .map_err(map_lock_list_error)?
                         .locks;
                     if locks.is_empty() {
                         return Err(CliError::fatal(format!("no lock found for path '{path}'"))
@@ -424,6 +429,32 @@ async fn current_refspec_or_err() -> CliResult<String> {
     })
 }
 
+fn map_lock_list_error(error: LockListError) -> CliError {
+    match error {
+        LockListError::Request(detail) => {
+            CliError::network(format!("failed to query LFS locks: {detail}"))
+        }
+        LockListError::Http { status, message } => {
+            if status == StatusCode::FORBIDDEN {
+                CliError::fatal("You must have push access to list locks")
+                    .with_stable_code(StableErrorCode::AuthPermissionDenied)
+            } else {
+                CliError::network(format!(
+                    "LFS get locks failed with status {}",
+                    status.as_u16()
+                ))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_detail("status", status.as_u16())
+                .with_detail("body", message)
+            }
+        }
+        LockListError::Decode(detail) => {
+            CliError::network(format!("failed to decode LFS locks response: {detail}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+        }
+    }
+}
+
 /// temp
 fn convert_patterns_to_workdir(patterns: Vec<String>) -> Vec<String> {
     patterns
@@ -506,4 +537,40 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Ve
     }
 
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_lock_list_error_forbidden_maps_to_auth_permission_denied() {
+        let err = map_lock_list_error(LockListError::Http {
+            status: StatusCode::FORBIDDEN,
+            message: "forbidden".to_string(),
+        });
+        assert_eq!(err.stable_code(), StableErrorCode::AuthPermissionDenied);
+        assert!(err.message().contains("push access"));
+    }
+
+    #[test]
+    fn map_lock_list_error_decode_maps_to_network_protocol() {
+        let err = map_lock_list_error(LockListError::Decode("invalid json".to_string()));
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+        assert!(err.message().contains("decode"));
+    }
+
+    #[test]
+    fn map_lock_list_error_http_maps_status_and_body_detail() {
+        let err = map_lock_list_error(LockListError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            message: "upstream unavailable".to_string(),
+        });
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+        assert_eq!(err.details().get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(
+            err.details().get("body"),
+            Some(&serde_json::json!("upstream unavailable"))
+        );
+    }
 }

@@ -41,6 +41,17 @@ pub struct LFSClient {
     pub lfs_url: Url,
     pub client: Client,
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum LockListError {
+    #[error("request failed: {0}")]
+    Request(String),
+    #[error("remote returned status {status}: {message}")]
+    Http { status: StatusCode, message: String },
+    #[error("failed to decode response: {0}")]
+    Decode(String),
+}
+
 static LFS_CLIENT: OnceCell<LFSClient> = OnceCell::const_new();
 impl LFSClient {
     /// Get LFSClient instance
@@ -645,7 +656,7 @@ impl LFSClient {
 
 // LFS locks API
 impl LFSClient {
-    pub async fn get_locks(&self, query: LockListQuery) -> LockList {
+    pub async fn get_locks(&self, query: LockListQuery) -> Result<LockList, LockListError> {
         let url = self.lfs_url.join("locks").unwrap();
         let query = [
             ("id", query.id),
@@ -656,20 +667,20 @@ impl LFSClient {
         ];
         let response = BasicAuth::send(|| async { self.client.get(url.clone()).query(&query) })
             .await
-            .unwrap();
+            .map_err(|err| LockListError::Request(err.to_string()))?;
         if !response.status().is_success() {
-            eprintln!(
-                "fatal: LFS get locks failed. Status: {}, Message: {}",
-                response.status(),
-                response.text().await.unwrap()
-            );
-            return LockList {
-                locks: Vec::new(),
-                next_cursor: String::default(),
-            };
+            let status = response.status();
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|err| format!("failed to read response body: {err}"));
+            return Err(LockListError::Http { status, message });
         }
 
-        response.json::<LockList>().await.unwrap()
+        response
+            .json::<LockList>()
+            .await
+            .map_err(|err| LockListError::Decode(err.to_string()))
     }
 
     /// lock an LFS file
