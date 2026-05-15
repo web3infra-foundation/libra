@@ -1028,6 +1028,47 @@ mod tests {
         assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Regression for v0.17.194: `LFSClient::download_object` previously
+    /// `obj.actions.as_ref().unwrap().get(&Action::Download).unwrap()` and
+    /// would crash if the LFS server returned a valid batch response but
+    /// omitted the `download` action (for example, an upload-only mirror,
+    /// or a partial-permission token). After v0.17.194 the inner unwrap is
+    /// `ok_or_else(|| anyhow!("…missing 'download' action for oid {oid}"))`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn download_object_rejects_batch_response_missing_download_action() {
+        use axum::{Router, routing::post};
+
+        let test_oid = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/objects/batch",
+            post(|| async {
+                // Object is present, no error, but `actions` only carries an upload
+                // action — the download action is intentionally missing.
+                r#"{"objects":[{"oid":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","size":4,"actions":{"upload":{"href":"http://example.invalid/up","header":{},"expires_at":"2099-01-01T00:00:00Z"}}}]}"#
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let out_path = tmp_dir.path().join("missing_download");
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+
+        let err = client
+            .download_object(test_oid, 4, &out_path, None)
+            .await
+            .expect_err("missing download action should surface a typed error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing 'download' action") && msg.contains(test_oid),
+            "unexpected error: {msg}"
+        );
+    }
+
     /// Regression for v0.17.193: `LFSClient::push_object` previously
     /// `assert_eq!(resp.objects.len(), 1, ...)` and would crash the entire
     /// binary if the LFS server returned a batch response with the wrong
