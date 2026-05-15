@@ -2460,6 +2460,23 @@ mod tests {
         );
     }
 
+    /// Regression: `cloud_cli_error("sync", "N objects failed to sync")` and the
+    /// equivalent typed-path `cloud_cli_error_typed("sync", CloudError::
+    /// PartialTransfer(...))` must produce identical envelopes — same stable
+    /// code, same message, same `details` map. Locks in the v0.17.209
+    /// `cloud_cli_error_typed` cleanup against future drift.
+    #[test]
+    fn cloud_cli_error_string_and_typed_paths_produce_identical_envelope() {
+        let from_string = cloud_cli_error("sync", "3 objects failed to sync".to_string());
+        let from_variant = cloud_cli_error_typed(
+            "sync",
+            CloudError::PartialTransfer("3 objects failed to sync".to_string()),
+        );
+        assert_eq!(from_string.stable_code(), from_variant.stable_code());
+        assert_eq!(from_string.message(), from_variant.message());
+        assert_eq!(from_string.details(), from_variant.details());
+    }
+
     #[test]
     fn cloud_sync_output_maps_synced_and_completed_outcomes() {
         let report = CloudSyncReport {
