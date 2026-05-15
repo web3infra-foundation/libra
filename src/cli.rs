@@ -139,6 +139,11 @@ struct Cli {
     )]
     color: String,
 
+    /// Disable terminal colors.
+    /// Equivalent to --color=never and takes precedence over --color.
+    #[arg(long, global = true)]
+    no_color: bool,
+
     /// Suppress standard stdout output; keep warnings/errors on stderr.
     /// This includes primary command results, unlike some Git per-command
     /// `--quiet` flags that only suppress informational chatter.
@@ -943,11 +948,16 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
     }
     // Resolve global output flags into a single config before dispatching.
+    let color = if args.no_color {
+        "never"
+    } else {
+        args.color.as_str()
+    };
     let output = OutputConfig::resolve(
         args.json.as_deref(),
         args.machine,
         args.no_pager,
-        &args.color,
+        color,
         args.quiet,
         args.exit_code_on_warning,
         &args.progress,

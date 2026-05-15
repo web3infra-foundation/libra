@@ -12,6 +12,7 @@ Every Libra command accepts the following global flags:
 | `--machine` | | Strict machine mode (implies `--json=ndjson --no-pager --color=never --quiet`) |
 | `--no-pager` | | Disable pager (`less`) |
 | `--color` | | When to use colors (`auto`, `never`, `always`) |
+| `--no-color` | | Disable colors; equivalent to `--color=never` |
 | `--quiet` | `-q` | Suppress stdout |
 | `--exit-code-on-warning` | | Return exit code 9 on warnings |
 | `--progress` | | Control progress output (`json`, `text`, `none`, `auto`) |

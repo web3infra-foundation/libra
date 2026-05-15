@@ -1033,6 +1033,24 @@ fn color_never_has_no_ansi_escapes() {
     );
 }
 
+// ─── --no-color ──────────────────────────────────────────────────────────────
+
+#[test]
+fn no_color_flag_disables_colors() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["--color=always", "--no-color", "status"], &repo);
+    assert_cli_success(&output, "status --no-color");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "expected no ANSI escapes with --no-color, got: {stdout}"
+    );
+}
+
 // ─── NO_COLOR env ────────────────────────────────────────────────────────────
 
 #[test]
@@ -1166,6 +1184,10 @@ fn help_shows_global_flags() {
         "help should mention --machine"
     );
     assert!(stdout.contains("--color"), "help should mention --color");
+    assert!(
+        stdout.contains("--no-color"),
+        "help should mention --no-color"
+    );
     assert!(stdout.contains("--quiet"), "help should mention --quiet");
     assert!(
         stdout.contains("--no-pager"),
