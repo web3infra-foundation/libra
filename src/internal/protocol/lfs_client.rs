@@ -699,11 +699,8 @@ impl LFSClient {
         .unwrap();
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
-            eprintln!(
-                "fatal: LFS lock failed. Status: {}, Message: {}",
-                code,
-                resp.text().await.unwrap()
-            );
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(status = %code, body = %body, "LFS lock failed");
         }
         code
     }
@@ -722,11 +719,8 @@ impl LFSClient {
         .unwrap();
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
-            eprintln!(
-                "fatal: LFS unlock failed. Status: {}, Message: {}",
-                code,
-                resp.text().await.unwrap()
-            );
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(status = %code, body = %body, "LFS unlock failed");
         }
         code
     }
