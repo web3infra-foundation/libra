@@ -524,33 +524,67 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let mut objects = Vec::new();
-            // Loose objects
+            // Loose objects: walk objects/AB/CDEF... directories. Skip-and-warn on any
+            // filesystem hiccup so a single bad entry doesn't kill the whole search.
             if let Ok(paths) = fs::read_dir(&self_clone.base_path) {
-                for path in paths {
-                    let path = path.unwrap().path();
-                    if path.is_dir() && path.file_name().unwrap().len() == 2 {
-                        let dir_name = path.file_name().unwrap().to_str().unwrap();
-                        if !prefix.starts_with(dir_name)
-                            && !dir_name.starts_with(&prefix[..std::cmp::min(2, prefix.len())])
-                        {
+                for entry in paths {
+                    let path = match entry {
+                        Ok(entry) => entry.path(),
+                        Err(err) => {
+                            tracing::warn!(
+                                base = %self_clone.base_path.display(),
+                                error = %err,
+                                "skipping unreadable objects/ entry during search"
+                            );
                             continue;
                         }
+                    };
+                    let Some(dir_name) = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|n| n.len() == 2)
+                    else {
+                        continue;
+                    };
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    if !prefix.starts_with(dir_name)
+                        && !dir_name.starts_with(&prefix[..std::cmp::min(2, prefix.len())])
+                    {
+                        continue;
+                    }
 
-                        if let Ok(sub_paths) = fs::read_dir(&path) {
-                            for sub_path in sub_paths {
-                                let sub_path = sub_path.unwrap().path();
-                                if sub_path.is_file() {
-                                    let parent_name =
-                                        path.file_name().unwrap().to_str().unwrap().to_string();
-                                    let file_name =
-                                        sub_path.file_name().unwrap().to_str().unwrap().to_string();
-                                    let full_hash = parent_name + &file_name;
-                                    if full_hash.starts_with(&prefix)
-                                        && let Ok(hash) = ObjectHash::from_str(&full_hash)
-                                    {
-                                        objects.push(hash);
-                                    }
+                    let parent_name = dir_name.to_string();
+                    if let Ok(sub_paths) = fs::read_dir(&path) {
+                        for sub_entry in sub_paths {
+                            let sub_path = match sub_entry {
+                                Ok(entry) => entry.path(),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        dir = %path.display(),
+                                        error = %err,
+                                        "skipping unreadable inner objects/ entry during search"
+                                    );
+                                    continue;
                                 }
+                            };
+                            if !sub_path.is_file() {
+                                continue;
+                            }
+                            let Some(file_name) = sub_path.file_name().and_then(|n| n.to_str())
+                            else {
+                                tracing::warn!(
+                                    sub_path = %sub_path.display(),
+                                    "skipping loose-object entry with non-UTF-8 file name"
+                                );
+                                continue;
+                            };
+                            let full_hash = format!("{parent_name}{file_name}");
+                            if full_hash.starts_with(&prefix)
+                                && let Ok(hash) = ObjectHash::from_str(&full_hash)
+                            {
+                                objects.push(hash);
                             }
                         }
                     }
