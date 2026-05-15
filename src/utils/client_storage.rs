@@ -316,7 +316,12 @@ impl ClientStorage {
                     builder = builder.with_allow_http(true);
                 }
 
-                Arc::new(builder.build().expect("Failed to build S3 storage"))
+                Arc::new(builder.build().unwrap_or_else(|err| {
+                    panic!(
+                        "ClientStorage::with_remote: failed to build S3 storage with endpoint/\
+                         bucket/region/credentials from LIBRA_STORAGE_* env: {err}"
+                    )
+                }))
             }
             _ => {
                 eprintln!(
