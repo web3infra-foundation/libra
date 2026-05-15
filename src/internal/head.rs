@@ -434,4 +434,66 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    /// Regression for v0.17.238: when no row exists for the requested remote
+    /// HEAD, `remote_current_result_with_conn` returns `Ok(None)` rather
+    /// than producing a `BranchStoreError`. This mirrors the historical
+    /// behavior of the lossy `remote_current_with_conn` (which returned
+    /// `Option::None`) and lets callers cleanly distinguish "no remote HEAD
+    /// recorded" from "remote HEAD is corrupt".
+    #[tokio::test]
+    #[serial]
+    async fn remote_current_result_with_conn_returns_none_for_unknown_remote() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        let result = Head::remote_current_result_with_conn(&db, "no-such-remote")
+            .await
+            .expect("unknown remote should not surface as error");
+        assert!(
+            result.is_none(),
+            "expected Ok(None) for unrecorded remote HEAD, got {result:?}"
+        );
+    }
+
+    /// Regression for v0.17.238: a remote HEAD row that is detached
+    /// (`name = NULL`) but whose stored commit hash is unparseable must
+    /// surface as `BranchStoreError::Corrupt`. Before v0.17.238 the lossy
+    /// `remote_current_with_conn` would panic via `ObjectHash::from_str(...).unwrap()`.
+    /// The error message names the canonical refspec
+    /// (`refs/remotes/<remote>/HEAD`) so operators can locate the bad row.
+    #[tokio::test]
+    #[serial]
+    async fn remote_current_result_with_conn_returns_corrupt_for_invalid_detached_hash() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        let remote = "origin";
+        let row = reference::ActiveModel {
+            kind: Set(reference::ConfigKind::Head),
+            remote: Set(Some(remote.to_string())),
+            name: Set(None),
+            commit: Set(Some("not-a-valid-hash".to_string())),
+            ..Default::default()
+        };
+        reference::Entity::insert(row).exec(&db).await.unwrap();
+
+        let error = Head::remote_current_result_with_conn(&db, remote)
+            .await
+            .expect_err("invalid remote HEAD hash should surface as corruption");
+        assert!(matches!(error, BranchStoreError::Corrupt { .. }));
+        let msg = error.to_string();
+        assert!(
+            msg.contains("invalid detached remote HEAD commit hash"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("refs/remotes/{remote}/HEAD")),
+            "error should name the canonical refspec: {msg}"
+        );
+    }
 }
