@@ -49,7 +49,6 @@
 - `BranchError` typed error enum、显式 `StableErrorCode`、统一 `run_branch()` / `render_branch_output()`、create / force-delete 确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续把旧测试 helper 的 `internal::branch` 兼容 wrapper 调用点迁移到 `list/find/delete/exists *_result` fallible API；生产路径已有 `tests/compat/branch_lossy_wrapper_guard.rs` 防回退。
 - 继续收口少量 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
 
 **本批非目标：**
@@ -389,7 +388,7 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/internal/branch.rs` | **已收口，继续维护** | `*_result` API 已暴露真实查询/删除失败与存储损坏；lossy wrapper 仅作兼容层保留，生产调用由 `tests/compat/branch_lossy_wrapper_guard.rs` 防回退 |
+| `src/internal/branch.rs` | **已收口，继续维护** | `*_result` API 已成为唯一的查询/删除/存在/列举接口；8 个 lossy wrapper 已在 v0.17.217 删除，`tests/compat/branch_lossy_wrapper_guard.rs` 仍作为防御性扫描，禁止后续在 `src/` 引入新的 lossy 调用 |
 | `src/command/branch.rs` | **维护** | 保持已落地的 `BranchOutput` / `BranchError` / `run_branch()` / `render_branch_output()` / human 确认消息 / fuzzy suggestion / `--help` EXAMPLES 不回退；后续仅继续清理兼容边界与旧调用点 |
 | `tests/command/branch_test.rs` | **扩展** | 在现有错误码和 JSON create 回归基础上，补齐 `BranchError` 变体覆盖、create/force-delete 确认消息和 fuzzy suggestion |
 | `tests/command/branch_json_test.rs` | **可选拆分** | 若 `branch_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |
