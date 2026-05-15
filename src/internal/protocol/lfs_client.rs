@@ -364,17 +364,13 @@ impl LFSClient {
         }
 
         if let Some(actions) = object.actions {
-            let upload_link = actions.get(&Action::Upload);
-            if upload_link.is_none() {
-                return Err(LfsPushError {
-                    path: Some(file.display().to_string()),
-                    oid: Some(oid),
-                    detail: "remote did not provide an upload action".to_string(),
-                });
-            }
+            let link = actions.get(&Action::Upload).ok_or_else(|| LfsPushError {
+                path: Some(file.display().to_string()),
+                oid: Some(oid),
+                detail: "remote did not provide an upload action".to_string(),
+            })?;
 
             println!("Uploading LFS file: {}", object.oid);
-            let link = upload_link.unwrap();
             let content_len = tokio::fs::metadata(file)
                 .await
                 .map_err(|e| LfsPushError {
