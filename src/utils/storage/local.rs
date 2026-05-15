@@ -744,4 +744,20 @@ mod tests {
             "unexpected err: {err:?}"
         );
     }
+
+    /// Pre-NUL header bytes that are not valid UTF-8 must surface as
+    /// `InvalidObjectInfo("non-UTF-8 header bytes: …")`. v0.17.228 deferred
+    /// this branch as "contrived", but `\xFF\xFF\xFF\0payload` is in fact a
+    /// minimal way to exercise the path: the position-of-\0 check passes
+    /// (terminator at offset 3) and the slice [0..3] is then invalid UTF-8.
+    #[test]
+    fn parse_header_rejects_non_utf8_header_bytes() {
+        // 3 invalid-UTF-8 bytes followed by NUL terminator and a 0-length payload.
+        let data = [0xFFu8, 0xFFu8, 0xFFu8, b'\0'];
+        let err = LocalStorage::parse_header(&data).expect_err("non-UTF-8 header should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
+            "unexpected err: {err:?}"
+        );
+    }
 }
