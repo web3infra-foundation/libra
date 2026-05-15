@@ -209,8 +209,11 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     let target_commit = {
         let _guard = ChangeDirGuard::new(repo.path());
-        InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md —
+        // storage errors no longer collapse into "main branch should exist".
+        InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit
             .to_string()
@@ -297,8 +300,10 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        let head = InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md.
+        let head = InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit;
         let commit: Commit = load_object(&head).expect("load HEAD commit");
