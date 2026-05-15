@@ -449,7 +449,13 @@ struct RebaseOutput {
     branch: String,
     commit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    upstream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     onto: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    common_ancestor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replay_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -572,9 +578,22 @@ impl From<RebaseError> for CliError {
                 message,
                 ..
             } => {
+                let mut resolution_hint =
+                    "resolve conflicts, stage them, then run 'libra rebase --continue'."
+                        .to_string();
+                if !paths.is_empty() {
+                    let path_list = paths
+                        .iter()
+                        .map(|path| format!("  {}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    resolution_hint = format!(
+                        "conflicted files:\n{path_list}\nresolve conflicts, stage them, then run 'libra rebase --continue'."
+                    );
+                }
                 let mut error = CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::ConflictUnresolved)
-                    .with_hint("resolve conflicts, stage them, then run 'libra rebase --continue'.")
+                    .with_hint(resolution_hint)
                     .with_hint("or run 'libra rebase --skip' / 'libra rebase --abort'.")
                     .with_detail("commit", commit.clone());
                 if !paths.is_empty() {
@@ -721,13 +740,10 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
         let result = run_rebase_skip().await.map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
-    if output.is_json()
-        && let Some(upstream) = args.upstream.as_deref()
-    {
+    if let Some(upstream) = args.upstream.as_deref() {
         let result = run_rebase_start(upstream).await.map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
-    execute(args).await;
     Ok(())
 }
 
@@ -736,6 +752,11 @@ fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResu
         return emit_json_data("rebase", result, output);
     }
     if output.quiet {
+        return Ok(());
+    }
+
+    if result.action == "start" {
+        render_rebase_start_output(result);
         return Ok(());
     }
 
@@ -770,6 +791,48 @@ fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResu
         );
     }
     Ok(())
+}
+
+fn render_rebase_start_output(result: &RebaseOutput) {
+    let upstream = result
+        .upstream
+        .as_deref()
+        .or(result.onto.as_deref())
+        .unwrap_or(&result.commit);
+
+    match result.status.as_str() {
+        "fast-forwarded" => {
+            println!(
+                "Fast-forwarded branch '{}' to '{}'.",
+                result.branch, upstream
+            );
+        }
+        "already-up-to-date" => {
+            println!("Current branch is ahead of upstream. No rebase needed.");
+        }
+        "no-commits" => {
+            println!("No commits to rebase on branch '{}'.", result.branch);
+        }
+        _ => {
+            if let Some(common_ancestor) = result.common_ancestor.as_deref() {
+                println!("Found common ancestor: {}", short_id(common_ancestor));
+            }
+            if let Some(replay_count) = result.replay_count {
+                println!(
+                    "Rebasing {replay_count} commits from `{}` onto `{upstream}`...",
+                    result.branch
+                );
+            }
+            for applied in &result.applied_commits {
+                println!("Applied: {} {}", short_id(&applied.commit), applied.subject);
+            }
+            println!(
+                "Successfully rebased branch '{}' onto '{}'.",
+                result.branch,
+                short_id(&result.commit)
+            );
+        }
+    }
 }
 
 async fn ensure_rebase_in_progress() -> Result<(), RebaseError> {
@@ -941,7 +1004,10 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             status: "fast-forwarded".to_string(),
             branch: current_branch_name,
             commit: upstream_id.to_string(),
+            upstream: Some(upstream.to_string()),
             onto: Some(upstream_id.to_string()),
+            common_ancestor: Some(base_id.to_string()),
+            replay_count: Some(0),
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
@@ -957,7 +1023,10 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             status: "already-up-to-date".to_string(),
             branch: current_branch_name,
             commit: head_to_rebase_id.to_string(),
+            upstream: Some(upstream.to_string()),
             onto: Some(upstream_id.to_string()),
+            common_ancestor: Some(base_id.to_string()),
+            replay_count: Some(0),
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
@@ -979,7 +1048,10 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
             status: "no-commits".to_string(),
             branch: current_branch_name,
             commit: head_to_rebase_id.to_string(),
+            upstream: Some(upstream.to_string()),
             onto: Some(upstream_id.to_string()),
+            common_ancestor: Some(base_id.to_string()),
+            replay_count: Some(0),
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
@@ -1023,6 +1095,7 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     .await
     .map_err(|e| RebaseError::Finalize(format!("failed to start rebase: {e}")))?;
 
+    let replay_count = commits_to_replay.len();
     let mut state = RebaseState {
         head_name: current_branch_name.clone(),
         onto: upstream_id,
@@ -1043,7 +1116,10 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         status: "completed".to_string(),
         branch: current_branch_name,
         commit: state.current_head.to_string(),
+        upstream: Some(upstream.to_string()),
         onto: Some(upstream_id.to_string()),
+        common_ancestor: Some(base_id.to_string()),
+        replay_count: Some(replay_count),
         previous_commit: Some(head_to_rebase_id.to_string()),
         restored: None,
         applied_commits: replay.applied_commits,
@@ -1542,7 +1618,10 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
         status: "completed".to_string(),
         branch,
         commit: state.current_head.to_string(),
+        upstream: None,
         onto: Some(state.onto.to_string()),
+        common_ancestor: None,
+        replay_count: None,
         previous_commit: Some(previous_commit),
         restored: None,
         applied_commits,
@@ -1661,7 +1740,10 @@ async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
         status: "aborted".to_string(),
         branch: state.head_name,
         commit: orig_head_str,
+        upstream: None,
         onto: None,
+        common_ancestor: None,
+        replay_count: None,
         previous_commit: Some(state.current_head.to_string()),
         restored: Some(true),
         applied_commits: Vec::new(),
@@ -1741,7 +1823,10 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         status: "completed".to_string(),
         branch,
         commit: state.current_head.to_string(),
+        upstream: None,
         onto: Some(state.onto.to_string()),
+        common_ancestor: None,
+        replay_count: None,
         previous_commit: Some(previous_commit),
         restored: None,
         applied_commits,
