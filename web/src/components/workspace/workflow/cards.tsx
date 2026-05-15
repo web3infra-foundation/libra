@@ -272,7 +272,7 @@ function StepRunGroup({
                   {r.result.toUpperCase()}
                 </span>
                 <span className="mono ml-auto text-[10.5px] text-ink-2">
-                  {r.patch}
+                  {r.label}
                 </span>
                 <span className="w-[30px] text-right text-[10.5px] text-ink-3">
                   {r.ago}

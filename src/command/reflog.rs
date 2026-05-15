@@ -10,8 +10,10 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use sea_orm::{
-    ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait, sqlx::types::chrono,
+    ConnectionTrait, DbBackend, DbErr, Statement, TransactionError, TransactionTrait,
+    sqlx::types::chrono,
 };
+use serde::Serialize;
 
 use crate::{
     command::{load_object, log::format_stat_output},
@@ -20,11 +22,11 @@ use crate::{
         db::get_db_conn_instance,
         log::date_parser::parse_date,
         model::reflog::Model,
-        reflog::{HEAD, Reflog, ReflogError},
+        reflog::{HEAD, Reflog},
     },
     utils::{
-        error::{CliError, CliResult},
-        output::OutputConfig,
+        error::{CliError, CliResult, StableErrorCode},
+        output::{OutputConfig, emit_json_data},
         pager::Pager,
     },
 };
@@ -112,12 +114,13 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
             };
             handle_show(&ref_name, options, output).await
         }
-        Subcommands::Delete { selectors } => handle_delete(&selectors).await,
-        Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
+        Subcommands::Delete { selectors } => handle_delete(&selectors, output).await,
+        Subcommands::Exists { ref_name } => handle_exists(&ref_name, output).await,
     }
 }
 
 /// Options for reflog show command
+#[derive(Clone)]
 struct ReflogShowOptions {
     pretty: FormatterKind,
     since: Option<String>,
@@ -127,6 +130,70 @@ struct ReflogShowOptions {
     number: Option<usize>,
     patch: bool,
     stat: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogShowOutput {
+    ref_name: String,
+    pretty: String,
+    count: usize,
+    total_count: usize,
+    filters: ReflogFiltersOutput,
+    entries: Vec<ReflogEntryOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogFiltersOutput {
+    since: Option<String>,
+    until: Option<String>,
+    grep: Option<String>,
+    author: Option<String>,
+    number: Option<usize>,
+    patch: bool,
+    stat: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogEntryOutput {
+    selector: String,
+    index: usize,
+    ref_name: String,
+    old_oid: String,
+    new_oid: String,
+    short_new_oid: String,
+    timestamp: i64,
+    datetime: String,
+    committer: ReflogIdentityOutput,
+    action: String,
+    message: String,
+    summary: String,
+    commit: ReflogCommitOutput,
+    patch: Option<String>,
+    stat: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogIdentityOutput {
+    name: String,
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogCommitOutput {
+    author: ReflogIdentityOutput,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogDeleteOutput {
+    selectors: Vec<String>,
+    deleted_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflogExistsOutput {
+    ref_name: String,
+    exists: bool,
 }
 
 async fn handle_show(
@@ -142,25 +209,38 @@ async fn handle_show(
         .as_deref()
         .map(parse_date)
         .transpose()
-        .map_err(|e| CliError::fatal(format!("invalid --since date: {e}")))?;
+        .map_err(|e| {
+            CliError::fatal(format!("invalid --since date: {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
 
     let until_ts = options
         .until
         .as_deref()
         .map(parse_date)
         .transpose()
-        .map_err(|e| CliError::fatal(format!("invalid --until date: {e}")))?;
+        .map_err(|e| {
+            CliError::fatal(format!("invalid --until date: {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
 
     let ref_name = parse_ref_name(ref_name).await;
-    let logs = Reflog::find_all(&db, &ref_name)
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to get reflog entries: {e}")))?;
+    let logs = Reflog::find_all(&db, &ref_name).await.map_err(|e| {
+        CliError::fatal(format!("failed to get reflog entries: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    let total_count = logs.len();
 
     // Preserve original indices before filtering
     let logs_with_index: Vec<_> = logs.into_iter().enumerate().collect();
 
     // Apply filters
-    let filter = ReflogFilter::new(since_ts, until_ts, options.grep, options.author);
+    let filter = ReflogFilter::new(
+        since_ts,
+        until_ts,
+        options.grep.clone(),
+        options.author.clone(),
+    );
     let filtered_logs: Vec<_> = logs_with_index
         .into_iter()
         .filter(|(_, log)| filter.passes(log))
@@ -169,6 +249,11 @@ async fn handle_show(
     // Apply number limit
     let max_output = options.number.unwrap_or(filtered_logs.len());
     let limited_logs = &filtered_logs[..filtered_logs.len().min(max_output)];
+
+    if output.is_json() {
+        let structured = build_reflog_show_output(&ref_name, &options, total_count, limited_logs)?;
+        return emit_json_data("reflog.show", &structured, output);
+    }
 
     let formatter = ReflogFormatter {
         logs: limited_logs,
@@ -184,53 +269,159 @@ async fn handle_show(
     Ok(())
 }
 
+fn build_reflog_show_output(
+    ref_name: &str,
+    options: &ReflogShowOptions,
+    total_count: usize,
+    logs: &[(usize, Model)],
+) -> CliResult<ReflogShowOutput> {
+    let entries = logs
+        .iter()
+        .map(|(idx, log)| build_reflog_entry(ref_name, *idx, log, options))
+        .collect::<CliResult<Vec<_>>>()?;
+
+    Ok(ReflogShowOutput {
+        ref_name: ref_name.to_string(),
+        pretty: options.pretty.to_string(),
+        count: entries.len(),
+        total_count,
+        filters: ReflogFiltersOutput {
+            since: options.since.clone(),
+            until: options.until.clone(),
+            grep: options.grep.clone(),
+            author: options.author.clone(),
+            number: options.number,
+            patch: options.patch,
+            stat: options.stat,
+        },
+        entries,
+    })
+}
+
+fn build_reflog_entry(
+    requested_ref_name: &str,
+    idx: usize,
+    log: &Model,
+    options: &ReflogShowOptions,
+) -> CliResult<ReflogEntryOutput> {
+    let commit = find_commit_checked(&log.new_oid)?;
+    let patch = if options.patch {
+        Some(generate_diff_sync(&commit).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to render reflog patch for '{}': {e}",
+                log.new_oid
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?)
+    } else {
+        None
+    };
+    let stat = if options.stat {
+        Some(generate_stat_sync(&commit).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to render reflog stat for '{}': {e}",
+                log.new_oid
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?)
+    } else {
+        None
+    };
+
+    let selector_ref = if log.ref_name.is_empty() {
+        requested_ref_name
+    } else {
+        &log.ref_name
+    };
+    Ok(ReflogEntryOutput {
+        selector: format!("{selector_ref}@{{{idx}}}"),
+        index: idx,
+        ref_name: log.ref_name.clone(),
+        old_oid: log.old_oid.clone(),
+        new_oid: log.new_oid.clone(),
+        short_new_oid: short_oid(&log.new_oid),
+        timestamp: log.timestamp,
+        datetime: format_datetime_checked(log.timestamp)?,
+        committer: ReflogIdentityOutput {
+            name: log.committer_name.clone(),
+            email: log.committer_email.clone(),
+        },
+        action: log.action.clone(),
+        message: log.message.clone(),
+        summary: format!("{}: {}", log.action, log.message),
+        commit: ReflogCommitOutput {
+            author: ReflogIdentityOutput {
+                name: commit.author.name.clone(),
+                email: commit.author.email.clone(),
+            },
+            message: commit.message.trim().to_string(),
+        },
+        patch,
+        stat,
+    })
+}
+
 // `partial_ref_name` is the branch name entered by the user.
 async fn parse_ref_name(partial_ref_name: &str) -> String {
     if partial_ref_name == HEAD {
         return HEAD.to_string();
     }
+    if partial_ref_name.starts_with("refs/") {
+        return partial_ref_name.to_string();
+    }
     if !partial_ref_name.contains("/") {
         return format!("refs/heads/{partial_ref_name}");
     }
-    let (ref_name, _) = partial_ref_name.split_once("/").unwrap();
-    if config::ConfigKv::get(&format!("remote.{ref_name}.url"))
-        .await
-        .ok()
-        .flatten()
-        .is_some()
+    if let Some((ref_name, _)) = partial_ref_name.split_once("/")
+        && config::ConfigKv::get(&format!("remote.{ref_name}.url"))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     {
         return format!("refs/remotes/{partial_ref_name}");
     }
     format!("refs/heads/{partial_ref_name}")
 }
 
-async fn handle_exists(ref_name: &str) -> CliResult<()> {
+async fn handle_exists(ref_name: &str, output: &OutputConfig) -> CliResult<()> {
     let db = get_db_conn_instance().await;
-    let log = Reflog::find_one(&db, ref_name)
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to get reflog entry: {e}")))?;
+    let ref_name = parse_ref_name(ref_name).await;
+    let log = Reflog::find_one(&db, &ref_name).await.map_err(|e| {
+        CliError::fatal(format!("failed to get reflog entry: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
     if log.is_none() {
-        return Err(CliError::failure(format!(
-            "reflog entry for '{}' not found",
-            ref_name
-        )));
+        return Err(
+            CliError::failure(format!("reflog entry for '{}' not found", ref_name))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        );
+    }
+    if output.is_json() {
+        let result = ReflogExistsOutput {
+            ref_name,
+            exists: true,
+        };
+        return emit_json_data("reflog.exists", &result, output);
     }
     Ok(())
 }
 
-async fn handle_delete(selectors: &[String]) -> CliResult<()> {
+async fn handle_delete(selectors: &[String], output: &OutputConfig) -> CliResult<()> {
     let mut groups = HashMap::new();
     for selector in selectors {
         if let Some(parsed) = parse_reflog_selector(selector) {
+            let normalized_ref_name = parse_ref_name(parsed.0).await;
             groups
-                .entry(parsed.0.to_string())
+                .entry(normalized_ref_name.clone())
                 .or_insert_with(Vec::new)
-                .push(parsed);
+                .push((normalized_ref_name, parsed.1));
             continue;
         }
-        return Err(CliError::fatal(format!(
-            "invalid reflog entry format: {selector}"
-        )));
+        return Err(
+            CliError::fatal(format!("invalid reflog entry format: {selector}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
 
     let groups = groups
@@ -240,25 +431,33 @@ async fn handle_delete(selectors: &[String]) -> CliResult<()> {
             group
         })
         .collect::<Vec<_>>();
+    let mut deleted_count = 0;
     for group in groups {
-        delete_single_group(&group).await?;
+        deleted_count += delete_single_group(&group).await?;
+    }
+    if output.is_json() {
+        let result = ReflogDeleteOutput {
+            selectors: selectors.to_vec(),
+            deleted_count,
+        };
+        return emit_json_data("reflog.delete", &result, output);
     }
     Ok(())
 }
 
-async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
+async fn delete_single_group(group: &[(String, usize)]) -> CliResult<usize> {
     let db = get_db_conn_instance().await;
     // clone this to move it into async block to make compiler happy :(
-    let group = group
-        .iter()
-        .map(|(s, i)| ((*s).to_string(), *i))
-        .collect::<Vec<(String, usize)>>();
+    let group = group.to_vec();
 
     db.transaction(|txn| {
         Box::pin(async move {
             let ref_name = &group[0].0;
-            let logs = Reflog::find_all(txn, ref_name).await?;
+            let logs = Reflog::find_all(txn, ref_name)
+                .await
+                .map_err(|err| DbErr::Custom(err.to_string()))?;
 
+            let mut deleted = 0;
             for (_, index) in &group {
                 if let Some(entry) = logs.get(*index) {
                     let id = entry.id;
@@ -268,19 +467,32 @@ async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
                         [id.into()],
                     ))
                     .await?;
+                    deleted += 1;
                     continue;
                 }
                 return Err(DbErr::Custom(format!(
                     "reflog entry `{ref_name}@{{{index}}}` not found"
-                ))
-                .into());
+                )));
             }
 
-            Ok::<_, ReflogError>(())
+            Ok::<_, DbErr>(deleted)
         })
     })
     .await
-    .map_err(|e| CliError::fatal(format!("failed to delete reflog entries: {e}")))
+    .map_err(map_reflog_delete_error)
+}
+
+fn map_reflog_delete_error(err: TransactionError<DbErr>) -> CliError {
+    let detail = match err {
+        TransactionError::Connection(err) | TransactionError::Transaction(err) => err.to_string(),
+    };
+    let stable_code = if detail.to_ascii_lowercase().contains("not found") {
+        StableErrorCode::CliInvalidTarget
+    } else {
+        StableErrorCode::IoWriteFailed
+    };
+    CliError::fatal(format!("failed to delete reflog entries: {detail}"))
+        .with_stable_code(stable_code)
 }
 
 fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {
@@ -474,6 +686,17 @@ fn find_commit(commit_hash: &str) -> Commit {
     load_object::<Commit>(&hash).unwrap()
 }
 
+fn find_commit_checked(commit_hash: &str) -> CliResult<Commit> {
+    let hash = ObjectHash::from_str(commit_hash).map_err(|e| {
+        CliError::fatal(format!("invalid reflog object id '{commit_hash}': {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    load_object::<Commit>(&hash).map_err(|e| {
+        CliError::fatal(format!("failed to load reflog commit '{commit_hash}': {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
+}
+
 // INVARIANT: reflog timestamps are always valid Unix timestamps written by our
 // own code. `from_timestamp` only returns `None` for out-of-range values that
 // cannot occur in practice.
@@ -483,6 +706,21 @@ fn format_datetime(timestamp: i64) -> String {
 
     let git_format = "%a %b %d %H:%M:%S %Y %z";
     local.format(git_format).to_string()
+}
+
+fn format_datetime_checked(timestamp: i64) -> CliResult<String> {
+    let naive = chrono::DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+        CliError::fatal(format!("invalid reflog timestamp '{timestamp}'"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let local = naive.with_timezone(&chrono::Local);
+
+    let git_format = "%a %b %d %H:%M:%S %Y %z";
+    Ok(local.format(git_format).to_string())
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(7).collect()
 }
 
 /// Synchronous wrapper for generating diff output

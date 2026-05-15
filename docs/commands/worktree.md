@@ -41,6 +41,7 @@ Create a new linked worktree at the given filesystem path.
 ```bash
 # Create a new worktree for a feature branch
 libra worktree add ../my-feature
+libra --json worktree add ../my-feature
 
 # Create using absolute path
 libra worktree add /tmp/libra-test
@@ -52,7 +53,13 @@ List all registered worktrees and their state.
 
 ```bash
 libra worktree list
+libra --json worktree list
+libra --machine worktree list
 ```
+
+Structured output uses the `worktree.list` command envelope. Each entry reports
+`kind`, `path`, `is_main`, `locked`, `lock_reason`, and whether the path currently
+exists on disk.
 
 ### Subcommand: `lock`
 
@@ -69,6 +76,7 @@ libra worktree lock ../my-feature
 
 # Lock with a reason
 libra worktree lock ../my-feature --reason "long-running experiment"
+libra --json worktree lock ../my-feature --reason "long-running experiment"
 ```
 
 ### Subcommand: `unlock`
@@ -81,6 +89,7 @@ Remove the lock from a previously locked worktree. Idempotent: unlocking an alre
 
 ```bash
 libra worktree unlock ../my-feature
+libra --machine worktree unlock ../my-feature
 ```
 
 ### Subcommand: `move`
@@ -94,6 +103,7 @@ Move or rename an existing linked worktree. The directory is renamed on disk and
 
 ```bash
 libra worktree move ../my-feature ../my-feature-v2
+libra --json worktree move ../my-feature ../my-feature-v2
 ```
 
 ### Subcommand: `prune`
@@ -102,6 +112,7 @@ Remove worktrees from the registry whose directories no longer exist on disk. Th
 
 ```bash
 libra worktree prune
+libra --machine worktree prune
 ```
 
 ### Subcommand: `remove`
@@ -120,9 +131,11 @@ worktree.
 ```bash
 # Default — keep the directory on disk
 libra worktree remove ../my-feature
+libra --json worktree remove ../my-feature
 
 # Git-style — also delete the directory (clean worktree only)
 libra worktree remove --delete-dir ../my-feature
+libra --machine worktree remove --delete-dir ../my-feature
 
 # Refused when dirty:
 $ libra worktree remove --delete-dir ../dirty-feature
@@ -153,6 +166,23 @@ Alias: `unmount`
 
 ```bash
 libra worktree umount /repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id/workspace --cleanup
+libra --json worktree umount /repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id --cleanup
+```
+
+JSON / machine output envelope:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.umount",
+  "data": {
+    "mountpoint": "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id/workspace",
+    "unmounted": true,
+    "cleanup_requested": true,
+    "cleanup_root": "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id",
+    "cleanup_root_removed": true
+  }
+}
 ```
 
 ### Subcommand: `repair`
@@ -161,6 +191,7 @@ Repair worktree metadata by removing duplicate entries (same canonical path) and
 
 ```bash
 libra worktree repair
+libra --json worktree repair
 ```
 
 ## Common Commands
@@ -207,6 +238,13 @@ worktree /Users/alice/projects/my-feature
 worktree /Users/alice/projects/hotfix [locked: production hotfix in progress]
 ```
 
+**`worktree remove`**:
+
+```text
+Removed worktree '/Users/alice/projects/my-feature' from registry. Directory kept on disk.
+Removed worktree '/Users/alice/projects/my-feature' from registry and deleted directory.
+```
+
 **`worktree prune`** (with stale entries):
 
 ```text
@@ -220,6 +258,129 @@ Pruned 2 worktrees
 
 ```text
 No worktrees to prune
+```
+
+## JSON Output
+
+`worktree add`, `lock`, `unlock`, `move`, `prune`, `remove`, and `repair`
+use command-specific envelopes. `--machine` emits the same schemas as compact
+single-line JSON.
+
+**`worktree.add`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.add",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "already_exists": false
+  }
+}
+```
+
+**`worktree.list`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.list",
+  "data": {
+    "worktrees": [
+      {
+        "kind": "main",
+        "path": "/Users/alice/projects/my-repo",
+        "is_main": true,
+        "locked": false,
+        "lock_reason": null,
+        "exists": true
+      }
+    ]
+  }
+}
+```
+
+**`worktree.lock`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.lock",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "locked": true,
+    "lock_reason": "long-running experiment",
+    "changed": true
+  }
+}
+```
+
+**`worktree.unlock`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.unlock",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "locked": false,
+    "changed": true
+  }
+}
+```
+
+**`worktree.move`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.move",
+  "data": {
+    "source": "/Users/alice/projects/my-feature",
+    "destination": "/Users/alice/projects/my-feature-v2",
+    "registry_updated": true,
+    "disk_directory_moved": true
+  }
+}
+```
+
+**`worktree.prune`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.prune",
+  "data": {
+    "pruned": ["/Users/alice/projects/old-experiment"],
+    "pruned_count": 1
+  }
+}
+```
+
+**`worktree.remove`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.remove",
+  "data": {
+    "path": "/Users/alice/projects/my-feature",
+    "registry_removed": true,
+    "disk_directory_deleted": false
+  }
+}
+```
+
+**`worktree.repair`**:
+
+```json
+{
+  "ok": true,
+  "command": "worktree.repair",
+  "data": {
+    "changed": true
+  }
+}
 ```
 
 ## Design Rationale
@@ -272,14 +433,18 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-IO-001` | Worktree path cannot be inside `.libra` storage |
-| `LBR-IO-001` | Target exists and is not a directory |
-| `LBR-IO-001` | Target directory exists and is not empty |
-| `LBR-IO-001` | Target already contains a `.libra` entry |
+| `LBR-REPO-002` | `worktrees.json` is corrupt |
+| `LBR-CLI-003` | Worktree path cannot be inside `.libra` storage |
+| `LBR-CLI-003` | Target exists and is not a directory |
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |
 | `LBR-CLI-003` | Cannot move or remove locked worktree |
-| `LBR-IO-001` | Destination already exists (for move) |
-| `LBR-IO-001` | Destination already registered as worktree (for move) |
+| `LBR-CLI-003` | `worktree umount --cleanup` was requested for a non-task FUSE worktree path |
+| `LBR-CONFLICT-002` | Target directory exists and is not empty |
+| `LBR-CONFLICT-002` | Target already contains a `.libra` entry |
+| `LBR-CONFLICT-002` | Destination already exists (for move) |
+| `LBR-CONFLICT-002` | Destination already registered as worktree (for move) |
+| `LBR-CONFLICT-002` | `--delete-dir` refused because the worktree is dirty |
+| `LBR-IO-001` | Failed to read or inspect worktree paths/state/status |
 | `LBR-IO-002` | Failed to write worktrees.json |
-| `LBR-IO-001` | Failed to populate worktree from HEAD |
+| `LBR-IO-002` | Failed to populate worktree from HEAD |

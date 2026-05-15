@@ -6,12 +6,13 @@ use std::{
 
 use clap::Parser;
 use git_internal::internal::index::{Index, IndexEntry};
+use serde::Serialize;
 
 use crate::{
     command::calc_file_blob_hash,
     utils::{
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path, util,
     },
 };
@@ -49,6 +50,21 @@ impl MovePlan {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct MovePair {
+    source: String,
+    destination: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MvOutput {
+    moves: Vec<MovePair>,
+    index_updates: Vec<MovePair>,
+    dry_run: bool,
+    forced: bool,
+    verbose: bool,
+}
+
 pub async fn execute(args: MvArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -58,14 +74,18 @@ pub async fn execute(args: MvArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Moves or renames files in the working directory and
 /// updates the index accordingly.
-pub async fn execute_safe(args: MvArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: MvArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute_inner(args)
+    let result = execute_inner(args, output)
         .await
-        .map_err(CliError::from_legacy_string)
+        .map_err(CliError::from_legacy_string)?;
+    if output.is_json() {
+        emit_json_data("mv", &result, output)?;
+    }
+    Ok(())
 }
 
-async fn execute_inner(args: MvArgs) -> Result<(), String> {
+async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, String> {
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(
@@ -133,6 +153,7 @@ async fn execute_inner(args: MvArgs) -> Result<(), String> {
         args.dry_run,
         args.force,
         &mut index,
+        output,
     )
 }
 /// Validates a source path and builds the move plan.
@@ -372,8 +393,16 @@ fn perform_moves(
     dry_run: bool,
     force: bool,
     index: &mut Index,
-) -> Result<(), String> {
+    output: &OutputConfig,
+) -> Result<MvOutput, String> {
     let mut moved_count = 0usize;
+    let output_result = MvOutput {
+        moves: move_pairs_for_output(&plan.fs_moves),
+        index_updates: move_pairs_for_output(&plan.index_updates),
+        dry_run,
+        forced: force,
+        verbose,
+    };
 
     for (src, dst) in &plan.fs_moves {
         let src_workdir = util::to_workdir_path(src);
@@ -381,16 +410,18 @@ fn perform_moves(
 
         // If it's a dry run, we just print the move operations without performing them.
         if dry_run {
-            println!(
-                "Checking rename of '{}' to '{}'",
-                src_workdir.display(),
-                dst_workdir.display()
-            );
-            println!(
-                "Renaming {} to {}",
-                src_workdir.display(),
-                dst_workdir.display()
-            );
+            if !output.is_json() && !output.quiet {
+                println!(
+                    "Checking rename of '{}' to '{}'",
+                    src_workdir.display(),
+                    dst_workdir.display()
+                );
+                println!(
+                    "Renaming {} to {}",
+                    src_workdir.display(),
+                    dst_workdir.display()
+                );
+            }
             continue;
         }
         // For actual move, we first check if the parent directory of the destination exists, if not, we try to create it.
@@ -432,7 +463,7 @@ fn perform_moves(
         moved_count += 1;
 
         // Print the move operation if verbose is enabled.
-        if verbose {
+        if verbose && !output.is_json() && !output.quiet {
             println!(
                 "Renaming {} to {}",
                 src_workdir.display(),
@@ -442,7 +473,7 @@ fn perform_moves(
     }
 
     if dry_run {
-        return Ok(());
+        return Ok(output_result);
     }
 
     // Update index only after all filesystem moves succeeded.
@@ -488,5 +519,15 @@ fn perform_moves(
         return Err(format!("fatal: failed to save index after mv: {e}"));
     }
 
-    Ok(())
+    Ok(output_result)
+}
+
+fn move_pairs_for_output(pairs: &[(PathBuf, PathBuf)]) -> Vec<MovePair> {
+    pairs
+        .iter()
+        .map(|(source, destination)| MovePair {
+            source: util::to_workdir_path(source).display().to_string(),
+            destination: util::to_workdir_path(destination).display().to_string(),
+        })
+        .collect()
 }

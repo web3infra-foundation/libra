@@ -91,7 +91,7 @@
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
 | **9** | `switch` | ✅ 已落地 | 第二批主改造已落地；后续仅维护回归测试、文档同步与大仓库切换性能观察（详见 [switch.md](switch.md)） |
-| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地 | 已完成 `SwitchError` 变体匹配适配与 `--help` EXAMPLES；**不是完整现代化**——`CheckoutError` / JSON / render split 改为留到后续状态变更批次（详见 [checkout.md](checkout.md)） |
+| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地；第 30 批补充结构化输出 | 已完成 `SwitchError` 变体匹配适配、`--help` EXAMPLES、`CheckoutOutput`、JSON/machine 成功路径与 checkout-owned stable code；剩余 `CheckoutError` typed enum 另行处理（详见 [checkout.md](checkout.md)） |
 | **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
 | **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
 | **12** | `branch` | 主改造已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪 | 继续把旧调用点迁移到 `internal::branch::*_result` fallible API，减少 legacy best-effort 查询路径（详见 [branch.md](branch.md)） |
@@ -184,10 +184,10 @@
 
 | 顺序 | 命令 | 当前状态 | 后续重点 |
 |------|------|--------|--------|
-| **30** | `reflog` / `checkout` | 兼容层和旧 CLI 形态并存 | CLI 形态收口、typed error、JSON / machine |
-| **31** | `mv` / `rm` / `worktree` | 仍缺结构化输出 | destructive 路径的结果模型、显式错误码、确认消息 |
-| **32** | `merge` / `rebase` | 状态机复杂，风险高 | merge / rebase 状态结构化、冲突契约、typed error |
-| **33** | `lfs` / `cloud` | 外部系统耦合高 | JSON / progress 契约、网络/权限错误分层 |
+| **30** | `reflog` / `checkout` | 部分落地：`reflog show/delete/exists` 已有 JSON/machine 成功路径、裸分支解析与显式错误码；`checkout` 已有 `CheckoutOutput`、JSON/machine 成功路径、render split 与 checkout-owned stable code | 剩余 `CheckoutError` typed enum 与更细 remote/pull 代理错误分层 |
+| **31** | `mv` / `rm` / `worktree` | ✅ 已落地：`mv` / `rm` / worktree 成功路径、非 FUSE worktree 错误路径、FUSE `umount` 成功路径均已有 JSON/machine；后续仅保留 FUSE mount 管理的更细错误码扩展 | destructive 路径的结果模型、显式错误码、确认消息 |
+| **32** | `merge` / `rebase` | 部分落地：[`merge`](merge.md) 已有 `run_merge()` / `render_merge_output()`、fast-forward / already-up-to-date / remote ref JSON/machine、non-fast-forward JSON error envelope 和显式错误码；[`rebase`](rebase.md) 已同步当前 human 输出文档、移除路径处理生产 `unwrap()`，显式化 no-state JSON 错误码，并落地 start / `--abort` / `--continue` / `--skip` 成功 JSON/machine 与 unresolved-conflict typed error | rebase human start path、replay/conflict-stop 细分 typed error；merge 后续仅做兼容 additive 扩展 |
+| **33** | `lfs` / `cloud` | 部分落地：[`lfs`](lfs.md) 已有 `run_lfs()` / `render_lfs_output()`、成功 JSON/machine 和本地路径无 panic 输出收口；[`cloud`](cloud.md) 已有 `cloud status` JSON/machine 与本地查询错误码 | cloud sync/restore JSON progress 契约、lfs 远端 lock API mock 覆盖与网络/权限错误分层 |
 
 **不纳入命令级批次改进的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
@@ -201,10 +201,10 @@
 |------|--------|--------|
 | **A** | 退出码三级模型统一对齐（0/128/129） | 与各命令改进同步进行 |
 | **B** | 每个子命令 --help 添加 EXAMPLES 段 | 与各命令改进同步进行 |
-| **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | 独立改进 |
+| **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
 | **D** | log/diff/blame/show TTY 下使用 pager | 独立改进 |
-| **E** | 顶层 help 按场景分组 | 独立改进 |
-| **F** | 拼写纠错建议（确认 clap suggest 已启用） | 独立改进 |
+| **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
+| **F** | 拼写纠错建议（确认 clap suggest 已启用） | ✅ 已落地：clap fuzzy suggestion 已启用，并由 `cli::tests::clap_fuzzy_suggests_similar_command` 覆盖 `initt -> init` |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |
 | **I** | **Git surface 兼容性补齐** → 见 [compatibility/README.md](compatibility/README.md)：4-tier `COMPATIBILITY.md` / 仓库治理 / CI 兼容矩阵 / stash・bisect 子命令面 / worktree 与 checkout 行为差异 | 与各命令批次并行 |

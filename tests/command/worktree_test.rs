@@ -63,6 +63,550 @@ fn worktree_paths() -> Vec<String> {
         .collect()
 }
 
+fn assert_worktree_error(output: &std::process::Output, error_code: &str) -> CliErrorReport {
+    assert_ne!(output.status.code(), Some(0), "worktree command must fail");
+    assert!(
+        output.stdout.is_empty(),
+        "failed structured worktree commands must keep stdout clean: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, error_code, "unexpected error report");
+    report
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_json_outputs_structured_entries() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let wt_path = repo_dir.path().join("wt_json");
+
+    let add = run_libra_command(&["worktree", "add", "wt_json"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let lock = run_libra_command(
+        &["worktree", "lock", "wt_json", "--reason", "review"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&lock, "worktree lock");
+
+    let output = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&output, "json worktree list");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree list should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "worktree.list");
+
+    let worktrees = parsed["data"]["worktrees"]
+        .as_array()
+        .expect("worktrees should be an array");
+    let main_path = repo_dir.path().canonicalize().unwrap();
+    let main_entry = worktrees
+        .iter()
+        .find(|entry| entry["path"] == main_path.to_string_lossy().as_ref())
+        .expect("json list should include main worktree");
+    assert_eq!(main_entry["kind"], "main");
+    assert_eq!(main_entry["is_main"], true);
+    assert_eq!(main_entry["locked"], false);
+    assert_eq!(main_entry["exists"], true);
+
+    let linked_path = wt_path.canonicalize().unwrap();
+    let linked_entry = worktrees
+        .iter()
+        .find(|entry| entry["path"] == linked_path.to_string_lossy().as_ref())
+        .expect("json list should include linked worktree");
+    assert_eq!(linked_entry["kind"], "worktree");
+    assert_eq!(linked_entry["is_main"], false);
+    assert_eq!(linked_entry["locked"], true);
+    assert_eq!(linked_entry["lock_reason"], "review");
+    assert_eq!(linked_entry["exists"], true);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_machine_outputs_single_json_line() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    let output = run_libra_command(&["--machine", "worktree", "list"], repo_dir.path());
+    assert_cli_success(&output, "machine worktree list");
+    assert!(
+        output.stderr.is_empty(),
+        "machine worktree list should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["command"], "worktree.list");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_json_reports_created_path() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+
+    let output = run_libra_command(
+        &["--json", "worktree", "add", "wt_add_json"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "json worktree add");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree add should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed = parse_json_stdout(&output);
+    let canonical = repo_dir.path().join("wt_add_json").canonicalize().unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "worktree.add");
+    assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(parsed["data"]["already_exists"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_lock_unlock_structured_outputs_report_state() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let add = run_libra_command(&["worktree", "add", "wt_lock_json"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+
+    let lock = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "lock",
+            "wt_lock_json",
+            "--reason",
+            "review",
+        ],
+        repo_dir.path(),
+    );
+    assert_cli_success(&lock, "json worktree lock");
+    assert!(
+        lock.stderr.is_empty(),
+        "json worktree lock should keep stderr clean: {}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    let locked = parse_json_stdout(&lock);
+    let canonical = repo_dir.path().join("wt_lock_json").canonicalize().unwrap();
+    assert_eq!(locked["command"], "worktree.lock");
+    assert_eq!(locked["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(locked["data"]["locked"], true);
+    assert_eq!(locked["data"]["lock_reason"], "review");
+    assert_eq!(locked["data"]["changed"], true);
+
+    let unlock = run_libra_command(
+        &["--machine", "worktree", "unlock", "wt_lock_json"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&unlock, "machine worktree unlock");
+    assert!(
+        unlock.stderr.is_empty(),
+        "machine worktree unlock should keep stderr clean: {}",
+        String::from_utf8_lossy(&unlock.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&unlock.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let unlocked: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(unlocked["command"], "worktree.unlock");
+    assert_eq!(
+        unlocked["data"]["path"],
+        canonical.to_string_lossy().as_ref()
+    );
+    assert_eq!(unlocked["data"]["locked"], false);
+    assert_eq!(unlocked["data"]["changed"], true);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_move_json_reports_source_and_destination() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let add = run_libra_command(&["worktree", "add", "wt_move_json"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+
+    let source = repo_dir.path().join("wt_move_json").canonicalize().unwrap();
+    let destination = repo_dir.path().join("wt_move_json_dest");
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "move",
+            "wt_move_json",
+            "wt_move_json_dest",
+        ],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "json worktree move");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree move should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed = parse_json_stdout(&output);
+    let canonical_destination = destination.canonicalize().unwrap();
+    assert_eq!(parsed["command"], "worktree.move");
+    assert_eq!(parsed["data"]["source"], source.to_string_lossy().as_ref());
+    assert_eq!(
+        parsed["data"]["destination"],
+        canonical_destination.to_string_lossy().as_ref()
+    );
+    assert_eq!(parsed["data"]["registry_updated"], true);
+    assert_eq!(parsed["data"]["disk_directory_moved"], true);
+    assert!(!source.exists(), "source worktree should be moved");
+    assert!(destination.is_dir(), "destination worktree should exist");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_prune_machine_reports_pruned_paths() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let add = run_libra_command(&["worktree", "add", "wt_prune_machine"], repo_dir.path());
+    assert_cli_success(&add, "worktree add");
+    let wt_path = repo_dir.path().join("wt_prune_machine");
+    let canonical = wt_path.canonicalize().unwrap();
+    fs::remove_dir_all(&wt_path).expect("failed to remove worktree directory before prune");
+
+    let output = run_libra_command(&["--machine", "worktree", "prune"], repo_dir.path());
+    assert_cli_success(&output, "machine worktree prune");
+    assert!(
+        output.stderr.is_empty(),
+        "machine worktree prune should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["command"], "worktree.prune");
+    assert_eq!(parsed["data"]["pruned_count"], 1);
+    assert_eq!(
+        parsed["data"]["pruned"][0],
+        canonical.to_string_lossy().as_ref()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_repair_json_reports_changed_state() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_repair_json"])
+        .await
+        .expect("worktree add should succeed");
+
+    let mut state = read_worktree_state();
+    let duplicate = state
+        .worktrees
+        .iter()
+        .find(|w| w.path.ends_with("wt_repair_json"))
+        .cloned()
+        .expect("expected worktree entry for wt_repair_json");
+    state.worktrees.push(duplicate);
+
+    let state_path = util::storage_path().join("worktrees.json");
+    let data = serde_json::to_string_pretty(&state)
+        .expect("failed to serialize duplicated worktree state");
+    fs::write(&state_path, data).expect("failed to overwrite worktrees.json with duplicates");
+
+    let output = run_libra_command(&["--json", "worktree", "repair"], repo_dir.path());
+    assert_cli_success(&output, "json worktree repair");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree repair should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.repair");
+    assert_eq!(parsed["data"]["changed"], true);
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_worktree_umount_json_reports_cleanup() {
+    let temp = tempdir().expect("create temp dir");
+    let cleanup_root = temp
+        .path()
+        .join("libra-task-worktree-fuse-29353-019ddec6-de60-7383");
+    let workspace = cleanup_root.join("workspace");
+    fs::create_dir_all(&workspace).expect("create task workspace");
+    let canonical_cleanup_root = cleanup_root.canonicalize().expect("canonical cleanup root");
+    let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+    let cleanup_arg = cleanup_root.to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "umount",
+            cleanup_arg.as_str(),
+            "--cleanup",
+        ],
+        temp.path(),
+    );
+
+    assert_cli_success(&output, "json worktree umount --cleanup");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree umount should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["command"], "worktree.umount");
+    assert_eq!(
+        parsed["data"]["mountpoint"],
+        canonical_workspace.to_string_lossy().as_ref()
+    );
+    assert_eq!(parsed["data"]["unmounted"], true);
+    assert_eq!(parsed["data"]["cleanup_requested"], true);
+    assert_eq!(
+        parsed["data"]["cleanup_root"],
+        canonical_cleanup_root.to_string_lossy().as_ref()
+    );
+    assert_eq!(parsed["data"]["cleanup_root_removed"], true);
+    assert!(
+        !cleanup_root.exists(),
+        "cleanup should remove the task worktree root"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_lock_json_no_such_worktree_reports_invalid_target() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state");
+    let before_paths = worktree_paths();
+
+    let output = run_libra_command(
+        &["--json", "worktree", "lock", "missing-worktree"],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert!(
+        report.message.contains("no such worktree"),
+        "error should identify missing worktree: {}",
+        report.message
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "failed lock must not mutate registry"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_machine_rejects_main_with_stable_error() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state");
+    let before_paths = worktree_paths();
+    let main_path = repo_dir.path().canonicalize().unwrap();
+    let main_arg = main_path.to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &["--machine", "worktree", "remove", main_arg.as_str()],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report.message.contains("cannot remove main worktree"),
+        "error should identify protected main worktree: {}",
+        report.message
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "failed main remove must not mutate registry"
+    );
+    assert!(main_path.is_dir(), "main worktree must remain on disk");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_remove_json_rejects_locked_with_stable_error() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "add", "wt_locked_error"])
+        .await
+        .expect("worktree add should succeed");
+    exec_async(vec!["worktree", "lock", "wt_locked_error"])
+        .await
+        .expect("worktree lock should succeed");
+    let wt_path = repo_dir.path().join("wt_locked_error");
+    let before_paths = worktree_paths();
+
+    let output = run_libra_command(
+        &["--json", "worktree", "remove", "wt_locked_error"],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report.message.contains("cannot remove locked worktree"),
+        "error should identify locked worktree: {}",
+        report.message
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "failed locked remove must not mutate registry"
+    );
+    assert!(wt_path.is_dir(), "locked worktree must remain on disk");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_move_machine_destination_exists_reports_conflict() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "add", "wt_move_error"])
+        .await
+        .expect("worktree add should succeed");
+    let src_path = repo_dir.path().join("wt_move_error");
+    let dest_path = repo_dir.path().join("wt_move_dest_exists");
+    fs::create_dir(&dest_path).expect("create destination collision");
+    let before_paths = worktree_paths();
+
+    let output = run_libra_command(
+        &[
+            "--machine",
+            "worktree",
+            "move",
+            "wt_move_error",
+            "wt_move_dest_exists",
+        ],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CONFLICT-002");
+    assert_eq!(report.category, "conflict");
+    assert!(
+        report.message.contains("destination already exists"),
+        "error should identify destination collision: {}",
+        report.message
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "failed move must not mutate registry"
+    );
+    assert!(src_path.is_dir(), "source worktree must remain on disk");
+    assert!(
+        dest_path.is_dir(),
+        "destination collision directory must remain on disk"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_add_json_rejects_storage_path_as_invalid_target() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state");
+    let before_paths = worktree_paths();
+    let inside_storage = util::storage_path().join("wt_inside_storage");
+    let inside_arg = inside_storage.to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &["--json", "worktree", "add", inside_arg.as_str()],
+        repo_dir.path(),
+    );
+
+    let report = assert_worktree_error(&output, "LBR-CLI-003");
+    assert!(
+        report
+            .message
+            .contains("worktree path cannot be inside .libra storage"),
+        "error should identify storage path refusal: {}",
+        report.message
+    );
+    assert_eq!(
+        worktree_paths(),
+        before_paths,
+        "failed add must not mutate registry"
+    );
+    assert!(
+        !inside_storage.exists(),
+        "failed add must not create the rejected worktree path"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worktree_list_json_corrupt_state_reports_repo_corrupt() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state");
+    let state_path = util::storage_path().join("worktrees.json");
+    fs::write(&state_path, b"{ invalid json").expect("failed to corrupt state file");
+    let before = fs::read_to_string(&state_path).unwrap();
+
+    let output = run_libra_command(&["--json", "worktree", "list"], repo_dir.path());
+
+    let report = assert_worktree_error(&output, "LBR-REPO-002");
+    assert_eq!(report.category, "repo");
+    assert!(
+        report.message.contains("worktree state") && report.message.contains("is corrupt"),
+        "error should identify corrupt worktree state: {}",
+        report.message
+    );
+    let after = fs::read_to_string(&state_path).unwrap();
+    assert_eq!(
+        after, before,
+        "failed state load must not rewrite corrupted worktree state"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// `worktree add` creates a linked directory with a `.libra` storage link.
@@ -1250,6 +1794,45 @@ async fn test_worktree_remove_default_keeps_disk_directory() {
 
 #[tokio::test]
 #[serial]
+/// `worktree remove --json` reports that the registry entry was removed while the directory remained.
+async fn test_worktree_remove_json_reports_kept_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_keep_json"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_keep_json");
+    let canonical = wt_path.canonicalize().expect("worktree should exist");
+    let output = run_libra_command(
+        &["--json", "worktree", "remove", "wt_keep_json"],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "json worktree remove");
+    assert!(
+        output.stderr.is_empty(),
+        "json worktree remove should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "worktree.remove");
+    assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(parsed["data"]["registry_removed"], true);
+    assert_eq!(parsed["data"]["disk_directory_deleted"], false);
+    assert!(
+        wt_path.is_dir(),
+        "json remove without --delete-dir must keep directory"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// `worktree remove --delete-dir` removes both the registry entry and the
 /// on-disk directory when the worktree is clean.
 async fn test_worktree_remove_with_delete_dir_clean_path() {
@@ -1276,5 +1859,108 @@ async fn test_worktree_remove_with_delete_dir_clean_path() {
     assert!(
         !paths.iter().any(|p| p.ends_with("wt_delete")),
         "registry should no longer track wt_delete, paths: {paths:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `worktree remove --delete-dir --machine` reports single-line JSON and deletes the directory.
+async fn test_worktree_remove_machine_reports_deleted_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_delete_machine"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_delete_machine");
+    let canonical = wt_path.canonicalize().expect("worktree should exist");
+    let output = run_libra_command(
+        &[
+            "--machine",
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "wt_delete_machine",
+        ],
+        repo_dir.path(),
+    );
+    assert_cli_success(&output, "machine worktree remove --delete-dir");
+    assert!(
+        output.stderr.is_empty(),
+        "machine worktree remove should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["command"], "worktree.remove");
+    assert_eq!(parsed["data"]["path"], canonical.to_string_lossy().as_ref());
+    assert_eq!(parsed["data"]["registry_removed"], true);
+    assert_eq!(parsed["data"]["disk_directory_deleted"], true);
+    assert!(
+        !wt_path.exists(),
+        "machine remove --delete-dir must delete directory"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `worktree remove --delete-dir` refuses dirty worktrees and leaves both disk and registry intact.
+async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_dirty_delete"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_dirty_delete");
+    fs::write(wt_path.join("dirty.txt"), "dirty\n").expect("failed to dirty worktree");
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "wt_dirty_delete",
+        ],
+        repo_dir.path(),
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "dirty --delete-dir must fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let report: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert!(
+        report["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot delete dirty worktree")),
+        "error should explain dirty worktree refusal: {report}",
+    );
+
+    assert!(
+        wt_path.is_dir(),
+        "dirty rejected --delete-dir must keep the directory on disk"
+    );
+    let paths = worktree_paths();
+    assert!(
+        paths.iter().any(|p| p.ends_with("wt_dirty_delete")),
+        "dirty rejected --delete-dir must keep registry entry, paths: {paths:?}"
     );
 }

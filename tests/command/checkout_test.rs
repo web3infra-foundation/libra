@@ -560,3 +560,147 @@ fn test_checkout_existing_branch_with_conflicting_untracked_file_returns_error()
     let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
     assert_eq!(content, "local untracked\n");
 }
+
+#[test]
+fn test_checkout_json_show_current_branch() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout"], repo.path());
+    assert_cli_success(&output, "json checkout show current");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "show-current");
+    assert_eq!(json["data"]["branch"], "main");
+    assert_eq!(json["data"]["detached"], false);
+    assert_eq!(json["data"]["switched"], false);
+    assert!(json["data"]["commit"].as_str().unwrap_or_default().len() >= 7);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_checkout_json_switch_existing_branch() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&branch, "branch feature");
+
+    let output = run_libra_command(&["--json", "checkout", "feature"], repo.path());
+    assert_cli_success(&output, "json checkout feature");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "switch");
+    assert_eq!(json["data"]["previous_branch"], "main");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["switched"], true);
+    assert_eq!(json["data"]["created"], false);
+    assert_eq!(json["data"]["pulled"], false);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_checkout_json_current_branch_reports_already_on() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "main"], repo.path());
+    assert_cli_success(&output, "json checkout main");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "already-on");
+    assert_eq!(json["data"]["branch"], "main");
+    assert_eq!(json["data"]["already_on"], true);
+    assert_eq!(json["data"]["switched"], false);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_checkout_json_create_branch() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "-b", "feature"], repo.path());
+    assert_cli_success(&output, "json checkout -b feature");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["previous_branch"], "main");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["switched"], true);
+    assert_eq!(json["data"]["created"], true);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_checkout_machine_outputs_single_json_line() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&branch, "branch feature");
+
+    let output = run_libra_command(&["--machine", "checkout", "feature"], repo.path());
+    assert_cli_success(&output, "machine checkout feature");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "expected one JSON line, got: {stdout}"
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("expected JSON");
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "switch");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn test_checkout_json_missing_branch_reports_invalid_target() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "missing"], repo.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report
+            .message
+            .contains("path specification 'missing' did not match")
+    );
+}
+
+#[test]
+fn test_checkout_json_reserved_branch_reports_invalid_target() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "intent"], repo.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(report.message.contains("checking out 'intent' branch"));
+}

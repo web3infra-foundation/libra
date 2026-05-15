@@ -2,16 +2,14 @@
  * Bottom message composer for the chat pane.
  *
  * Controls a textarea draft with `Enter` to submit, `Shift+Enter` for newline.
- * Includes static "Add context" / file chips (placeholders for future
- * features) and a Plan/Build mode toggle. The actual model name and tool
- * policy strings are static — the production backend will surface these
- * through a session settings RPC.
+ * Includes a disabled context picker entrypoint and a Plan/Build mode toggle
+ * until the backend exposes writable settings for them.
  */
 "use client";
 
 import { useState, type KeyboardEvent } from "react";
 
-import { IconAt, IconFile, IconSend } from "@/components/icons";
+import { IconAt, IconSend } from "@/components/icons";
 import { cn } from "@/lib/utils";
 
 /** Composer mode discriminator. "Plan" is read-only, "Build" allows mutating tools. */
@@ -59,15 +57,11 @@ export function Composer({ onSubmit, disabled = false, disabledReason }: Props) 
         <div className="flex items-center gap-1.5 border-b border-rule px-2.5 py-2">
           <button
             type="button"
+            disabled
+            title="Context picker is not connected yet"
             className="inline-flex items-center gap-1.5 rounded-sm border border-rule bg-paper-2 px-2 py-1 text-[11.5px] text-ink-2"
           >
             <IconAt size={12} /> Add context
-          </button>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded-sm border border-rule bg-paper-2 px-2 py-1 text-[11.5px] text-ink-2"
-          >
-            <IconFile size={12} /> src/lib/query.ts
           </button>
           <div className="flex-1" />
           <ModeToggle mode={mode} onChange={setMode} />

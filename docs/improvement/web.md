@@ -33,9 +33,9 @@
 | 区域 | 已落地 | 仍需收口 |
 |------|--------|----------|
 | Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden；`docs/commands/code.md` 已补稳定字段表、thread list envelope 与 Code UI error code 表 | 后续新增字段/错误码时继续同步 Rust/TS/wire test/命令文档 |
-| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | 继续补齐 Web API client / component / browser smoke 测试 |
-| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 需要 API client 单测、组件测试、browser smoke；长 transcript/diff/tool output 的主线程保护仍不足 |
-| Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
+| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | API client、组件、browser audit scenario 已有回归；后续新增字段/错误码时继续同步测试 |
+| Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
+| Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
 | Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
@@ -75,10 +75,11 @@
 
 **任务：**
 
-- 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard。
-- 增加 store/controller hook 测试：首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce、lease retry once、`CONTROLLER_CONFLICT` 不重试。
-- 增加组件测试：无 session 空态、read-only controller、`BROWSER_CONTROL_DISABLED`、pending interaction 五种 kind、streaming assistant message、empty diff、parse error、long diff collapse。
-- Rust：把 `tests/code_ui_scenarios.rs` 中 browser flow 的 audit log 断言补上；`/api/code/threads` invalid limit / clamp 场景已由 `tests/code_ui_remote_security_matrix.rs` + `tests/data/code_ui_remote/security_cases.json` 覆盖。
+- [x] 增加 `web/src/lib/code-ui/client.test.ts`：覆盖 fetch error mapping、`RepoStatusEnvelope`、thread list query、SSE parse、controller token header、256 KiB client-side guard；`web/package.json` 已增加 `test` 脚本用于本地回归。
+- [x] 增加 store/controller hook 测试：`web/src/lib/code-ui/store.test.tsx` 覆盖首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce；`web/src/lib/code-ui/controller.test.tsx` 覆盖 lease retry once、`CONTROLLER_CONFLICT` 不重试。
+  - [x] `web/src/lib/code-ui/controller.test.tsx` 已覆盖 browser controller lazy attach、stale token retry once、`CONTROLLER_CONFLICT` 不重试、`BROWSER_CONTROL_DISABLED` error surface。
+- [x] 增加组件测试：`message.test.tsx` 覆盖 streaming assistant message；`review-view.test.tsx` 覆盖无 session 空态、empty diff、parse error、long diff collapse；`interaction-panel.test.tsx` 覆盖 read-only controller、`BROWSER_CONTROL_DISABLED` 和 pending interaction 五种 kind。
+- [x] Rust：`tests/code_ui_scenarios.rs` 已补 `browser_write_appends_redacted_control_audit`，覆盖 browser lease 的 interaction/respond、message submit、turn cancel 审计日志与 client id redaction；`/api/code/threads` invalid limit / clamp 场景已由 `tests/code_ui_remote_security_matrix.rs` + `tests/data/code_ui_remote/security_cases.json` 覆盖。
 - [x] 修复 SSE lag 可观测性：`BroadcastStream` 收到 `Lagged` 时不能静默丢弃；server 会发送一次完整 `session_updated` snapshot。
 
 **验收：**
@@ -137,17 +138,17 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- Workflow：把 `plans[].steps[].status`、`tasks[].status`、`toolCalls[].status`、`patchsets[].status` 映射到 phase strip；新增 `tasks[]` 单列；点击 step 展示 summary/details/metadata。
+- Workflow：`plans[].steps[].status` 与 `toolCalls[].status` 已映射到 phase strip / execution runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。后续仍需新增 `tasks[]` 单列，并把 patchsets / richer plan metadata 映射进详情页。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
-- Terminal：按 Sandbox / Tools / Agent tab 展示真实 tool/transcript/diagnostics；长 tool output 超过 200 KiB 截断并提供 load-more。
+- Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；diagnostics 映射仍需后续接入。
 - Sidebar：当前 thread + projection list 已有；后续新增 server-side `q=` 前先证明 client-side 50 条过滤不够。`New thread` 和 thread switch 仍引导 CLI，直到后端入口存在。
 - Settings：保持只读；任何可修改项必须先有后端 endpoint 和权限模型。
 
 **验收：**
 
 - 页面无 demo 文案；空态明确。
-- 长 transcript、长 diff、长 tool output 不阻塞主线程、不撑坏布局。
+- 长 transcript、长 diff、长 tool output 不阻塞主线程、不撑坏布局；chat pane 默认只渲染最新 transcript 窗口，单条超长消息按需展开。
 - capability flag 改变时对应控件立即禁用或只读。
 
 ### Phase E：CI、文档与发布门
@@ -156,8 +157,9 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- CI 增加 `pnpm --dir web lint`、`pnpm --dir web build`，并检查 `web/out/` 与 source 变更同步。
-- 增加 browser smoke：打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread title，发送消息后 snapshot 更新。
+- [x] CI 已有 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web lint`、`pnpm --dir web build` 专门 job；`web/pnpm-workspace.yaml` 允许 `msw`、`sharp`、`unrs-resolver` build scripts，避免 pnpm 11 `ERR_PNPM_IGNORED_BUILDS`。
+- 继续检查 `web/out/` 与 source 变更同步。
+- [x] 增加 browser smoke：`browser_static_app_loads_and_submit_updates_snapshot` 打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread 内容，发送 browser message 后 snapshot 更新。
 - [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
 - `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致。
 

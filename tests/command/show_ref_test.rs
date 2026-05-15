@@ -4,7 +4,9 @@
 
 use std::{fs, io::Write, process::Command};
 
-use libra::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
+use libra::internal::{
+    branch::Branch, config::ConfigKv, db::get_db_conn_instance, model::reference,
+};
 use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
@@ -112,6 +114,65 @@ async fn test_show_ref_json_lists_refs() {
             .iter()
             .any(|entry| entry["refname"] == "refs/heads/main"),
         "expected branch entry in JSON output"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_lists_remote_tracking_refs() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+    let head_hash = Head::current_commit().await.unwrap().to_string();
+    ConfigKv::set("remote.origin.url", "https://example.com/repo.git", false)
+        .await
+        .unwrap();
+    Branch::update_branch("refs/remotes/origin/main", &head_hash, Some("origin"))
+        .await
+        .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp.path())
+        .arg("show-ref")
+        .arg("--heads")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("refs/remotes/origin/main"),
+        "expected remote-tracking ref in output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&head_hash),
+        "expected remote-tracking commit hash in output, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_json_lists_remote_tracking_refs() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+    let head_hash = Head::current_commit().await.unwrap().to_string();
+    ConfigKv::set("remote.origin.url", "https://example.com/repo.git", false)
+        .await
+        .unwrap();
+    Branch::update_branch("refs/remotes/origin/main", &head_hash, Some("origin"))
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["show-ref", "--json", "--heads"], temp.path());
+    assert_cli_success(&output, "show-ref --json --heads should succeed");
+
+    let json = parse_json_stdout(&output);
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("entries should be an array");
+    assert!(
+        entries.iter().any(|entry| {
+            entry["refname"] == "refs/remotes/origin/main" && entry["hash"] == head_hash
+        }),
+        "expected remote-tracking entry in JSON output: {json}",
     );
 }
 

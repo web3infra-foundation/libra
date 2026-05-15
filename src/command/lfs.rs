@@ -10,15 +10,16 @@ use std::{
 use clap::Subcommand;
 use git_internal::internal::index::Index;
 use reqwest::StatusCode;
+use serde::Serialize;
 
 use crate::{
     command::status,
     internal::{head::Head, protocol::lfs_client::LFSClient},
-    lfs_structs::LockListQuery,
+    lfs_structs::{Lock, LockListQuery},
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
         lfs,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path,
         path_ext::PathExt,
         util,
@@ -68,7 +69,53 @@ pub enum LfsCmds {
     },
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+struct LfsOutput {
+    action: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    patterns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    locks: Vec<Lock>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<LfsFileOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refspec: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    name_only: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    show_size: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LfsFileOutput {
+    path: String,
+    oid: String,
+    marker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_size: Option<String>,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
+    execute_safe(cmd, &OutputConfig::default()).await
+}
+
+pub async fn execute_safe(cmd: LfsCmds, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let result = run_lfs(cmd).await?;
+    render_lfs_output(&result, output)
+}
+
+async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
     // TODO: attributes file should be created in current dir, NOT root dir
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
@@ -77,27 +124,36 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
             match pattern {
                 Some(pattern) => {
                     let pattern = convert_patterns_to_workdir(pattern); //
-                    add_lfs_patterns(&attr_path, pattern).map_err(|e| {
+                    let patterns = add_lfs_patterns(&attr_path, pattern).map_err(|e| {
                         CliError::io(format!("failed to update '{attr_path}': {e}"))
                     })?;
+                    Ok(LfsOutput {
+                        action: "track".to_string(),
+                        patterns,
+                        ..LfsOutput::default()
+                    })
                 }
                 None => {
                     let lfs_patterns = lfs::extract_lfs_patterns(&attr_path)
                         .map_err(|e| CliError::io(format!("failed to read '{attr_path}': {e}")))?;
-                    if !lfs_patterns.is_empty() {
-                        println!("Listing tracked patterns");
-                        for p in lfs_patterns {
-                            println!("    {} ({})", p, util::ATTRIBUTES); // '\t' seems to be 8 spaces, :(
-                        }
-                    }
+                    Ok(LfsOutput {
+                        action: "track-list".to_string(),
+                        patterns: lfs_patterns,
+                        ..LfsOutput::default()
+                    })
                 }
             }
         }
         LfsCmds::Untrack { path } => {
             // only remove totally same pattern with path ?
             let path = convert_patterns_to_workdir(path); //
-            untrack_lfs_patterns(&attr_path, path)
+            let patterns = untrack_lfs_patterns(&attr_path, path)
                 .map_err(|e| CliError::io(format!("failed to update '{attr_path}': {e}")))?;
+            Ok(LfsOutput {
+                action: "untrack".to_string(),
+                patterns,
+                ..LfsOutput::default()
+            })
         }
         LfsCmds::Locks { id, path, limit } => {
             let refspec = current_refspec_or_err().await?;
@@ -107,7 +163,7 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 path: path.unwrap_or_default(),
                 limit: limit.map(|l| l.to_string()).unwrap_or_default(),
                 cursor: "".to_string(),
-                refspec,
+                refspec: refspec.clone(),
             };
             let locks = LFSClient::get()
                 .await
@@ -118,17 +174,12 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 .get_locks(query)
                 .await
                 .locks;
-            if !locks.is_empty() {
-                let max_path_len = locks.iter().map(|l| l.path.len()).max().unwrap();
-                for lock in locks {
-                    println!(
-                        "{:<path_width$}\tID:{}",
-                        lock.path,
-                        lock.id,
-                        path_width = max_path_len
-                    );
-                }
-            }
+            Ok(LfsOutput {
+                action: "locks".to_string(),
+                locks,
+                refspec: Some(refspec),
+                ..LfsOutput::default()
+            })
         }
         LfsCmds::Lock { path } => {
             // Only check existence
@@ -148,9 +199,7 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 })?
                 .lock(path.clone(), refspec.clone())
                 .await;
-            if code.is_success() {
-                println!("Locked {path}");
-            } else if code == StatusCode::FORBIDDEN {
+            if code == StatusCode::FORBIDDEN {
                 return Err(
                     CliError::fatal("You must have push access to create a lock")
                         .with_stable_code(StableErrorCode::AuthPermissionDenied),
@@ -158,13 +207,19 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
             } else if code == StatusCode::CONFLICT {
                 return Err(CliError::conflict("lock already exists")
                     .with_stable_code(StableErrorCode::ConflictOperationBlocked));
-            } else {
+            } else if !code.is_success() {
                 return Err(CliError::network(format!(
                     "LFS lock failed with status {}",
                     code.as_u16()
                 ))
                 .with_detail("status", code.as_u16()));
             }
+            Ok(LfsOutput {
+                action: "lock".to_string(),
+                path: Some(path),
+                refspec: Some(refspec),
+                ..LfsOutput::default()
+            })
         }
         LfsCmds::Unlock { path, force, id } => {
             if !force {
@@ -214,18 +269,23 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 })?
                 .unlock(id.clone(), refspec.clone(), force)
                 .await;
-            if code.is_success() {
-                println!("Unlocked {path}");
-            } else if code == StatusCode::FORBIDDEN {
+            if code == StatusCode::FORBIDDEN {
                 return Err(CliError::fatal("You must have push access to unlock")
                     .with_stable_code(StableErrorCode::AuthPermissionDenied));
-            } else {
+            } else if !code.is_success() {
                 return Err(CliError::network(format!(
                     "LFS unlock failed with status {}",
                     code.as_u16()
                 ))
                 .with_detail("status", code.as_u16()));
             }
+            Ok(LfsOutput {
+                action: "unlock".to_string(),
+                path: Some(path),
+                id: Some(id),
+                refspec: Some(refspec),
+                ..LfsOutput::default()
+            })
         }
         LfsCmds::LsFiles {
             long,
@@ -237,6 +297,7 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                 .map_err(|e| CliError::io(format!("failed to load index: {e}")))?;
             let entries = index.tracked_entries(0);
             let storage = util::objects_storage();
+            let mut files = Vec::new();
             for entry in entries {
                 let path_abs = util::workdir_to_absolute(&entry.name);
                 if lfs::is_lfs_tracked(&path_abs) {
@@ -253,29 +314,98 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
                             "*"
                         };
                         let oid = if long { oid } else { oid[..10].to_owned() };
-                        let tail = if size {
-                            let byte = util::auto_unit_bytes(lfs_size);
-                            format!(" ({byte:.2})")
+                        let (size_value, display_size) = if size {
+                            let display = util::auto_unit_bytes(lfs_size);
+                            (Some(lfs_size), Some(format!(" ({display:.2})")))
                         } else {
-                            "".to_string()
+                            (None, None)
                         };
-                        if name_only {
-                            println!("{}{}", entry.name, tail);
-                        } else {
-                            println!("{} {} {}{}", oid, _type, entry.name, tail);
-                        }
+                        files.push(LfsFileOutput {
+                            path: entry.name.clone(),
+                            oid,
+                            marker: _type.to_string(),
+                            size: size_value,
+                            display_size,
+                        });
                     }
                 }
             }
+            Ok(LfsOutput {
+                action: "ls-files".to_string(),
+                files,
+                name_only,
+                show_size: size,
+                ..LfsOutput::default()
+            })
         }
+    }
+}
+
+fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("lfs", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    match result.action.as_str() {
+        "track" => {
+            for pattern in &result.patterns {
+                println!("Tracking \"{pattern}\"");
+            }
+        }
+        "track-list" if !result.patterns.is_empty() => {
+            println!("Listing tracked patterns");
+            for pattern in &result.patterns {
+                println!("    {} ({})", pattern, util::ATTRIBUTES);
+            }
+        }
+        "untrack" => {
+            for pattern in &result.patterns {
+                println!("Untracking \"{pattern}\"");
+            }
+        }
+        "locks" => {
+            let max_path_len = result
+                .locks
+                .iter()
+                .map(|lock| lock.path.len())
+                .max()
+                .unwrap_or(0);
+            for lock in &result.locks {
+                println!(
+                    "{:<path_width$}\tID:{}",
+                    lock.path,
+                    lock.id,
+                    path_width = max_path_len
+                );
+            }
+        }
+        "lock" => {
+            if let Some(path) = &result.path {
+                println!("Locked {path}");
+            }
+        }
+        "unlock" => {
+            if let Some(path) = &result.path {
+                println!("Unlocked {path}");
+            }
+        }
+        "ls-files" => {
+            for file in &result.files {
+                let tail = file.display_size.as_deref().unwrap_or("");
+                if result.name_only {
+                    println!("{}{}", file.path, tail);
+                } else {
+                    println!("{} {} {}{}", file.oid, file.marker, file.path, tail);
+                }
+            }
+        }
+        _ => {}
     }
 
     Ok(())
-}
-
-pub async fn execute_safe(cmd: LfsCmds, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute(cmd).await
 }
 
 pub(crate) async fn current_refspec() -> Option<String> {
@@ -302,7 +432,7 @@ fn convert_patterns_to_workdir(patterns: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()> {
+fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Vec<String>> {
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -322,11 +452,12 @@ fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()> {
     }
 
     let lfs_patterns = lfs::extract_lfs_patterns(file_path)?;
+    let mut added = Vec::new();
     for pattern in patterns {
         if lfs_patterns.contains(&pattern) {
             continue;
         }
-        println!("Tracking \"{pattern}\"");
+        added.push(pattern.clone());
         let pattern = format!(
             "{} filter=lfs diff=lfs merge=lfs -text\n",
             pattern.replace(" ", r"\ ")
@@ -334,17 +465,18 @@ fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()> {
         file.write_all(pattern.as_bytes())?;
     }
 
-    Ok(())
+    Ok(added)
 }
 
-fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()> {
+fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Vec<String>> {
     if !Path::new(file_path).exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
     let mut lines: Vec<String> = Vec::new();
+    let mut removed = Vec::new();
     for line in reader.lines() {
         let line = line?;
         let mut matched_pattern = None;
@@ -357,7 +489,7 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()
             }
         }
         match matched_pattern {
-            Some(pattern) => println!("Untracking \"{pattern}\""),
+            Some(pattern) => removed.push(pattern),
             None => lines.push(line),
         }
     }
@@ -373,5 +505,5 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<()
         file.write_all(b"\n")?;
     }
 
-    Ok(())
+    Ok(removed)
 }

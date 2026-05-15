@@ -39,9 +39,9 @@
 
 后续维护项：
 
-- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 为旧调用点和旧测试保留 `Vec` / `Option` / `()` wrapper；这是兼容债，后续继续迁移到 `*_result` API。
-- **生产调用点继续迁移到 fallible API**：v0.17.148 已把 `stash branch` 的 branch-name 占用检查迁到 `exists_result()`，避免损坏 branch row 被当作缺失并覆盖；`bisect reset` 恢复原分支时已迁到 `find_branch_result()`，存储损坏会显式返回 `LBR-REPO-002`，不再静默 detached fallback。
-- **少量旧调用点仍可继续迁移到 fallible API**：非第二批范围内的旧命令、工具模块和测试 helper 可继续把分支查询失败从 best-effort 迁移到显式传播。
+- **生产调用点已迁移到 fallible API 并加回归守卫**：v0.17.148 已把 `stash branch` 的 branch-name 占用检查迁到 `exists_result()`，`bisect reset` 恢复原分支时已迁到 `find_branch_result()`；`tests/compat/branch_lossy_wrapper_guard.rs` 会扫描 `src/`，防止生产代码重新调用 `find_branch()` / `list_branches()` / `delete_branch()` / `exists()` 这类 lossy wrapper。
+- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` / `exists_with_conn()` 仍为旧测试和兼容调用保留 `Vec` / `Option` / `()` / `bool` wrapper；这是测试/兼容债，不再是生产路径风险。
+- **旧测试 helper 可继续迁移到 fallible API**：剩余 `tests/command/*` 里直接调用 lossy wrapper 的断言可逐步改成 `*_result`，最终删除兼容 wrapper。
 - **`DelegatedCli` 是兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；后续如需更细粒度 typed error 可再拆分
 
 ### 目标与非目标
@@ -50,7 +50,7 @@
 - `BranchError` typed error enum、显式 `StableErrorCode`、统一 `run_branch()` / `render_branch_output()`、create / force-delete 确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续把 `internal::branch` 的旧兼容 wrapper 调用点迁移到 `list/find/delete *_result` fallible API，逐步消除 best-effort 查询路径；v0.17.148 已覆盖 `stash branch` 和 `bisect reset` 两个生产路径。
+- 继续把旧测试 helper 的 `internal::branch` 兼容 wrapper 调用点迁移到 `list/find/delete/exists *_result` fallible API；生产路径已有 `tests/compat/branch_lossy_wrapper_guard.rs` 防回退。
 - 继续收口少量 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
 
 **本批非目标：**
@@ -131,7 +131,7 @@ pub enum BranchError {
 
 > **`NotFound` 携带 `similar` 列表**：与 `SwitchError::BranchNotFound` 模式一致，在错误构造点预计算 Levenshtein ≤ 2 近似分支名列表，`impl From<BranchError> for CliError` 只负责渲染 hint。Levenshtein 距离计算复用 switch 批次落地的共享工具函数（~10 行，位于 `src/utils/` 或 `src/command/mod.rs`）。
 
-> **关于底层 branch store 的后续收口**：当前命令层已经引入 `BranchError`，但 `src/internal/branch.rs` 仍保留 `list_branches_with_conn()`、`find_branch_with_conn()`、`delete_branch_with_conn()` 这组兼容 wrapper，旧调用点还可能走 best-effort 路径。后续应继续把这些旧调用方迁移到 `*_result` API，最终彻底消除 lossy 查询。
+> **关于底层 branch store 的后续收口**：当前命令层已经引入 `BranchError`，生产调用点已经迁到 `*_result` API，并由 `tests/compat/branch_lossy_wrapper_guard.rs` 防止回退。`src/internal/branch.rs` 仍保留 `list_branches_with_conn()`、`find_branch_with_conn()`、`delete_branch_with_conn()`、`exists_with_conn()` 这组兼容 wrapper，主要债务是旧测试 helper 仍在直接调用；后续可继续把这些测试迁移到 `*_result` API，最终删除 lossy wrapper。
 
 **`BranchError → CliError` 显式映射：**
 
@@ -158,9 +158,9 @@ pub enum BranchError {
 
 | 当前代码位置 | 当前 inline 错误 | 对应 BranchError 变体 |
 |-------------|-----------------|---------------------|
-| `internal::branch::list_branches_with_conn()` | `all(db).await.unwrap()` | `StorageQueryFailed` / `StoredReferenceCorrupt`（先改底层 API） |
-| `internal::branch::find_branch_with_conn()` | `eprintln!("fatal: failed to query branch ...")` + `None` | `StorageQueryFailed`（先改底层 API） |
-| `internal::branch::delete_branch_with_conn()` | `eprintln!("fatal: failed to delete branch ...")` | `DeleteFailed`（先改底层 API） |
+| `internal::branch::list_branches_result_with_conn()` | 已返回 `Result<Vec<Branch>, BranchStoreError>` | `StorageQueryFailed` / `StoredReferenceCorrupt` |
+| `internal::branch::find_branch_result_with_conn()` | 已返回 `Result<Option<Branch>, BranchStoreError>` | `StorageQueryFailed` / `StoredReferenceCorrupt` |
+| `internal::branch::delete_branch_result_with_conn()` | 已返回 `Result<(), BranchStoreError>` | `DeleteFailed` |
 | `create_branch_safe:244-247` | `CliError::fatal("... is not a valid branch name")` | `InvalidName` |
 | `create_branch_safe:249-254` | `CliError::fatal("... branch is locked")` | `Locked` |
 | `create_branch_safe:262` | `CliError::fatal("... already exists")` | `AlreadyExists` |
@@ -363,6 +363,7 @@ EXAMPLES:
 - `find_branch_with_conn()`：查询失败不再 `eprintln!()` 后伪装成 `None`
 - `delete_branch_with_conn()`：删除失败不再仅打印 fatal，而是返回可断言的错误
 - malformed stored commit/hash：不再 `unwrap()` panic，改为 `StoredReferenceCorrupt`
+- `tests/compat/branch_lossy_wrapper_guard.rs`：扫描 `src/`，禁止生产代码重新调用 lossy 兼容 wrapper
 
 #### `tests/command/branch_json_test.rs`（JSON schema 稳定性，可选拆分文件）
 
@@ -389,7 +390,7 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/internal/branch.rs` | **收口** | 把 `list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 从 `unwrap()` / `eprintln!()` 风格改为 `Result` 风格，暴露真实查询/删除失败与存储损坏，并扩展该文件内现有单元测试覆盖这些失败面 |
+| `src/internal/branch.rs` | **已收口，继续维护** | `*_result` API 已暴露真实查询/删除失败与存储损坏；lossy wrapper 仅作兼容层保留，生产调用由 `tests/compat/branch_lossy_wrapper_guard.rs` 防回退 |
 | `src/command/branch.rs` | **维护** | 保持已落地的 `BranchOutput` / `BranchError` / `run_branch()` / `render_branch_output()` / human 确认消息 / fuzzy suggestion / `--help` EXAMPLES 不回退；后续仅继续清理兼容边界与旧调用点 |
 | `tests/command/branch_test.rs` | **扩展** | 在现有错误码和 JSON create 回归基础上，补齐 `BranchError` 变体覆盖、create/force-delete 确认消息和 fuzzy suggestion |
 | `tests/command/branch_json_test.rs` | **可选拆分** | 若 `branch_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

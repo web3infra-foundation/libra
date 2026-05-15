@@ -116,6 +116,8 @@ function TermTab({
 
 function TermLineRow({ row }: { row: TerminalRow }) {
   const tone = rowTone(row.kind);
+  const [expanded, setExpanded] = useState(false);
+  const displayedText = expanded && row.fullText ? row.fullText : row.text;
   return (
     <div className="flex items-baseline gap-2 py-[1.5px]">
       <span
@@ -124,11 +126,22 @@ function TermLineRow({ row }: { row: TerminalRow }) {
       >
         {rowMark(row.kind)}
       </span>
-      <span
-        className="mono flex-1 whitespace-pre-wrap break-words text-[11.5px] leading-[1.55]"
-        style={{ color: tone.text }}
-      >
-        {row.text || " "}
+      <span className="flex-1">
+        <span
+          className="mono block whitespace-pre-wrap break-words text-[11.5px] leading-[1.55]"
+          style={{ color: tone.text }}
+        >
+          {displayedText || " "}
+        </span>
+        {row.fullText && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="mt-1 rounded-sm border border-rule bg-paper px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 hover:text-ink"
+          >
+            {expanded ? "Show less" : `Show full output (${row.hiddenChars?.toLocaleString()} chars hidden)`}
+          </button>
+        )}
       </span>
     </div>
   );

@@ -28,6 +28,15 @@ use crate::{
 };
 
 const ROOT_AFTER_HELP: &str = "\
+Command Groups:
+  Repository Setup        init, clone, config
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
+  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
+  Maintenance And Plumbing db, cat-file, rev-parse, rev-list, symbolic-ref, reflog, bisect
+
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
@@ -139,6 +148,11 @@ struct Cli {
     )]
     color: String,
 
+    /// Disable terminal colors.
+    /// Equivalent to --color=never and takes precedence over --color.
+    #[arg(long, global = true)]
+    no_color: bool,
+
     /// Suppress standard stdout output; keep warnings/errors on stderr.
     /// This includes primary command results, unlike some Git per-command
     /// `--quiet` flags that only suppress informational chatter.
@@ -172,25 +186,15 @@ enum Commands {
     // Each variant of the enum represents a subcommand.
     // The about attribute provides a brief description of the subcommand.
     // The arguments of the subcommand are defined in the command module.
-
-    // Init and Clone are the only commands that can be executed without a repository
     #[command(about = "Initialize a new repository")]
     Init(command::init::InitArgs),
     #[command(about = "Clone a repository into a new directory")]
     Clone(command::clone::CloneArgs),
-    #[command(about = "Start Libra Code interactive TUI (with background web server)")]
-    Code(command::code::CodeArgs),
-    #[command(about = "Drive a local Libra Code TUI automation control session")]
-    CodeControl(command::code_control::CodeControlArgs),
-    #[command(about = "Manage AI automation rules and history")]
-    Automation(command::automation::AutomationArgs),
-    #[command(about = "Report AI provider/model usage")]
-    Usage(command::usage::UsageArgs),
-    #[command(about = "Inspect an AI thread version graph in a TUI")]
-    Graph(command::graph::GraphArgs),
-    #[command(about = "Inspect AI sandbox diagnostics")]
-    Sandbox(command::sandbox::SandboxArgs),
-    // The rest of the commands require a repository to be present
+    #[command(about = "Manage repository configurations", alias = "cfg")]
+    Config(command::config::ConfigArgs),
+
+    #[command(about = "Show the working tree status", alias = "st")]
+    Status(command::status::StatusArgs),
     #[command(about = "Add file contents to the index")]
     Add(command::add::AddArgs),
     #[command(
@@ -199,10 +203,10 @@ enum Commands {
         alias = "delete"
     )]
     Rm(command::remove::RemoveArgs),
+    #[command(about = "Move or rename a file, a directory, or a symlink")]
+    Mv(command::mv::MvArgs),
     #[command(about = "Restore working tree files", alias = "unstage")]
     Restore(command::restore::RestoreArgs),
-    #[command(about = "Show the working tree status", alias = "st")]
-    Status(command::status::StatusArgs),
     #[command(about = "Remove untracked files from the working tree")]
     Clean(command::clean::CleanArgs),
     #[command(
@@ -213,6 +217,13 @@ enum Commands {
     Stash(Stash),
     #[command(subcommand, about = "Large File Storage")]
     Lfs(command::lfs::LfsCmds),
+    #[command(
+        about = "Manage multiple working trees attached to this repository",
+        alias = "wt",
+        after_help = command::worktree::WORKTREE_EXAMPLES
+    )]
+    Worktree(command::worktree::WorktreeArgs),
+
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
     #[command(about = "Summarize 'git log' output", alias = "slog")]
@@ -225,31 +236,42 @@ enum Commands {
     LsRemote(command::ls_remote::LsRemoteArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
-    #[command(about = "List, create, or delete branches", alias = "br")]
-    Branch(command::branch::BranchArgs),
-    #[command(about = "Create a new tag")]
-    Tag(command::tag::TagArgs),
-    #[command(about = "Record changes to the repository", alias = "ci")]
-    Commit(command::commit::CommitArgs),
-    #[command(about = "Switch branches", alias = "sw")]
-    Switch(command::switch::SwitchArgs),
-    #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
-    Rebase(command::rebase::RebaseArgs),
-    #[command(about = "Merge changes")]
-    Merge(command::merge::MergeArgs),
-    #[command(about = "Reset current HEAD to specified state")]
-    Reset(command::reset::ResetArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
     RevParse(command::rev_parse::RevParseArgs),
     #[command(about = "List commit objects reachable from a revision")]
     RevList(command::rev_list::RevListArgs),
-    #[command(about = "Move or rename a file, a directory, or a symlink")]
-    Mv(command::mv::MvArgs),
+    #[command(about = "Show changes between commits, commit and working tree, etc")]
+    Diff(command::diff::DiffArgs),
+    #[command(about = "Search for patterns in tracked files")]
+    Grep(command::grep::GrepArgs),
+    #[command(about = "Show author and history of each line of a file")]
+    Blame(command::blame::BlameArgs),
     #[command(
         about = "Give an object a human readable name based on an available ref",
         alias = "desc"
     )]
     Describe(command::describe::DescribeArgs),
+    #[command(about = "Provide content, type or size info for repository objects")]
+    CatFile(command::cat_file::CatFileArgs),
+
+    #[command(about = "Record changes to the repository", alias = "ci")]
+    Commit(command::commit::CommitArgs),
+    #[command(about = "List, create, or delete branches", alias = "br")]
+    Branch(command::branch::BranchArgs),
+    #[command(about = "Switch branches", alias = "sw")]
+    Switch(command::switch::SwitchArgs),
+    #[command(
+        about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
+    )]
+    Checkout(command::checkout::CheckoutArgs),
+    #[command(about = "Create a new tag")]
+    Tag(command::tag::TagArgs),
+    #[command(about = "Merge changes")]
+    Merge(command::merge::MergeArgs),
+    #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
+    Rebase(command::rebase::RebaseArgs),
+    #[command(about = "Reset current HEAD to specified state")]
+    Reset(command::reset::ResetArgs),
     #[command(
         about = "Apply the changes introduced by some existing commits",
         alias = "cp"
@@ -271,57 +293,56 @@ enum Commands {
     Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
-    #[command(subcommand, about = "Manage set of tracked repositories")]
-    Remote(command::remote::RemoteCmds),
-    #[command(about = "Open the repository in the browser")]
-    Open(command::open::OpenArgs),
-    #[command(about = "Manage repository configurations", alias = "cfg")]
-    Config(command::config::ConfigArgs),
-    #[command(about = "Inspect and upgrade the repository database schema")]
-    Db(command::db::DbArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
-    #[command(
-        about = "Manage multiple working trees attached to this repository",
-        alias = "wt",
-        after_help = command::worktree::WORKTREE_EXAMPLES
-    )]
-    Worktree(command::worktree::WorktreeArgs),
-    #[command(about = "Cloud backup and restore operations (D1/R2)")]
-    Cloud(command::cloud::CloudArgs),
-
-    #[command(about = "Manage read-only Cloudflare Worker publishing")]
-    Publish(command::publish::PublishArgs),
-
-    // CEX-EntireIO: external-Agent capture surface.
-    #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
-    Agent(command::agent::AgentArgs),
-    #[command(
-        about = "Compatibility entry for hook configurations installed by `libra agent enable`",
-        hide = true
-    )]
-    Hooks(command::hooks::HooksArgs),
-
-    // other hidden commands
-    #[command(about = "Provide content, type or size info for repository objects")]
-    CatFile(command::cat_file::CatFileArgs),
-
-    #[command(
-        about = "Build pack index file for an existing packed archive",
-        hide = true
-    )]
-    IndexPack(command::index_pack::IndexPackArgs),
-
-    #[command(
-        about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
-    )]
-    Checkout(command::checkout::CheckoutArgs),
     #[command(
         subcommand,
         about = "Use binary search to find the commit that introduced a bug",
         after_help = command::bisect::BISECT_EXAMPLES
     )]
     Bisect(Bisect),
+
+    #[command(subcommand, about = "Manage set of tracked repositories")]
+    Remote(command::remote::RemoteCmds),
+    #[command(about = "Download objects and refs from another repository")]
+    Fetch(command::fetch::FetchArgs),
+    #[command(about = "Fetch from and integrate with another repository or a local branch")]
+    Pull(command::pull::PullArgs),
+    #[command(about = "Update remote refs along with associated objects")]
+    Push(command::push::PushArgs),
+    #[command(about = "Open the repository in the browser")]
+    Open(command::open::OpenArgs),
+    #[command(about = "Cloud backup and restore operations (D1/R2)")]
+    Cloud(command::cloud::CloudArgs),
+    #[command(about = "Manage read-only Cloudflare Worker publishing")]
+    Publish(command::publish::PublishArgs),
+
+    #[command(about = "Start Libra Code interactive TUI (with background web server)")]
+    Code(command::code::CodeArgs),
+    #[command(about = "Drive a local Libra Code TUI automation control session")]
+    CodeControl(command::code_control::CodeControlArgs),
+    #[command(about = "Manage AI automation rules and history")]
+    Automation(command::automation::AutomationArgs),
+    #[command(about = "Report AI provider/model usage")]
+    Usage(command::usage::UsageArgs),
+    #[command(about = "Inspect an AI thread version graph in a TUI")]
+    Graph(command::graph::GraphArgs),
+    #[command(about = "Inspect AI sandbox diagnostics")]
+    Sandbox(command::sandbox::SandboxArgs),
+    #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
+    Agent(command::agent::AgentArgs),
+    #[command(about = "Inspect and upgrade the repository database schema")]
+    Db(command::db::DbArgs),
+    #[command(
+        about = "Build pack index file for an existing packed archive",
+        hide = true
+    )]
+    IndexPack(command::index_pack::IndexPackArgs),
+    #[command(
+        about = "Compatibility entry for hook configurations installed by `libra agent enable`",
+        hide = true
+    )]
+    Hooks(command::hooks::HooksArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -945,11 +966,16 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
     }
     // Resolve global output flags into a single config before dispatching.
+    let color = if args.no_color {
+        "never"
+    } else {
+        args.color.as_str()
+    };
     let output = OutputConfig::resolve(
         args.json.as_deref(),
         args.machine,
         args.no_pager,
-        &args.color,
+        color,
         args.quiet,
         args.exit_code_on_warning,
         &args.progress,

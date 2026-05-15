@@ -76,7 +76,7 @@ batch document.
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. Full modernization (typed error / JSON / render split) pending |
+| checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. JSON/machine success output and render split supported; typed `CheckoutError` pending |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`

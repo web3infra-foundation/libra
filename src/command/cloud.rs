@@ -6,7 +6,7 @@
 //! - `libra cloud status` - Show sync status
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{BTreeMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::Arc,
@@ -18,6 +18,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Schema, Set,
     sea_query::Expr,
 };
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -32,8 +33,8 @@ use crate::{
     },
     utils::{
         d1_client::{AgentCheckpointRow, AgentSessionRow, D1Client, ObjectIndexRow},
-        error::{CliError, CliResult, emit_warning},
-        output::OutputConfig,
+        error::{CliError, CliResult, StableErrorCode, emit_warning},
+        output::{OutputConfig, emit_json_data},
         path,
         storage::{
             Storage, local::LocalStorage, publish_storage::PublishStorage, remote::RemoteStorage,
@@ -282,6 +283,33 @@ impl CloudSyncProgress for ConsoleCloudSyncProgress {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CloudStatusOutput {
+    repo_id: String,
+    total_objects: usize,
+    synced: usize,
+    pending: usize,
+    synced_percent: usize,
+    by_type: Vec<CloudStatusTypeOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unsynced_objects: Vec<CloudStatusObjectOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudStatusTypeOutput {
+    object_type: String,
+    total: usize,
+    synced: usize,
+    pending: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudStatusObjectOutput {
+    oid: String,
+    object_type: String,
+    size: i64,
+}
+
 /// Execute cloud command
 pub async fn execute(args: CloudArgs) -> CliResult<()> {
     match args.command {
@@ -299,9 +327,22 @@ pub async fn execute(args: CloudArgs) -> CliResult<()> {
     Ok(())
 }
 
-pub async fn execute_safe(args: CloudArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute(args).await
+    match args.command {
+        CloudCommand::Sync(sync_args) => execute_sync(sync_args)
+            .await
+            .map_err(|e| cloud_cli_error("sync", e))?,
+        CloudCommand::Restore(restore_args) => execute_restore(restore_args)
+            .await
+            .map_err(|e| cloud_cli_error("restore", e))?,
+        CloudCommand::Status(status_args) => {
+            let status = run_cloud_status(status_args).await?;
+            render_cloud_status_output(&status, output)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn cloud_cli_error(operation: &str, error: String) -> CliError {
@@ -824,6 +865,12 @@ async fn restore_worktree_to_head() -> Result<(), String> {
 
 /// Execute status command - shows sync status
 async fn execute_status(args: StatusArgs) -> Result<(), String> {
+    let status = run_cloud_status(args).await.map_err(|e| e.to_string())?;
+    render_cloud_status_human(&status);
+    Ok(())
+}
+
+async fn run_cloud_status(args: StatusArgs) -> CliResult<CloudStatusOutput> {
     // Get database connection
     let db_conn = db::get_db_conn_instance().await;
 
@@ -839,28 +886,16 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
         .filter(object_index::Column::RepoId.eq(&repo_id))
         .all(&db_conn)
         .await
-        .map_err(|e| format!("Database query failed: {}", e))?;
+        .map_err(|e| {
+            CliError::fatal(format!("failed to query cloud object index: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
 
     let synced_count = all_objects.iter().filter(|o| o.is_synced == 1).count();
     let unsynced_count = all_objects.len() - synced_count;
 
-    println!("Cloud Sync Status:");
-    println!("  Repo ID:       {}", repo_id);
-    println!("  Total objects: {}", all_objects.len());
-    println!(
-        "  Synced:        {} ({}%)",
-        synced_count,
-        if all_objects.is_empty() {
-            0
-        } else {
-            synced_count * 100 / all_objects.len()
-        }
-    );
-    println!("  Pending:       {}", unsynced_count);
-
     // Group by type
-    let mut by_type: std::collections::HashMap<String, (usize, usize)> =
-        std::collections::HashMap::new();
+    let mut by_type: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for obj in &all_objects {
         let entry = by_type.entry(obj.o_type.clone()).or_insert((0, 0));
         entry.0 += 1;
@@ -868,23 +903,87 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
             entry.1 += 1;
         }
     }
+    let by_type = by_type
+        .into_iter()
+        .map(|(object_type, (total, synced))| CloudStatusTypeOutput {
+            object_type,
+            total,
+            synced,
+            pending: total - synced,
+        })
+        .collect();
+    let unsynced_objects = if args.verbose {
+        all_objects
+            .iter()
+            .filter(|o| o.is_synced == 0)
+            .take(20)
+            .map(|obj| CloudStatusObjectOutput {
+                oid: obj.o_id.clone(),
+                object_type: obj.o_type.clone(),
+                size: obj.o_size,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(CloudStatusOutput {
+        repo_id,
+        total_objects: all_objects.len(),
+        synced: synced_count,
+        pending: unsynced_count,
+        synced_percent: if all_objects.is_empty() {
+            0
+        } else {
+            synced_count * 100 / all_objects.len()
+        },
+        by_type,
+        unsynced_objects,
+    })
+}
+
+fn render_cloud_status_output(status: &CloudStatusOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("cloud.status", status, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    render_cloud_status_human(status);
+    Ok(())
+}
+
+fn render_cloud_status_human(status: &CloudStatusOutput) {
+    println!("Cloud Sync Status:");
+    println!("  Repo ID:       {}", status.repo_id);
+    println!("  Total objects: {}", status.total_objects);
+    println!(
+        "  Synced:        {} ({}%)",
+        status.synced, status.synced_percent
+    );
+    println!("  Pending:       {}", status.pending);
 
     println!("\nBy object type:");
-    for (obj_type, (total, synced)) in &by_type {
-        println!("  {}: {}/{} synced", obj_type, synced, total);
+    for entry in &status.by_type {
+        println!(
+            "  {}: {}/{} synced",
+            entry.object_type, entry.synced, entry.total
+        );
     }
 
-    if args.verbose && !all_objects.is_empty() {
+    if !status.unsynced_objects.is_empty() {
         println!("\nUnsynced objects:");
-        for obj in all_objects.iter().filter(|o| o.is_synced == 0).take(20) {
-            println!("  {} ({}, {} bytes)", obj.o_id, obj.o_type, obj.o_size);
+        for obj in &status.unsynced_objects {
+            println!("  {} ({}, {} bytes)", obj.oid, obj.object_type, obj.size);
         }
-        if unsynced_count > 20 {
-            println!("  ... and {} more", unsynced_count - 20);
+        if status.pending > status.unsynced_objects.len() {
+            println!(
+                "  ... and {} more",
+                status.pending - status.unsynced_objects.len()
+            );
         }
     }
-
-    Ok(())
 }
 
 fn cloud_local_db_path() -> Result<PathBuf, String> {

@@ -26,7 +26,8 @@ export type ExecutionRun = {
   step: string;
   result: ExecutionRunResult;
   ago: string;
-  patch: string;
+  label: string;
+  details?: string;
 };
 
 export type EvidenceKind = "tool" | "frame" | "patch";

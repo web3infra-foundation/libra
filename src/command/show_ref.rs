@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::{
     internal::{
         branch::{Branch, BranchStoreError},
+        config::ConfigKv,
         head::Head,
         tag,
     },
@@ -141,7 +142,26 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
             });
         }
 
-        // TODO: collect remote-tracking branches
+        let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
+            CliError::fatal(format!("failed to list remotes: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        for remote in remotes {
+            let branches = Branch::list_branches_result(Some(&remote.name))
+                .await
+                .map_err(|error| {
+                    show_ref_branch_store_error(
+                        &format!("list remote-tracking branches for '{}'", remote.name),
+                        error,
+                    )
+                })?;
+            for branch in branches {
+                entries.push(ShowRefEntry {
+                    hash: branch.commit.to_string(),
+                    refname: remote_refname(&remote.name, &branch.name),
+                });
+            }
+        }
     }
 
     // Collect tags: refs/tags/<name>
@@ -179,6 +199,14 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     }
 
     Ok(entries)
+}
+
+fn remote_refname(remote: &str, branch_name: &str) -> String {
+    if branch_name.starts_with("refs/remotes/") {
+        branch_name.to_string()
+    } else {
+        format!("refs/remotes/{remote}/{branch_name}")
+    }
 }
 
 #[cfg(test)]

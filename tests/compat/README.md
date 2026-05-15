@@ -32,6 +32,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
 | `matrix_alignment.rs` | C2 | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
+| `branch_lossy_wrapper_guard.rs` | branch follow-up | `src/` production code must use branch `*_result` APIs instead of lossy compatibility wrappers |
 
 ## Authoring guidelines
 

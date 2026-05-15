@@ -48,6 +48,7 @@ libra checkout                         # Show the current branch
 libra checkout main                    # Switch to an existing local branch
 libra checkout feature-x               # Switch to another branch
 libra checkout -b feature-x            # Create and switch to a new branch
+libra --json checkout main             # Structured compatibility output
 libra checkout --quiet main            # Switch without informational stdout
 ```
 
@@ -100,14 +101,42 @@ Already on main
 
 ## Structured Output (JSON)
 
-`checkout` does not support `--json` / `--machine` output. This is intentional — as a compatibility shim, it delegates to `switch` and `restore` internally without its own output model.
+`checkout` supports `--json` and `--machine` for the branch-compatibility surface. `--json` emits a normal command envelope; `--machine` emits the same envelope as one NDJSON line. Nested `restore`, branch-upstream, and pull output is suppressed so stdout contains only the checkout result.
 
-For structured output, use the preferred commands directly:
+Example for switching to an existing local branch:
 
-```bash
-libra switch --json main        # branch switching with JSON output
-libra restore --json -- file    # file restoration with JSON output
+```json
+{
+  "ok": true,
+  "command": "checkout",
+  "data": {
+    "action": "switch",
+    "previous_branch": "main",
+    "previous_commit": "abc1234...",
+    "branch": "feature-x",
+    "commit": "def5678...",
+    "short_commit": "def5678a",
+    "switched": true,
+    "created": false,
+    "pulled": false,
+    "already_on": false,
+    "detached": false,
+    "tracking": null
+  }
+}
 ```
+
+| Action | When emitted |
+|--------|--------------|
+| `show-current` | `libra checkout` with no branch |
+| `already-on` | Target branch is already checked out |
+| `switch` | Existing local branch checkout |
+| `create` | `checkout -b <branch>` |
+| `track` | Local branch is created from `origin/<branch>` and pull is attempted |
+
+Remote auto-track output sets `created: true`, `pulled: true`, and includes `tracking.remote` plus `tracking.remote_branch`.
+
+For richer branch workflows, `libra switch --json ...` remains the preferred structured command. File restoration still belongs to `libra restore --json ...`.
 
 ## Design Rationale
 
@@ -125,8 +154,9 @@ without surprise, but the help banner and the command index both steer
 day-to-day usage to `switch` (branch navigation) and `restore` (file
 restoration). `switch` and `restore` provide:
 
-- Typed error enums with stable error codes (checkout still uses raw `CliError`
-  pending its own modernization batch)
+- Typed command-specific error enums (checkout now has stable codes for its
+  compatibility-layer failures but does not yet have a dedicated
+  `CheckoutError` enum)
 - Structured JSON output (`--json` / `--machine`)
 - Fuzzy branch suggestions on typos
 - Explicit semantics (no ambiguity between "switch branch" and "restore file")
@@ -149,19 +179,22 @@ When `libra checkout feature` finds `origin/feature` but no local `feature` bran
 | Auto-track remote | `git checkout feature` (creates tracking) | `libra checkout feature` (creates tracking + pulls) | N/A |
 | Restore files | `git checkout -- file` | Not supported (use `libra restore`) | `jj restore` |
 | Detach HEAD | `git checkout <commit>` | Not supported (use `libra switch --detach`) | `jj edit <rev>` |
-| Structured output | No | Not yet (planned) | `--template` |
+| Structured output | No | `--json` / `--machine` for branch compatibility actions | `--template` |
 
 ## Error Handling
 
-`checkout` does not yet have its own typed error enum. Errors are surfaced
-via `CliError` directly. Key failure scenarios:
+`checkout` does not yet have its own typed `CheckoutError` enum. Errors are
+surfaced via `CliError` directly, with stable codes for checkout-owned
+compatibility failures and delegated codes from `switch`, `branch`, `restore`,
+or `pull` where those commands own the failure.
 
-| Scenario | Message | Exit |
-|----------|---------|------|
-| Dirty worktree (unstaged or staged changes) | "local changes would be overwritten by checkout" | 128 |
-| Internal branch blocked | "checking out '{name}' branch is not allowed" | 128 |
-| Create internal branch blocked | "creating/switching to '{name}' branch is not allowed" | 128 |
-| Branch not found (no remote match) | "path specification '{name}' did not match any files known to libra" | 128 |
-| Current branch (no-op) | Prints "Already on {branch}" and succeeds | 0 |
-| Branch storage query failure | "failed to resolve checkout target: {detail}" | 128 |
-| Corrupt branch reference | "failed to resolve checkout target: {detail}" | 128 |
+| Scenario | Stable code | Message | Exit |
+|----------|-------------|---------|------|
+| Dirty worktree (unstaged or staged changes) | `LBR-REPO-003` | "local changes would be overwritten by checkout" | 128 |
+| Untracked file would be overwritten | `LBR-CONFLICT-002` | "local changes would be overwritten by checkout" | 128 |
+| Internal branch blocked | `LBR-CLI-003` | "checking out '{name}' branch is not allowed" | 128 |
+| Create internal branch blocked | `LBR-CLI-003` | "creating/switching to '{name}' branch is not allowed" | 128 |
+| Branch not found (no remote match) | `LBR-CLI-003` | "path specification '{name}' did not match any files known to libra" | 128 |
+| Current branch (no-op) | N/A | Prints "Already on {branch}" and succeeds | 0 |
+| Branch storage query failure | `LBR-IO-001` | "failed to resolve checkout target: {detail}" | 128 |
+| Corrupt branch reference | `LBR-REPO-002` | "failed to resolve checkout target: {detail}" | 128 |

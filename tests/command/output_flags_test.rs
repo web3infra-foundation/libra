@@ -801,10 +801,16 @@ fn machine_checkout_existing_branch_suppresses_human_output() {
     assert_cli_success(&output, "machine checkout foo");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.trim().is_empty(),
-        "machine checkout should not emit human text, got: {stdout}"
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "machine checkout should emit one JSON line, got: {stdout}"
     );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON output, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["command"], "checkout");
+    assert_eq!(parsed["data"]["action"], "switch");
+    assert_eq!(parsed["data"]["branch"], "foo");
 }
 
 #[test]
@@ -1027,6 +1033,24 @@ fn color_never_has_no_ansi_escapes() {
     );
 }
 
+// ─── --no-color ──────────────────────────────────────────────────────────────
+
+#[test]
+fn no_color_flag_disables_colors() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["--color=always", "--no-color", "status"], &repo);
+    assert_cli_success(&output, "status --no-color");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "expected no ANSI escapes with --no-color, got: {stdout}"
+    );
+}
+
 // ─── NO_COLOR env ────────────────────────────────────────────────────────────
 
 #[test]
@@ -1160,6 +1184,10 @@ fn help_shows_global_flags() {
         "help should mention --machine"
     );
     assert!(stdout.contains("--color"), "help should mention --color");
+    assert!(
+        stdout.contains("--no-color"),
+        "help should mention --no-color"
+    );
     assert!(stdout.contains("--quiet"), "help should mention --quiet");
     assert!(
         stdout.contains("--no-pager"),
@@ -1173,6 +1201,20 @@ fn help_shows_global_flags() {
         stdout.contains("--exit-code-on-warning"),
         "help should mention --exit-code-on-warning"
     );
+    for heading in [
+        "Repository Setup",
+        "Working Tree",
+        "History Inspection",
+        "Commit And Branching",
+        "Remote And Cloud",
+        "AI And Automation",
+        "Maintenance And Plumbing",
+    ] {
+        assert!(
+            stdout.contains(heading),
+            "help should group subcommands under {heading}: {stdout}"
+        );
+    }
 }
 
 // ─── subcommand --help shows inherited flags ─────────────────────────────────

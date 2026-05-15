@@ -33,7 +33,8 @@ pub enum JsonFormat {
     Ndjson,
 }
 
-/// Terminal color policy resolved from `--color` and `NO_COLOR`.
+/// Terminal color policy resolved from `--color`, `--no-color`, `NO_COLOR`,
+/// and `TERM=dumb`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorChoice {
     /// Let the `colored` crate auto-detect based on TTY.
@@ -118,6 +119,7 @@ impl OutputConfig {
     ///
     /// The `color_raw` and `progress_raw` parameters are the string values
     /// of `--color` and `--progress` (e.g. `"auto"`, `"never"`, `"json"`).
+    /// `--no-color` is normalized by the CLI parser to `color_raw = "never"`.
     #[allow(clippy::fn_params_excessive_bools)]
     pub fn resolve(
         json: Option<&str>,
@@ -142,8 +144,8 @@ impl OutputConfig {
         let quiet = quiet || machine;
         let pager = !no_pager && !machine && json_format.is_none();
 
-        // Color: --machine forces never; otherwise parse the flag.
-        // NO_COLOR env (any value) forces Never unless --color=always was explicit.
+        // Color: --machine and --no-color force never; otherwise parse the flag.
+        // NO_COLOR or TERM=dumb force Never only while color remains auto.
         let explicit_color = if machine {
             ColorChoice::Never
         } else {
@@ -154,7 +156,9 @@ impl OutputConfig {
             }
         };
 
-        let color = if explicit_color == ColorChoice::Auto && env::var_os("NO_COLOR").is_some() {
+        let auto_color_disabled =
+            env::var_os("NO_COLOR").is_some() || matches!(env::var("TERM").as_deref(), Ok("dumb"));
+        let color = if explicit_color == ColorChoice::Auto && auto_color_disabled {
             ColorChoice::Never
         } else {
             explicit_color
@@ -202,6 +206,7 @@ impl OutputConfig {
         let mut json: Option<String> = None;
         let mut machine = false;
         let mut no_pager = false;
+        let mut no_color = false;
         let mut color = String::from("auto");
         let mut quiet = false;
         let mut exit_code_on_warning = false;
@@ -225,6 +230,10 @@ impl OutputConfig {
                 progress = value.to_string();
                 continue;
             }
+            if arg == "--no-color" {
+                no_color = true;
+                continue;
+            }
             if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
                 let short_flags = &arg[1..];
                 if short_flags.chars().all(|flag| matches!(flag, 'J' | 'q')) {
@@ -243,6 +252,7 @@ impl OutputConfig {
                 "--json" | "-J" => json = Some(String::from("pretty")),
                 "--machine" => machine = true,
                 "--no-pager" => no_pager = true,
+                "--no-color" => no_color = true,
                 "--quiet" | "-q" => quiet = true,
                 "--exit-code-on-warning" => exit_code_on_warning = true,
                 "--color" => {
@@ -259,11 +269,12 @@ impl OutputConfig {
             }
         }
 
+        let color_raw = if no_color { "never" } else { &color };
         Self::resolve(
             json.as_deref(),
             machine,
             no_pager,
-            &color,
+            color_raw,
             quiet,
             exit_code_on_warning,
             &progress,
@@ -626,6 +637,18 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn resolve_term_dumb_disables_auto_color() {
+        let _term = crate::utils::test::ScopedEnvVar::set("TERM", "dumb");
+
+        let config = OutputConfig::resolve(None, false, false, "auto", false, false, "auto");
+        assert_eq!(config.color, ColorChoice::Never);
+
+        let explicit = OutputConfig::resolve(None, false, false, "always", false, false, "auto");
+        assert_eq!(explicit.color, ColorChoice::Always);
+    }
+
+    #[test]
     fn resolve_no_pager() {
         let config = OutputConfig::resolve(None, false, true, "auto", false, false, "auto");
         assert!(!config.pager);
@@ -689,6 +712,20 @@ mod tests {
 
         assert_eq!(config.json_format, Some(JsonFormat::Pretty));
         assert!(config.quiet);
+    }
+
+    #[test]
+    fn resolve_from_argv_no_color_sets_never() {
+        let argv = vec![
+            "libra".to_string(),
+            "--color=always".to_string(),
+            "--no-color".to_string(),
+            "status".to_string(),
+        ];
+
+        let config = OutputConfig::resolve_from_argv(&argv);
+
+        assert_eq!(config.color, ColorChoice::Never);
     }
 
     #[test]

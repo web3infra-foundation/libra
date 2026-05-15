@@ -181,18 +181,35 @@ fn default_control_paths_restart_after_stale_pid_takeover() -> Result<()> {
 }
 
 /// Browser-controller end-to-end smoke. Spawns `libra code` with
-/// `--browser-control loopback`, attaches as a browser (no automation
-/// control token), submits a chat through the browser write surface, and
-/// confirms the snapshot reflects the browser ownership + transcript turn.
+/// `--browser-control loopback`, verifies the loopback browser receives the
+/// embedded Web app rather than stale mock content, attaches as a browser (no
+/// automation control token), submits a chat through the browser write surface,
+/// and confirms the snapshot reflects the browser ownership + transcript turn.
 /// Ends with a clean detach.
 #[cfg(feature = "test-provider")]
 #[test]
 #[serial]
-fn browser_controller_attach_submit_detach_roundtrip() -> Result<()> {
+fn browser_static_app_loads_and_submit_updates_snapshot() -> Result<()> {
     let mut session = CodeSession::spawn(
-        CodeSessionOptions::new("browser-roundtrip", fixture("basic_chat"))
+        CodeSessionOptions::new("browser-static-submit", fixture("basic_chat"))
             .with_browser_control_loopback(),
     )?;
+
+    let (page_status, page_html) = session.get_web_path("/")?;
+    assert!(
+        page_status.is_success(),
+        "loopback Web app must load, got {page_status}",
+    );
+    assert!(
+        page_html.contains("Libra — Agent Workspace"),
+        "loopback Web app should serve the embedded Next.js page",
+    );
+    for stale_text in ["src/lib/query.ts", "useMutation", "optimistic mutation"] {
+        assert!(
+            !page_html.contains(stale_text),
+            "loopback Web app should not contain stale mock text '{stale_text}'",
+        );
+    }
 
     let token = session.attach_browser("scenario-browser-roundtrip")?;
     session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
@@ -425,6 +442,65 @@ fn browser_unknown_interaction_id_is_rejected_without_state_change() -> Result<(
     let after = session.snapshot()?;
     assert_eq!(status(&before), status(&after));
     assert_eq!(controller_kind(&after), Some("browser"));
+
+    session.shutdown()
+}
+
+/// Browser write paths must leave an audit trail without exposing the raw
+/// browser `clientId`. This covers the browser-only write surface called out
+/// in the web improvement plan: interaction responses, message submit, and
+/// turn cancel all use the lease token without an automation control token.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_write_appends_redacted_control_audit() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-write-audit", fixture("delayed_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-write token:super-secret-149")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let (interaction_status, interaction_body) =
+        session.browser_respond_interaction(&token, "missing-interaction")?;
+    assert_eq!(interaction_status, StatusCode::CONFLICT);
+    assert_eq!(
+        error_code(&interaction_body),
+        Some("INTERACTION_NOT_ACTIVE")
+    );
+
+    let (submit_status, submit_body) = session.browser_submit_message(&token, "/chat slow")?;
+    assert!(
+        submit_status.is_success(),
+        "browser submit must succeed, got {submit_status}: {submit_body}",
+    );
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status(snapshot) == Some("thinking")
+    })?;
+
+    let (cancel_status, cancel_body) = session.browser_cancel_turn(&token)?;
+    assert!(
+        cancel_status.is_success(),
+        "browser cancel must succeed, got {cancel_status}: {cancel_body}",
+    );
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status(snapshot) == Some("idle")
+    })?;
+
+    let log = session.libra_log_text()?;
+    for action in ["interaction.respond", "message.submit", "turn.cancel"] {
+        assert!(
+            log.contains(action),
+            "browser write audit log must contain '{action}'; full log:\n{log}",
+        );
+    }
+    assert!(
+        !log.contains("super-secret-149"),
+        "browser write audit log leaked the raw client id secret suffix:\n{log}",
+    );
 
     session.shutdown()
 }
