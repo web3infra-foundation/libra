@@ -484,6 +484,20 @@ enum RebaseError {
     StateCheck(String),
     #[error("failed to load rebase state: {0}")]
     StateLoad(String),
+    #[error("not on a branch or in detached HEAD state, cannot rebase")]
+    NotOnBranch,
+    #[error("current branch '{branch}' has no commits")]
+    BranchHasNoCommits { branch: String },
+    #[error("failed to resolve upstream '{upstream}': {detail}")]
+    UpstreamResolve { upstream: String, detail: String },
+    #[error("no common ancestor found")]
+    NoCommonAncestor,
+    #[error("failed to determine working tree status: {0}")]
+    WorktreeStatus(String),
+    #[error("{detail}, can't {action}")]
+    WorktreeDirty { action: String, detail: String },
+    #[error("untracked working tree file would be overwritten by rebase: {path}")]
+    UntrackedOverwrite { path: String },
     #[error("you must resolve all conflicts before continuing")]
     UnresolvedConflicts,
     #[error("no commit to skip")]
@@ -529,6 +543,23 @@ impl From<RebaseError> for CliError {
             RebaseError::StateCheck(..) | RebaseError::StateLoad(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            RebaseError::NotOnBranch | RebaseError::BranchHasNoCommits { .. } => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            }
+            RebaseError::UpstreamResolve { .. } | RebaseError::NoCommonAncestor => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+            RebaseError::WorktreeStatus(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            RebaseError::WorktreeDirty { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("commit or stash your changes before rebasing."),
+            RebaseError::UntrackedOverwrite { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("move or remove it before you rebase."),
             RebaseError::UnresolvedConflicts => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::ConflictUnresolved)
                 .with_hint("use 'libra add <file>' to mark conflicts as resolved.")
@@ -690,6 +721,12 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
         let result = run_rebase_skip().await.map_err(CliError::from)?;
         return render_rebase_output(&result, output);
     }
+    if output.is_json()
+        && let Some(upstream) = args.upstream.as_deref()
+    {
+        let result = run_rebase_start(upstream).await.map_err(CliError::from)?;
+        return render_rebase_output(&result, output);
+    }
     execute(args).await;
     Ok(())
 }
@@ -810,6 +847,210 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         .await
         .map_err(CliError::from_legacy_string)?;
     Ok(())
+}
+
+async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
+    let db = get_db_conn_instance().await;
+
+    let current_branch_name = match Head::current().await {
+        Head::Branch(name) if !name.is_empty() => name,
+        _ => return Err(RebaseError::NotOnBranch),
+    };
+
+    let head_to_rebase_id =
+        Head::current_commit()
+            .await
+            .ok_or_else(|| RebaseError::BranchHasNoCommits {
+                branch: current_branch_name.clone(),
+            })?;
+
+    let upstream_id = resolve_branch_or_commit(upstream).await.map_err(|detail| {
+        RebaseError::UpstreamResolve {
+            upstream: upstream.to_string(),
+            detail,
+        }
+    })?;
+
+    let base_id = find_merge_base(&head_to_rebase_id, &upstream_id)
+        .await
+        .map_err(|detail| RebaseError::CommitLoad {
+            commit: head_to_rebase_id.to_string(),
+            detail,
+        })?
+        .ok_or(RebaseError::NoCommonAncestor)?;
+
+    if base_id == head_to_rebase_id {
+        let upstream_commit: Commit =
+            load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
+                commit: upstream_id.to_string(),
+                detail: e.to_string(),
+            })?;
+        let upstream_tree: Tree =
+            load_object(&upstream_commit.tree_id).map_err(|e| RebaseError::OriginalTreeLoad {
+                tree: upstream_commit.tree_id.to_string(),
+                detail: e.to_string(),
+            })?;
+
+        let index_file = path::index();
+        let current_index = git_internal::internal::index::Index::load(&index_file)
+            .map_err(|e| RebaseError::IndexLoad(e.to_string()))?;
+        let mut index = git_internal::internal::index::Index::new();
+        rebuild_index_from_tree(&upstream_tree, &mut index, "")
+            .map_err(RebaseError::IndexRebuild)?;
+        rebase_worktree_guard_structured(&index, "fast-forward rebase").await?;
+
+        let fast_forward_action = ReflogAction::Rebase {
+            state: "fast-forward".to_string(),
+            details: format!("moving {} to {}", current_branch_name, upstream),
+        };
+        let fast_forward_context = ReflogContext {
+            old_oid: head_to_rebase_id.to_string(),
+            new_oid: upstream_id.to_string(),
+            action: fast_forward_action,
+        };
+
+        let branch_name_cloned = current_branch_name.clone();
+        let upstream_id_str = upstream_id.to_string();
+        with_reflog(
+            fast_forward_context,
+            move |txn: &sea_orm::DatabaseTransaction| {
+                Box::pin(async move {
+                    Branch::update_branch_with_conn(
+                        txn,
+                        &branch_name_cloned,
+                        &upstream_id_str,
+                        None,
+                    )
+                    .await?;
+                    Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
+                    Ok(())
+                })
+            },
+            true,
+        )
+        .await
+        .map_err(|e| RebaseError::Finalize(format!("failed to fast-forward: {e}")))?;
+
+        index
+            .save(&index_file)
+            .map_err(|e| RebaseError::IndexSave(e.to_string()))?;
+        reset_workdir_tracked_only(&current_index, &index).map_err(RebaseError::WorkdirReset)?;
+
+        return Ok(RebaseOutput {
+            action: "start".to_string(),
+            status: "fast-forwarded".to_string(),
+            branch: current_branch_name,
+            commit: upstream_id.to_string(),
+            onto: Some(upstream_id.to_string()),
+            previous_commit: Some(head_to_rebase_id.to_string()),
+            restored: None,
+            applied_commits: Vec::new(),
+            skipped_commit: None,
+            skipped_subject: None,
+            remaining: Some(0),
+        });
+    }
+
+    if base_id == upstream_id {
+        return Ok(RebaseOutput {
+            action: "start".to_string(),
+            status: "already-up-to-date".to_string(),
+            branch: current_branch_name,
+            commit: head_to_rebase_id.to_string(),
+            onto: Some(upstream_id.to_string()),
+            previous_commit: Some(head_to_rebase_id.to_string()),
+            restored: None,
+            applied_commits: Vec::new(),
+            skipped_commit: None,
+            skipped_subject: None,
+            remaining: Some(0),
+        });
+    }
+
+    let commits_to_replay = collect_commits_to_replay(&base_id, &head_to_rebase_id)
+        .await
+        .map_err(|detail| RebaseError::CommitLoad {
+            commit: head_to_rebase_id.to_string(),
+            detail,
+        })?;
+    if commits_to_replay.is_empty() {
+        return Ok(RebaseOutput {
+            action: "start".to_string(),
+            status: "no-commits".to_string(),
+            branch: current_branch_name,
+            commit: head_to_rebase_id.to_string(),
+            onto: Some(upstream_id.to_string()),
+            previous_commit: Some(head_to_rebase_id.to_string()),
+            restored: None,
+            applied_commits: Vec::new(),
+            skipped_commit: None,
+            skipped_subject: None,
+            remaining: Some(0),
+        });
+    }
+
+    let upstream_commit: Commit =
+        load_object(&upstream_id).map_err(|e| RebaseError::CommitLoad {
+            commit: upstream_id.to_string(),
+            detail: e.to_string(),
+        })?;
+    let upstream_tree: Tree =
+        load_object(&upstream_commit.tree_id).map_err(|e| RebaseError::OriginalTreeLoad {
+            tree: upstream_commit.tree_id.to_string(),
+            detail: e.to_string(),
+        })?;
+    let mut guard_index = git_internal::internal::index::Index::new();
+    rebuild_index_from_tree(&upstream_tree, &mut guard_index, "")
+        .map_err(RebaseError::IndexRebuild)?;
+    rebase_worktree_guard_structured(&guard_index, "rebase").await?;
+
+    let start_action = ReflogAction::Rebase {
+        state: "start".to_string(),
+        details: format!("checkout {}", upstream),
+    };
+    let start_context = ReflogContext {
+        old_oid: head_to_rebase_id.to_string(),
+        new_oid: upstream_id.to_string(),
+        action: start_action,
+    };
+    db.transaction(|txn| {
+        Box::pin(async move {
+            reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD").await?;
+            Head::update_with_conn(txn, Head::Detached(upstream_id), None).await;
+            Ok::<_, ReflogError>(())
+        })
+    })
+    .await
+    .map_err(|e| RebaseError::Finalize(format!("failed to start rebase: {e}")))?;
+
+    let mut state = RebaseState {
+        head_name: current_branch_name.clone(),
+        onto: upstream_id,
+        orig_head: head_to_rebase_id,
+        todo: VecDeque::from(commits_to_replay),
+        done: Vec::new(),
+        stopped_sha: None,
+        current_head: upstream_id,
+    };
+
+    state.save().await.map_err(RebaseError::StateSave)?;
+    Head::update_with_conn(&db, Head::Detached(upstream_id), None).await;
+
+    let replay = continue_replay(&mut state, &current_branch_name, upstream, false).await?;
+
+    Ok(RebaseOutput {
+        action: "start".to_string(),
+        status: "completed".to_string(),
+        branch: current_branch_name,
+        commit: state.current_head.to_string(),
+        onto: Some(upstream_id.to_string()),
+        previous_commit: Some(head_to_rebase_id.to_string()),
+        restored: None,
+        applied_commits: replay.applied_commits,
+        skipped_commit: None,
+        skipped_subject: None,
+        remaining: Some(state.todo.len()),
+    })
 }
 
 /// Start a new rebase operation
@@ -1807,6 +2048,38 @@ async fn rebase_worktree_guard(
     }
 
     true
+}
+
+async fn rebase_worktree_guard_structured(
+    new_index: &git_internal::internal::index::Index,
+    action: &str,
+) -> Result<(), RebaseError> {
+    let unstaged = status::changes_to_be_staged_with_policy(IgnorePolicy::Respect)
+        .map_err(|err| RebaseError::WorktreeStatus(err.to_string()))?;
+    if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
+        return Err(RebaseError::WorktreeDirty {
+            action: action.to_string(),
+            detail: "unstaged changes".to_string(),
+        });
+    }
+
+    let staged = status::changes_to_be_committed_safe()
+        .await
+        .map_err(|err| RebaseError::WorktreeStatus(err.to_string()))?;
+    if !staged.new.is_empty() || !staged.modified.is_empty() || !staged.deleted.is_empty() {
+        return Err(RebaseError::WorktreeDirty {
+            action: action.to_string(),
+            detail: "uncommitted changes".to_string(),
+        });
+    }
+
+    if let Some(conflict) = worktree::untracked_overwrite_path(&unstaged.new, new_index) {
+        return Err(RebaseError::UntrackedOverwrite {
+            path: conflict.display().to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Resolve a branch name or commit reference to a ObjectHash hash

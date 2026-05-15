@@ -10,20 +10,20 @@
 - `--abort` / `--continue` / `--skip` 无 rebase state 的 JSON 错误已显式返回 `LBR-REPO-003`，不再依赖字符串推断。
 - `--abort` 成功路径已拆出 `RebaseOutput` / `render_rebase_output()`，支持 `--json` / `--machine` 输出恢复的分支和 commit。
 - `--continue` / `--skip` 已拆出 typed result，支持成功 `--json` / `--machine` 输出；未解决冲突的 `--continue` 返回 `LBR-CONFLICT-001`，不再混入 human stdout。
+- `rebase <upstream>` 结构化路径已覆盖完整 replay、fast-forward、already-up-to-date 和 conflict-stop 错误 envelope；`--json` / `--machine` 不再混入 legacy human stdout。
 - 命令文档已同步当前 human 输出，包括 `Found common ancestor`、`Rebasing N commits`、`Applied:`、conflict 提示、abort 恢复消息和 fast-forward 消息。
 - 创建树和重置工作区时的路径处理不再使用生产 `unwrap()`；空路径和非 UTF-8 路径会返回带上下文的错误。
 
 ## 当前未完成
 
-- `execute_safe()` 仍委托 legacy `execute(args).await`，深层运行时错误会直接 `println!` / `eprintln!` 后 `return`。
-- start 和 replay 成功路径尚未接入 `RebaseOutput` / `render_rebase_output()`，`--json` / `--machine` 成功输出未落地。
-- replay、conflict 和 start 的运行时错误尚未统一建模为 `RebaseError`。
-- 部分 legacy 运行时失败仍可能只打印错误文本而不把失败状态传回 CLI 边界。
+- human 输出路径仍保留 legacy `execute(args).await`，深层运行时错误会直接 `println!` / `eprintln!` 后 `return`。
+- replay/conflict-stop 的错误分类仍是初步 typed envelope，尚未细分到所有 replay 内部失败。
+- 部分 legacy human 运行时失败仍可能只打印错误文本而不把失败状态传回 CLI 边界。
 
 ## 后续切片建议
 
-1. 拆 `start_rebase()` 的 fast-forward、already-up-to-date、no-commit 和 start replay 结果，接入 `RebaseOutput`。
-2. 最后拆 replay/conflict-stop 的完整 typed result 和 JSON/machine 错误细节。
+1. 最后拆 human start path，使普通输出也共享 `run_rebase_start()` / renderer，避免 success/error 双轨。
+2. 细化 replay/conflict-stop 的完整 typed result 和 JSON/machine 错误细节。
 
 ## 非目标
 

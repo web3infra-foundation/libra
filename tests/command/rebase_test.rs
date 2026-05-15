@@ -135,7 +135,7 @@ fn commit_file_via_cli(repo: &Path, path: &str, contents: &str, message: &str) {
     assert_cli_success(&output, "failed to commit test file");
 }
 
-fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
+fn create_cli_rebase_conflict_ready_repo() -> tempfile::TempDir {
     let repo = tempdir().expect("failed to create temp repo");
     let repo_path = repo.path();
     init_repo_via_cli(repo_path);
@@ -164,6 +164,13 @@ fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
     let output = run_libra_command(&["switch", "feature"], repo_path);
     assert_cli_success(&output, "failed to switch to feature");
 
+    repo
+}
+
+fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
+    let repo = create_cli_rebase_conflict_ready_repo();
+    let repo_path = repo.path();
+
     let output = run_libra_command(&["rebase", "main"], repo_path);
     assert!(
         output.status.success(),
@@ -177,6 +184,167 @@ fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
     );
 
     repo
+}
+
+fn create_cli_rebase_success_repo() -> tempfile::TempDir {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    repo
+}
+
+fn create_cli_rebase_fast_forward_repo() -> tempfile::TempDir {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+
+    repo
+}
+
+fn create_cli_rebase_ahead_repo() -> tempfile::TempDir {
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+    commit_file_via_cli(repo_path, "feature.txt", "feature\n", "Feature adds file");
+
+    repo
+}
+
+#[test]
+fn test_rebase_json_start_outputs_completed_result() {
+    let repo = create_cli_rebase_success_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "main"], repo.path());
+    assert_cli_success(&output, "json rebase start");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "start");
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["applied_commits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["data"]["applied_commits"][0]["subject"],
+        "Feature adds file"
+    );
+    assert!(json["data"]["commit"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["previous_commit"].as_str().unwrap().len() >= 7);
+}
+
+#[test]
+fn test_rebase_machine_start_outputs_single_json_line() {
+    let repo = create_cli_rebase_success_repo();
+
+    let output = run_libra_command(&["--machine", "rebase", "main"], repo.path());
+    assert_cli_success(&output, "machine rebase start");
+    assert!(output.stderr.is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "machine rebase output should be exactly one line: {stdout}"
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "start");
+    assert_eq!(json["data"]["status"], "completed");
+}
+
+#[test]
+fn test_rebase_json_start_outputs_fast_forward_result() {
+    let repo = create_cli_rebase_fast_forward_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "main"], repo.path());
+    assert_cli_success(&output, "json rebase fast-forward start");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "start");
+    assert_eq!(json["data"]["status"], "fast-forwarded");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["commit"], json["data"]["onto"]);
+    assert!(json["data"]["applied_commits"].is_null());
+}
+
+#[test]
+fn test_rebase_json_start_outputs_already_up_to_date_result() {
+    let repo = create_cli_rebase_ahead_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "main"], repo.path());
+    assert_cli_success(&output, "json rebase already-up-to-date start");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "start");
+    assert_eq!(json["data"]["status"], "already-up-to-date");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["commit"], json["data"]["previous_commit"]);
+    assert!(json["data"]["applied_commits"].is_null());
+}
+
+#[test]
+fn test_rebase_json_start_conflict_returns_structured_error() {
+    let repo = create_cli_rebase_conflict_ready_repo();
+
+    let output = run_libra_command(&["--json", "rebase", "main"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        output.stdout.is_empty(),
+        "expected empty stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    assert_eq!(report.category, "conflict");
+    assert!(
+        report.message.contains("rebase stopped while applying"),
+        "unexpected message: {}",
+        report.message
+    );
+    assert_eq!(report.details["paths"][0], "conflict.txt");
+
+    let abort = run_libra_command(&["--json", "rebase", "--abort"], repo.path());
+    assert_cli_success(&abort, "abort after json rebase conflict");
 }
 
 #[test]

@@ -149,7 +149,34 @@ Rebase aborted. Restored branch 'feature'.
 
 ## JSON / Machine Output
 
-`--json` and `--machine` are currently supported for successful `--abort`, `--continue`, and `--skip` output. CLI/preflight failures and unresolved-conflict `--continue` failures are rendered through Libra's standard structured error envelope. Rebase start and deeper replay/conflict-stop output are still tracked as follow-up work in the command improvement plan.
+`--json` and `--machine` are currently supported for successful `rebase <upstream>`, `--abort`, `--continue`, and `--skip` output. CLI/preflight failures, unresolved-conflict `--continue` failures, and structured `rebase <upstream>` conflict stops are rendered through Libra's standard structured error envelope. Deeper replay/conflict-stop error taxonomy is still tracked as follow-up work in the command improvement plan.
+
+Start and complete a replay:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "start",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "onto": "fedcba9...",
+    "previous_commit": "def5678...",
+    "applied_commits": [
+      {
+        "original_commit": "0123456...",
+        "commit": "abc1234...",
+        "subject": "Feature adds file"
+      }
+    ],
+    "remaining": 0
+  }
+}
+```
+
+Fast-forward start results use the same envelope with `status: "fast-forwarded"`, `commit` equal to `onto`, and no `applied_commits`. Branches already ahead of upstream return `status: "already-up-to-date"`.
 
 ```json
 {
