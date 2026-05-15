@@ -202,7 +202,7 @@
 | **A** | 退出码三级模型统一对齐（0/128/129） | 与各命令改进同步进行 |
 | **B** | 每个子命令 --help 添加 EXAMPLES 段 | 与各命令改进同步进行 |
 | **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
-| **D** | log/diff/blame/show TTY 下使用 pager | 独立改进 |
+| **D** | log/diff/blame/show TTY 下使用 pager | ✅ 已落地：`log` / `diff` / `blame` / `show` human 输出均走共享 `Pager::with_config()`；`--json` / `--machine` / `--quiet` / `--no-pager` 保持不初始化 pager |
 | **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
 | **F** | 拼写纠错建议（确认 clap suggest 已启用） | ✅ 已落地：clap fuzzy suggestion 已启用，并由 `cli::tests::clap_fuzzy_suggests_similar_command` 覆盖 `initt -> init` |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |

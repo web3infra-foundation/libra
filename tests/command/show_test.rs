@@ -203,6 +203,47 @@ fn test_show_quiet_suppresses_human_output() {
 
 #[tokio::test]
 #[serial]
+async fn test_show_non_quiet_uses_forced_pager() {
+    if cfg!(windows) {
+        return;
+    }
+
+    use libra::{
+        command::show::{ShowArgs, execute_safe},
+        utils::{
+            pager::LIBRA_PAGER_ENV,
+            test::{ChangeDirGuard, ScopedEnvVar},
+        },
+    };
+
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let missing_bin_dir = tempfile::tempdir().expect("failed to create missing-bin dir");
+    let _path = ScopedEnvVar::set("PATH", missing_bin_dir.path());
+    let _pager = ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
+
+    let args = ShowArgs {
+        object: Some("HEAD".to_string()),
+        no_patch: true,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+
+    let err = execute_safe(args, &OutputConfig::default())
+        .await
+        .expect_err("forced pager should be initialized for non-quiet show output");
+    assert_eq!(err.stable_code(), StableErrorCode::IoWriteFailed);
+    assert!(
+        err.message().contains("failed to execute pager"),
+        "unexpected pager error: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_show_quiet_still_validates_patch_generation() {
     use libra::command::show::{ShowArgs, execute_safe};
 
