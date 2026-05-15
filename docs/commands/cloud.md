@@ -238,6 +238,35 @@ When `--verbose` is set, the status payload also includes up to 20
 }
 ```
 
+`cloud restore --json` / `--machine` emits `cloud.restore` on successful restore runs:
+
+```json
+{
+  "ok": true,
+  "command": "cloud.restore",
+  "data": {
+    "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "metadata_only": false,
+    "total_objects": 42,
+    "indexes_restored": 42,
+    "object_restore": {
+      "downloaded": 30,
+      "skipped": 12,
+      "failed": 0
+    },
+    "metadata": {
+      "status": "restored"
+    },
+    "agent_capture": {
+      "status": "restored"
+    }
+  }
+}
+```
+
+For `cloud restore --metadata-only`, the payload keeps `metadata_only: true`
+and omits `object_restore`.
+
 `cloud sync --progress=json` emits NDJSON progress events to stderr (no legacy
 human progress text on stdout). Event names cover object, metadata, and
 agent-capture phases, for example:
@@ -251,9 +280,8 @@ agent-capture phases, for example:
 ```
 
 `cloud sync` default mode still uses the legacy human progress output.
-`cloud restore` structured success schema remains follow-up work in the
-improvement plan. Failures continue through Libra's standard CLI error
-machinery.
+`cloud restore` and `cloud sync` failures continue through Libra's standard CLI
+error machinery.
 
 ## Environment Variables
 

@@ -191,6 +191,37 @@ struct CloudAgentCaptureSyncOutput {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CloudRestoreOutput {
+    repo_id: String,
+    metadata_only: bool,
+    total_objects: usize,
+    indexes_restored: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_restore: Option<CloudRestoreObjectOutput>,
+    metadata: CloudRestoreMetadataOutput,
+    agent_capture: CloudRestoreAgentCaptureOutput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudRestoreObjectOutput {
+    downloaded: usize,
+    skipped: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudRestoreMetadataOutput {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CloudRestoreAgentCaptureOutput {
+    status: String,
+}
+
 /// Summary returned after restoring Git objects listed in D1 `object_index`.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(crate) struct ObjectRestoreReport {
@@ -507,9 +538,18 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
                     .map_err(|e| cloud_cli_error("sync", e))?;
             }
         }
-        CloudCommand::Restore(restore_args) => execute_restore(restore_args)
-            .await
-            .map_err(|e| cloud_cli_error("restore", e))?,
+        CloudCommand::Restore(restore_args) => {
+            if output.is_json() || output.quiet {
+                let report = run_cloud_restore(restore_args)
+                    .await
+                    .map_err(|e| cloud_cli_error("restore", e))?;
+                render_cloud_restore_output(&report, output)?;
+            } else {
+                execute_restore(restore_args)
+                    .await
+                    .map_err(|e| cloud_cli_error("restore", e))?;
+            }
+        }
         CloudCommand::Status(status_args) => {
             let status = run_cloud_status(status_args).await?;
             render_cloud_status_output(&status, output)?;
@@ -594,6 +634,16 @@ fn render_cloud_sync_output(report: &CloudSyncReport, output: &OutputConfig) -> 
     if output.is_json() {
         let cloud_output = cloud_sync_output_from_report(report);
         return emit_json_data("cloud.sync", &cloud_output, output);
+    }
+    Ok(())
+}
+
+fn render_cloud_restore_output(
+    result: &CloudRestoreOutput,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("cloud.restore", result, output);
     }
     Ok(())
 }
@@ -927,6 +977,173 @@ pub(crate) async fn restore_indexed_objects_from_remote(
     Ok(report)
 }
 
+async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, String> {
+    validate_cloud_backup_env(args.metadata_only).await?;
+
+    let d1_client = D1Client::from_env()
+        .await
+        .map_err(|e| format!("D1 client error: {}", e.message))?;
+
+    let repo_id = if let Some(name) = &args.name {
+        d1_client
+            .ensure_repositories_table()
+            .await
+            .map_err(|e| format!("Failed to ensure repositories table: {}", e.message))?;
+
+        let id = d1_client
+            .get_repo_id_by_name(name)
+            .await
+            .map_err(|e| format!("Failed to resolve repo name: {}", e.message))?;
+        id.ok_or_else(|| format!("Repository with name '{}' not found", name))?
+    } else {
+        args.repo_id
+            .clone()
+            .ok_or_else(|| "repo_id is required".to_string())?
+    };
+
+    let indexes = d1_client
+        .get_object_indexes(&repo_id)
+        .await
+        .map_err(|e| format!("Failed to query D1: {}", e.message))?;
+
+    let db_conn = db::get_db_conn_instance().await;
+    for idx in &indexes {
+        let existing = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(&idx.o_id))
+            .filter(object_index::Column::RepoId.eq(&idx.repo_id))
+            .one(&db_conn)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+
+        if let Some(existing_model) = existing {
+            let mut active: object_index::ActiveModel = existing_model.into();
+            active.is_synced = Set(1);
+            if let Err(e) = active.update(&db_conn).await {
+                cli_error!(e, "warning: failed to update index for {}", idx.o_id);
+            }
+        } else {
+            let entry = object_index::ActiveModel {
+                o_id: Set(idx.o_id.clone()),
+                o_type: Set(idx.o_type.clone()),
+                o_size: Set(idx.o_size),
+                repo_id: Set(idx.repo_id.clone()),
+                created_at: Set(idx.created_at),
+                is_synced: Set(1),
+                ..Default::default()
+            };
+
+            if let Err(e) = entry.insert(&db_conn).await {
+                cli_error!(e, "warning: failed to insert index for {}", idx.o_id);
+            }
+        }
+    }
+
+    let _ = ConfigKv::set("libra.repoid", &repo_id, false).await;
+
+    if args.metadata_only {
+        return Ok(CloudRestoreOutput {
+            repo_id,
+            metadata_only: true,
+            total_objects: indexes.len(),
+            indexes_restored: indexes.len(),
+            object_restore: None,
+            metadata: CloudRestoreMetadataOutput {
+                status: "not_run".to_string(),
+                warning: None,
+            },
+            agent_capture: CloudRestoreAgentCaptureOutput {
+                status: "not_run".to_string(),
+            },
+        });
+    }
+
+    if indexes.is_empty() {
+        return Ok(CloudRestoreOutput {
+            repo_id,
+            metadata_only: false,
+            total_objects: 0,
+            indexes_restored: 0,
+            object_restore: Some(CloudRestoreObjectOutput {
+                downloaded: 0,
+                skipped: 0,
+                failed: 0,
+            }),
+            metadata: CloudRestoreMetadataOutput {
+                status: "not_run".to_string(),
+                warning: None,
+            },
+            agent_capture: CloudRestoreAgentCaptureOutput {
+                status: "not_run".to_string(),
+            },
+        });
+    }
+
+    let r2_storage = create_r2_storage(&repo_id).await?;
+    let objects_path = path::objects();
+    let local_storage = LocalStorage::new(objects_path);
+
+    let object_report =
+        restore_indexed_objects_from_remote(&indexes, &r2_storage, &local_storage).await?;
+    for warning in &object_report.warnings {
+        eprintln!("{warning}");
+    }
+    if object_report.failed > 0 {
+        return Err(format!(
+            "{} objects failed to restore",
+            object_report.failed
+        ));
+    }
+
+    let metadata = match restore_metadata(&db_conn, &r2_storage).await {
+        Ok(_) => CloudRestoreMetadataOutput {
+            status: "restored".to_string(),
+            warning: None,
+        },
+        Err(e) => {
+            emit_warning(format!("failed to restore metadata: {}", e));
+            CloudRestoreMetadataOutput {
+                status: "warning".to_string(),
+                warning: Some(e),
+            }
+        }
+    };
+
+    let head_commit = Head::current_commit_result()
+        .await
+        .map_err(|error| format!("failed to resolve HEAD commit: {error}"))?;
+    if head_commit.is_some() {
+        let _ = restore_worktree_to_head(false).await;
+    } else {
+        let main_branch = Branch::find_branch_result("main", None)
+            .await
+            .map_err(|error| format!("failed to resolve main branch: {error}"))?;
+        if main_branch.is_some() {
+            Head::update(Head::Branch("main".to_string()), None).await;
+            let _ = restore_worktree_to_head(false).await;
+        }
+    }
+
+    restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id, false)
+        .await
+        .map_err(|e| format!("agent capture restore failed: {}", e))?;
+
+    Ok(CloudRestoreOutput {
+        repo_id,
+        metadata_only: false,
+        total_objects: indexes.len(),
+        indexes_restored: indexes.len(),
+        object_restore: Some(CloudRestoreObjectOutput {
+            downloaded: object_report.downloaded,
+            skipped: object_report.skipped,
+            failed: object_report.failed,
+        }),
+        metadata,
+        agent_capture: CloudRestoreAgentCaptureOutput {
+            status: "restored".to_string(),
+        },
+    })
+}
+
 /// Execute restore command - resolves project name (if provided) and restores from D1/R2
 async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     validate_cloud_backup_env(args.metadata_only).await?;
@@ -1056,7 +1273,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 
         if let Some(commit) = head_commit {
             println!("Restoring working directory to HEAD ({})", commit);
-            let _ = restore_worktree_to_head().await;
+            let _ = restore_worktree_to_head(true).await;
         } else {
             println!("Restoring working directory (fallback)...");
 
@@ -1072,7 +1289,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 // Update HEAD to point to main
                 Head::update(Head::Branch("main".to_string()), None).await;
 
-                let _ = restore_worktree_to_head().await;
+                let _ = restore_worktree_to_head(true).await;
             } else {
                 println!("No HEAD commit or main branch found. Skipping worktree restore.");
             }
@@ -1085,7 +1302,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         // helper is strict (Q2), so propagating its error here surfaces
         // partial-restore problems to the caller without blocking the
         // worktree materialization that runs above.
-        restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id)
+        restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id, true)
             .await
             .map_err(|e| format!("agent capture restore failed: {}", e))?;
 
@@ -1093,7 +1310,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     }
 }
 
-async fn restore_worktree_to_head() -> Result<(), String> {
+async fn restore_worktree_to_head(render_human: bool) -> Result<(), String> {
     let restore_args = RestoreWorktreeArgs {
         pathspec: vec![".".to_string()], // restore everything
         source: Some("HEAD".to_string()),
@@ -1105,7 +1322,9 @@ async fn restore_worktree_to_head() -> Result<(), String> {
         emit_warning(format!("failed to restore worktree files: {}", e));
         Err(e.to_string())
     } else {
-        println!("Successfully restored working directory files.");
+        if render_human {
+            println!("Successfully restored working directory files.");
+        }
         Ok(())
     }
 }
@@ -1599,6 +1818,7 @@ async fn restore_agent_capture_from_d1(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
     repo_id: &str,
+    render_human: bool,
 ) -> Result<(), String> {
     use sea_orm::{ConnectionTrait, Statement};
 
@@ -1640,7 +1860,9 @@ async fn restore_agent_capture_from_d1(
         return Ok(());
     }
 
-    println!("Restoring agent_session / agent_checkpoint from D1...");
+    if render_human {
+        println!("Restoring agent_session / agent_checkpoint from D1...");
+    }
 
     // Codex round-2 follow-up: ensure the catalogue tables exist on the
     // remote D1 before listing. Old backups taken by a libra binary that
@@ -1669,7 +1891,7 @@ async fn restore_agent_capture_from_d1(
         .await
         .map_err(|e| format!("list_agent_checkpoints: {}", e.message))?;
 
-    restore_agent_capture_from_rows(db_conn, &session_rows, &checkpoint_rows).await
+    restore_agent_capture_from_rows(db_conn, &session_rows, &checkpoint_rows, render_human).await
 }
 
 /// Connection-bound core of [`restore_agent_capture_from_d1`]. Extracted
@@ -1683,6 +1905,7 @@ async fn restore_agent_capture_from_rows(
     db_conn: &sea_orm::DatabaseConnection,
     session_rows: &[AgentSessionRow],
     checkpoint_rows: &[AgentCheckpointRow],
+    render_human: bool,
 ) -> Result<(), String> {
     use sea_orm::{ConnectionTrait, Statement};
 
@@ -1795,13 +2018,15 @@ async fn restore_agent_capture_from_rows(
         }
     }
 
-    println!(
-        "Agent capture restore: {sessions_inserted}/{} sessions, \
-         {checkpoints_inserted}/{} checkpoints ({sessions_failed} + \
-         {checkpoints_failed} failed).",
-        session_rows.len(),
-        checkpoint_rows.len()
-    );
+    if render_human {
+        println!(
+            "Agent capture restore: {sessions_inserted}/{} sessions, \
+             {checkpoints_inserted}/{} checkpoints ({sessions_failed} + \
+             {checkpoints_failed} failed).",
+            session_rows.len(),
+            checkpoint_rows.len()
+        );
+    }
     if sessions_failed > 0 || checkpoints_failed > 0 {
         Err(format!(
             "{} session + {} checkpoint inserts failed",
@@ -2418,7 +2643,7 @@ mod tests {
             let sessions = vec![fixture_session_row("sess-A", "prov-A")];
             let checkpoints = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("first"))];
 
-            restore_agent_capture_from_rows(&db_conn, &sessions, &checkpoints)
+            restore_agent_capture_from_rows(&db_conn, &sessions, &checkpoints, true)
                 .await
                 .expect("fresh restore should succeed");
 
@@ -2452,7 +2677,7 @@ mod tests {
         rt.block_on(async {
             let db_conn = db::get_db_conn_instance().await;
             let initial = vec![fixture_session_row("sess-A", "prov-A")];
-            restore_agent_capture_from_rows(&db_conn, &initial, &[])
+            restore_agent_capture_from_rows(&db_conn, &initial, &[], true)
                 .await
                 .expect("first restore");
 
@@ -2461,7 +2686,7 @@ mod tests {
             updated.last_event_at = 1_800_000_000;
             updated.stopped_at = Some(1_800_000_000);
 
-            restore_agent_capture_from_rows(&db_conn, &[updated], &[])
+            restore_agent_capture_from_rows(&db_conn, &[updated], &[], true)
                 .await
                 .expect("conflict update");
 
@@ -2499,12 +2724,12 @@ mod tests {
             let db_conn = db::get_db_conn_instance().await;
             let session = vec![fixture_session_row("sess-A", "prov-A")];
             let initial = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("v1"))];
-            restore_agent_capture_from_rows(&db_conn, &session, &initial)
+            restore_agent_capture_from_rows(&db_conn, &session, &initial, true)
                 .await
                 .expect("first restore");
 
             let updated = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("v2"))];
-            restore_agent_capture_from_rows(&db_conn, &session, &updated)
+            restore_agent_capture_from_rows(&db_conn, &session, &updated, true)
                 .await
                 .expect("conflict update");
 
@@ -2555,7 +2780,7 @@ mod tests {
             bad.agent_kind = "not_a_real_kind".to_string(); // violates CHECK
             let good = fixture_session_row("sess-good", "prov-good");
 
-            let err = restore_agent_capture_from_rows(&db_conn, &[bad, good], &[])
+            let err = restore_agent_capture_from_rows(&db_conn, &[bad, good], &[], true)
                 .await
                 .expect_err("strict restore should bubble the failure");
             assert!(
@@ -2617,7 +2842,8 @@ mod tests {
                 "stub-database".to_string(),
             );
 
-            let result = restore_agent_capture_from_d1(&db_conn, &d1_client, "fixture-repo").await;
+            let result =
+                restore_agent_capture_from_d1(&db_conn, &d1_client, "fixture-repo", true).await;
             assert!(
                 result.is_ok(),
                 "partial-schema path returns Ok with a warning, not Err: {:?}",
