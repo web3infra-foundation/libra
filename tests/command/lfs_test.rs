@@ -242,8 +242,18 @@ async fn test_lfs_ls_files_json_output() {
     assert_eq!(json["command"], "lfs");
     assert_eq!(json["data"]["action"], "ls-files");
     assert_eq!(json["data"]["show_size"], true);
-    assert_eq!(json["data"]["files"][0]["path"], "tracked_file.txt");
-    assert!(json["data"]["files"][0]["size"].as_u64().is_some());
+    let file = &json["data"]["files"][0];
+    assert_eq!(file["path"], "tracked_file.txt");
+    assert!(file["size"].as_u64().is_some());
+    // `oid` is the display oid (10-char prefix by default), `full_oid` always carries
+    // the canonical 64-char hash so `--json` consumers don't have to pass `--long`.
+    let display_oid = file["oid"].as_str().expect("oid should be a string");
+    let full_oid = file["full_oid"]
+        .as_str()
+        .expect("full_oid should be a string");
+    assert_eq!(display_oid.len(), 10);
+    assert_eq!(full_oid.len(), 64);
+    assert!(full_oid.starts_with(display_oid));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -96,7 +96,12 @@ struct LfsOutput {
 #[derive(Debug, Clone, Serialize)]
 struct LfsFileOutput {
     path: String,
+    /// Display oid: full 64-char hash when `--long`, otherwise the first 10
+    /// characters. Backward-compatible — preserves the existing JSON contract.
     oid: String,
+    /// Full 64-char LFS oid, always. Lets `--json` consumers read the canonical
+    /// hash without having to also pass `--long`.
+    full_oid: String,
     marker: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
@@ -318,6 +323,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         } else {
                             "*"
                         };
+                        let full_oid = oid.clone();
                         let oid = if long { oid } else { oid[..10].to_owned() };
                         let (size_value, display_size) = if size {
                             let display = util::auto_unit_bytes(lfs_size);
@@ -328,6 +334,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         files.push(LfsFileOutput {
                             path: entry.name.clone(),
                             oid,
+                            full_oid,
                             marker: _type.to_string(),
                             size: size_value,
                             display_size,

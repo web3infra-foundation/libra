@@ -15,11 +15,8 @@
 - `src/command/lfs.rs` 增加 `map_lock_list_error()` 单测，覆盖 forbidden、decode、http-5xx detail 映射。
 - `src/internal/protocol/lfs_client.rs` 新增本地 mock server 合约测试，覆盖 lock API 关键路径：`get_locks` 成功解析、`get_locks` 403、`lock` 409、`unlock` 500。
 - `tests/command/lfs_test.rs` 新增 CLI 级 mock 回归，覆盖 `locks` 成功 / 403→`LBR-AUTH-002`、`lock` 成功 / 409→`LBR-CONFLICT-002`、`unlock --force --id` 成功，验证 `--json` envelope 和稳定错误码。
+- `ls-files --json` 新增 `full_oid` 字段，始终携带 64 字符 canonical hash；原 `oid` 字段保持显示语义（默认 10 字符前缀，`--long` 时为全长）向后兼容。`tests/command/lfs_test.rs::test_lfs_ls_files_json_output` 已断言 `full_oid.len() == 64` 且 `full_oid.starts_with(oid)`。
 
 ## 当前未完成
 
 - `LfsOutput` 仍是命令内 schema；如后续和 `push` 的 LFS upload summary 共享字段，需要再抽公共类型。
-
-## 后续切片建议
-
-1. 视需要扩展 `ls-files` JSON：增加 `full_oid`，保持当前 `oid` 显示语义向后兼容。
