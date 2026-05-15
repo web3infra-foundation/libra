@@ -151,15 +151,32 @@ fn generate_git_lfs_server_url(mut url: String) -> String {
 /// https://github.com/git-lfs/git-lfs/blob/main/docs/api/locking.md -> https://github.com
 ///
 /// http://localhost:8000/xxx/yyy -> http://localhost:8000
+///
+/// Falls back to the original URL string if parsing fails or the URL has no
+/// host (e.g. `file:///path`). Callers will then either accept the literal
+/// URL or surface a downstream error.
 fn generate_mono_lfs_server_url(url: String) -> String {
-    let url = Url::parse(&url).unwrap();
-    match url.port() {
-        None => {
-            format!("{}://{}", url.scheme(), url.host().unwrap())
+    let parsed = match Url::parse(&url) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(
+                url = %url,
+                error = %err,
+                "failed to re-parse remote URL while deriving mono LFS URL; using as-is"
+            );
+            return url;
         }
-        Some(port) => {
-            format!("{}://{}:{}", url.scheme(), url.host().unwrap(), port)
-        }
+    };
+    let Some(host) = parsed.host() else {
+        tracing::warn!(
+            url = %url,
+            "remote URL has no host; using as-is for mono LFS URL"
+        );
+        return url;
+    };
+    match parsed.port() {
+        None => format!("{}://{host}", parsed.scheme()),
+        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
     }
 }
 
@@ -246,6 +263,9 @@ where
 }
 
 /// Check if `data` is an LFS pointer, return `oid` & `size`
+///
+/// Returns `None` for any malformed input, including pointer-shape bytes that
+/// happen to contain non-UTF-8 sequences where the oid or size are expected.
 pub fn parse_pointer_data(data: &[u8]) -> Option<(String, u64)> {
     if data.len() > LFS_POINTER_MAX_SIZE {
         return None;
@@ -253,12 +273,13 @@ pub fn parse_pointer_data(data: &[u8]) -> Option<(String, u64)> {
     // Start with format `version ...`
     if let Some(data) =
         data.strip_prefix(format!("version {LFS_VERSION}\noid {LFS_HASH_ALGO}:").as_bytes())
+        && data.len() > LFS_OID_LEN
         && data[LFS_OID_LEN] == b'\n'
     {
-        // check `oid` length
-        let oid = String::from_utf8(data[..LFS_OID_LEN].to_vec()).unwrap();
+        // check `oid` length and that it is valid UTF-8 (LFS oids are hex ASCII).
+        let oid = String::from_utf8(data[..LFS_OID_LEN].to_vec()).ok()?;
         if let Some(data) = data.strip_prefix(format!("{oid}\nsize ").as_bytes()) {
-            let data = String::from_utf8(data[..].to_vec()).unwrap();
+            let data = String::from_utf8(data.to_vec()).ok()?;
             if let Ok(size) = data.trim_end().parse::<u64>() {
                 return Some((oid, size));
             }
