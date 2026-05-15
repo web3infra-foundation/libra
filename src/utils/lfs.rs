@@ -204,12 +204,11 @@ fn generate_mono_lfs_server_url(url: String) -> String {
 /// - Automatically detect git or mono repo by domain
 /// - Caution: without trailing slash `/`
 pub fn generate_lfs_server_url(url_str: String) -> String {
-    let url = Url::parse(&url_str);
-    if url.is_err() {
+    let url = match Url::parse(&url_str) {
+        Ok(url) => url,
         // maybe start with `git@`
-        return generate_git_lfs_server_url(url_str);
-    }
-    let url = url.unwrap();
+        Err(_) => return generate_git_lfs_server_url(url_str),
+    };
     match url.domain() {
         Some(domain) => {
             if domain == "github.com" || domain == "gitee.com" {
@@ -367,7 +366,11 @@ pub fn extract_lfs_patterns(file_path: &str) -> io::Result<Vec<String>> {
     let reader = BufReader::new(file);
 
     // ' ' needs '\' before it to be escaped
-    let re = Regex::new(r"^\s*(([^\s#\\]|\\ )+)").unwrap();
+    // INVARIANT: this regex is a compile-time literal; `Regex::new` only
+    // returns Err for syntactically invalid patterns, which is caught by
+    // unit tests.
+    let re = Regex::new(r"^\s*(([^\s#\\]|\\ )+)")
+        .expect("LFS attributes regex is a valid hardcoded pattern");
 
     let mut patterns = Vec::new();
 
