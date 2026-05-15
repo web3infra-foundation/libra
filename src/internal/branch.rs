@@ -105,14 +105,6 @@ pub enum BranchStoreError {
     Delete { name: String, detail: String },
 }
 
-/// Emit a `tracing::error!` for a [`BranchStoreError`] without aborting.
-///
-/// Used by the lossy wrappers to keep the storage error visible in logs even
-/// when the public API is forced to return `None` or an empty `Vec`.
-fn log_branch_store_error(context: &str, error: &BranchStoreError) {
-    tracing::error!("{context}: {error}");
-}
-
 /// Decode a raw `reference::Model` row into a [`Branch`].
 ///
 /// Boundary conditions:
@@ -351,25 +343,6 @@ impl Branch {
         Self::find_branch_result_with_conn(&db_conn, branch_name, remote).await
     }
 
-    /// Lossy variant of [`search_branch_result_with_conn`]. Storage errors
-    /// degrade to an empty `Vec`; only used by callers that prefer "no matches"
-    /// over an `Err` (e.g. interactive completion).
-    pub async fn search_branch_with_conn<C>(db: &C, branch_name: &str) -> Vec<Self>
-    where
-        C: ConnectionTrait,
-    {
-        match Self::search_branch_result_with_conn(db, branch_name).await {
-            Ok(branches) => branches,
-            Err(error) => {
-                log_branch_store_error(
-                    &format!("failed to search branches matching '{branch_name}'"),
-                    &error,
-                );
-                Vec::new()
-            }
-        }
-    }
-
     /// Walk every `(remote, branch)` split of an ambiguous slash-delimited name
     /// and collect every existing match.
     ///
@@ -427,14 +400,6 @@ impl Branch {
             }
         }
         Ok(branches)
-    }
-
-    /// search branch with full name, return vec of branches
-    /// e.g. `origin/sub/master/feature` may means `origin/sub/master` + `feature` or `origin/sub` + `master/feature`
-    /// so we need to search all possible branches
-    pub async fn search_branch(branch_name: &str) -> Vec<Self> {
-        let db_conn = get_db_conn_instance().await;
-        Self::search_branch_with_conn(&db_conn, branch_name).await
     }
 
     /// Pool-acquiring counterpart of [`Branch::search_branch_result_with_conn`].
@@ -580,7 +545,7 @@ mod tests {
     /// it could be a local name, or any of three `(remote, branch)` splits.
     /// This test seeds three matching rows and one decoy that shares a prefix
     /// but a non-matching branch suffix, then asserts that
-    /// [`Branch::search_branch`] returns exactly the three real matches.
+    /// [`Branch::search_branch_result`] returns exactly the three real matches.
     #[tokio::test]
     #[serial]
     async fn test_search_branch() {
@@ -603,7 +568,9 @@ mod tests {
             .await
             .unwrap(); // should not match
 
-        let branches = Branch::search_branch("upstream/origin/master").await;
+        let branches = Branch::search_branch_result("upstream/origin/master")
+            .await
+            .expect("search_branch_result should not fail on a freshly-seeded test DB");
         assert_eq!(branches.len(), 3);
     }
 
