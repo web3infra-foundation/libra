@@ -2034,7 +2034,7 @@ mod tests {
 
     use super::{
         RebaseError, ReplayErrorKind, classify_relative_to_base, collect_tree_items_and_paths,
-        path_to_index_key, resolve_three_way, tree_item_name,
+        resolve_three_way, tree_item_name,
     };
     use crate::utils::error::{CliError, StableErrorCode};
 

@@ -282,6 +282,7 @@ mod diff_test;
 mod fetch_test;
 mod graph_test;
 mod grep_test;
+mod hash_object_test;
 mod index_pack_test;
 mod init_from_git_test;
 mod init_json_test;

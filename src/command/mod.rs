@@ -31,6 +31,7 @@ pub mod diff;
 pub mod fetch;
 pub mod graph;
 pub mod grep;
+pub mod hash_object;
 pub mod hooks;
 pub mod index_pack;
 pub mod init;
