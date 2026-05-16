@@ -597,4 +597,41 @@ mod tests {
         assert_eq!(model.provider_id(), "fake");
         assert!(matches!(model, AnyCompletionModel::Fake(_)));
     }
+
+    #[test]
+    fn provider_factory_error_display_pins_each_variant() {
+        assert_eq!(
+            ProviderFactoryError::UnknownProvider {
+                provider_id: "xx".to_string(),
+                available: vec!["openai", "anthropic"],
+            }
+            .to_string(),
+            "unknown provider 'xx'; available providers: openai, anthropic",
+        );
+        assert_eq!(
+            ProviderFactoryError::UnknownModel {
+                provider_id: "openai".to_string(),
+                model_id: "ghost-1".to_string(),
+                suggestions: vec!["gpt-4o", "gpt-4-turbo"],
+            }
+            .to_string(),
+            "unknown model 'ghost-1' for provider 'openai'; known models: gpt-4o, gpt-4-turbo",
+        );
+        assert_eq!(
+            ProviderFactoryError::MissingApiKey {
+                provider_id: "openai".to_string(),
+                env_var: "OPENAI_API_KEY",
+            }
+            .to_string(),
+            "provider 'openai' requires an API key; set OPENAI_API_KEY",
+        );
+        assert_eq!(
+            ProviderFactoryError::BuildFailed {
+                provider_id: "anthropic".to_string(),
+                reason: "invalid base URL".to_string(),
+            }
+            .to_string(),
+            "failed to build provider 'anthropic': invalid base URL",
+        );
+    }
 }
