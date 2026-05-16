@@ -244,3 +244,33 @@ fn push_required(required: &mut Vec<String>, name: &str) {
         required.push(name.to_string());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OpenApiToolSpecError;
+
+    #[test]
+    fn openapi_tool_spec_error_display_pins_owned_variants() {
+        assert_eq!(
+            OpenApiToolSpecError::InvalidOperationName {
+                method: "GET".to_string(),
+                path: "/users".to_string(),
+            }
+            .to_string(),
+            "OpenAPI operation GET /users did not produce a valid tool name",
+        );
+        assert_eq!(
+            OpenApiToolSpecError::NoOperations.to_string(),
+            "OpenAPI fixture did not contain any operations",
+        );
+
+        let invalid_json = OpenApiToolSpecError::InvalidJson(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        );
+        let rendered = invalid_json.to_string();
+        assert!(
+            rendered.starts_with("failed to parse OpenAPI fixture: "),
+            "got: {rendered}",
+        );
+    }
+}
