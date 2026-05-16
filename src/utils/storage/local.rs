@@ -65,11 +65,15 @@ impl LocalStorage {
     /// Transforms an object hash into a path like "ab/cdef...". This is used for loose objects.
     fn transform_path(&self, hash: &ObjectHash) -> String {
         let hash = hash.to_string();
+        // INVARIANT: `hash` is the lowercase-hex string from `ObjectHash::to_string()`
+        // (SHA-1 / SHA-256), so every byte of the resulting path is ASCII alphanumeric
+        // and therefore valid UTF-8. `OsString::into_string()` only returns Err on
+        // non-UTF-8 byte sequences, which cannot occur here.
         Path::new(&hash[0..2])
             .join(&hash[2..hash.len()])
             .into_os_string()
             .into_string()
-            .unwrap()
+            .expect("hex object hash always round-trips through OsString as UTF-8")
     }
 
     /// Gets the full path to an object file based on its hash. For example, "base_path/ab/cdef...".

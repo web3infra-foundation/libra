@@ -82,14 +82,15 @@ pub fn read_pkt_line(bytes: &mut Bytes) -> (usize, Bytes) {
     if bytes.is_empty() {
         return (0, Bytes::new());
     }
-    let pkt_length = bytes.copy_to_bytes(4);
+    let pkt_length_bytes = bytes.copy_to_bytes(4);
     // INVARIANT: the function's doc comment explicitly documents that
     // callers must validate the 4-byte header as UTF-8 hex. Network code
     // upstream rejects malformed frames before they reach this helper.
-    let header_str = core::str::from_utf8(&pkt_length)
+    let header_str = core::str::from_utf8(&pkt_length_bytes)
         .expect("pkt-line header must be 4 bytes of ASCII hex (caller contract)");
-    let pkt_length = usize::from_str_radix(header_str, 16)
-        .unwrap_or_else(|_| panic!("{:?} is not a valid digit?", pkt_length));
+    let pkt_length = usize::from_str_radix(header_str, 16).unwrap_or_else(|_| {
+        panic!("pkt-line header {pkt_length_bytes:?} is not valid hex (caller contract)")
+    });
     if pkt_length == 0 {
         return (0, Bytes::new());
     }
