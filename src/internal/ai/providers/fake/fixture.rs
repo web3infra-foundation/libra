@@ -193,4 +193,26 @@ mod tests {
 
         assert_eq!(action.delay(), Duration::from_secs(10));
     }
+
+    #[test]
+    fn fake_fixture_error_display_pins_each_template() {
+        let read_err = FakeFixtureError::Read {
+            path: "/tmp/fake.json".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        assert_eq!(
+            read_err.to_string(),
+            "failed to read fake provider fixture '/tmp/fake.json': missing",
+        );
+
+        let parse_err = FakeFixtureError::Parse {
+            path: "/tmp/fake.json".to_string(),
+            source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        };
+        let parse_rendered = parse_err.to_string();
+        assert!(
+            parse_rendered.starts_with("failed to parse fake provider fixture '/tmp/fake.json': "),
+            "got: {parse_rendered}",
+        );
+    }
 }
