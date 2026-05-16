@@ -397,7 +397,12 @@ impl LFSClient {
                 }
 
                 // INVARIANT: metadata was validated before entering the retry loop.
-                let content = tokio::fs::File::open(file).await.unwrap();
+                // A subsequent failure here indicates the file disappeared mid-upload
+                // (TOCTOU race with another process); panicking is the only recovery
+                // because BasicAuth::send's closure return type is reqwest::RequestBuilder.
+                let content = tokio::fs::File::open(file)
+                    .await
+                    .expect("LFS upload file disappeared between metadata check and File::open");
                 let progress_bar = util::default_progress_bar(content_len);
 
                 let stream = tokio_util::io::ReaderStream::new(content);
@@ -768,7 +773,7 @@ impl LFSClient {
             })
         })
         .await
-        .unwrap();
+        .expect("LFS lock request failed after retries (callers receive StatusCode, not Result)");
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
@@ -778,7 +783,15 @@ impl LFSClient {
     }
 
     pub async fn unlock(&self, id: String, refspec: String, force: bool) -> StatusCode {
-        let url = self.lfs_url.join(&format!("locks/{id}/unlock")).unwrap();
+        // INVARIANT: `id` comes from a prior `get_locks` response or
+        // user-supplied `--id` argument and is treated as a single path
+        // segment; if it contains URL-special characters, `Url::join`
+        // percent-encodes them via the relative-URL parser. The .expect()
+        // names the dynamic-id contract.
+        let url = self
+            .lfs_url
+            .join(&format!("locks/{id}/unlock"))
+            .expect("LFS lock id failed to compose a valid relative URL segment");
         let resp = BasicAuth::send(|| async {
             self.client.post(url.clone()).json(&UnlockRequest {
                 force: Some(force),
@@ -788,7 +801,7 @@ impl LFSClient {
             })
         })
         .await
-        .unwrap();
+        .expect("LFS unlock request failed after retries (callers receive StatusCode, not Result)");
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
@@ -811,7 +824,9 @@ impl LFSClient {
             .expect("'locks/verify' is a valid relative URL");
         let resp = BasicAuth::send(|| async { self.client.post(url.clone()).json(&query) })
             .await
-            .unwrap();
+            .expect(
+                "LFS verify_locks request failed after retries (callers receive StatusCode pair)",
+            );
         let code = resp.status();
         // By default, an LFS server that doesn't implement any locking endpoints should return 404.
         // This response will not halt any Git pushes.
@@ -819,7 +834,7 @@ impl LFSClient {
             eprintln!(
                 "fatal: LFS verify locks failed. Status: {}, Message: {}",
                 code,
-                resp.text().await.unwrap()
+                resp.text().await.unwrap_or_default()
             );
             return (
                 code,
@@ -830,7 +845,12 @@ impl LFSClient {
                 },
             );
         }
-        (code, resp.json::<VerifiableLockList>().await.unwrap())
+        (
+            code,
+            resp.json::<VerifiableLockList>().await.expect(
+                "LFS verify_locks: 2xx response body failed to decode as VerifiableLockList",
+            ),
+        )
     }
 }
 
