@@ -565,3 +565,50 @@ fn prune_manifest(manifest: &mut FileHistoryManifest) {
     }
     manifest.batches.retain(|batch| !batch.entries.is_empty());
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::FileHistoryError;
+
+    #[test]
+    fn file_history_error_display_pins_owned_variants() {
+        assert_eq!(
+            FileHistoryError::PathOutsideWorkspace {
+                path: PathBuf::from("/etc/secrets"),
+            }
+            .to_string(),
+            "path is outside the workspace: /etc/secrets",
+        );
+        assert_eq!(
+            FileHistoryError::NoUndoBatch.to_string(),
+            "no file edits are available to undo",
+        );
+        assert_eq!(
+            FileHistoryError::SnapshotMissing {
+                path: "src/main.rs".to_string(),
+                snapshot: "abc123".to_string(),
+            }
+            .to_string(),
+            "undo snapshot is missing for src/main.rs: abc123",
+        );
+        assert_eq!(
+            FileHistoryError::Preflight {
+                path: PathBuf::from("src/main.rs"),
+                reason: "modified concurrently".to_string(),
+            }
+            .to_string(),
+            "undo preflight failed for src/main.rs: modified concurrently",
+        );
+    }
+
+    #[test]
+    fn file_history_error_io_template_pins_context_colon_source() {
+        let err = FileHistoryError::Io {
+            context: "failed to read manifest".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        assert_eq!(err.to_string(), "failed to read manifest: missing");
+    }
+}
