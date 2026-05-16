@@ -277,12 +277,13 @@ fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
     }
     let large_offsets_end = cursor + large_count * 8;
     let trailer_start = large_offsets_end;
-    let expected_len = trailer_start + hash_len * 2;
-    if expected_len != bytes.len() {
+    let remaining = bytes.len().saturating_sub(trailer_start);
+    if remaining != hash_len * 2 && remaining != hash_len + 20 {
         return Err(
             "pack index v2 length does not match fanout and large-offset tables".to_string(),
         );
     }
+    let index_hash_len = remaining - hash_len;
 
     let mut large_offsets = Vec::with_capacity(large_count);
     for chunk in bytes[cursor..large_offsets_end].chunks_exact(8) {
@@ -334,11 +335,15 @@ fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
 
     let pack_hash = ObjectHash::from_bytes(&bytes[trailer_start..trailer_start + hash_len])
         .map_err(|error| format!("invalid v2 pack hash: {error}"))?;
-    let index_hash = bytes[trailer_start + hash_len..expected_len].to_vec();
+    let index_hash = bytes[trailer_start + hash_len..].to_vec();
 
-    let computed_git_hash = hash_bytes(&bytes[..expected_len - hash_len]);
+    let computed_git_hash = hash_bytes(&bytes[..bytes.len() - index_hash_len]);
     let computed_libra_hash = hash_bytes(&bytes[..trailer_start]);
-    if index_hash != computed_git_hash && index_hash != computed_libra_hash {
+    let computed_legacy_sha1_libra_hash = sha1_bytes(&bytes[..trailer_start]);
+    if index_hash != computed_git_hash
+        && index_hash != computed_libra_hash
+        && index_hash != computed_legacy_sha1_libra_hash
+    {
         return Err("pack index v2 checksum mismatch".to_string());
     }
 
@@ -380,9 +385,9 @@ fn validate_fanout_monotonic(fanout: &[u32; 256]) -> Result<(), String> {
 
 fn validate_sorted_entries(entries: &[ParsedIndexEntry]) -> Result<(), String> {
     for pair in entries.windows(2) {
-        if pair[0].hash > pair[1].hash {
+        if pair[0].hash >= pair[1].hash {
             return Err(format!(
-                "pack index object hashes are not sorted: {} > {}",
+                "pack index object hashes are not strictly sorted: {} >= {}",
                 pair[0].hash, pair[1].hash
             ));
         }
@@ -567,6 +572,10 @@ fn hash_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut hash = HashAlgorithm::new();
     hash.update(bytes);
     hash.finalize()
+}
+
+fn sha1_bytes(bytes: &[u8]) -> Vec<u8> {
+    Sha1::digest(bytes).to_vec()
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

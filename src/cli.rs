@@ -744,6 +744,14 @@ impl CommandPreflight {
             set_hash_kind: false,
         }
     }
+
+    fn repo_hash_kind_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
 }
 
 fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
@@ -754,7 +762,12 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
-        Commands::VerifyPack(_) => Ok(CommandPreflight::sha1_without_repo()),
+        Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
+            Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            )),
+            Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+        },
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },

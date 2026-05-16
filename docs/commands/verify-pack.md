@@ -22,8 +22,9 @@ decodes the corresponding pack file, and verifies that both files agree on:
 
 By default the pack path is derived by replacing the index file extension with
 `.pack`. Use `--pack <PACK_FILE>` when the pack archive lives elsewhere.
-The command does not require a Libra repository and defaults to SHA-1 when no
-repository object format is available.
+The command does not require a Libra repository. When run inside a repository,
+it uses that repository's object format; outside a repository, it defaults to
+SHA-1.
 
 ## Options
 

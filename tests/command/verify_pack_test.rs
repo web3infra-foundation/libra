@@ -7,6 +7,7 @@ use std::{
 };
 
 use serial_test::serial;
+use sha1::{Digest, Sha1};
 
 use super::{
     assert_cli_success, init_repo_via_cli, parse_cli_error_stderr, parse_json_stdout,
@@ -52,6 +53,51 @@ fn build_index(repo: &Path, pack_path: &Path, version: &str) -> PathBuf {
     pack_path.with_extension("idx")
 }
 
+fn init_sha256_repo_via_cli(repo: &Path) {
+    fs::create_dir_all(repo).expect("create repo dir");
+    let output = run_libra_command(&["init", "--object-format", "sha256"], repo);
+    assert_cli_success(&output, "failed to initialize sha256 repository");
+}
+
+fn corrupt_v1_index_with_duplicate_first_entry(idx_path: &Path) {
+    const FANOUT_LEN: usize = 256 * 4;
+    const HASH_LEN: usize = 20;
+    const ENTRY_LEN: usize = 4 + HASH_LEN;
+
+    let mut bytes = fs::read(idx_path).expect("read generated idx");
+    let object_count = u32::from_be_bytes(
+        bytes[FANOUT_LEN - 4..FANOUT_LEN]
+            .try_into()
+            .expect("fanout[255] is present"),
+    ) as usize;
+    assert!(
+        object_count >= 2,
+        "fixture index needs at least two objects"
+    );
+
+    let entries_start = FANOUT_LEN;
+    let first_entry = bytes[entries_start..entries_start + ENTRY_LEN].to_vec();
+    bytes[entries_start + ENTRY_LEN..entries_start + ENTRY_LEN * 2].copy_from_slice(&first_entry);
+
+    let mut fanout = [0u32; 256];
+    for idx in 0..object_count {
+        let hash_start = entries_start + idx * ENTRY_LEN + 4;
+        fanout[bytes[hash_start] as usize] += 1;
+    }
+    for idx in 1..fanout.len() {
+        fanout[idx] += fanout[idx - 1];
+    }
+    for (idx, count) in fanout.iter().enumerate() {
+        let start = idx * 4;
+        bytes[start..start + 4].copy_from_slice(&count.to_be_bytes());
+    }
+
+    let checksum_start = bytes.len() - HASH_LEN;
+    let checksum: [u8; HASH_LEN] = Sha1::digest(&bytes[..checksum_start]).into();
+    bytes[checksum_start..].copy_from_slice(&checksum);
+    fs::write(idx_path, bytes).expect("write duplicate idx");
+}
+
 #[test]
 #[serial]
 fn verify_pack_accepts_generated_v1_index() {
@@ -80,6 +126,39 @@ fn verify_pack_accepts_generated_v1_index() {
 
 #[test]
 #[serial]
+fn verify_pack_uses_repository_hash_kind_for_sha256_indexes() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_sha256_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha256");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            idx_path.to_str().expect("idx path UTF-8"),
+            "--json",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "verify-pack should use repository sha256 object format",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "verify-pack");
+    assert_eq!(json["data"]["index_version"], 2);
+    assert_eq!(
+        json["data"]["pack_hash"]
+            .as_str()
+            .expect("pack_hash should be string")
+            .len(),
+        64
+    );
+}
+
+#[test]
+#[serial]
 fn verify_pack_accepts_absolute_index_path_outside_repository() {
     let repo = tempfile::tempdir().expect("create repo");
     init_repo_via_cli(repo.path());
@@ -100,6 +179,32 @@ fn verify_pack_accepts_absolute_index_path_outside_repository() {
     assert!(
         stdout.contains(": ok"),
         "outside-repo verification should confirm success: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_rejects_duplicate_object_ids_even_with_valid_index_checksum() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "1");
+    corrupt_v1_index_with_duplicate_first_entry(&idx_path);
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        repo.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "duplicate index object IDs should fail verification"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        human.contains("not strictly sorted"),
+        "error should identify duplicate or unsorted object IDs: {human}"
     );
 }
 
