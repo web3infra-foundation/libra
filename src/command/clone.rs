@@ -1348,10 +1348,10 @@ async fn clone_cloud_publish_into_destination(
         &local_storage,
     )
     .await
-    .map_err(|message| CloneError::CloudPublishObjectRestoreFailed {
+    .map_err(|source_error| CloneError::CloudPublishObjectRestoreFailed {
         domain: source.clone_domain.clone(),
         target: site_target_label(source, &restore_plan.site),
-        message,
+        message: source_error.to_string(),
     })?;
     if object_report.failed > 0 {
         return Err(CloneError::CloudPublishObjectRestoreFailed {
@@ -1367,13 +1367,11 @@ async fn clone_cloud_publish_into_destination(
     let db_conn = get_db_conn_instance().await;
     restore_metadata_strict(&db_conn, r2_storage)
         .await
-        .map_err(
-            |message| CloneError::CloudPublishRefsMetadataRestoreFailed {
-                domain: source.clone_domain.clone(),
-                target: site_target_label(source, &restore_plan.site),
-                message,
-            },
-        )?;
+        .map_err(|error| CloneError::CloudPublishRefsMetadataRestoreFailed {
+            domain: source.clone_domain.clone(),
+            target: site_target_label(source, &restore_plan.site),
+            message: error.to_string(),
+        })?;
     restore_cloud_publish_ai_objects(source, restore_plan, r2_storage, &local_storage, &db_conn)
         .await?;
 
