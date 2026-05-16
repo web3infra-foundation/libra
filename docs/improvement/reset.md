@@ -254,13 +254,15 @@ M       src/lib.rs
     "commit": "abc1234...",
     "short_commit": "abc1234",
     "subject": "feat: add new feature",
-    "previous_commit": "abc1234...",
+    "previous_commit": null,
     "files_unstaged": 2,
     "files_restored": 0,
     "pathspecs": ["src/main.rs", "src/lib.rs"]
   }
 }
 ```
+
+> 注：pathspec reset 不移动 HEAD，因此 `previous_commit` 显式输出 `null`，与 `docs/commands/reset.md` 第 130 行的用户契约一致；机器消费方可借此一字段区分整体 reset 和 pathspec reset。
 
 **错误 JSON：**
 
