@@ -953,6 +953,37 @@ mod tests {
         assert_eq!(err.to_string(), "LFS push failed: HEAD is detached");
     }
 
+    /// Pin the `Display` format contract for [`LockListError`]. The
+    /// variants are produced via `thiserror` `#[error(...)]` attributes:
+    ///   - `Request(msg)`         -> `request failed: <msg>`
+    ///   - `Http { status, msg }` -> `remote returned status <status>: <message>`
+    ///   - `Decode(msg)`          -> `failed to decode response: <msg>`
+    ///
+    /// `src/command/lfs.rs::map_lock_list_error` and downstream
+    /// `LBR-NET-*` / `LBR-AUTH-002` mappings depend on this exact shape
+    /// to keep human and JSON stable-code surfaces consistent.
+    #[test]
+    fn lock_list_error_display_pins_each_variant() {
+        let req = LockListError::Request("connection refused".to_string());
+        assert_eq!(req.to_string(), "request failed: connection refused");
+
+        let http = LockListError::Http {
+            status: StatusCode::FORBIDDEN,
+            message: "you must have push access to verify locks".to_string(),
+        };
+        assert_eq!(
+            http.to_string(),
+            "remote returned status 403 Forbidden: \
+             you must have push access to verify locks",
+        );
+
+        let decode = LockListError::Decode("expected `objects` field".to_string());
+        assert_eq!(
+            decode.to_string(),
+            "failed to decode response: expected `objects` field",
+        );
+    }
+
     #[tokio::test]
     async fn test_push_object() {
         if std::env::var("LIBRA_TEST_MEGA_SERVER").map_or(true, |v| v.is_empty()) {
