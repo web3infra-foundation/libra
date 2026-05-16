@@ -480,3 +480,20 @@ fn sum_segment_tokens(segments: &[ContextSegmentBudget]) -> u64 {
         .map(|segment| segment.max_tokens)
         .fold(0_u64, u64::saturating_add)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextBudgetError, ContextSegmentKind};
+
+    #[test]
+    fn context_budget_error_display_pins_each_variant() {
+        assert_eq!(
+            ContextBudgetError::EmptySegments.to_string(),
+            "context budget must define at least one segment",
+        );
+        assert_eq!(
+            ContextBudgetError::DuplicateSegment(ContextSegmentKind::RecentMessages).to_string(),
+            "context budget contains duplicate segment 'recent_messages'",
+        );
+    }
+}
