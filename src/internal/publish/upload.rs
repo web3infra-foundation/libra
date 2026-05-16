@@ -422,3 +422,58 @@ fn ai_layer_label(layer: AiObjectLayer) -> &'static str {
         AiObjectLayer::Projection => "projection",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format contract for the three small typed
+    /// error enums in this module:
+    ///   - `RevisionD1RowsError`
+    ///   - `SiteIndexArtifactError`
+    ///   - `AiExportD1RowsError`
+    ///
+    /// These surface in `cloud sync` failure paths and are mapped to
+    /// `StableErrorCode::ConflictOperationBlocked` /
+    /// `IoWriteFailed` at the CLI boundary. Future refactors that
+    /// touch the `#[error(...)]` attributes will trip this test.
+    #[test]
+    fn publish_upload_error_display_pins_each_variant() {
+        // RevisionD1RowsError
+        let e = RevisionD1RowsError::FileCountTooLarge { count: 1_000_000 };
+        assert_eq!(
+            e.to_string(),
+            "publish revision file count 1000000 exceeds D1 integer range",
+        );
+        let e = RevisionD1RowsError::FileSizeTooLarge {
+            path: "src/big.bin".to_string(),
+            size_bytes: 9_223_372_036_854_775_807, // i64::MAX
+        };
+        assert_eq!(
+            e.to_string(),
+            "publish file \"src/big.bin\" has size 9223372036854775807 \
+             which exceeds D1 integer range",
+        );
+
+        // SiteIndexArtifactError (skip the #[from] Snapshot variant —
+        // its Display is owned by SnapshotBuildError).
+        assert_eq!(
+            SiteIndexArtifactError::MissingDefaultRef.to_string(),
+            "site index requires a default ref",
+        );
+        assert_eq!(
+            SiteIndexArtifactError::MissingLatestRevision.to_string(),
+            "site index requires the default ref to resolve to a latest revision",
+        );
+
+        // AiExportD1RowsError
+        assert_eq!(
+            AiExportD1RowsError::ObjectCountTooLarge { count: 5_000_000 }.to_string(),
+            "AI export object count 5000000 exceeds D1 integer range",
+        );
+        assert_eq!(
+            AiExportD1RowsError::MissingBundle.to_string(),
+            "AI export plan does not contain a bundle entry",
+        );
+    }
+}
