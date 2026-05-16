@@ -91,12 +91,22 @@ libra restore --json --source HEAD .
 ## Human Output
 
 ```text
-Restored src/main.rs
-Restored lib/utils.rs
-Deleted old_file.txt
+Updated 3 path(s) from HEAD
 ```
 
-`--quiet` suppresses all output.
+The confirmation reports a count over the union of files restored *and*
+deleted (i.e. when a tracked file is removed in the source it gets
+deleted from the worktree/index). When `--source` is omitted, the
+source label is `HEAD` for `--staged` restores and `the index` for
+worktree-only restores:
+
+```text
+Updated 1 path(s) from the index
+```
+
+`--quiet` suppresses all output. If neither a restored nor a deleted
+path matched, no confirmation is emitted (so a no-op restore is
+silent).
 
 ## Structured Output (JSON)
 

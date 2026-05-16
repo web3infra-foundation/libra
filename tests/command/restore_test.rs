@@ -256,3 +256,65 @@ fn test_restore_quiet_suppresses_confirmation_but_still_restores() {
         "quiet mode must still perform the restore"
     );
 }
+
+// ── Locked-branch guard ─────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn test_restore_source_refuses_locked_intent_branch() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+
+    let output = run_libra_command(
+        &["restore", "--source", "intent", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "locked-branch restore should exit 128 (fatal)"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("refusing to restore from locked branch 'intent'"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 128);
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read tracked file");
+    assert_eq!(
+        content, "modified\n",
+        "locked-source guard must not modify the worktree"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_source_refuses_locked_branch_with_revision_suffix() {
+    // is_locked_revision strips `~1` / `^` / `@{0}` so users cannot
+    // end-run the guard with `agent-traces~1` or similar.
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+
+    let output = run_libra_command(
+        &["restore", "--source", "agent-traces~1", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "locked-branch restore with revision suffix should still exit 128"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("refusing to restore from locked branch 'agent-traces~1'"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
