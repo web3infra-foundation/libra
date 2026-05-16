@@ -663,4 +663,37 @@ mod tests {
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
     }
+
+    /// Pin the `Display` format for the static-message and direct-
+    /// message variants of [`TagError`]. These strings are used as
+    /// the `CliError` message via `From<TagError> for CliError` and
+    /// surface in both human and `--json` envelopes for the `tag`
+    /// subcommand.
+    ///
+    /// Source-chained variants (ResolveHead, CheckExistingFailed,
+    /// SerializeAnnotatedTag, StoreObjectFailed, …) wrap upstream
+    /// error types (BranchStoreError / DbErr / GitError / io::Error)
+    /// and are intentionally skipped — their {source} slot is owned
+    /// by the wrapped error.
+    #[test]
+    fn tag_error_display_pins_static_message_variants() {
+        assert_eq!(TagError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            TagError::AlreadyExists("v1.0.0".to_string()).to_string(),
+            "tag 'v1.0.0' already exists",
+        );
+        assert_eq!(
+            TagError::NotFound("v9.9.9".to_string()).to_string(),
+            "tag 'v9.9.9' not found",
+        );
+        // MissingName(s) echoes the inner string verbatim.
+        assert_eq!(
+            TagError::MissingName("provide a tag name".to_string()).to_string(),
+            "provide a tag name",
+        );
+        assert_eq!(
+            TagError::HeadUnborn.to_string(),
+            "Cannot create tag: HEAD does not point to a commit",
+        );
+    }
 }
