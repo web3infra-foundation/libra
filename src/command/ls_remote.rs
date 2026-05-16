@@ -347,13 +347,43 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CompiledPattern, LsRemoteArgs, include_reference, resolve_remote, sanitize_discovery_error,
-        sanitize_remote_error_reason, visible_remote_display, visible_remote_url,
+        CompiledPattern, LsRemoteArgs, LsRemoteError, include_reference, resolve_remote,
+        sanitize_discovery_error, sanitize_remote_error_reason, visible_remote_display,
+        visible_remote_url,
     };
     use crate::{
         internal::protocol::DiscRef,
         utils::{test::ChangeDirGuard, util},
     };
+
+    /// Pin the `Display` format for the owned variants of [`LsRemoteError`].
+    /// `ConfigRead`, `InvalidRemote`, and `InvalidPattern` are fully owned
+    /// by this enum's `#[error(...)]` attributes; `Discovery` forwards
+    /// `{source}` to `GitError` and is intentionally skipped (the wrapped
+    /// type's Display contract lives in `git_internal`).
+    #[test]
+    fn ls_remote_error_display_pins_each_owned_variant() {
+        assert_eq!(
+            LsRemoteError::ConfigRead("db locked".to_string()).to_string(),
+            "failed to read remote configuration: db locked",
+        );
+        assert_eq!(
+            LsRemoteError::InvalidRemote {
+                spec: "ftp://example.com/repo".to_string(),
+                reason: "unsupported scheme".to_string(),
+            }
+            .to_string(),
+            "invalid remote 'ftp://example.com/repo': unsupported scheme",
+        );
+        assert_eq!(
+            LsRemoteError::InvalidPattern {
+                pattern: "**".to_string(),
+                reason: "empty alternation".to_string(),
+            }
+            .to_string(),
+            "invalid ref pattern '**': empty alternation",
+        );
+    }
 
     fn disc_ref(refname: &str) -> DiscRef {
         DiscRef {
