@@ -394,4 +394,53 @@ mod tests {
             error.message()
         );
     }
+
+    /// Pin the `Display` format for every variant of [`CleanError`].
+    /// These strings are used as the CliError message via
+    /// `clean_cli_error` and surface in both human and `--json`
+    /// envelopes for the `clean` subcommand.
+    #[test]
+    fn clean_error_display_pins_each_variant() {
+        assert_eq!(
+            CleanError::MissingMode.to_string(),
+            "clean requires -f or -n (use -f to remove files, -n to dry-run)",
+        );
+        assert_eq!(
+            CleanError::InvalidArgs("--fff is not a valid flag".to_string()).to_string(),
+            "invalid arguments: --fff is not a valid flag",
+        );
+        assert_eq!(
+            CleanError::LoadIndex("index file corrupt".to_string()).to_string(),
+            "failed to load index: index file corrupt",
+        );
+        // ScanUntracked echoes the inner string verbatim.
+        assert_eq!(
+            CleanError::ScanUntracked("walk failed at /tmp".to_string()).to_string(),
+            "walk failed at /tmp",
+        );
+        assert_eq!(
+            CleanError::ResolveWorkdir("permission denied".to_string()).to_string(),
+            "failed to resolve working directory: permission denied",
+        );
+        assert_eq!(
+            CleanError::ResolvePath {
+                path: "src/foo.rs".to_string(),
+                detail: "no such file".to_string(),
+            }
+            .to_string(),
+            "failed to resolve path src/foo.rs: no such file",
+        );
+        assert_eq!(
+            CleanError::OutsideWorkdir("/tmp/elsewhere".to_string()).to_string(),
+            "refusing to remove path outside workdir: /tmp/elsewhere",
+        );
+        assert_eq!(
+            CleanError::RemoveFile {
+                path: "build/artifact.o".to_string(),
+                detail: "permission denied".to_string(),
+            }
+            .to_string(),
+            "failed to remove build/artifact.o: permission denied",
+        );
+    }
 }
