@@ -867,4 +867,32 @@ mod tests {
         assert!(formatted.contains("invalid summary"));
         assert!(formatted.contains("## Goal"));
     }
+
+    #[test]
+    fn compaction_agent_error_display_pins_each_variant() {
+        assert_eq!(
+            CompactionAgentError::EmptyInput.to_string(),
+            "compaction agent input transcript is empty (blank or whitespace-only)",
+        );
+        assert_eq!(
+            CompactionAgentError::EmptyResponse.to_string(),
+            "compaction agent returned empty response (no text content)",
+        );
+        assert_eq!(
+            CompactionAgentError::UnexpectedToolCall {
+                tool_name: "apply_patch".to_string(),
+            }
+            .to_string(),
+            "compaction agent attempted to call tool \"apply_patch\", \
+             but tools are forbidden for this agent",
+        );
+        assert_eq!(
+            CompactionAgentError::InvalidTemplate(ContextHandoffParseError::DuplicateHeading {
+                heading: "## Goal".to_string(),
+            })
+            .to_string(),
+            "compaction agent produced an invalid summary: \
+             context handoff summary contains duplicate heading: ## Goal",
+        );
+    }
 }
