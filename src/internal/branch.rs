@@ -574,6 +574,42 @@ mod tests {
         assert_eq!(branches.len(), 3);
     }
 
+    /// Pin the `Display` format contract for [`BranchStoreError`].
+    /// The variants are produced via `thiserror` `#[error(...)]`
+    /// attributes and feed `LBR-REPO-002` / `LBR-REPO-003` mappings
+    /// at the CLI boundary (see `src/utils/error.rs`). The exact
+    /// strings are also used by the `--json` envelope so they form
+    /// part of the public output contract.
+    #[test]
+    fn branch_store_error_display_pins_each_variant() {
+        let query = BranchStoreError::Query("connection lost".to_string());
+        assert_eq!(
+            query.to_string(),
+            "failed to query branch storage: connection lost",
+        );
+
+        let corrupt = BranchStoreError::Corrupt {
+            name: "refs/heads/main".to_string(),
+            detail: "invalid object id".to_string(),
+        };
+        assert_eq!(
+            corrupt.to_string(),
+            "stored branch reference 'refs/heads/main' is corrupt: invalid object id",
+        );
+
+        let not_found = BranchStoreError::NotFound("topic/x".to_string());
+        assert_eq!(not_found.to_string(), "branch 'topic/x' not found");
+
+        let delete = BranchStoreError::Delete {
+            name: "feature/y".to_string(),
+            detail: "FK violation".to_string(),
+        };
+        assert_eq!(
+            delete.to_string(),
+            "failed to delete branch 'feature/y': FK violation",
+        );
+    }
+
     /// CEX-EntireIO: regression — `is_locked_branch` must include
     /// `agent-traces` so `restore`, `reset`, `switch`, and `checkout` reject
     /// it as a target.
