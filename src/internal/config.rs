@@ -1381,6 +1381,13 @@ impl Config {
         key: &str,
         value: &str,
     ) -> Model {
+        // INVARIANT (deprecated lossy API): callers must have verified the
+        // (configuration, name, key) tuple exists before calling. The
+        // SeaORM `find().one()` returns `Result<Option<Model>, DbErr>`, so
+        // the outer .expect() surfaces query failures and the inner
+        // .expect() surfaces the missing-row case. Both are unrecoverable
+        // for this legacy path; ConfigKv::set replaces the whole sequence
+        // with an upsert and explicit errors.
         let mut config: ActiveModel = config::Entity::find()
             .filter(config::Column::Configuration.eq(configuration))
             .filter(match name {
@@ -1390,11 +1397,14 @@ impl Config {
             .filter(config::Column::Key.eq(key))
             .one(db)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("legacy Config::update_with_conn: DB query failed")
+            .expect("legacy Config::update_with_conn: target config row missing (use ConfigKv::set for upsert semantics)")
             .into();
         config.value = Set(value.to_owned());
-        config.update(db).await.unwrap()
+        config
+            .update(db)
+            .await
+            .expect("legacy Config::update_with_conn: DB update failed")
     }
 
     /// Internal: list every legacy row matching `(configuration, name, key)`.
