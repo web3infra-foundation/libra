@@ -680,10 +680,13 @@ impl Display for ReflogFormatter<'_> {
 
 // INVARIANT: `commit_hash` comes from the reflog which only stores valid hashes
 // pointing to existing objects. If the object store is corrupt, panicking during
-// formatting is acceptable.
+// formatting is acceptable. The Result-returning sibling `find_commit_checked`
+// surfaces both failure modes as `RepoCorrupt` for callers that handle them.
 fn find_commit(commit_hash: &str) -> Commit {
-    let hash = ObjectHash::from_str(commit_hash).unwrap();
-    load_object::<Commit>(&hash).unwrap()
+    let hash = ObjectHash::from_str(commit_hash)
+        .expect("reflog commit hash is malformed (reflog object store may be corrupt)");
+    load_object::<Commit>(&hash)
+        .expect("reflog commit object is missing (reflog object store may be corrupt)")
 }
 
 fn find_commit_checked(commit_hash: &str) -> CliResult<Commit> {
@@ -699,9 +702,11 @@ fn find_commit_checked(commit_hash: &str) -> CliResult<Commit> {
 
 // INVARIANT: reflog timestamps are always valid Unix timestamps written by our
 // own code. `from_timestamp` only returns `None` for out-of-range values that
-// cannot occur in practice.
+// cannot occur in practice. The Result-returning sibling `format_datetime_checked`
+// surfaces an out-of-range timestamp as `RepoCorrupt`.
 fn format_datetime(timestamp: i64) -> String {
-    let naive = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
+    let naive = chrono::DateTime::from_timestamp(timestamp, 0)
+        .expect("reflog timestamp out of chrono::DateTime range (reflog may be corrupt)");
     let local = naive.with_timezone(&chrono::Local);
 
     let git_format = "%a %b %d %H:%M:%S %Y %z";
