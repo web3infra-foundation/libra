@@ -848,3 +848,31 @@ fn is_unquoted_key_continue(ch: char) -> bool {
 fn is_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonRepairError, JsonRepairErrorKind};
+
+    #[test]
+    fn json_repair_error_kind_display_pins_snake_case_for_each_variant() {
+        assert_eq!(JsonRepairErrorKind::EmptyInput.to_string(), "empty_input");
+        assert_eq!(
+            JsonRepairErrorKind::NoJsonCandidate.to_string(),
+            "no_json_candidate",
+        );
+        assert_eq!(JsonRepairErrorKind::ParseFailed.to_string(), "parse_failed");
+    }
+
+    #[test]
+    fn json_repair_error_display_pins_kind_colon_message_template() {
+        let err = JsonRepairError {
+            kind: JsonRepairErrorKind::ParseFailed,
+            message: "unexpected token at offset 7".to_string(),
+            parse_error: Some("trailing garbage".to_string()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "parse_failed: unexpected token at offset 7",
+        );
+    }
+}
