@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.267"
+version = "0.17.268"
 edition = "2024"
 
 [features]
@@ -186,3 +186,7 @@ path = "tests/compat/client_storage_production_unwrap_guard.rs"
 [[test]]
 name = "compat_extra_production_unwrap_guard"
 path = "tests/compat/extra_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_all_production_unwrap_guard"
+path = "tests/compat/all_production_unwrap_guard.rs"
