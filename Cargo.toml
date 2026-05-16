@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.260"
+version = "0.17.261"
 edition = "2024"
 
 [features]
@@ -166,3 +166,7 @@ path = "tests/compat/branch_lossy_wrapper_guard.rs"
 [[test]]
 name = "compat_lfs_client_production_unwrap_guard"
 path = "tests/compat/lfs_client_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_config_production_unwrap_guard"
+path = "tests/compat/config_production_unwrap_guard.rs"
