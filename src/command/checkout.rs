@@ -71,6 +71,71 @@ struct CheckoutTrackingOutput {
     remote_branch: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CheckoutError {
+    #[error("checking out '{0}' branch is not allowed")]
+    CheckingOutBranchBlocked(String),
+
+    #[error("creating/switching to '{0}' branch is not allowed")]
+    CreatingBranchBlocked(String),
+
+    #[error("unstaged changes, can't switch branch")]
+    DirtyUnstaged,
+
+    #[error("uncommitted changes, can't switch branch")]
+    DirtyUncommitted,
+
+    #[error("untracked working tree file would be overwritten by checkout: {0}")]
+    UntrackedOverwrite(String),
+
+    #[error("failed to {context}: {detail}")]
+    BranchStoreRead { context: String, detail: String },
+
+    #[error("failed to {context}: {detail}")]
+    BranchStoreCorrupt { context: String, detail: String },
+
+    #[error(transparent)]
+    DelegatedCli(#[from] CliError),
+}
+
+impl From<CheckoutError> for CliError {
+    fn from(error: CheckoutError) -> Self {
+        match error {
+            CheckoutError::CheckingOutBranchBlocked(branch) => CliError::fatal(format!(
+                "checking out '{}' branch is not allowed",
+                branch
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget),
+
+            CheckoutError::CreatingBranchBlocked(branch) => CliError::fatal(format!(
+                "creating/switching to '{}' branch is not allowed",
+                branch
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget),
+
+            CheckoutError::DirtyUnstaged | CheckoutError::DirtyUncommitted => {
+                CliError::failure("local changes would be overwritten by checkout")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            }
+
+            CheckoutError::UntrackedOverwrite(path) => {
+                CliError::failure(format!("local changes would be overwritten by checkout: {path}"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            }
+
+            CheckoutError::BranchStoreRead { context, detail } => {
+                CliError::fatal(format!("failed to {context}: {detail}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            CheckoutError::BranchStoreCorrupt { context, detail } => {
+                CliError::fatal(format!("failed to {context}: {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            }
+            CheckoutError::DelegatedCli(err) => err,
+        }
+    }
+}
+
 pub async fn execute(args: CheckoutArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -91,28 +156,25 @@ pub async fn execute(args: CheckoutArgs) {
 /// changes would be overwritten, branch creation fails, or checkout/restore
 /// writes fail.
 pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = run_checkout(args, output).await?;
+    let result = run_checkout(args, output).await.map_err(CliError::from)?;
     render_checkout_output(&result, output)
 }
 
-async fn run_checkout(args: CheckoutArgs, output: &OutputConfig) -> CliResult<CheckoutOutput> {
+async fn run_checkout(
+    args: CheckoutArgs,
+    output: &OutputConfig,
+) -> Result<CheckoutOutput, CheckoutError> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH
     {
-        return Err(CliError::fatal(format!(
-            "checking out '{}' branch is not allowed",
-            INTENT_BRANCH
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget));
+        return Err(CheckoutError::CheckingOutBranchBlocked(INTENT_BRANCH.to_string()));
     }
     if let Some(ref new_branch_name) = args.new_branch
         && new_branch_name == INTENT_BRANCH
     {
-        return Err(CliError::fatal(format!(
-            "creating/switching to '{}' branch is not allowed",
-            INTENT_BRANCH
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget));
+        return Err(CheckoutError::CreatingBranchBlocked(
+            INTENT_BRANCH.to_string(),
+        ));
     }
 
     let previous_branch = get_current_branch().await;
@@ -142,7 +204,7 @@ async fn run_checkout(args: CheckoutArgs, output: &OutputConfig) -> CliResult<Ch
     let target_commit = if let Some(ref branch_name) = args.branch {
         Branch::find_branch_result(branch_name, None)
             .await
-            .map_err(|error| checkout_branch_store_error("resolve checkout target", error))?
+            .map_err(|error| map_checkout_branch_store_error("resolve checkout target", error))?
             .map(|branch| branch.commit)
     } else {
         None
@@ -155,28 +217,29 @@ async fn run_checkout(args: CheckoutArgs, output: &OutputConfig) -> CliResult<Ch
 
     match clean_status {
         Ok(()) => {}
-        Err(switch::SwitchError::DirtyUnstaged | switch::SwitchError::DirtyUncommitted) => {
-            return Err(
-                CliError::failure("local changes would be overwritten by checkout")
-                    .with_stable_code(StableErrorCode::RepoStateInvalid),
-            );
+        Err(switch::SwitchError::DirtyUnstaged) => {
+            return Err(CheckoutError::DirtyUnstaged);
         }
-        Err(switch::SwitchError::UntrackedOverwrite(..)) => {
-            return Err(
-                CliError::failure("local changes would be overwritten by checkout")
-                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
-            );
+        Err(switch::SwitchError::DirtyUncommitted) => {
+            return Err(CheckoutError::DirtyUncommitted);
+        }
+        Err(switch::SwitchError::UntrackedOverwrite(path)) => {
+            return Err(CheckoutError::UntrackedOverwrite(path))
         }
         Err(err) => return Err(CliError::from(err)),
     }
 
     match (args.branch, args.new_branch) {
         (Some(target_branch), _) => {
-            check_and_switch_branch(&target_branch, previous_branch, previous_commit, output).await
+            check_and_switch_branch(&target_branch, previous_branch, previous_commit, output)
+                .await
+                .map_err(CheckoutError::DelegatedCli)?
         }
         (None, Some(new_branch)) => {
             let child_output = silent_child_output(output);
-            let commit = create_and_switch_new_branch(&new_branch, &child_output).await?;
+            let commit = create_and_switch_new_branch(&new_branch, &child_output)
+                .await
+                .map_err(CheckoutError::DelegatedCli)?;
             let commit = commit.to_string();
             Ok(CheckoutOutput {
                 action: "create".to_string(),
@@ -197,14 +260,21 @@ async fn run_checkout(args: CheckoutArgs, output: &OutputConfig) -> CliResult<Ch
     }
 }
 
-fn checkout_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+fn map_checkout_branch_store_error(
+    context: &str,
+    error: BranchStoreError,
+) -> CheckoutError {
     match error {
         BranchStoreError::Query(detail) => {
-            CliError::fatal(format!("failed to {context}: {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
+            CheckoutError::BranchStoreRead {
+                context: context.to_string(),
+                detail,
+            }
         }
-        other => CliError::fatal(format!("failed to {context}: {other}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt),
+        other => CheckoutError::BranchStoreCorrupt {
+            context: context.to_string(),
+            detail: other.to_string(),
+        },
     }
 }
 
@@ -219,7 +289,13 @@ async fn current_commit_string() -> CliResult<Option<String>> {
     Head::current_commit_result()
         .await
         .map(|commit| commit.map(|hash| hash.to_string()))
-        .map_err(|error| checkout_branch_store_error("resolve HEAD commit", error))
+        .map_err(|error| {
+            CheckoutError::BranchStoreCorrupt {
+                context: "resolve HEAD commit".to_string(),
+                detail: error.to_string(),
+            }
+        })
+        .map_err(CliError::from)?;
 }
 
 pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
@@ -241,7 +317,7 @@ async fn switch_branch_with_output(
     }
     let target_branch = Branch::find_branch_result(branch_name, None)
         .await
-        .map_err(|error| checkout_branch_store_error("resolve branch", error))?
+        .map_err(|error| map_checkout_branch_store_error("resolve branch", error))?
         .ok_or_else(|| {
             CliError::fatal(format!("branch '{}' not found", branch_name))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -273,7 +349,7 @@ async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<Objec
     pull::execute_safe(pull::PullArgs::make(None, None), &child_output).await?;
     Head::current_commit_result()
         .await
-        .map_err(|error| checkout_branch_store_error("resolve checkout result", error))?
+        .map_err(|error| map_checkout_branch_store_error("resolve checkout result", error))?
         .ok_or_else(|| {
             CliError::fatal("checkout remote branch left HEAD without a commit")
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
@@ -297,12 +373,12 @@ async fn check_branch_with_output(
 
     let target_branch: Option<Branch> = Branch::find_branch_result(branch_name, None)
         .await
-        .map_err(|error| checkout_branch_store_error("resolve branch", error))?;
+        .map_err(|error| map_checkout_branch_store_error("resolve branch", error))?;
     if target_branch.is_none() {
         let remote_branch_name: String = format!("origin/{branch_name}");
-        if !Branch::search_branch_result(&remote_branch_name)
-            .await
-            .map_err(|error| checkout_branch_store_error("search remote tracking branches", error))?
+            if !Branch::search_branch_result(&remote_branch_name)
+        .await
+            .map_err(|error| map_checkout_branch_store_error("search remote tracking branches", error))?
             .is_empty()
         {
             info_println!(
