@@ -521,4 +521,33 @@ mod tests {
 
         let _ = Head::current_with_conn(&db).await;
     }
+
+    /// Regression for v0.17.238 (parallel to `current_with_conn_panics_*`):
+    /// the lossy `Head::remote_current_with_conn` must panic with the
+    /// INVARIANT message `"remote HEAD row in reference table is corrupt"`
+    /// when its Result-returning sibling surfaces a
+    /// `BranchStoreError::Corrupt { .. }`. Insert a detached remote HEAD
+    /// row whose stored commit hash is unparseable, then call the lossy
+    /// variant.
+    #[tokio::test]
+    #[serial]
+    #[should_panic(expected = "remote HEAD row in reference table is corrupt")]
+    async fn remote_current_with_conn_panics_with_invariant_message_when_remote_head_corrupt() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        let remote = "origin";
+        let row = reference::ActiveModel {
+            kind: Set(reference::ConfigKind::Head),
+            remote: Set(Some(remote.to_string())),
+            name: Set(None),
+            commit: Set(Some("not-a-valid-hash".to_string())),
+            ..Default::default()
+        };
+        reference::Entity::insert(row).exec(&db).await.unwrap();
+
+        let _ = Head::remote_current_with_conn(&db, remote).await;
+    }
 }
