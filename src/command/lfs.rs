@@ -10,15 +10,17 @@ use std::{
 use clap::Subcommand;
 use git_internal::internal::index::Index;
 use reqwest::StatusCode;
-use serde::Serialize;
 
 use crate::{
-    command::status,
+    command::{
+        lfs_schema::{LfsFileOutput, LfsOutput},
+        status,
+    },
     internal::{
         head::Head,
         protocol::lfs_client::{LFSClient, LockListError},
     },
-    lfs_structs::{Lock, LockListQuery},
+    lfs_structs::LockListQuery,
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
         lfs,
@@ -70,47 +72,6 @@ pub enum LfsCmds {
         #[clap(long, short)]
         name_only: bool,
     },
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct LfsOutput {
-    action: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    patterns: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    locks: Vec<Lock>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    files: Vec<LfsFileOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refspec: Option<String>,
-    #[serde(skip_serializing_if = "is_false")]
-    name_only: bool,
-    #[serde(skip_serializing_if = "is_false")]
-    show_size: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LfsFileOutput {
-    path: String,
-    /// Display oid: full 64-char hash when `--long`, otherwise the first 10
-    /// characters. Backward-compatible — preserves the existing JSON contract.
-    oid: String,
-    /// Full 64-char LFS oid, always. Lets `--json` consumers read the canonical
-    /// hash without having to also pass `--long`.
-    full_oid: String,
-    marker: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display_size: Option<String>,
-}
-
-const fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 pub async fn execute(cmd: LfsCmds) -> CliResult<()> {

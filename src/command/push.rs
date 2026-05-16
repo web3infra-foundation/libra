@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::{branch, fetch::RemoteClient},
+    command::{branch, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
@@ -281,6 +281,7 @@ pub struct PushOutput {
     pub bytes_pushed: u64,
     /// Number of LFS files uploaded
     pub lfs_files_uploaded: usize,
+    pub lfs_upload: LfsUploadSummary,
     /// Whether this was a dry-run
     pub dry_run: bool,
     /// Whether everything was already up-to-date
@@ -514,6 +515,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: 0,
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: args.dry_run,
             up_to_date: true,
             upstream_set: None,
@@ -575,6 +577,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: result.objs.len(),
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: true,
             up_to_date: false,
             upstream_set: None,
@@ -758,6 +761,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         objects_pushed: obj_count,
         bytes_pushed,
         lfs_files_uploaded,
+        lfs_upload: LfsUploadSummary {
+            files_uploaded: lfs_files_uploaded,
+        },
         dry_run: false,
         up_to_date: false,
         upstream_set,
