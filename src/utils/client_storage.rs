@@ -414,7 +414,13 @@ impl ClientStorage {
             let res = future.await;
             let _ = tx.send(res);
         });
-        rx.recv().unwrap()
+        // INVARIANT: the spawned task above always either returns or panics
+        // before exiting. recv() therefore only returns Err if the spawned
+        // task panicked (sender dropped before sending). The function's doc
+        // comment already documents this as a programmer error since
+        // RUNTIME is a `Lazy` static that outlives the process.
+        rx.recv()
+            .expect("ClientStorage storage-runtime task panicked before sending result")
     }
 
     /// Wait for all background tasks (e.g. indexing) to complete.
