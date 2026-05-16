@@ -241,4 +241,21 @@ mod tests {
 
         assert_eq!(estimate, 66);
     }
+
+    #[test]
+    fn usage_pricing_config_error_display_pins_owned_variant_and_parse_template() {
+        assert_eq!(
+            UsagePricingConfigError::MissingField("input_micro_dollars_per_mtok").to_string(),
+            "usage pricing config is missing `input_micro_dollars_per_mtok`",
+        );
+
+        let parse_err = UsagePricingConfigError::ParseToml(
+            toml::from_str::<toml::Value>("invalid = ").unwrap_err(),
+        );
+        let rendered = parse_err.to_string();
+        assert!(
+            rendered.starts_with("failed to parse usage pricing config: "),
+            "got: {rendered}",
+        );
+    }
 }
