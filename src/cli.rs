@@ -253,8 +253,6 @@ enum Commands {
     Describe(command::describe::DescribeArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
-    #[command(about = "Compute Git-compatible object IDs")]
-    HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
 
@@ -723,6 +721,14 @@ impl CommandPreflight {
         }
     }
 
+    fn sha1_without_repo() -> Self {
+        Self {
+            storage: None,
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
+
     fn repo(storage: std::path::PathBuf) -> Self {
         Self {
             storage: Some(storage),
@@ -748,6 +754,7 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        Commands::VerifyPack(_) => Ok(CommandPreflight::sha1_without_repo()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -954,6 +961,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         if preflight.set_hash_kind {
             set_local_hash_kind_for_storage(storage).await?;
         }
+    } else if preflight.set_hash_kind {
+        set_hash_kind(HashKind::Sha1);
     }
     // Resolve global output flags into a single config before dispatching.
     let color = if args.no_color {

@@ -80,6 +80,31 @@ fn verify_pack_accepts_generated_v1_index() {
 
 #[test]
 #[serial]
+fn verify_pack_accepts_absolute_index_path_outside_repository() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "1");
+    let outside = tempfile::tempdir().expect("create non-repo cwd");
+
+    let output = run_libra_command(
+        &["verify-pack", idx_path.to_str().expect("idx path UTF-8")],
+        outside.path(),
+    );
+    assert_cli_success(
+        &output,
+        "verify-pack should accept absolute index paths outside a repo",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(": ok"),
+        "outside-repo verification should confirm success: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
 fn verify_pack_accepts_generated_v2_index_with_verbose_objects() {
     let repo = tempfile::tempdir().expect("create repo");
     init_repo_via_cli(repo.path());
