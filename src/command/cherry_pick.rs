@@ -561,3 +561,56 @@ async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`CherryPickError`].
+    /// These strings are used as the `CliError` message via
+    /// `From<CherryPickError> for CliError` and surface in both human
+    /// and `--json` envelopes for the `cherry-pick` subcommand.
+    ///
+    /// All variants are pinned because every variant carries either a
+    /// static message or an explicit `{0}` field interpolation; none
+    /// wrap an upstream source error directly.
+    #[test]
+    fn cherry_pick_error_display_pins_each_variant() {
+        assert_eq!(
+            CherryPickError::NotInRepo.to_string(),
+            "not a libra repository",
+        );
+        assert_eq!(
+            CherryPickError::DetachedHead.to_string(),
+            "cannot cherry-pick on detached HEAD",
+        );
+        assert_eq!(
+            CherryPickError::InvalidCommit("deadbeef".to_string()).to_string(),
+            "failed to resolve commit reference 'deadbeef'",
+        );
+        assert_eq!(
+            CherryPickError::MultipleWithNoCommit.to_string(),
+            "cannot cherry-pick multiple commits with --no-commit",
+        );
+        assert_eq!(
+            CherryPickError::MergeCommitUnsupported.to_string(),
+            "cherry-picking merge commits is not supported",
+        );
+        assert_eq!(
+            CherryPickError::Conflict {
+                commit: "abc123".to_string(),
+                reason: "untracked file would be overwritten".to_string(),
+            }
+            .to_string(),
+            "failed to cherry-pick abc123: untracked file would be overwritten",
+        );
+        assert_eq!(
+            CherryPickError::LoadObject("object not found".to_string()).to_string(),
+            "failed to load cherry-pick state: object not found",
+        );
+        assert_eq!(
+            CherryPickError::SaveFailed("disk full".to_string()).to_string(),
+            "failed to update cherry-pick state: disk full",
+        );
+    }
+}
