@@ -1395,3 +1395,76 @@ pub(crate) fn get_stash_num() -> Result<usize, String> {
 
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`StashError`]. These strings are used as the
+    /// `CliError` message via the From<StashError> mapping and surface
+    /// in both human and `--json` envelopes for `stash`.
+    ///
+    /// Source-chained variants whose body is solely a wrapped string
+    /// (ReadObject, WriteObject, IndexSave, ResetFailed, Other) are
+    /// covered indirectly by pinning the inner `{0}` echo form here for
+    /// representative cases (Other does that explicitly).
+    #[test]
+    fn stash_error_display_pins_each_variant() {
+        assert_eq!(StashError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            StashError::NoInitialCommit.to_string(),
+            "you do not have the initial commit yet",
+        );
+        assert_eq!(StashError::NoStashFound.to_string(), "no stash found");
+        assert_eq!(
+            StashError::InvalidStashRef("@bogus".to_string()).to_string(),
+            "'@bogus' is not a valid stash reference",
+        );
+        assert_eq!(
+            StashError::StashNotExist(3).to_string(),
+            "stash@{3}: stash does not exist",
+        );
+        assert_eq!(
+            StashError::MergeConflict("foo.txt".to_string()).to_string(),
+            "merge conflict during stash apply:\n  foo.txt",
+        );
+        assert_eq!(
+            StashError::BranchExists("feature".to_string()).to_string(),
+            "a branch named 'feature' already exists",
+        );
+        assert_eq!(
+            StashError::BranchLookupFailed {
+                branch: "topic/x".to_string(),
+                detail: "db locked".to_string(),
+            }
+            .to_string(),
+            "failed to query branch 'topic/x': db locked",
+        );
+        assert_eq!(
+            StashError::ClearRequiresForce.to_string(),
+            "clearing all stash entries requires --force in interactive mode",
+        );
+        assert_eq!(
+            StashError::ReadObject("permission denied".to_string()).to_string(),
+            "failed to read object: permission denied",
+        );
+        assert_eq!(
+            StashError::WriteObject("disk full".to_string()).to_string(),
+            "failed to write object: disk full",
+        );
+        assert_eq!(
+            StashError::IndexSave("io error".to_string()).to_string(),
+            "failed to save index: io error",
+        );
+        assert_eq!(
+            StashError::ResetFailed("could not restore".to_string()).to_string(),
+            "failed to reset working directory: could not restore",
+        );
+        // Other(s) echoes the inner string verbatim.
+        assert_eq!(
+            StashError::Other("custom error".to_string()).to_string(),
+            "custom error",
+        );
+    }
+}
