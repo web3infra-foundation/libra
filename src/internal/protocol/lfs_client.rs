@@ -728,7 +728,13 @@ impl LFSClient {
 // LFS locks API
 impl LFSClient {
     pub async fn get_locks(&self, query: LockListQuery) -> Result<LockList, LockListError> {
-        let url = self.lfs_url.join("locks").unwrap();
+        // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
+        // construction; joining a static relative URL onto a valid base URL
+        // cannot fail.
+        let url = self
+            .lfs_url
+            .join("locks")
+            .expect("'locks' is a valid relative URL");
         let query = [
             ("id", query.id),
             ("path", query.path),
