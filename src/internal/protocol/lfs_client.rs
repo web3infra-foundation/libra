@@ -903,6 +903,56 @@ mod tests {
         println!("{:?}", serde_json::to_string(&vars).unwrap());
     }
 
+    /// Regression for v0.17.269: pin the `Display` format contract for
+    /// `LfsPushError`. The format is
+    /// `LFS push failed[ for <path>][ (oid <oid>)]: <detail>` — both
+    /// optional fields are elided if `None`. Callers that propagate via
+    /// `?` or call `.to_string()` rely on this exact one-line shape.
+    #[test]
+    fn lfs_push_error_display_formats_all_combinations() {
+        // path + oid + detail (the common case from upload_object)
+        let err = LfsPushError {
+            path: Some("/tmp/large.bin".to_string()),
+            oid: Some("abc123".to_string()),
+            detail: "remote did not provide an upload action".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "LFS push failed for /tmp/large.bin (oid abc123): \
+             remote did not provide an upload action",
+        );
+
+        // path only
+        let err = LfsPushError {
+            path: Some("/tmp/large.bin".to_string()),
+            oid: None,
+            detail: "local LFS object not found".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "LFS push failed for /tmp/large.bin: local LFS object not found",
+        );
+
+        // oid only
+        let err = LfsPushError {
+            path: None,
+            oid: Some("abc123".to_string()),
+            detail: "remote rejected upload".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "LFS push failed (oid abc123): remote rejected upload",
+        );
+
+        // detail only (e.g. lock-verification failures with no path/oid)
+        let err = LfsPushError {
+            path: None,
+            oid: None,
+            detail: "HEAD is detached".to_string(),
+        };
+        assert_eq!(err.to_string(), "LFS push failed: HEAD is detached");
+    }
+
     #[tokio::test]
     async fn test_push_object() {
         if std::env::var("LIBRA_TEST_MEGA_SERVER").map_or(true, |v| v.is_empty()) {
