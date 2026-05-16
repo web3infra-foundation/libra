@@ -113,6 +113,7 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra cat-file` | | Inspect Git objects and AI objects by type, size, or pretty-printed content | [cat-file.md](cat-file.md) |
+| `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |

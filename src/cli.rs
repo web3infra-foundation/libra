@@ -35,7 +35,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -253,6 +253,10 @@ enum Commands {
     Describe(command::describe::DescribeArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(about = "Compute Git-compatible object IDs")]
+    HashObject(command::hash_object::HashObjectArgs),
+    #[command(about = "Validate pack index files against pack archives")]
+    VerifyPack(command::verify_pack::VerifyPackArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -1033,6 +1037,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::VerifyPack(cmd_args) => {
+            command::verify_pack::execute_safe(cmd_args, &output).await?
+        }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
