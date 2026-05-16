@@ -807,3 +807,96 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for [`RemoteError`] variants whose
+    /// pattern is fully owned by this enum (i.e., the `#[error(...)]`
+    /// attribute is fully formed with `{field}` interpolations rather
+    /// than `{0}` source forwarding to upstream Display).
+    ///
+    /// The `#[error(transparent)] Fetch` variant forwards to
+    /// `fetch::FetchError` which has its own pin test
+    /// (`fetch_error_display_pins_static_message_variants`), so it's
+    /// intentionally skipped here.
+    #[test]
+    fn remote_error_display_pins_each_owned_variant() {
+        assert_eq!(
+            RemoteError::AlreadyExists {
+                name: "origin".to_string(),
+            }
+            .to_string(),
+            "remote 'origin' already exists",
+        );
+        assert_eq!(
+            RemoteError::NotFound {
+                name: "upstream".to_string(),
+            }
+            .to_string(),
+            "no such remote: upstream",
+        );
+        assert_eq!(
+            RemoteError::NoUrlConfigured {
+                name: "origin".to_string(),
+            }
+            .to_string(),
+            "no URL configured for remote 'origin'",
+        );
+        assert_eq!(
+            RemoteError::UrlPatternNotMatched {
+                name: "origin".to_string(),
+                role: UrlRole::Push,
+                pattern: "https://*".to_string(),
+            }
+            .to_string(),
+            "no matching push URL found for remote 'origin': https://*",
+        );
+        assert_eq!(
+            RemoteError::ConfigRead {
+                detail: "db locked".to_string(),
+            }
+            .to_string(),
+            "failed to read remote configuration: db locked",
+        );
+        assert_eq!(
+            RemoteError::ConfigWrite {
+                detail: "disk full".to_string(),
+            }
+            .to_string(),
+            "failed to update remote configuration: disk full",
+        );
+        assert_eq!(
+            RemoteError::BranchList {
+                detail: "query failed".to_string(),
+            }
+            .to_string(),
+            "failed to list remote-tracking branches: query failed",
+        );
+        assert_eq!(
+            RemoteError::BranchCorrupt {
+                name: "refs/remotes/origin/main".to_string(),
+                detail: "invalid hash".to_string(),
+            }
+            .to_string(),
+            "corrupt remote-tracking branch 'refs/remotes/origin/main': invalid hash",
+        );
+        assert_eq!(
+            RemoteError::BranchDelete {
+                name: "refs/remotes/origin/stale".to_string(),
+                detail: "row locked".to_string(),
+            }
+            .to_string(),
+            "failed to prune remote-tracking branch 'refs/remotes/origin/stale': row locked",
+        );
+        assert_eq!(
+            RemoteError::ObjectFormatMismatch {
+                remote: "sha1".to_string(),
+                local: "sha256".to_string(),
+            }
+            .to_string(),
+            "remote object format 'sha1' does not match local 'sha256'",
+        );
+    }
+}
