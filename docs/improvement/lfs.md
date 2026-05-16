@@ -17,6 +17,7 @@
 - `tests/command/lfs_test.rs` 新增 CLI 级 mock 回归，覆盖 `locks` 成功 / 403→`LBR-AUTH-002`、`lock` 成功 / 409→`LBR-CONFLICT-002`、`unlock --force --id` 成功，验证 `--json` envelope 和稳定错误码。
 - `src/internal/protocol/lfs_client.rs` 新增 batch 协议合约回归：`push_object` 在 batch response 返回错误对象数（v0.17.232）、`download_object` 在 batch response 缺少 `download` action（v0.17.233）、`upload_object` 在 batch response 缺少 `upload` action（v0.17.234），均必须返回 typed 错误（`LfsPushError` 或 `anyhow::Error`）并在 detail/消息中携带请求 oid，不再 panic。
 - `ls-files --json` 新增 `full_oid` 字段，始终携带 64 字符 canonical hash；原 `oid` 字段保持显示语义（默认 10 字符前缀，`--long` 时为全长）向后兼容。`tests/command/lfs_test.rs::test_lfs_ls_files_json_output` 已断言 `full_oid.len() == 64` 且 `full_oid.starts_with(oid)`。
+- `src/internal/protocol/lfs_client.rs` 生产路径 unwrap 审计已完成：v0.17.237 / v0.17.254-256 将所有 production `.unwrap()` 调用迁移为 `.expect("...")` 并附带 INVARIANT 注释，覆盖 `from_url` trait 实现、`new()` 构造路径、`lock` / `unlock` / `verify_locks` / `get_locks` / `upload_object` 内部 retry loop 和 URL join，违约时的 panic 消息会指明被破坏的具体契约（例如 `LFSClient::from_url: derived LFS server URL did not parse`、`LFS upload file disappeared between metadata check and File::open`、`LFS lock id failed to compose a valid relative URL segment`）。
 
 ## 当前未完成
 
