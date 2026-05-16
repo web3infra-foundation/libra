@@ -293,3 +293,20 @@ pub enum TaskIntentClassifierError {
     #[error("task intent classifier returned invalid JSON: {0}")]
     InvalidResponse(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskIntentClassifierError;
+
+    #[test]
+    fn task_intent_classifier_error_display_pins_owned_variants() {
+        assert_eq!(
+            TaskIntentClassifierError::InvalidIntent("plan_only".to_string()).to_string(),
+            "task intent classifier returned invalid intent 'plan_only'",
+        );
+        assert_eq!(
+            TaskIntentClassifierError::InvalidResponse("trailing brace".to_string()).to_string(),
+            "task intent classifier returned invalid JSON: trailing brace",
+        );
+    }
+}
