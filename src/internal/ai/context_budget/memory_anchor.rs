@@ -466,3 +466,24 @@ pub fn build_memory_anchor_prompt_section(
 
     Some(lines.join("\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryAnchorLookupError;
+
+    #[test]
+    fn memory_anchor_lookup_error_display_pins_each_variant() {
+        assert_eq!(
+            MemoryAnchorLookupError::EmptyPrefix.to_string(),
+            "missing memory anchor id prefix",
+        );
+        assert_eq!(
+            MemoryAnchorLookupError::NotFound("abc".to_string()).to_string(),
+            "no memory anchor matches `abc`",
+        );
+        assert_eq!(
+            MemoryAnchorLookupError::Ambiguous("ab".to_string()).to_string(),
+            "memory anchor prefix `ab` is ambiguous",
+        );
+    }
+}
