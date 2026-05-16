@@ -2382,6 +2382,33 @@ mod tests {
             ),
         }
     }
+
+    #[test]
+    fn replay_error_kind_display_pins_snake_case_for_each_variant() {
+        assert_eq!(ReplayErrorKind::IndexLoad.to_string(), "index_load");
+        assert_eq!(ReplayErrorKind::CommitLoad.to_string(), "commit_load");
+        assert_eq!(ReplayErrorKind::MissingParent.to_string(), "missing_parent");
+        assert_eq!(ReplayErrorKind::BaseTreeLoad.to_string(), "base_tree_load");
+        assert_eq!(
+            ReplayErrorKind::TheirTreeLoad.to_string(),
+            "their_tree_load",
+        );
+        assert_eq!(ReplayErrorKind::OurTreeLoad.to_string(), "our_tree_load");
+        assert_eq!(
+            ReplayErrorKind::UntrackedOverwrite.to_string(),
+            "untracked_overwrite",
+        );
+        assert_eq!(
+            ReplayErrorKind::ConflictMarker.to_string(),
+            "conflict_marker",
+        );
+        assert_eq!(ReplayErrorKind::TreeCreate.to_string(), "tree_create");
+        assert_eq!(ReplayErrorKind::CommitSave.to_string(), "commit_save");
+        assert_eq!(ReplayErrorKind::NewTreeLoad.to_string(), "new_tree_load");
+        assert_eq!(ReplayErrorKind::IndexRebuild.to_string(), "index_rebuild");
+        assert_eq!(ReplayErrorKind::IndexSave.to_string(), "index_save");
+        assert_eq!(ReplayErrorKind::WorkdirReset.to_string(), "workdir_reset");
+    }
 }
 
 async fn rebase_worktree_guard(
