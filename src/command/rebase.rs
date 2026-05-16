@@ -2106,6 +2106,67 @@ mod tests {
         assert_eq!(ReplayErrorKind::WorkdirReset.as_str(), "workdir_reset");
     }
 
+    /// Pin the `Display` format for the static-message `RebaseError`
+    /// variants. These strings are used directly as the `CliError`
+    /// message via `CliError::fatal(error.to_string())` in the
+    /// `From<RebaseError> for CliError` mapping, so they're part of
+    /// the human + JSON output contract.
+    ///
+    /// Source-chained variants (CheckStateLoad, LoadStateError,
+    /// UpstreamLookup, WorktreeStatus, etc.) are intentionally not
+    /// pinned here — their `{0}` slot forwards to upstream Display
+    /// strings owned by other modules.
+    #[test]
+    fn rebase_error_display_pins_static_message_variants() {
+        assert_eq!(
+            RebaseError::NoRebaseInProgress.to_string(),
+            "no rebase in progress",
+        );
+        assert_eq!(
+            RebaseError::NotOnBranch.to_string(),
+            "not on a branch or in detached HEAD state, cannot rebase",
+        );
+        assert_eq!(
+            RebaseError::NoCommonAncestor.to_string(),
+            "no common ancestor found",
+        );
+        assert_eq!(
+            RebaseError::UnresolvedConflicts.to_string(),
+            "you must resolve all conflicts before continuing",
+        );
+        assert_eq!(RebaseError::NoCommitToSkip.to_string(), "no commit to skip");
+        assert_eq!(
+            RebaseError::BranchHasNoCommits {
+                branch: "main".to_string(),
+            }
+            .to_string(),
+            "current branch 'main' has no commits",
+        );
+        assert_eq!(
+            RebaseError::UntrackedOverwrite {
+                path: "scratch.txt".to_string(),
+            }
+            .to_string(),
+            "untracked working tree file would be overwritten by rebase: scratch.txt",
+        );
+        assert_eq!(
+            RebaseError::UpstreamResolve {
+                upstream: "origin/main".to_string(),
+                detail: "not a valid object".to_string(),
+            }
+            .to_string(),
+            "failed to resolve upstream 'origin/main': not a valid object",
+        );
+        assert_eq!(
+            RebaseError::WorktreeDirty {
+                action: "switch".to_string(),
+                detail: "uncommitted changes".to_string(),
+            }
+            .to_string(),
+            "uncommitted changes, can't switch",
+        );
+    }
+
     #[test]
     fn replay_internal_error_maps_to_typed_cli_error() {
         let rebase_err = RebaseError::ReplayInternal {
