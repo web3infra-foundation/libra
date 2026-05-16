@@ -496,4 +496,29 @@ mod tests {
             "error should name the canonical refspec: {msg}"
         );
     }
+
+    /// Regression for v0.17.238: the lossy `Head::current_with_conn` must
+    /// panic with the INVARIANT message `"HEAD row in reference table is
+    /// corrupt"` when the underlying `current_result_with_conn` returns
+    /// `Err(BranchStoreError::Corrupt { .. })`. This pins the panic
+    /// message contract so a future refactor of the Result-returning
+    /// helper cannot silently drift the lossy variant's diagnostic output.
+    #[tokio::test]
+    #[serial]
+    #[should_panic(expected = "HEAD row in reference table is corrupt")]
+    async fn current_with_conn_panics_with_invariant_message_when_head_corrupt() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        reference::Entity::delete_many()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+            .filter(reference::Column::Remote.is_null())
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let _ = Head::current_with_conn(&db).await;
+    }
 }
