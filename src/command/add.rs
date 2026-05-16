@@ -1079,6 +1079,45 @@ fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
 mod test {
     use super::*;
 
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`AddError`]. These strings are used as the `CliError`
+    /// message via `From<AddError> for CliError` and surface in both
+    /// human and `--json` envelopes.
+    ///
+    /// Source-chained variants (IndexLoad, IndexSave, RefreshFailed,
+    /// CreateIndexEntry, Workdir, Status) wrap upstream error sources
+    /// and are intentionally skipped — their `{source}` slot is owned
+    /// by the wrapped error type.
+    #[test]
+    fn add_error_display_pins_static_message_variants() {
+        assert_eq!(
+            AddError::NotInRepo.to_string(),
+            "not a libra repository (or any of the parent directories): .libra",
+        );
+        assert_eq!(
+            AddError::PathspecNotMatched {
+                pathspec: "src/missing.rs".to_string(),
+            }
+            .to_string(),
+            "pathspec 'src/missing.rs' did not match any files",
+        );
+        assert_eq!(
+            AddError::PathOutsideRepo {
+                path: "/tmp/elsewhere".to_string(),
+                repo_root: PathBuf::from("/home/user/repo"),
+            }
+            .to_string(),
+            "'/tmp/elsewhere' is outside repository at '/home/user/repo'",
+        );
+        assert_eq!(
+            AddError::InvalidPathEncoding {
+                path: PathBuf::from("src/foo"),
+            }
+            .to_string(),
+            "path 'src/foo' is not valid UTF-8",
+        );
+    }
+
     /// Scenario: clap should reject incompatible mode flags up front so the
     /// user gets a parse-time error rather than ambiguous staging behavior.
     /// The `mode` clap group ties `-A`, `-u`, and `--refresh` together.
