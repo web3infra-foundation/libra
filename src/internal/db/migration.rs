@@ -808,4 +808,49 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, MigrationError::DuplicateVersion { .. }));
     }
+
+    #[test]
+    fn migration_error_display_pins_owned_variants() {
+        assert_eq!(
+            MigrationError::DuplicateVersion {
+                version: 3,
+                existing: "schema_versions",
+                new: "schema_versions_again",
+            }
+            .to_string(),
+            "duplicate migration version 3 \
+             (existing name: schema_versions, new name: schema_versions_again)",
+        );
+        assert_eq!(
+            MigrationError::NonMonotonicRegistration {
+                prev_version: 7,
+                prev_name: "add_refs",
+                new_version: 5,
+                new_name: "add_objects",
+            }
+            .to_string(),
+            "migration versions must be strictly increasing; \
+             got 5 (add_objects) after 7 (add_refs)",
+        );
+        assert_eq!(
+            MigrationError::IrreversibleMigration {
+                version: 4,
+                name: "drop_legacy",
+            }
+            .to_string(),
+            "migration 4 (drop_legacy) has no down DDL — cannot rollback past it",
+        );
+        assert_eq!(
+            MigrationError::RollbackTargetNotBelowCurrent {
+                target: 9,
+                current: 8,
+            }
+            .to_string(),
+            "rollback target 9 is at or above current version 8",
+        );
+        assert_eq!(
+            MigrationError::RollbackOnEmptyDatabase { target: 2 }.to_string(),
+            "rollback target 2 requested but no migrations are applied",
+        );
+    }
 }
