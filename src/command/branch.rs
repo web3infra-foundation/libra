@@ -1275,6 +1275,62 @@ mod tests {
         ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
     }
 
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`BranchError`]. These strings are used directly as
+    /// the `CliError` message via `From<BranchError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    ///
+    /// Source-chained / wrapper variants (ConfigReadFailed,
+    /// ConfigWriteFailed, StorageQueryFailed, StoredReferenceCorrupt,
+    /// CreateFailed, DeleteFailed, DelegatedCli) wrap upstream error
+    /// messages and are intentionally skipped — their content is owned
+    /// by the wrapped type.
+    #[test]
+    fn branch_error_display_pins_static_message_variants() {
+        assert_eq!(BranchError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            BranchError::InvalidName("@bad name".to_string()).to_string(),
+            "'@bad name' is not a valid branch name",
+        );
+        assert_eq!(
+            BranchError::AlreadyExists("feature".to_string()).to_string(),
+            "a branch named 'feature' already exists",
+        );
+        assert_eq!(
+            BranchError::NotFound {
+                name: "topic/x".to_string(),
+                similar: vec![],
+            }
+            .to_string(),
+            "branch 'topic/x' not found",
+        );
+        assert_eq!(
+            BranchError::DeleteCurrent("main".to_string()).to_string(),
+            "Cannot delete the branch 'main' which you are currently on",
+        );
+        assert_eq!(
+            BranchError::NotFullyMerged("feature".to_string()).to_string(),
+            "The branch 'feature' is not fully merged.",
+        );
+        assert_eq!(
+            BranchError::Locked("intent".to_string()).to_string(),
+            "the 'intent' branch is locked and cannot be modified",
+        );
+        assert_eq!(BranchError::DetachedHead.to_string(), "HEAD is detached");
+        assert_eq!(
+            BranchError::InvalidCommit("deadbeef".to_string()).to_string(),
+            "not a valid object name: 'deadbeef'",
+        );
+        assert_eq!(
+            BranchError::InvalidUpstream("origin/missing".to_string()).to_string(),
+            "invalid upstream 'origin/missing'",
+        );
+        assert_eq!(
+            BranchError::RenameTooManyArgs.to_string(),
+            "too many arguments",
+        );
+    }
+
     #[test]
     #[serial]
     fn test_format_branch_name_with_full_remote_ref() {
