@@ -1139,4 +1139,31 @@ mod tests {
                 .any(|(_, path)| path == Path::new("/Users/tester/Library/Cookies"))
         );
     }
+
+    #[test]
+    fn sandbox_transform_error_display_pins_owned_variants() {
+        assert_eq!(
+            SandboxTransformError::MissingProgram.to_string(),
+            "missing command program",
+        );
+        assert_eq!(
+            SandboxTransformError::MissingLinuxSandboxExecutable.to_string(),
+            "missing linux sandbox executable path",
+        );
+        assert_eq!(
+            SandboxTransformError::WindowsSandboxNotImplemented.to_string(),
+            "windows restricted sandbox is not implemented yet",
+        );
+        assert_eq!(
+            SandboxTransformError::UnsupportedPlatform.to_string(),
+            "sandboxed command execution is not supported on this platform",
+        );
+        assert_eq!(
+            SandboxTransformError::EnforcementFailed {
+                reason: "process spawn refused".to_string(),
+            }
+            .to_string(),
+            "sandbox enforcement failed: process spawn refused",
+        );
+    }
 }
