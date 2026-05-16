@@ -929,4 +929,85 @@ permission = { write = "deny", read = "allow", shell = "ask" }
         assert_eq!(perm.get("read"), Some(&PermissionPolicy::Allow));
         assert_eq!(perm.get("shell"), Some(&PermissionPolicy::Ask));
     }
+
+    #[test]
+    fn agents_config_validation_error_display_pins_each_variant() {
+        assert_eq!(
+            AgentsConfigValidationError::InvalidModelBinding {
+                name: "research".to_string(),
+                value: "openai".to_string(),
+            }
+            .to_string(),
+            "agent 'research': model string 'openai' is not a valid `provider/model[@variant]`",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::InvalidAgentMode {
+                name: "research".to_string(),
+                value: "expert".to_string(),
+            }
+            .to_string(),
+            "agent 'research': mode 'expert' is not one of primary/subagent/all",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::EmptyToolEntry {
+                name: "research".to_string(),
+                index: 3,
+            }
+            .to_string(),
+            "agent 'research': tool entry at index 3 is empty",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::InvalidCompactionModel {
+                value: "raw".to_string(),
+            }
+            .to_string(),
+            "compaction.model 'raw' is not a valid `provider/model[@variant]`",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::InvalidAutoContinueOnResume {
+                value: "maybe".to_string(),
+            }
+            .to_string(),
+            "goal.auto_continue_on_resume 'maybe' is not one of: ask, auto, never",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::MultiAgentMustBePositive {
+                field: "max_subagent_depth",
+                value: 0,
+            }
+            .to_string(),
+            "multi_agent.max_subagent_depth must be at least 1 when multi_agent.enabled is true \
+             (got 0)",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::SessionCostWarnNotBelowMax {
+                warn: 9.0,
+                max: 5.0,
+            }
+            .to_string(),
+            "budget.warn_session_cost_usd (9) must be strictly less than max_session_cost_usd (5)",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::GoalCostWarnNotBelowMax {
+                warn: 12.0,
+                max: 8.0,
+            }
+            .to_string(),
+            "budget.goal.warn_cost_usd (12) must be strictly less than goal.max_cost_usd (8)",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::GoalWallClockWarnNotBelowMax { warn: 30, max: 20 }
+                .to_string(),
+            "budget.goal.warn_wall_clock_minutes (30) must be strictly less than \
+             goal.max_wall_clock_minutes (20)",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::PerAgentBudgetUndefinedAgent {
+                name: "unknown".to_string(),
+            }
+            .to_string(),
+            "budget.per_agent.unknown references an agent that is not declared under \
+             [code.agents.unknown]",
+        );
+    }
 }
