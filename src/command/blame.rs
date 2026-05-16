@@ -443,6 +443,40 @@ fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize
 mod tests {
     use super::*;
 
+    /// Pin the `Display` format for the static-message and direct-
+    /// message variants of [`BlameError`]. These strings are used as
+    /// the `CliError` message via `From<BlameError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    #[test]
+    fn blame_error_display_pins_each_variant() {
+        assert_eq!(BlameError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            BlameError::InvalidRevision("HEAD~99".to_string()).to_string(),
+            "invalid revision: 'HEAD~99'",
+        );
+        assert_eq!(
+            BlameError::ObjectLoad {
+                kind: "tree",
+                object_id: "deadbeef".to_string(),
+                detail: "object not found".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'deadbeef': object not found",
+        );
+        assert_eq!(
+            BlameError::FileNotFound {
+                path: "src/missing.rs".to_string(),
+                revision: "HEAD".to_string(),
+            }
+            .to_string(),
+            "file 'src/missing.rs' not found in revision 'HEAD'",
+        );
+        assert_eq!(
+            BlameError::InvalidLineRange("10,5".to_string()).to_string(),
+            "invalid line range: 10,5",
+        );
+    }
+
     /// Scenario: object-store failures must surface as `RepoCorrupt` so that
     /// shell scripts and JSON consumers can distinguish "the object store is
     /// broken" from "the user typed the wrong revision".
