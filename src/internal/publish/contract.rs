@@ -972,4 +972,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn publish_contract_error_display_pins_owned_variants() {
+        assert_eq!(
+            PublishContractError::UnsupportedNewerSchemaVersion {
+                actual: 9,
+                max: PUBLISH_SCHEMA_VERSION,
+            }
+            .to_string(),
+            "publish payload schemaVersion 9 is newer than this binary's known maximum 1; \
+             upgrade Libra or downgrade the publish source",
+        );
+        assert_eq!(
+            PublishContractError::MissingSchemaVersion.to_string(),
+            "publish payload is missing a numeric `schemaVersion` top-level field",
+        );
+    }
 }
