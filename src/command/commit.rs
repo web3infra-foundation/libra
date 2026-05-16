@@ -1096,6 +1096,54 @@ mod test {
         assert!(err.message().contains("nothing to commit"));
     }
 
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`CommitError`]. These strings are used as the
+    /// `CliError` message via `From<CommitError> for CliError` and
+    /// surface in both human and `--json` envelopes (visible to scripts
+    /// reading exit codes and JSON error blobs).
+    ///
+    /// Source-chained / wrapper variants (IndexLoad, IndexSave,
+    /// TreeCreation, ObjectStorage, ParentCommitLoad, HeadUpdate,
+    /// PreCommitHook, VaultSign, AutoStage, StagedChanges,
+    /// MessageFileRead) wrap upstream error strings via `{0}` /
+    /// `{detail}` and are intentionally skipped — their content is
+    /// owned by the wrapped error type.
+    #[test]
+    fn commit_error_display_pins_static_message_variants() {
+        assert_eq!(
+            CommitError::NothingToCommit.to_string(),
+            "nothing to commit, working tree clean",
+        );
+        assert_eq!(
+            CommitError::NothingToCommitNoTracked.to_string(),
+            "nothing to commit (create/copy files and use 'libra add' to track)",
+        );
+        assert_eq!(
+            CommitError::IdentityMissing("set user.name and user.email".to_string()).to_string(),
+            "set user.name and user.email",
+        );
+        assert_eq!(
+            CommitError::NoCommitToAmend.to_string(),
+            "there is no commit to amend",
+        );
+        assert_eq!(
+            CommitError::AmendUnsupported.to_string(),
+            "amend is not supported for merge commits with multiple parents",
+        );
+        assert_eq!(
+            CommitError::InvalidAuthor("missing '<email>'".to_string()).to_string(),
+            "invalid author format: missing '<email>'",
+        );
+        assert_eq!(
+            CommitError::EmptyMessage.to_string(),
+            "aborting commit due to empty commit message",
+        );
+        assert_eq!(
+            CommitError::ConventionalCommit("subject too long".to_string()).to_string(),
+            "conventional commit validation failed: subject too long",
+        );
+    }
+
     #[test]
     fn test_commit_error_identity_missing_maps_to_auth() {
         let err: CliError =
