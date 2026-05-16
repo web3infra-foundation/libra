@@ -1369,7 +1369,13 @@ impl Config {
             value: Set(value.to_owned()),
             ..Default::default()
         };
-        config.save(db).await.unwrap();
+        // INVARIANT (deprecated lossy API): storage failures here are
+        // unrecoverable for this legacy path. ConfigKv::add / ConfigKv::set
+        // surface the same failure as a typed error.
+        config
+            .save(db)
+            .await
+            .expect("legacy Config::insert_with_conn: DB save failed");
     }
 
     /// Update an existing config row's value. Panics if no matching row
@@ -1424,7 +1430,7 @@ impl Config {
             .filter(config::Column::Key.eq(key))
             .all(db)
             .await
-            .unwrap()
+            .expect("legacy Config::query_with_conn: DB query failed")
     }
 
     /// Get the first matching value (insertion order). Returns `None` for
@@ -1472,7 +1478,16 @@ impl Config {
 
     /// Legacy "URL of the current branch's upstream" lookup.
     pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(db: &C) -> Option<String> {
-        match Config::get_current_remote_with_conn(db).await.unwrap() {
+        // INVARIANT (deprecated lossy API): `get_current_remote_with_conn`
+        // returns Err(()) only when HEAD is detached, after already
+        // printing a `fatal: HEAD is detached, cannot get remote` message
+        // to stderr. The legacy contract is to panic in that case rather
+        // than silently treat it as "no remote"; callers that need
+        // graceful handling should use `ConfigKv::get_current_remote_url_with_conn`.
+        match Config::get_current_remote_with_conn(db)
+            .await
+            .expect("legacy Config::get_current_remote_url_with_conn: HEAD is detached")
+        {
             Some(remote) => Some(Config::get_remote_url_with_conn(db, &remote).await),
             None => None,
         }
@@ -1499,7 +1514,7 @@ impl Config {
         config::Entity::find()
             .all(db)
             .await
-            .unwrap()
+            .expect("legacy Config::list_all_with_conn: DB query failed")
             .iter()
             .map(|m| {
                 (
