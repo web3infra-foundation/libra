@@ -28,11 +28,32 @@ use crate::{
     utils::{lfs, util},
 };
 
-#[derive(Debug, Clone)]
+/// Failure surface for the LFS push pipeline.
+///
+/// `Display` formats the error as `LFS push failed[ for <path>][ (oid <oid>)]: <detail>`,
+/// so callers that propagate via `?` or call `.to_string()` get a meaningful
+/// one-line message instead of having to manually destructure the fields.
+/// Callers that need structured access (e.g., `src/command/push.rs` maps to
+/// a typed `PushError::LfsUploadFailed`) continue to read the public fields
+/// directly.
+#[derive(Debug, Clone, thiserror::Error)]
 pub struct LfsPushError {
     pub path: Option<String>,
     pub oid: Option<String>,
     pub detail: String,
+}
+
+impl std::fmt::Display for LfsPushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LFS push failed")?;
+        if let Some(path) = &self.path {
+            write!(f, " for {path}")?;
+        }
+        if let Some(oid) = &self.oid {
+            write!(f, " (oid {oid})")?;
+        }
+        write!(f, ": {}", self.detail)
+    }
 }
 
 #[derive(Debug)]
