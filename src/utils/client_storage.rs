@@ -66,10 +66,16 @@ use crate::{
 // this private runtime and block on an mpsc receiver. This avoids `block_on within
 // runtime` panics and decouples storage IO from the caller's executor.
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    // INVARIANT: `Builder::build()` only fails on platform resource
+    // exhaustion (cannot spawn the I/O reactor or worker threads). If
+    // that happens the process cannot make progress regardless, so
+    // surfacing the panic immediately is the right behavior. The
+    // panic message identifies that this is the storage runtime so
+    // the failure is distinguishable from caller-runtime issues.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
+        .expect("failed to build dedicated tokio runtime for ClientStorage IO")
 });
 
 // Message describing a single object_index update queued by `ClientStorage::put`.
@@ -717,7 +723,11 @@ impl ClientStorage {
         path: &str,
     ) -> Result<ObjectHash, GitError> {
         let mut current = base_commit;
-        let re = Regex::new(r"(\^|~)(\d*)").unwrap();
+        // INVARIANT: compile-time literal regex with two capture groups;
+        // Regex::new only fails on syntactically invalid patterns, which
+        // is caught by the surrounding parent-traversal tests.
+        let re =
+            Regex::new(r"(\^|~)(\d*)").expect("revision-suffix regex is a valid hardcoded pattern");
 
         if !re.is_match(path) {
             return Err(GitError::InvalidArgument(format!(
@@ -725,7 +735,12 @@ impl ClientStorage {
             )));
         }
         for cap in re.captures_iter(path) {
-            let symbol = cap.get(1).unwrap().as_str();
+            // INVARIANT: capture group 1 is non-optional (`(\^|~)`), so any
+            // match produced by `captures_iter` is guaranteed to populate it.
+            let symbol = cap
+                .get(1)
+                .expect("regex capture group 1 is non-optional")
+                .as_str();
             let num_str = cap.get(2).map_or("1", |m| m.as_str());
             let num: usize = num_str.parse().unwrap_or(1);
 
