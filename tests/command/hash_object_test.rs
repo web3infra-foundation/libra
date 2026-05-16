@@ -43,6 +43,55 @@ async fn hash_object_stdin_matches_git_blob_hash() {
 }
 
 #[tokio::test]
+async fn hash_object_file_works_outside_repository() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    fs::write(dir.path().join("hello.txt"), b"hello world\n").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "hello.txt"], dir.path());
+    assert_cli_success(&output, "read-only hash-object should not require repo");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_stdin_works_outside_repository() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+
+    let output = run_libra_command_with_stdin(&["hash-object", "--stdin"], dir.path(), "hello");
+    assert_cli_success(
+        &output,
+        "read-only hash-object --stdin should not require repo",
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_write_still_requires_repository() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    fs::write(dir.path().join("persist.txt"), b"persist me").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "-w", "persist.txt"], dir.path());
+    assert!(
+        !output.status.success(),
+        "hash-object -w outside repo should fail"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-001");
+    assert!(
+        human.contains("not a libra repository"),
+        "error should explain repo requirement: {human}"
+    );
+}
+
+#[tokio::test]
 async fn hash_object_write_persists_blob_for_cat_file() {
     let repo = tempfile::tempdir().expect("create temp repo");
     init_repo_via_cli(repo.path());

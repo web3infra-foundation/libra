@@ -11,6 +11,10 @@ This initial implementation supports blob objects. It hashes the raw bytes as a
 Git blob using the current repository object format. It does not apply clean
 filters, attributes, or LFS pointer conversion.
 
+Read-only hashing does not require a Libra repository and defaults to SHA-1
+when no repository object format is available. `-w` / `--write` requires a
+repository because it stores the object in the repository object database.
+
 ## Options
 
 | Option | Short | Description |
