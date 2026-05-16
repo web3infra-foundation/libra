@@ -1031,6 +1031,62 @@ mod tests {
         assert_eq!(args.target, "HEAD~1");
     }
 
+    /// Pin the `Display` format contract for static-message and
+    /// `{0}`-prefixed variants of [`ResetError`]. These strings are
+    /// used directly as the CliError message in the `From<ResetError>
+    /// for CliError` mapping, so they form part of the human +
+    /// --json error envelope contract.
+    ///
+    /// Source-chained / wrapper variants whose Display body forwards
+    /// to upstream error strings (HeadRead, HeadCorrupt, ObjectLoad,
+    /// IndexLoad, IndexSave, HeadUpdate, WorktreeRead, WorktreeRestore)
+    /// are intentionally skipped — their `{0}` slot is owned by the
+    /// wrapped error type.
+    #[test]
+    fn reset_error_display_pins_static_message_variants() {
+        assert_eq!(ResetError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            ResetError::HeadUnborn.to_string(),
+            "Cannot reset: HEAD is unborn and points to no commit.",
+        );
+        assert_eq!(
+            ResetError::PathspecWithHard.to_string(),
+            "Cannot do hard reset with paths.",
+        );
+        // {0}-prefixed variants where the inner string IS the message.
+        assert_eq!(
+            ResetError::InvalidRevision("ambiguous revision 'a'".to_string()).to_string(),
+            "ambiguous revision 'a'",
+        );
+        assert_eq!(
+            ResetError::RevisionRead("io error".to_string()).to_string(),
+            "io error",
+        );
+        // {0}-suffixed variants where the prefix is the user message.
+        assert_eq!(
+            ResetError::InvalidPathspecEncoding("src/\\xff".to_string()).to_string(),
+            "path contains invalid UTF-8: src/\\xff",
+        );
+        assert_eq!(
+            ResetError::PathspecWithSoft("src/foo.rs".to_string()).to_string(),
+            "pathspec 'src/foo.rs' is not compatible with --soft reset",
+        );
+        assert_eq!(
+            ResetError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
+            "pathspec 'src/missing.rs' did not match any file(s) known to libra",
+        );
+        // ObjectLoad — three structured fields.
+        assert_eq!(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "deadbeef".to_string(),
+                detail: "object not found".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'deadbeef': object not found",
+        );
+    }
+
     #[test]
     fn test_reset_mode_detection() {
         let args = ResetArgs::try_parse_from(["reset", "--soft"]).unwrap();
