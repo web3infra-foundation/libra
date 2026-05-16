@@ -73,18 +73,30 @@ pub struct LfsBatchResponse {
 
 impl ProtocolClient for LFSClient {
     /// Construct LFSClient from a given Repo URL.
+    ///
+    /// INVARIANT (trait contract): the `ProtocolClient::from_url` trait
+    /// returns `Self`, not Result, so failures here must panic. Use
+    /// `LFSClient::new()` (returns `anyhow::Result<Self>`) for the
+    /// graceful path that also handles SCP-style SSH URLs and surfaces
+    /// errors with context.
     fn from_url(repo_url: &Url) -> Self {
         // The trailing slash is MUST, or `join()` method will replace the last segment.
         // like: Url("/info/lfs").join("objects/batch") => "/info/objects/batch"
         let lfs_server = lfs::generate_lfs_server_url(repo_url.to_string()) + "/"; // IMPORTANT
-        let lfs_server = Url::parse(&lfs_server).unwrap();
+        let lfs_server = Url::parse(&lfs_server).expect(
+            "LFSClient::from_url: derived LFS server URL did not parse (use LFSClient::new for SCP-style)",
+        );
         let client = Client::builder()
             .default_headers(lfs::LFS_HEADERS.clone()) //  will be overwritten by `json()`, careful!
             .build()
-            .unwrap();
+            .expect(
+                "LFSClient::from_url: reqwest client builder failed (likely missing TLS backend)",
+            );
         Self {
             // Caution: DO NOT start with `/`, or path after domain will be replaced.
-            batch_url: lfs_server.join("objects/batch").unwrap(),
+            batch_url: lfs_server
+                .join("objects/batch")
+                .expect("'objects/batch' is a valid relative URL"),
             lfs_url: lfs_server,
             client,
         }
