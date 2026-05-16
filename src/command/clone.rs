@@ -3993,4 +3993,260 @@ mod tests {
             updated_at: "2026-05-13T00:00:00Z".to_string(),
         }
     }
+
+    #[test]
+    fn clone_error_display_pins_owned_variants() {
+        assert_eq!(
+            CloneError::CannotInferDestination.to_string(),
+            "please specify the destination path explicitly",
+        );
+        assert_eq!(
+            CloneError::DestinationExistsNonEmpty {
+                path: PathBuf::from("/tmp/repo"),
+            }
+            .to_string(),
+            "destination path '/tmp/repo' already exists and is not an empty directory",
+        );
+        assert_eq!(
+            CloneError::DestinationAlreadyRepo {
+                path: PathBuf::from("/tmp/repo"),
+            }
+            .to_string(),
+            "destination path '/tmp/repo' already contains a libra repository",
+        );
+        assert_eq!(
+            CloneError::RemoteBranchNotFound {
+                branch: "feat/x".to_string(),
+            }
+            .to_string(),
+            "remote branch feat/x not found in upstream origin",
+        );
+        assert_eq!(
+            CloneError::SetupFailed {
+                message: "vault missing".to_string(),
+            }
+            .to_string(),
+            "failed to complete clone setup: vault missing",
+        );
+        assert_eq!(
+            CloneError::CloudCloneDomainNotConfigured {
+                domain: "alpha".to_string(),
+                missing_keys: "D1_TOKEN".to_string(),
+            }
+            .to_string(),
+            "clone domain 'alpha' is not configured for libra+cloud restore",
+        );
+        assert_eq!(
+            CloneError::CloudCloneD1ApiTokenNotConfigured {
+                domain: "alpha".to_string(),
+            }
+            .to_string(),
+            "D1 API token is not configured for clone domain 'alpha'",
+        );
+        assert_eq!(
+            CloneError::CloudCloneD1ApiBaseUrlInvalid {
+                domain: "alpha".to_string(),
+                message: "not a url".to_string(),
+            }
+            .to_string(),
+            "D1 API base URL is invalid for clone domain 'alpha': not a url",
+        );
+        assert_eq!(
+            CloneError::CloudCloneR2CredentialsNotConfigured {
+                domain: "alpha".to_string(),
+                missing_keys: "AK,SK".to_string(),
+            }
+            .to_string(),
+            "R2 credentials are not configured for clone domain 'alpha'",
+        );
+        assert_eq!(
+            CloneError::CloudCloneR2ClientBuildFailed {
+                domain: "alpha".to_string(),
+                message: "tls error".to_string(),
+            }
+            .to_string(),
+            "failed to build R2 client for clone domain 'alpha': tls error",
+        );
+        assert_eq!(
+            CloneError::UnsupportedCloudCloneOption {
+                option: "--depth",
+                reason: "shallow not supported",
+                hint: "omit --depth",
+            }
+            .to_string(),
+            "--depth is not supported with libra+cloud:// clone sources: shallow not supported",
+        );
+        assert_eq!(
+            CloneError::CloudPublishSiteLookupFailed {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                code: 500,
+                message: "timeout".to_string(),
+            }
+            .to_string(),
+            "failed to resolve libra+cloud site demo in clone domain 'alpha' \
+             via D1 (code 500): timeout",
+        );
+        assert_eq!(
+            CloneError::CloudPublishSiteNotFound {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo was not found in clone domain 'alpha'",
+        );
+        assert_eq!(
+            CloneError::CloudPublishSiteUnavailable {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                status: "draining".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' is not active: draining",
+        );
+        assert_eq!(
+            CloneError::CloudPublishMetadataLookupFailed {
+                domain: "alpha".to_string(),
+                site_id: "s1".to_string(),
+                operation: "refs",
+                code: 404,
+                message: "not found".to_string(),
+            }
+            .to_string(),
+            "failed to resolve libra+cloud metadata for site s1 in clone domain 'alpha' during refs (code 404): not found",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRepositoryNotFound {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                repo_id: "r1".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' has no repositories row for repo_id r1",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRefsMissing {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' has no published refs",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRefNotFound {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                selector: "main".to_string(),
+            }
+            .to_string(),
+            "libra+cloud ref selector 'main' did not match a published branch or tag for site demo in clone domain 'alpha'",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRefAmbiguous {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                selector: "feat".to_string(),
+                matches: "feat/a, feat/b".to_string(),
+            }
+            .to_string(),
+            "libra+cloud ref selector 'feat' is ambiguous for site demo in clone domain 'alpha'; matches: feat/a, feat/b",
+        );
+        assert_eq!(
+            CloneError::CloudPublishDefaultRefMissing {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' has no default_ref for clone checkout",
+        );
+        assert_eq!(
+            CloneError::CloudPublishLatestRevisionMissing {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' has no latest_revision_oid for revision=latest",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRevisionNotFound {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                revision_oid: "deadbeef".to_string(),
+            }
+            .to_string(),
+            "published revision deadbeef for libra+cloud site demo in clone domain 'alpha' was not found",
+        );
+        assert_eq!(
+            CloneError::CloudPublishObjectIndexMissing {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                repo_id: "r1".to_string(),
+            }
+            .to_string(),
+            "libra+cloud site demo in clone domain 'alpha' has no object_index rows for repo_id r1",
+        );
+        assert_eq!(
+            CloneError::CloudPublishObjectMissing {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                object_oid: "feedface".to_string(),
+            }
+            .to_string(),
+            "R2 object feedface for libra+cloud site demo in clone domain 'alpha' is missing",
+        );
+        assert_eq!(
+            CloneError::CloudPublishObjectRestoreFailed {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                message: "checksum".to_string(),
+            }
+            .to_string(),
+            "failed to restore R2 objects for libra+cloud site demo in clone domain 'alpha': checksum",
+        );
+        assert_eq!(
+            CloneError::CloudPublishRefsMetadataRestoreFailed {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                message: "db err".to_string(),
+            }
+            .to_string(),
+            "failed to restore refs metadata for libra+cloud site demo in clone domain 'alpha': db err",
+        );
+        assert_eq!(
+            CloneError::CloudPublishAiRestoreFailed {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                message: "ai object".to_string(),
+            }
+            .to_string(),
+            "failed to restore AI object model for libra+cloud site demo in clone domain 'alpha': ai object",
+        );
+        assert_eq!(
+            CloneError::CloudPublishCheckoutSetupFailed {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                message: "head".to_string(),
+            }
+            .to_string(),
+            "failed to configure checkout for libra+cloud site demo in clone domain 'alpha': head",
+        );
+        assert_eq!(
+            CloneError::CloudPublishObjectIndexInvalid {
+                domain: "alpha".to_string(),
+                target: "demo".to_string(),
+                object_oid: "xyz".to_string(),
+                reason: "non-hex".to_string(),
+            }
+            .to_string(),
+            "object_index row xyz for libra+cloud site demo in clone domain 'alpha' is not a valid object id: non-hex",
+        );
+        assert_eq!(
+            CloneError::InvalidCloudPublishSource {
+                input: "libra+cloud://bad".to_string(),
+                reason: "missing site".to_string(),
+            }
+            .to_string(),
+            "invalid libra+cloud clone source 'libra+cloud://bad': missing site",
+        );
+    }
 }
