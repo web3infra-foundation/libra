@@ -351,8 +351,14 @@ impl LFSClient {
                 ),
             });
         }
-        // INVARIANT: len() == 1 checked above.
-        let obj = resp.objects.into_iter().next().expect("len checked");
+        // INVARIANT: `resp.objects.len() != 1` was checked above and rejected
+        // before reaching this branch, so `into_iter().next()` always yields
+        // exactly one ResponseObject.
+        let obj = resp
+            .objects
+            .into_iter()
+            .next()
+            .expect("LFS batch response had exactly one object (checked above)");
         let uploaded = self.upload_object(obj, file).await?;
         println!("LFS objects push completed.");
         Ok(uploaded)
@@ -546,7 +552,10 @@ impl LFSClient {
             Ok(chunks) if !chunks.is_empty() => {
                 is_chunked = true;
                 // INVARIANT: matched the `!chunks.is_empty()` guard above.
-                chunk_size = chunks.first().expect("non-empty checked above").size;
+                chunk_size = chunks
+                    .first()
+                    .expect("LFS chunk list was non-empty (checked above)")
+                    .size;
                 tracing::info!("LFS Chunk API supported.");
                 chunks.into_iter().map(|c| c.link).collect()
             }
