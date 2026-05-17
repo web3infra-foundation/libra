@@ -1424,4 +1424,114 @@ mod tests {
             self.goal_id
         }
     }
+
+    #[test]
+    fn goal_apply_reject_display_pins_each_variant() {
+        let env_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let state_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let claim_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let env_recorded = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let state_updated = DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap();
+
+        assert_eq!(
+            GoalApplyReject::CrossGoal {
+                envelope_goal_id: env_id,
+                state_goal_id: state_id,
+            }
+            .to_string(),
+            format!(
+                "envelope goal_id {env_id} does not match state spec goal_id \
+                 {state_id} — misrouted envelope",
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::TerminalGuard {
+                status: GoalStatus::Completed,
+            }
+            .to_string(),
+            "state is already terminal (Completed); event ignored to preserve the terminal \
+             boundary",
+        );
+        assert_eq!(
+            GoalApplyReject::InvalidCriteriaRevised {
+                source: GoalSpecError::EmptyObjective,
+            }
+            .to_string(),
+            format!(
+                "CriteriaRevised payload failed validation: {}",
+                GoalSpecError::EmptyObjective,
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::InvalidCompletionReport {
+                source: GoalCompletionShapeError::UnknownCriterionId {
+                    id: "compiles".to_string(),
+                },
+            }
+            .to_string(),
+            format!(
+                "Completed report does not match the spec: {}",
+                GoalCompletionShapeError::UnknownCriterionId {
+                    id: "compiles".to_string(),
+                },
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::UnknownFutureVariant.to_string(),
+            "event uses a future variant this binary cannot apply (semver gap)",
+        );
+        assert_eq!(
+            GoalApplyReject::MissingCompletionClaim.to_string(),
+            "Completed envelope arrived without a prior CompletionClaimed — the doc state \
+             machine forbids transitioning to terminal `Completed` without the verifier \
+             (P6.2) accepting a pending claim",
+        );
+        assert_eq!(
+            GoalApplyReject::DuplicateCreated.to_string(),
+            "duplicate Created envelope after the seed — only one Created is permitted per \
+             Goal",
+        );
+        assert_eq!(
+            GoalApplyReject::MismatchedClaimEnvelope {
+                expected: claim_id,
+                actual: env_id,
+            }
+            .to_string(),
+            format!(
+                "Completed report claim_envelope_id {env_id} does not match the active \
+                 pending claim's envelope id {claim_id} — the verifier (P6.2) only ever \
+                 emits a report bound to the claim it just accepted",
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::TimestampNonMonotonic {
+                envelope_recorded_at: env_recorded,
+                state_updated_at: state_updated,
+            }
+            .to_string(),
+            format!(
+                "envelope recorded_at {env_recorded} predates state updated_at \
+                 {state_updated} — Goal events must be monotonic on the timeline",
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::InvalidCompletionClaim {
+                source: GoalCompletionShapeError::UnknownCriterionId {
+                    id: "compiles".to_string(),
+                },
+            }
+            .to_string(),
+            format!(
+                "CompletionClaimed payload failed validation: {}",
+                GoalCompletionShapeError::UnknownCriterionId {
+                    id: "compiles".to_string(),
+                },
+            ),
+        );
+        assert_eq!(
+            GoalApplyReject::RejectedWithoutPendingClaim.to_string(),
+            "CompletionRejected envelope arrived without an open pending claim — the \
+             verifier (P6.2) only ever rejects an active CompletionClaimed",
+        );
+    }
 }
