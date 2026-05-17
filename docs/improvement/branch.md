@@ -20,8 +20,8 @@
 - `BranchOutput` + `run_branch()` 已覆盖 list / create / delete / rename / set-upstream / show-current 的 JSON 输出
 - `--list` / `--delete` / `--delete-force` / `--set-upstream-to` / `--show-current` / `--move` / `--remotes` / `--all` / `--contains` / `--no-contains` 已实现
 - create / delete / rename / set-upstream / show-current 路径都已补上命令层 `StableErrorCode`
-- `is_valid_git_branch_name()` 分支名验证已实现（`branch.rs:694-725`）
-- `delete_branch_safe()` 已有 merge 检查和 `.with_hint()`（`branch.rs:342-349`）
+- `is_valid_git_branch_name()` 分支名验证已实现（`branch.rs:1219`）
+- `delete_branch_impl()` 已有 merge 检查和 `.with_hint()`（`branch.rs:687`；原计划中的 `delete_branch_safe` 已重命名为 internal `_impl` helper，对外仍走 typed-error 命令路径）
 - human 路径已覆盖 create / delete-safe / force-delete / rename / set-upstream / show-current 的确认输出
 - `after_help` 已同时包含 compatibility notes 和 EXAMPLES
 
@@ -187,7 +187,7 @@ pub enum BranchError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**已落地部分（保持不变）：** `BranchOutput` enum（含 `List`/`Create`/`Delete`/`Rename`/`SetUpstream`/`ShowCurrent` 六变体）和 `BranchListEntry` 结构体均已存在于 `branch.rs:28-58`，JSON schema 已稳定。
+**已落地部分（保持不变）：** `BranchOutput` enum（含 `List`/`Create`/`Delete`/`Rename`/`SetUpstream`/`ShowCurrent` 六变体）位于 `branch.rs:76` 起，`BranchListEntry` 结构体位于 `branch.rs:134`，JSON schema 已稳定。
 
 > **向后兼容说明：** 现有 `--json -l` 返回 `{ "branches": [...] }` 的 schema 通过 `BranchOutput::List { branches }` 保留。`action` 字段由 `#[serde(tag = "action")]` 自动添加到 JSON envelope 的 `data` 层。
 
