@@ -444,4 +444,123 @@ mod tests {
             "failed to update reflog",
         );
     }
+
+    /// Pins the manual `Display` impl on `ReflogContext`. The rendered
+    /// string is the `<message>` half of every reflog entry written
+    /// to SQLite (e.g. the text after `commit: ` / `switch: ` in
+    /// `libra reflog show` output and in `libra log -g`). Renaming
+    /// any of these templates would silently change the historical
+    /// reflog rendering and break log scrapers.
+    #[test]
+    fn reflog_context_display_pins_each_action() {
+        use super::{ReflogAction, ReflogContext};
+
+        fn ctx(action: ReflogAction) -> ReflogContext {
+            ReflogContext {
+                old_oid: "old".to_string(),
+                new_oid: "new".to_string(),
+                action,
+            }
+        }
+
+        assert_eq!(
+            ctx(ReflogAction::Commit {
+                message: "initial commit\nbody continues".to_string(),
+            })
+            .to_string(),
+            "initial commit",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Commit {
+                message: String::new(),
+            })
+            .to_string(),
+            "(no commit message)",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Switch {
+                from: "main".to_string(),
+                to: "feature".to_string(),
+            })
+            .to_string(),
+            "moving from main to feature",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Checkout {
+                from: "main".to_string(),
+                to: "feature".to_string(),
+            })
+            .to_string(),
+            "moving from main to feature",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Reset {
+                target: "HEAD~1".to_string(),
+            })
+            .to_string(),
+            "moving to HEAD~1",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Merge {
+                branch: "feature".to_string(),
+                policy: "ff".to_string(),
+            })
+            .to_string(),
+            "merge feature:ff",
+        );
+        assert_eq!(
+            ctx(ReflogAction::CherryPick {
+                source_message: "  fix typo\nbody".to_string(),
+            })
+            .to_string(),
+            "fix typo",
+        );
+        assert_eq!(
+            ctx(ReflogAction::CherryPick {
+                source_message: String::new(),
+            })
+            .to_string(),
+            "(no commit message)",
+        );
+        assert_eq!(ctx(ReflogAction::Fetch).to_string(), "fast-forward");
+        assert_eq!(ctx(ReflogAction::Pull).to_string(), "fast-forward");
+        assert_eq!(ctx(ReflogAction::Push).to_string(), "push");
+        assert_eq!(
+            ctx(ReflogAction::Rebase {
+                state: "in-progress".to_string(),
+                details: "onto main".to_string(),
+            })
+            .to_string(),
+            "(in-progress) onto main",
+        );
+        assert_eq!(
+            ctx(ReflogAction::Clone {
+                from: "https://example.com/repo.git".to_string(),
+            })
+            .to_string(),
+            "from https://example.com/repo.git",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `ReflogActionKind`. The
+    /// rendered string is the `<action>: ` prefix used in every
+    /// reflog entry (e.g. `commit: …`, `cherry-pick: …`,
+    /// `fast-forward: …`). Renaming any variant would silently break
+    /// reflog scrapers and the `libra reflog show` filter UI.
+    #[test]
+    fn reflog_action_kind_display_pins_each_variant() {
+        use super::ReflogActionKind;
+
+        assert_eq!(ReflogActionKind::Commit.to_string(), "commit");
+        assert_eq!(ReflogActionKind::Reset.to_string(), "reset");
+        assert_eq!(ReflogActionKind::Checkout.to_string(), "checkout");
+        assert_eq!(ReflogActionKind::Switch.to_string(), "switch");
+        assert_eq!(ReflogActionKind::Merge.to_string(), "merge");
+        assert_eq!(ReflogActionKind::CherryPick.to_string(), "cherry-pick");
+        assert_eq!(ReflogActionKind::Rebase.to_string(), "rebase");
+        assert_eq!(ReflogActionKind::Fetch.to_string(), "fetch");
+        assert_eq!(ReflogActionKind::Pull.to_string(), "pull");
+        assert_eq!(ReflogActionKind::Push.to_string(), "push");
+        assert_eq!(ReflogActionKind::Clone.to_string(), "clone");
+    }
 }
