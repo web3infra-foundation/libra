@@ -48,6 +48,11 @@ use crate::{
     },
 };
 
+/// GitHub Issues URL surfaced on `StashError::Other` so users can report
+/// catch-all bucket failures that map to `InternalInvariant`. Mirrors
+/// push.rs / tag.rs's hint pattern per Cross-Cutting G.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 // ── Typed error ──────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -146,6 +151,9 @@ impl From<StashError> for CliError {
             StashError::ClearRequiresForce => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("re-run with --force, or use --json / --machine for scripted use"),
+            StashError::Other(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -1465,6 +1473,20 @@ mod tests {
         assert_eq!(
             StashError::Other("custom error".to_string()).to_string(),
             "custom error",
+        );
+    }
+
+    /// Cross-Cutting G: `StashError::Other` is the catch-all bucket
+    /// that maps to `InternalInvariant`. It must surface the GitHub
+    /// Issues URL hint so users can report the bug.
+    #[test]
+    fn stash_error_other_has_issue_url_hint() {
+        let err: CliError = StashError::Other("synthetic failure".to_string()).into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "StashError::Other must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
         );
     }
 }

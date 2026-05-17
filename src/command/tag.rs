@@ -17,6 +17,11 @@ use crate::{
     },
 };
 
+/// GitHub Issues URL shown on the `SerializeAnnotatedTag` internal-invariant
+/// error path so users can report the bug; mirrors `push.rs`'s
+/// `ObjectCollection` / `PackEncoding` hint pattern.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 const TAG_EXAMPLES: &str = "\
 EXAMPLES:
     libra tag v1.0                        Create a lightweight tag at HEAD
@@ -207,9 +212,9 @@ impl From<TagError> for CliError {
             TagError::CheckExistingFailed { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            TagError::SerializeAnnotatedTag(_) => {
-                CliError::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
-            }
+            TagError::SerializeAnnotatedTag(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::InternalInvariant)
+                .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
             TagError::StoreObjectFailed(_) => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -706,6 +711,24 @@ mod tests {
         assert_eq!(
             TagError::HeadUnborn.to_string(),
             "Cannot create tag: HEAD does not point to a commit",
+        );
+    }
+
+    /// tag.md Cross-Cutting G: `SerializeAnnotatedTag` is the one TagError
+    /// variant that maps to `InternalInvariant` and must surface the
+    /// GitHub Issues URL hint (mirroring push.rs `ObjectCollection` /
+    /// `PackEncoding` pattern).
+    #[test]
+    fn tag_error_to_cli_error_serialize_annotated_tag_has_issue_url() {
+        let err: CliError = TagError::SerializeAnnotatedTag(GitError::InvalidArgument(
+            "synthetic serialize failure".to_string(),
+        ))
+        .into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "SerializeAnnotatedTag must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
         );
     }
 }
