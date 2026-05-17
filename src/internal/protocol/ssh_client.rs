@@ -329,21 +329,12 @@ impl SshClient {
             // `ssh` process can still take a while to exit (control sockets,
             // late exit-status, server-side keepalive), so don't block the
             // consumer's stream on a clean exit — wait briefly, then kill.
-            let status = match tokio::time::timeout(
-                Duration::from_secs(2),
-                child.wait(),
-            )
-            .await
-            {
+            let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(status)) => Some(status),
                 Ok(Err(_)) => None,
                 Err(_) => {
                     let _ = child.start_kill();
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(1),
-                        child.wait(),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
                     None
                 }
             };
@@ -351,12 +342,7 @@ impl SshClient {
             // Stderr stays open until the ssh process actually exits; if we
             // had to kill it above the read may already be unblocked, but cap
             // the join anyway so a stuck pipe can't keep the channel alive.
-            let stderr_buf = match tokio::time::timeout(
-                Duration::from_secs(1),
-                stderr_task,
-            )
-            .await
-            {
+            let stderr_buf = match tokio::time::timeout(Duration::from_secs(1), stderr_task).await {
                 Ok(Ok(buf)) => buf,
                 _ => Vec::new(),
             };

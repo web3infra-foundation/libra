@@ -112,15 +112,16 @@ helpers in `db.rs`. Subsequent CEXes have populated this directory.
 
 | Version       | Name                | Source                                          |
 |---------------|---------------------|-------------------------------------------------|
-| `2026050301`  | `automation_log`    | inline in `builtin_migrations()`                |
-| `2026050302`  | `agent_usage_stats` | inline in `builtin_migrations()`                |
+| `2026050301`  | `automation_log`    | `2026050301_automation_log{,_down}.sql`         |
+| `2026050302`  | `agent_usage_stats` | `2026050302_agent_usage_stats{,_down}.sql`      |
 | `2026050303`  | `agent_capture`     | `2026050303_agent_capture{,_down}.sql`          |
 | `2026050501`  | `agent_checkpoint_parent_nullable` | `2026050501_agent_checkpoint_parent_nullable{,_down}.sql` |
 | `2026050601`  | `approved_permission` | `2026050601_approved_permission{,_down}.sql`  |
 | `2026050801`  | `agent_usage_stats_agent_name` | `2026050801_agent_usage_stats_agent_name{,_down}.sql` |
 
-The first two migrations stayed inline for stability; newer migrations use the
-file + `include_str!` form.
+All registered migrations are loaded via `include_str!`. New migrations must
+follow the same pattern — inline SQL strings in `builtin_migrations()` are no
+longer accepted.
 
 ## `include_str!` example
 
