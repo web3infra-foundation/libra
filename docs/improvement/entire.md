@@ -618,17 +618,17 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 目的 | 复用对象 | 位置 |
 |------|---------|------|
 | 孤儿 ref CAS | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) |
-| Hook 摄入流水线 | `process_hook_event_from_stdin` → 抽离为 `process_hook_event_with_target` + 旧 API 包装 | [src/internal/ai/hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) |
+| Hook 摄入流水线 | `process_hook_event_from_stdin` → 抽离为 `process_hook_event_with_target` + 旧 API 包装 | [src/internal/ai/hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) |
 | 事件模型 | `LifecycleEvent` / `LifecycleEventKind` / `make_dedup_key` / `normalize_json_value` / `validate_session_hook_envelope` / `apply_lifecycle_event` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) |
 | Unknown-event-safe envelope 模式 | 借鉴 `AgentRunEvent` / `AgentRunEventEnvelope`（`agent_run/` gated 在 `subagent-scaffold`，**不直接依赖**） | [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) |
 | Migration runner | `MigrationRunner::register` / `run_pending` / `builtin_migrations()` | [migration.rs](../../src/internal/db/migration.rs) |
-| 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:338](../../src/internal/ai/session/store.rs) |
+| 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:440](../../src/internal/ai/session/store.rs) |
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
 | 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:45](../../src/internal/branch.rs)、[checkout.rs:71-83](../../src/command/checkout.rs)、[switch.rs:35,265](../../src/command/switch.rs) |
-| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:336](../../src/utils/client_storage.rs) |
+| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:347/490](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
-| 云同步 | `object_index` 迭代 | [cloud.rs:192](../../src/command/cloud.rs) |
+| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
 | 现 Claude/Gemini provider | 保留 `HookProvider`，新加 `ObservedAgent` wrapper 组合复用 | [hooks/providers/](../../src/internal/ai/hooks/providers/) |
 | Projection 层 | **不直接复用** —— 独立 storage.rs，弱关联 | [projection/](../../src/internal/ai/projection/) |
 
@@ -744,11 +744,11 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 文件 | 改动 |
 |------|------|
 | `src/cli.rs` | `Commands` 枚举加 `Hooks(HooksArgs)` 与 `Agent(AgentArgs)`；`match` 分支加路由 |
-| `src/internal/db/migration.rs:499` `builtin_migrations()` | 加 `2026050303_agent_capture` 条目，`up`/`down` 用 `include_str!("../../../sql/migrations/...")` |
-| `src/internal/branch.rs:45` `is_locked_branch` | 加 `\|\| name == "agent-traces"` |
-| `src/command/restore.rs` | 入口处加 `is_locked_branch` 检查，命中拒绝 |
+| `src/internal/db/migration.rs:532` `builtin_migrations()` | ✅ `2026050303_agent_capture` 条目已加入并使用 `include_str!("../../../sql/migrations/...")`；本表保留作为历史改造记录 |
+| `src/internal/branch.rs::is_locked_branch` | ✅ 已加 `\|\| name == AGENT_TRACES_BRANCH`（branch.rs:51 起的 helper） |
+| `src/command/restore.rs` | 入口处加 `is_locked_branch` 检查，命中拒绝（restore 已通过 `RestoreError::LockedSource` 守 `--source`；reset / restore 命令在 cwd 上的拦截属于行为变更，留作独立切片） |
 | `src/command/reset.rs` | 同上 |
-| `src/internal/ai/hooks/runtime.rs:139` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
+| `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
 | `tests/db_migration_test.rs:47-48,53,985` | `2026050303` / `agent_capture` 加进硬编码断言 |
