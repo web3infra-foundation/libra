@@ -10,13 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// One of the five enforcement dimensions. Used as the `dimension` field on
 /// `AgentRunEvent::BudgetExceeded`.
-///
-/// `#[non_exhaustive]` keeps room for future dimensions (e.g. attention-budget,
-/// disk-write quota) without forcing every external matcher to break on a
-/// minor release — per agent.md audit follow-up (g).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum BudgetDimension {
     Token,
     ToolCall,

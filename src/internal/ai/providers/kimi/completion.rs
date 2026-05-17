@@ -17,7 +17,7 @@ use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
         CompletionError, CompletionModel as CompletionModelTrait, CompletionStreamEvent,
-        CompletionThinking, parse_json_repaired,
+        CompletionThinking,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::{
@@ -294,18 +294,10 @@ struct KimiStreamToolCallBuilder {
 }
 
 impl KimiStreamToolCallBuilder {
-    /// Mirror of [`DeepSeekStreamToolCallBuilder::is_complete`]: the
-    /// streaming salvage boundary matches [`parse_tool_call_arguments_with_repair`]'s
-    /// repair-aware logic so a mid-stream chunk that only needs the standard
-    /// JSON repairs is treated as complete rather than dropped.
     fn is_complete(&self) -> bool {
-        if self.name.is_empty() || self.arguments.trim().is_empty() {
-            return false;
-        }
-        if serde_json::from_str::<Value>(&self.arguments).is_ok() {
-            return true;
-        }
-        parse_json_repaired(&self.arguments).is_ok()
+        !self.name.is_empty()
+            && !self.arguments.trim().is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok()
     }
 }
 
@@ -949,23 +941,6 @@ mod tests {
         assert_eq!(json["model"], "kimi-k2.6");
         assert_eq!(json["thinking"]["type"], "enabled");
         assert_eq!(json["thinking"]["keep"], "all");
-    }
-
-    /// Scenario: a streaming tool-call whose argument buffer is strict-invalid
-    /// JSON but repairable via the shared `parse_json_repaired` helper must
-    /// be classified as complete by the streaming `is_complete` salvage
-    /// boundary, matching DeepSeek and the final-stage repair behavior.
-    #[test]
-    fn test_kimi_stream_repairable_tool_call_arguments_classify_complete() {
-        let builder = KimiStreamToolCallBuilder {
-            id: Some("call_1".to_string()),
-            name: "shell".to_string(),
-            arguments: "{\"command\":\"ls\",}".to_string(),
-        };
-        assert!(
-            builder.is_complete(),
-            "trailing-comma arguments should be classified complete via JSON repair"
-        );
     }
 
     /// Scenario: Kimi defaults to streaming in Libra so thinking tokens can be

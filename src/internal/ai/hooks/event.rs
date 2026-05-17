@@ -140,22 +140,3 @@ pub struct HookOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the manual `Display` impl on `HookEvent`. The same strings
-    /// also appear under the `serde(rename_all = "snake_case")` enum
-    /// tag, but the Display path is independent and is used in hook
-    /// matcher diagnostics and log lines. Changing them would silently
-    /// desync `HookEvent::to_string()` from the JSONL serialization
-    /// users author hooks against.
-    #[test]
-    fn hook_event_display_pins_each_variant() {
-        assert_eq!(HookEvent::PreToolUse.to_string(), "pre_tool_use");
-        assert_eq!(HookEvent::PostToolUse.to_string(), "post_tool_use");
-        assert_eq!(HookEvent::SessionStart.to_string(), "session_start");
-        assert_eq!(HookEvent::SessionEnd.to_string(), "session_end");
-    }
-}

@@ -18,18 +18,17 @@ use crate::{
     },
 };
 
-const PULL_EXAMPLES: &str = "\
-EXAMPLES:
-    libra pull                             Pull from tracking remote
-    libra pull origin main                 Pull specific branch from origin
-    libra pull --json                      Structured JSON output for agents
-    libra pull --quiet                     Suppress progress output";
-
 /// Fetch from a remote and integrate changes into the current branch.
 ///
-/// See `libra pull --help` for the same EXAMPLES rendered through clap.
+/// # Examples
+///
+/// ```text
+/// libra pull                             Pull from tracking remote
+/// libra pull origin main                 Pull specific branch from origin
+/// libra pull --json                      Structured JSON output for agents
+/// libra pull --quiet                     Suppress progress output
+/// ```
 #[derive(Parser, Debug)]
-#[command(after_help = PULL_EXAMPLES)]
 pub struct PullArgs {
     /// The repository to pull from
     repository: Option<String>,

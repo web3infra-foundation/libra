@@ -201,15 +201,6 @@ pub struct UnpublishArgs {
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
 const PUBLISH_REDACTION_RULES_VERSION: &str = "2026.05.13-1";
-
-/// GitHub Issues URL surfaced on inline `InternalInvariant` bug paths in
-/// `publish.rs` so users can report unexpected failures (D1 row build,
-/// AI projection rebuild, refs_generation overflow, etc.). The framework's
-/// `effective_hints()` already auto-injects this URL on the rendered
-/// output, but the explicit hint keeps the contract callsite-stable —
-/// mirrors push.rs / tag.rs / commit.rs / stash.rs / index_pack.rs's
-/// hint pattern per Cross-Cutting G.
-const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 const PUBLISH_AI_PROJECTION_OBJECT_TYPES: &[&str] = &[
     "Thread",
     "Scheduler",
@@ -1328,9 +1319,10 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
         )
         .await
         .map_err(|source| {
-            publish_internal_error(format!(
+            CliError::fatal(format!(
                 "failed to collect publish AI history objects: {source}"
             ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         let projection_rebuilder = ProjectionRebuilder::new(self.storage.as_ref(), &self.history);
         let projection_rebuilds =
@@ -1338,16 +1330,18 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
                 .rebuild_all_threads()
                 .await
                 .map_err(|source| {
-                    publish_internal_error(format!(
+                    CliError::fatal(format!(
                         "failed to rebuild publish AI projection objects: {source:#}"
                     ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
                 })?;
         if !objects.is_empty() && projection_rebuilds.is_empty() {
-            return Err(publish_internal_error(format!(
+            return Err(CliError::fatal(format!(
                 "failed to rebuild publish AI projection objects: missing projection object types \
                  {}; no rebuildable Intent, Task, or Run history was found",
                 PUBLISH_AI_PROJECTION_OBJECT_TYPES.join(", ")
-            )));
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant));
         }
         for rebuild in projection_rebuilds {
             objects.extend(
@@ -1362,9 +1356,10 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
                     },
                 )
                 .map_err(|source| {
-                    publish_internal_error(format!(
+                    CliError::fatal(format!(
                         "failed to build publish AI projection objects: {source}"
                     ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
                 })?,
             );
         }
@@ -1385,7 +1380,8 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
             objects,
         })
         .map_err(|source| {
-            publish_internal_error(format!("failed to build publish AI export plan: {source}"))
+            CliError::fatal(format!("failed to build publish AI export plan: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
         })
     }
 }
@@ -1493,7 +1489,8 @@ async fn run_publish_sync_selected_refs_with_sink_and_ai_planner(
             PUBLISH_REDACTION_RULES_VERSION,
         )
         .map_err(|source| {
-            publish_internal_error(format!("failed to build publish D1 rows: {source}"))
+            CliError::fatal(format!("failed to build publish D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         let ai_plan = ai_planner
             .plan_revision_ai_export(PublishAiExportPlanInput {
@@ -1507,7 +1504,8 @@ async fn run_publish_sync_selected_refs_with_sink_and_ai_planner(
             })
             .await?;
         let ai_rows = build_ai_export_d1_rows(&ai_plan).map_err(|source| {
-            publish_internal_error(format!("failed to build publish AI D1 rows: {source}"))
+            CliError::fatal(format!("failed to build publish AI D1 rows: {source}"))
+                .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         rows.revision.ai_index_key = Some(ai_plan.index_key.clone());
         rows.revision.ai_object_count =
@@ -1683,21 +1681,24 @@ async fn persist_publish_sync_plan(
         .map_err(snapshot_ref_error)?;
         let next_refs_generation =
             context.site.refs_generation.checked_add(1).ok_or_else(|| {
-                publish_internal_error("publish refs_generation overflowed while planning sync")
+                CliError::fatal("publish refs_generation overflowed while planning sync")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
             })?;
         let artifacts = build_site_index_artifacts(
             &snapshot_plan,
             &context.site.site_id,
             context.sync_run_id,
             u64::try_from(next_refs_generation).map_err(|_| {
-                publish_internal_error("publish refs_generation cannot be negative")
+                CliError::fatal("publish refs_generation cannot be negative")
+                    .with_stable_code(StableErrorCode::InternalInvariant)
             })?,
             context.generated_at,
         )
         .map_err(|source| {
-            publish_internal_error(format!(
+            CliError::fatal(format!(
                 "failed to build publish refs/latest artifacts: {source}"
             ))
+            .with_stable_code(StableErrorCode::InternalInvariant)
         })?;
         sink.upload_site_index_artifacts(&artifacts).await?;
         for row in artifacts.ref_rows {
@@ -1842,8 +1843,10 @@ fn publish_sync_run_row(input: PublishSyncRunRowInput<'_>) -> CliResult<PublishS
 }
 
 fn usize_to_i64(value: usize, label: &str) -> CliResult<i64> {
-    i64::try_from(value)
-        .map_err(|_| publish_internal_error(format!("{label} exceeds D1 integer range")))
+    i64::try_from(value).map_err(|_| {
+        CliError::fatal(format!("{label} exceeds D1 integer range"))
+            .with_stable_code(StableErrorCode::InternalInvariant)
+    })
 }
 
 async fn resolve_publish_sync_site_id() -> CliResult<String> {
@@ -2318,17 +2321,6 @@ fn snapshot_ref_error(source: impl std::error::Error) -> CliError {
     CliError::failure(format!("invalid publish ref plan: {source}"))
         .with_stable_code(StableErrorCode::CliInvalidTarget)
         .with_hint("publish only refs/heads/* and refs/tags/* entries with valid object ids.")
-}
-
-/// Build a `CliError::fatal(message)` with `StableErrorCode::InternalInvariant`
-/// and the GitHub Issues URL hint, mirroring the per-command Cross-Cutting G
-/// pattern (push.rs / tag.rs / commit.rs / stash.rs / index_pack.rs). All
-/// inline `InternalInvariant` raise sites in `publish.rs` route through
-/// this helper so the callsite contract is stable.
-fn publish_internal_error(message: impl Into<String>) -> CliError {
-    CliError::fatal(message)
-        .with_stable_code(StableErrorCode::InternalInvariant)
-        .with_hint(format!("this is a bug; please report it at {ISSUE_URL}"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -3810,35 +3802,6 @@ mod tests {
                 .contains("no rebuildable Intent, Task, or Run history"),
             "{}",
             err.message()
-        );
-        // Cross-Cutting G: every internal-invariant raise site in
-        // `publish.rs` must surface the GitHub Issues URL hint via
-        // `publish_internal_error`.
-        assert!(
-            err.hints().iter().any(|h| h.as_str().contains("issues")),
-            "publish AI projection-rebuild internal error must include the Issues URL hint, got hints: {:?}",
-            err.hints()
-        );
-    }
-
-    /// Cross-Cutting G unit test: the `publish_internal_error` helper
-    /// produces a fatal `CliError` whose stable code is
-    /// `InternalInvariant` and whose user-visible hint list contains
-    /// the GitHub Issues URL. This pins the contract for the 11 inline
-    /// raise sites that route through this helper.
-    #[test]
-    fn publish_internal_error_helper_has_issue_url_hint() {
-        let err = publish_internal_error("synthetic bug case");
-        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
-        assert!(
-            err.message().contains("synthetic bug case"),
-            "message should be passed through verbatim, got: {}",
-            err.message()
-        );
-        assert!(
-            err.hints().iter().any(|h| h.as_str().contains("issues")),
-            "publish_internal_error must include the Issues URL hint, got hints: {:?}",
-            err.hints()
         );
     }
 

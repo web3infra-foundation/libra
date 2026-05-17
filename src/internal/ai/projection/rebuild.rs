@@ -63,23 +63,6 @@ pub struct MaterializedProjection {
     pub intent_context_frame_index: Vec<IntentContextFrameIndexRow>,
 }
 
-impl crate::internal::ai::runtime::snapshot::Snapshot for MaterializedProjection {
-    fn snapshot_kind(&self) -> &'static str {
-        // Disambiguates from `runtime::contracts::MaterializedProjection`
-        // (kind = "materialized_projection") which is the snapshot-layer
-        // projection used by the formal runtime contracts. This type is the
-        // rebuild-side materialization that bundles thread + scheduler +
-        // index slices for HistoryManager consumers.
-        "thread_projection_rebuild"
-    }
-
-    fn snapshot_id(&self) -> Uuid {
-        // The owning thread is the stable identity for the rebuild — multiple
-        // rebuild versions for the same thread share the same snapshot id.
-        self.thread.thread_id
-    }
-}
-
 pub struct ProjectionRebuilder<'a> {
     storage: &'a (dyn Storage + Send + Sync),
     history: &'a HistoryManager,
@@ -1983,59 +1966,6 @@ mod tests {
         );
         let history = HistoryManager::new(storage.clone(), libra_dir, db_conn.clone());
         (dir, storage, history, db_conn)
-    }
-
-    #[test]
-    fn rebuild_materialized_projection_implements_snapshot_with_stable_kind() {
-        use chrono::{TimeZone, Utc};
-
-        use super::MaterializedProjection;
-        use crate::internal::ai::{
-            projection::scheduler::SchedulerState, runtime::snapshot::Snapshot,
-        };
-
-        let thread_id =
-            Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid parse");
-        let scheduler = SchedulerState {
-            thread_id,
-            selected_plan_id: None,
-            selected_plan_ids: vec![],
-            current_plan_heads: vec![],
-            active_task_id: None,
-            active_run_id: None,
-            live_context_window: vec![],
-            metadata: None,
-            updated_at: Utc.timestamp_opt(1_700_000_000, 0).single().expect("utc"),
-            version: 1,
-        };
-        let projection = MaterializedProjection {
-            thread: ThreadProjection {
-                thread_id,
-                title: Some("Snapshot trait probe".to_string()),
-                owner: ActorRef::human("user-1").expect("actor"),
-                participants: vec![],
-                current_intent_id: None,
-                latest_intent_id: None,
-                intents: vec![],
-                metadata: None,
-                archived: false,
-                created_at: Utc.timestamp_opt(1_700_000_000, 0).single().expect("utc"),
-                updated_at: Utc.timestamp_opt(1_700_000_010, 0).single().expect("utc"),
-                version: 1,
-            },
-            scheduler,
-            intent_plan_index: vec![],
-            intent_task_index: vec![],
-            plan_step_task_index: vec![],
-            task_run_index: vec![],
-            run_event_index: vec![],
-            run_patchset_index: vec![],
-            intent_context_frame_index: vec![],
-        };
-
-        let snapshot: &dyn Snapshot = &projection;
-        assert_eq!(snapshot.snapshot_kind(), "thread_projection_rebuild");
-        assert_eq!(snapshot.snapshot_id(), thread_id);
     }
 
     #[tokio::test]

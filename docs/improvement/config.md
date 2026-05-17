@@ -74,9 +74,9 @@ CREATE INDEX idx_config_kv_key ON config_kv(`key`);
   - `is_sensitive_key()` 匹配的 key → 自动加密；**vault 未初始化时自动 lazy init**（首次写入敏感 key 触发 vault 初始化，生成对应 scope 的 unseal key）
   - 普通 key → 明文存储（可通过 `--encrypt` 强制加密）
   - `--encrypt` 显式标志 → 强制加密；vault 未初始化时同样 lazy init
-  - `--plaintext` 显式标志 → 强制明文存储，跳过自动加密和脱敏。适用于 `is_sensitive_key()` 规则误伤场景（如 `http.proxyPasswordPrompt = false`、`alias.token = "!echo ..."`）。**限制**：`--plaintext` 不允许用于 vault 内部凭据和真正的 secret 命名空间——以下 key 一律拒绝 `--plaintext`：`vault.env.*`、`*.privkey`、`vault.unsealkey`、`vault.roottoken`、`vault.roottoken_enc`（报错 `error: --plaintext cannot be used with vault internal/secret keys`，**exit 128**，v0.17.393 已收口：`StableErrorCode::RepoStateInvalid` → Repo → Fatal；旧文档 "exit 1" 对应 fine-mode 数字）。`--plaintext` 与 `--encrypt` 互斥，同时使用报错 **exit 129**（v0.17.393 已收口：`CliError::command_usage` → `CliInvalidArguments` → Cli → Usage；旧文档 "exit 2" 对应 fine-mode 数字）
+  - `--plaintext` 显式标志 → 强制明文存储，跳过自动加密和脱敏。适用于 `is_sensitive_key()` 规则误伤场景（如 `http.proxyPasswordPrompt = false`、`alias.token = "!echo ..."`）。**限制**：`--plaintext` 不允许用于 vault 内部凭据和真正的 secret 命名空间——以下 key 一律拒绝 `--plaintext`：`vault.env.*`、`*.privkey`、`vault.unsealkey`、`vault.roottoken`、`vault.roottoken_enc`（报错 `error: --plaintext cannot be used with vault internal/secret keys`，exit 1）。`--plaintext` 与 `--encrypt` 互斥，同时使用报错 exit 2
   - **加密状态继承**（UPDATE 和 `--add` INSERT 均适用）：操作已存在的 key 时，如果数据库中该 key 已有 `encrypted = 1` 的条目，即使本次未提供 `--encrypt`，系统也自动继承加密属性。这包括：UPDATE 覆盖时继承加密；`--add` 追加新行时，检查同名 key 是否存在 `encrypted=1` 条目，存在则新行也强制加密。要将已加密 key 降级为明文，使用 `--plaintext` 显式覆盖
-  - **同键同态约束**：不允许同一个 key 混合存在明文和加密的多行记录。如果在 `--add` 时显式指定的 `--plaintext` / `--encrypt` 与数据库中该 key 已有记录的加密状态冲突，直接报错拒绝插入（`error: cannot mix encrypted and plaintext values for the same key`，**exit 128**，v0.17.393 已收口：`StableErrorCode::ConflictOperationBlocked` → Conflict → Fatal；旧文档 "exit 1" 对应 fine-mode 数字）
+  - **同键同态约束**：不允许同一个 key 混合存在明文和加密的多行记录。如果在 `--add` 时显式指定的 `--plaintext` / `--encrypt` 与数据库中该 key 已有记录的加密状态冲突，直接报错拒绝插入（`error: cannot mix encrypted and plaintext values for the same key`，exit 1）
   - **多值覆盖保护**：如果对已存在多个值的 key 使用 `set` 覆盖（而非 `--add` 或 `unset`），即使携带了 `--plaintext` 或 `--encrypt` 标志，也必须抛出多值冲突错误（`exit 5`），防止一瞬间意外清空并覆盖整个多值数组。必须先 `unset --all` 才能改变其整体加密状态
 - **vault lazy init 行为**：首次在某个 scope 写入敏感/加密 key 时，自动初始化该 scope 的 vault（生成 unseal key + root token），无需用户显式操作。初始化成功后输出提示："Initialized vault for <scope> scope"
 - **vault init 失败处理**：如果 lazy init 失败（如文件系统权限不足），直接报错，不做明文降级
@@ -85,7 +85,7 @@ CREATE INDEX idx_config_kv_key ON config_kv(`key`);
 - `config_kv_get_bool(key)` — 归一化 `true/yes/on/1` → `true`，`false/no/off/0` → `false`，其他值报错
 - `config_kv_get_int(key)` — 解析整数（支持 `k`/`m`/`g` 后缀），无效值报错
 - `config_kv_set` 对已知路径做基本合法性校验：`vault.signing` 只接受 `true`/`false`，`core.autocrlf` 只接受 `true`/`false`/`input`
-- 校验失败 → `error: invalid value '<val>' for key '<key>': expected bool (true/false)`，**exit 128**（旧文档 "exit 1" 对应 fine-mode 数字；coarse-mode 走 `from_legacy_string`→`failure` 默认 128，与同组其他 set 校验错误一致）。**安全**：如果 `is_sensitive_key(key) == true` 或 `encrypted == true`，错误消息中的 `<val>` 替换为 `<REDACTED>`（防止敏感值通过校验错误消息泄漏到终端或 CI 日志）
+- 校验失败 → `error: invalid value '<val>' for key '<key>': expected bool (true/false)`，exit 1。**安全**：如果 `is_sensitive_key(key) == true` 或 `encrypted == true`，错误消息中的 `<val>` 替换为 `<REDACTED>`（防止敏感值通过校验错误消息泄漏到终端或 CI 日志）
 
 **依赖命令同步迁移（不做 shim）：**
 - 本批直接将所有调用旧 `Config` API 的命令和模块迁移到新 `config_kv` 后端
@@ -141,8 +141,8 @@ CREATE INDEX idx_config_kv_key ON config_kv(`key`);
 **`config set` value 参数规则：** `value` 为可选参数 `[value]`。缺省时的行为由 key 类型决定：
 - **受保护 key**（`is_sensitive_key(key) == true` 或使用了 `--encrypt` 或**数据库中该 key 已有 `encrypted=1` 的条目**）且**未使用 `--plaintext`**：触发安全交互式输入（`Enter value for <key>: ****`），要求交互环境（`stdin.is_terminal() == true && !output.is_json()`）；非交互环境下报错 `LBR-CLI-002`。**`--json`/`--machine` 视为非交互**——即使处于 TTY，也不启动交互输入（避免 Agent 通过 PTY 调用时死锁）
 - **`--plaintext` + value 缺省**：直接报参数缺失错误（`error: missing value for key '<key>'`），不触发交互输入（`--plaintext` 的语义是"我知道我在做什么"，不需要安全输入保护）
-- **`--stdin` 标志**：从标准输入读取 value（**读取全部内容直到 EOF**，仅去除最末尾的一个换行符，原生支持 JSON/PEM 等多行凭证）。适用于 CI/CD 和 Agent 管道场景，避免明文参数暴露在 shell history 和进程列表中。示例：`echo "$MY_CI_SECRET" | libra config set --stdin vault.env.API_KEY`。`--stdin` 不要求 TTY，可与 `--encrypt` 或 `--plaintext` 组合使用。如果同时提供了 `[value]` 参数和 `--stdin`，报错 `error: cannot use both value argument and --stdin`，**exit 129**（v0.17.393 已收口：`CliError::command_usage` → `CliInvalidArguments` → Cli → Usage；旧文档 "exit 2" 对应 fine-mode 数字）
-- **普通 key**（`is_sensitive_key() == false` 且无 `--encrypt` 且数据库中无 `encrypted=1` 条目）：直接报参数缺失错误（`error: missing value for key '<key>'`），**exit 2**（`with_exit_code(2)` 显式覆盖，与同组 set 缺值错误的语义一致；旧文档 "exit 2" 与代码现行行为相同，记录此处避免与同 section 其他经 v0.17.39x 收口的项混淆）
+- **`--stdin` 标志**：从标准输入读取 value（**读取全部内容直到 EOF**，仅去除最末尾的一个换行符，原生支持 JSON/PEM 等多行凭证）。适用于 CI/CD 和 Agent 管道场景，避免明文参数暴露在 shell history 和进程列表中。示例：`echo "$MY_CI_SECRET" | libra config set --stdin vault.env.API_KEY`。`--stdin` 不要求 TTY，可与 `--encrypt` 或 `--plaintext` 组合使用。如果同时提供了 `[value]` 参数和 `--stdin`，报错 `error: cannot use both value argument and --stdin`，exit 2
+- **普通 key**（`is_sensitive_key() == false` 且无 `--encrypt` 且数据库中无 `encrypted=1` 条目）：直接报参数缺失错误（`error: missing value for key '<key>'`），exit 2
 
 **scope 标志：**
 - `--local` — 仓库级（默认），存储在 `.libra/libra.db`
@@ -172,12 +172,12 @@ CREATE INDEX idx_config_kv_key ON config_kv(`key`);
   - **隐式布尔值**：如果在 `-z` 输出的 chunk 中找不到 `\n` 分隔符（如 Git 的 `[core] bare` 配置），则视其为隐式布尔值，自动解析 value 并存为 `"true"`
   - **已知多值 key**（`remote.*.fetch`、`remote.*.push`、`remote.*.pushurl`、`branch.*.merge`、`url.*.insteadOf`、`url.*.pushInsteadOf`、`http.*.extraHeader`、`credential.helper`）：按 `--add` 语义追加，`(key, value)` 完全一致才算 duplicate 并跳过
   - **其余 key**：last-one-wins 语义——同 key 多次出现时仅保留最后一个值。**如果检测到未知 key 有多个不同值被压扁，输出 warning**：`warning: key '<key>' has N values in Git config, only last value kept (not in known multi-value list)`，计入导入统计的 `collapsed_multivalue_warnings` 计数
-- `import --system` → 报错 `error: --system scope is not supported`，**exit 129**（v0.17.394 已收口：`CliError::command_usage` → `CliInvalidArguments` → Cli → Usage；旧文档 "exit 2" 对应 fine-mode 数字。所有 `config --system <subcommand>` 触发同一拒绝路径，统一返回 129）
+- `import --system` → 报错 `error: --system scope is not supported`，exit 2
 - 错误处理：
-  - `import --local` 在非 Libra 仓库目录 → **exit 128**（coarse-mode；`Fatal` 类别；fine-mode 对应 3-`Repo`），提示 "not a libra repository (use libra init first)"
-  - `import --local` 在没有 `.git/` 的 Libra 仓库 → **exit 128**（coarse-mode；`Fatal` 类别 via `from_legacy_string`→`failure`；旧文档 "exit 1" 对应 fine-mode 数字），提示 "no Git config found (.git/config does not exist)"
-  - Git config 来源为空（文件不存在或无配置项）→ **exit 128**（coarse-mode；`Fatal` 类别 via `from_legacy_string`→`failure`；旧文档 "exit 1" 对应 fine-mode 数字），提示 "no Git config entries found for scope <scope>"
-  - `git` 命令执行失败（权限不足等）→ **exit 128**（coarse-mode；附带 git 的 stderr 输出；与上面非 Libra 仓库的退出码语义一致）
+  - `import --local` 在非 Libra 仓库目录 → exit 128，提示 "not a libra repository (use libra init first)"
+  - `import --local` 在没有 `.git/` 的 Libra 仓库 → exit 1，提示 "no Git config found (.git/config does not exist)"
+  - Git config 来源为空（文件不存在或无配置项）→ exit 1，提示 "no Git config entries found for scope <scope>"
+  - `git` 命令执行失败（权限不足等）→ exit 128，附带 git 的 stderr 输出
 
 ### 特性 3：环境变量 Vault 存储
 
@@ -269,8 +269,8 @@ libra config list --ssh-keys
 **remote 名校验规则：** `--remote <name>` 的 `<name>` 必须满足以下约束（同时用于 config key 和文件路径，必须安全）：
 - 只允许 `[a-zA-Z0-9_-]` 字符，长度 1-64
 - 禁止 `.`（会造成 config key `vault.ssh.<remote>.pubkey` 歧义）、`/`、`\`、`..`（路径注入风险）
-- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，**exit 128**（v0.17.392 已收口：`StableErrorCode::RepoStateInvalid` → Repo 类别 → Fatal；旧文档 "exit 1" 对应 fine-mode 数字，coarse 模式默认 128）。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
-- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，**exit 129**（v0.17.392 已修复：现走 `CliError::command_usage` → `CliInvalidArguments` → Cli 类别 → Usage；旧实现走 `from_legacy_string`→`failure` 误返回 128；旧文档 "exit 2" 对应 fine-mode 数字，coarse 模式默认 129）
+- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，exit 1。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
+- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，exit 2
 
 **存储：**
 - 公钥：`vault.ssh.<remote>.pubkey` in config_kv（明文）

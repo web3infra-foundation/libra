@@ -29,7 +29,7 @@ use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
         CompletionError, CompletionModel as CompletionModelTrait, CompletionReasoningEffort,
-        CompletionStreamEvent, CompletionThinking, parse_json_repaired,
+        CompletionStreamEvent, CompletionThinking,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::{
@@ -474,22 +474,13 @@ impl DeepSeekStreamToolCallBuilder {
     ///
     /// Functional scope:
     /// - Requires a non-empty function name.
-    /// - Requires the arguments buffer to parse as valid JSON, or be repairable
-    ///   via [`parse_json_repaired`]. The repair-aware boundary keeps this
-    ///   salvage check aligned with [`parse_tool_call_arguments_with_repair`],
-    ///   so a mid-stream chunk that needs the same trailing-comma / smart-quote
-    ///   repairs the final processing already applies will be treated as a
-    ///   complete tool call rather than being dropped as incomplete.
-    /// - An empty buffer is ambiguous during streaming and is treated as a
-    ///   partial fragment for body-error recovery.
+    /// - Requires the arguments buffer to parse as valid JSON. An empty buffer is
+    ///   ambiguous during streaming and is treated as a partial fragment for
+    ///   body-error recovery.
     fn is_complete(&self) -> bool {
-        if self.name.is_empty() || self.arguments.trim().is_empty() {
-            return false;
-        }
-        if serde_json::from_str::<Value>(&self.arguments).is_ok() {
-            return true;
-        }
-        parse_json_repaired(&self.arguments).is_ok()
+        !self.name.is_empty()
+            && !self.arguments.trim().is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok()
     }
 }
 
@@ -1424,28 +1415,6 @@ mod tests {
         )
         .unwrap();
         assert!(with_tool_call.has_salvageable_response());
-    }
-
-    /// Scenario: a streaming tool-call whose argument buffer is strict-invalid
-    /// JSON but repairable via the shared `parse_json_repaired` helper (e.g.
-    /// trailing comma, single-quoted keys — exactly the shapes
-    /// `parse_tool_call_arguments_with_repair` accepts at the final stage)
-    /// must be classified as complete by the streaming `is_complete` salvage
-    /// boundary. Otherwise the streaming check drops calls the final handler
-    /// would happily accept, causing avoidable mid-stream retries.
-    #[test]
-    fn test_deepseek_stream_repairable_tool_call_arguments_classify_complete() {
-        let builder = DeepSeekStreamToolCallBuilder {
-            id: Some("call_1".to_string()),
-            name: "shell".to_string(),
-            // Trailing comma — strict JSON rejects but parse_json_repaired
-            // strips it. This is the canonical "salvageable" mid-stream case.
-            arguments: "{\"command\":\"ls\",}".to_string(),
-        };
-        assert!(
-            builder.is_complete(),
-            "trailing-comma arguments should be classified complete via JSON repair"
-        );
     }
 
     /// Scenario: a stream body error after only a tool name must not be treated

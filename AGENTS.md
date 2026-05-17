@@ -85,14 +85,25 @@ Do not dismiss an issue only because:
 - Prefer actionable recommendations over generic advice.
 
 ## Project Structure & Module Organization
-- `src/` holds the Rust crate: CLI entry in `src/main.rs`, crate root in `src/lib.rs`, subcommands under `src/command/`, shared primitives in `src/internal/`, utilities in `src/utils/`.
-- Integration tests live in `tests/command/` with fixtures in `tests/data/`; `tests/command/mod.rs` re-exports helpers.
-- Community docs in `docs/`; schema bootstrap `sql/sqlite_20260309_init.sql`; hooks/templates in `template/`.
+- `src/` holds the Rust crate (edition 2024). CLI entry `src/main.rs`, library root `src/lib.rs`, CLI definition/dispatch in `src/cli.rs`, shared helpers in `src/common_utils.rs`, `src/git_protocol.rs`, `src/lfs_structs.rs`.
+- `src/command/` contains every `libra <subcommand>` (60+ modules: `init`, `clone`, `add`, `commit`, `push`, `pull`, `fetch`, `status`, `log`, `show`, `diff`, `blame`, `branch`, `tag`, `switch`, `checkout`, `merge`, `rebase`, `cherry_pick`, `reset`, `restore`, `mv`, `clean`, `stash`, `revert`, `reflog`, `config`, `remote`, `worktree`, `worktree-fuse`, `cloud`, `lfs`, `open`, `bisect`, `cat_file`, `describe`, `grep`, `graph`, `hooks`, `index_pack`, `ls_remote`, `publish`, `rev_list`, `rev_parse`, `sandbox`, `shortlog`, `show_ref`, `symbolic_ref`, `automation`, `code`, `code_control`, `code_control_files`, `web_assets`, `usage`, `db`, `lfs_schema`, …) plus `src/command/agent/` for `libra agent …` subcommands.
+- `src/internal/` holds core logic: AI stack in `internal/ai/` (`agent/`, `agent_run/`, `providers/`, `tools/`, `completion/`, `mcp/`, `session/`, `prompt/`, `commands/`, `hooks/`, `intentspec/`, `orchestrator/`, `goal/`, `skills/`, `sandbox/`, `runtime/`, `usage/`, `history.rs`, `libra_vcs.rs`, …); TUI in `internal/tui/`; Sea-ORM models in `internal/model/`; network clients in `internal/protocol/` (`git_client`, `https_client`, `ssh_client`, `lfs_client`, `local_client`); publish pipeline in `internal/publish/`; plus `branch.rs`, `tag.rs`, `config.rs`, `head.rs`, `reflog.rs`, `db.rs`, `db/migration.rs`, `vault.rs`, `log/`.
+- `src/utils/` covers shared utilities: `client_storage.rs` (tiered local + S3/R2 + LRU), `d1_client.rs`, `path*.rs`, `object*.rs`, `tree.rs`, `ignore.rs`, `lfs.rs`, `fuse.rs`, `convert.rs`, `error.rs`, `output.rs`, `pager.rs`, `text.rs`, `worktree.rs`, `storage/`, `storage_ext.rs`, `test.rs` (`ChangeDirGuard`, `setup_with_new_libra_in`).
+- `tests/` holds integration targets at the top level plus `tests/command/` for per-subcommand suites. `tests/INDEX.md` is the authoritative one-line index of every cargo `--test` target, grouped by Wave (1 command/compat, 2 Code UI & local automation, 3 network, 4 live AI, 5 live cloud, 6 perf smoke); keep it in sync when adding/renaming a test target. Shared helpers in `tests/command/mod.rs`, `tests/helpers/`, `tests/harness/`; fixtures in `tests/data/`, `tests/fixtures/`; `tests/objects/` for object-level tests; `tests/compat/` for compat-surface guards.
+- `web/` is the Next.js static export bundled into `WebAssets` by `build.rs` (skipped when `LIBRA_SKIP_WEB_BUILD=1`); `worker/` holds the Cloudflare Worker (D1 + R2) backing `libra publish` and cloud backup.
+- Community docs in `docs/` (incl. `docs/development/integration-test-plan.md`, `docs/improvement/*.md` for per-area gap-analysis); SQLite bootstrap `sql/sqlite_20260309_init.sql` + `sql/sqlite_20260415_ai_runtime_contract.sql`; runtime migrations in `sql/migrations/`; publish-pipeline schema in `sql/publish/`; hooks/templates in `template/`; release/install assets in `install.sh`, `scripts/`.
 
 ## Build, Test, and Development Commands
-- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate). **All `cargo clippy` warnings must be resolved before committing; treat clippy warnings as errors.**
-- `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo).
-- `cargo test` runs the suite; filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; run serial if flaky.
+- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features -- -D warnings` keep formatting and linting aligned (`rustfmt.toml` sets `group_imports = "StdExternalCrate"` and `imports_granularity = "Crate"`). **CI enforces `-D warnings`; all clippy warnings must be resolved before committing.**
+- `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo). Set `LIBRA_SKIP_WEB_BUILD=1` to skip the Next.js export inside `build.rs` during iteration.
+- `cargo test --all` runs the default L1 suite. Filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; mark `#[serial]` if they mutate shared state.
+- Feature-gated layers (see `tests/INDEX.md` waves; CI `compat-offline-core` covers L1 by default, `compat-network-remotes` runs L2):
+  - `--features test-network` for Wave 3 (`network_remotes_test`) — no secrets needed.
+  - `--features test-live-ai` for Wave 4 (real LLM APIs; needs `DEEPSEEK_API_KEY` etc.).
+  - `--features test-live-cloud` for Wave 5 (real D1/R2; needs `LIBRA_D1_*`/`LIBRA_STORAGE_*`).
+  - `--features test-provider` plus `LIBRA_ENABLE_TEST_PROVIDER=1` to activate the deterministic provider used by `code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix` (run with `--test-threads=1`).
+  - `--features worktree-fuse` for Unix FUSE-backed worktree commands.
+  - `--features subagent-scaffold` for the gated CEX-S2-10 schema scaffold (see `docs/improvement/agent.md`).
 
 ## Coding Style & Naming Conventions
 - Rust 2024; 4-space indent; snake_case for modules/functions, PascalCase for types, SCREAMING_SNAKE for consts.
@@ -103,15 +114,16 @@ Do not dismiss an issue only because:
 - Add short comments only when control flow is non-obvious (e.g., async handling, SQLite migrations).
 
 ## Testing Guidelines
-- Favor integration coverage in `tests/command/` to mirror Git workflows; use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state.
-- Keep fixtures small and local; re-use helpers in `tests/command/mod.rs` instead of shelling out directly.
-- Mark tests `#[serial]` if they mutate shared state; keep async tests on Tokio (`#[tokio::test]` or `flavor = "multi_thread"` when needed).
-- Pair new commands/options with at least one end-to-end test plus a focused unit test where logic is easily isolated.
+- Favor integration coverage in `tests/command/` (per-subcommand suites) and the top-level `tests/*.rs` targets (AI/runtime/Code-UI/publish/etc.) to mirror real Git and agent workflows; use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state.
+- `tests/INDEX.md` is the authoritative test index — when adding/renaming a `--test` target, add or update its one-line row (target | wave | purpose | relevant src). Reference specific cases in PRs as `<target>::<test_fn>`.
+- Keep fixtures small and local under `tests/data/` or `tests/fixtures/`; re-use helpers in `tests/command/mod.rs`, `tests/helpers/`, and `tests/harness/` instead of shelling out directly.
+- Mark tests `#[serial]` (via `serial_test`) if they mutate shared state; keep async tests on Tokio (`#[tokio::test]`, or `flavor = "multi_thread"` when needed). PTY/TUI scenarios under `tests/harness/` plus the `code_ui_*` and `harness_self_test` targets require `--features test-provider` with `LIBRA_ENABLE_TEST_PROVIDER=1` and `--test-threads=1`.
+- Pair new commands/options with at least one end-to-end test plus a focused unit test where logic is easily isolated. For new error variants, add a Display-pin test (see the `test(...): pin Display for …` commits) so user-facing messages stay stable.
 
 ## Commit & Pull Request Guidelines
 - History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
 - Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features`); include repro steps or sample CLI output when touching user-visible behavior.
+- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all`, plus any relevant `--features test-*` runs); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
 
 ## Aggressive review bias

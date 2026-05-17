@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 /// approval prompts go to; field-level scope plumbing arrives later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ApprovalRouting {
     /// All sub-agent approvals route to Layer 1 / human reviewer.
     /// Default for all agent types per S2-INV-06.

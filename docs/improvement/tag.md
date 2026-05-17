@@ -117,7 +117,7 @@ pub enum TagError {
 | `MissingName` | `CliInvalidArguments` | 129 | `provide a tag name` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first before tagging HEAD` |
 | `CheckExistingFailed` | `RepoCorrupt` | 128 | 无 |
-| `SerializeAnnotatedTag` | `InternalInvariant` | 128 | 附带 Issues URL（v0.17.395 已落地：`tag.rs` 引入 `const ISSUE_URL` 并通过 `.with_hint(format!("this is a bug; please report it at {ISSUE_URL}"))` 附加；与 push.rs 的 `ObjectCollection` / `PackEncoding` hint 模式一致；`tag_error_to_cli_error_serialize_annotated_tag_has_issue_url` 单测防御回归） |
+| `SerializeAnnotatedTag` | `InternalInvariant` | 128 | 附带 Issues URL |
 | `StoreObjectFailed` | `IoWriteFailed` | 128 | 无 |
 | `PersistReferenceFailed` | `IoWriteFailed` | 128 | 无 |
 | `DeleteFailed` | `IoWriteFailed` | 128 | 无 |

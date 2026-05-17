@@ -153,35 +153,6 @@ run_step() {
     return $rc
 }
 
-# Run a command in the foreground so command-native progress output is visible.
-run_step_live() {
-    label=$1
-    shift
-
-    if [ "$TTY" = "1" ]; then
-        printf '  %s→%s  %s%s%s\n' "$C_ACCENT" "$C_RESET" "$C_TEXT" "$label" "$C_RESET"
-    else
-        printf '  ·  %s ...\n' "$label"
-    fi
-
-    if "$@"; then
-        if [ "$TTY" = "1" ]; then
-            printf '  %s✓%s  %s%s%s\n' "$C_SUCCESS" "$C_RESET" "$C_TEXT" "$label" "$C_RESET"
-        else
-            printf '  ·  %s ... ok\n' "$label"
-        fi
-        return 0
-    fi
-
-    rc=$?
-    if [ "$TTY" = "1" ]; then
-        printf '  %s✗%s  %s%s%s\n' "$C_ERROR" "$C_RESET" "$C_ERROR" "$label" "$C_RESET"
-    else
-        printf '  ·  %s ... fail\n' "$label"
-    fi
-    return $rc
-}
-
 success_box() {
     printf '  %s%s╭───────────────────────────────╮%s\n' "$C_BOLD" "$C_SUCCESS" "$C_RESET"
     printf '  %s%s│                               │%s\n' "$C_BOLD" "$C_SUCCESS" "$C_RESET"
@@ -328,23 +299,13 @@ check_dependencies() {
 }
 
 download_file() {
-    show_progress=${3:-0}
-
     # Bounded timeouts so a stalled mirror cannot hang CI / autoinstall flows.
     # 300s max wallclock covers a ~12 MB binary down to ~40 KB/s; .sha256 is tiny
     # so the same cap applies harmlessly.
     if [ "$DOWNLOADER" = "curl" ]; then
-        if [ "$show_progress" = "1" ]; then
-            curl -fL --connect-timeout 10 --max-time 300 --progress-bar "$1" -o "$2"
-        else
-            curl -fsSL --connect-timeout 10 --max-time 300 "$1" -o "$2"
-        fi
+        curl -fsSL --connect-timeout 10 --max-time 300 "$1" -o "$2"
     else
-        if [ "$show_progress" = "1" ]; then
-            wget -q --show-progress --progress=bar:force:noscroll --timeout=30 --tries=3 "$1" -O "$2"
-        else
-            wget -q --timeout=30 --tries=3 "$1" -O "$2"
-        fi
+        wget -q --timeout=30 --tries=3 "$1" -O "$2"
     fi
 }
 
@@ -572,9 +533,7 @@ screen_install() {
             "pick a writable path with LIBRA_HOME or -d (we never sudo)"
     fi
 
-    show_progress=0
-    [ -t 2 ] && show_progress=1
-    run_step_live "fetch $binary_name" download_file "$download_url" "$temp_file" "$show_progress" \
+    run_step "fetch $binary_name" download_file "$download_url" "$temp_file" \
         || error_exit "download failed" "install" "url: $download_url"
 
     [ -s "$temp_file" ] || error_exit "downloaded file is empty" "install" "the mirror may be corrupted — please retry"

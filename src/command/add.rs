@@ -46,22 +46,18 @@ use crate::{
     },
 };
 
-const ADD_EXAMPLES: &str = "\
-EXAMPLES:
-    libra add .                        Stage all changes in current directory
-    libra add src/main.rs              Stage a specific file
-    libra add src/ tests/              Stage multiple paths
-    libra add -A                       Stage all changes (adds, modifies, removes)
-    libra add -u                       Update tracked files only (no new files)
-    libra add --dry-run .              Preview what would be staged
-    libra add -f ignored_file.log      Force-add an ignored file
-    libra add --refresh                Refresh index metadata without staging";
-
 /// Stage file contents for the next commit.
 ///
-/// See `libra add --help` for the same EXAMPLES rendered through clap.
+/// EXAMPLES:
+///     libra add .                        Stage all changes in current directory
+///     libra add src/main.rs              Stage a specific file
+///     libra add src/ tests/              Stage multiple paths
+///     libra add -A                       Stage all changes (adds, modifies, removes)
+///     libra add -u                       Update tracked files only (no new files)
+///     libra add --dry-run .              Preview what would be staged
+///     libra add -f ignored_file.log      Force-add an ignored file
+///     libra add --refresh                Refresh index metadata without staging
 #[derive(Parser, Debug)]
-#[command(after_help = ADD_EXAMPLES)]
 pub struct AddArgs {
     /// pathspec... files & dir to add content from.
     #[clap(required = false)]

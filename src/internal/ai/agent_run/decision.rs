@@ -21,7 +21,6 @@ use super::{AgentPatchSetId, AgentRunId, DecisionId, EvidenceId, MergeCandidateI
 /// owned by CEX-S2-15 and is off by default in Step 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ReviewState {
     NeedsHumanReview,
     Accepted,
@@ -34,7 +33,6 @@ pub enum ReviewState {
 /// concrete value; CEX-S2-13 only declares the shape.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum RiskLevel {
     Low,
     Medium,
