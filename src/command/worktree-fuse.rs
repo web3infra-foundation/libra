@@ -795,3 +795,34 @@ fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig)
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    /// Pins the manual `Display` impl on `FuseUmountError`. All three
+    /// variants (InvalidTarget / IoRead / IoWrite) carry a single
+    /// pre-formatted message that the impl writes verbatim — the
+    /// same string then flows through `into_cli_error()` into
+    /// `CliError::fatal(...)` and out to the operator-visible
+    /// error.message in both human stderr and the JSON envelope
+    /// produced by `libra worktree umount` failures.
+    #[test]
+    fn fuse_umount_error_display_pins_each_variant() {
+        assert_eq!(
+            FuseUmountError::InvalidTarget(
+                "umount target does not exist: /tmp/missing".to_string(),
+            )
+            .to_string(),
+            "umount target does not exist: /tmp/missing",
+        );
+        assert_eq!(
+            FuseUmountError::IoRead("failed to read mountpoint metadata".to_string()).to_string(),
+            "failed to read mountpoint metadata",
+        );
+        assert_eq!(
+            FuseUmountError::IoWrite("failed to remove cleanup root".to_string()).to_string(),
+            "failed to remove cleanup root",
+        );
+    }
+}
