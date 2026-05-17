@@ -9,7 +9,7 @@ use std::{
 
 use clap::Parser;
 use git_internal::{
-    hash::{HashKind, ObjectHash, get_hash_kind},
+    hash::{HashKind, ObjectHash, get_hash_kind, set_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::types::ObjectType,
@@ -133,6 +133,11 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
         .unwrap_or_else(|| idx_file.with_extension("pack"));
 
     let idx_bytes = read_file(&idx_file, "pack index")?;
+    if let Some(hash_kind) =
+        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?
+    {
+        set_hash_kind(hash_kind);
+    }
     let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?;
     let decoded = decode_pack(&pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
@@ -190,6 +195,89 @@ fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     } else {
         parse_idx_v1(bytes)
     }
+}
+
+fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
+    if !bytes.starts_with(&IDX_MAGIC) {
+        return Ok(None);
+    }
+
+    let version = u32::from_be_bytes(
+        bytes
+            .get(4..8)
+            .ok_or_else(|| "truncated v2 version".to_string())?
+            .try_into()
+            .map_err(|_| "truncated v2 version".to_string())?,
+    );
+    if version != 2 {
+        return Ok(None);
+    }
+
+    let fanout = parse_fanout(bytes, 8)?;
+    validate_fanout_monotonic(&fanout)?;
+    let object_count = fanout[255] as usize;
+    let mut candidates = [HashKind::Sha1, HashKind::Sha256]
+        .into_iter()
+        .filter(|kind| idx_v2_layout_matches_hash_kind(bytes, object_count, *kind))
+        .collect::<Vec<_>>();
+
+    match candidates.len() {
+        0 => Err("pack index v2 layout does not match sha1 or sha256".to_string()),
+        1 => Ok(candidates.pop()),
+        _ => {
+            let current = get_hash_kind();
+            if candidates.contains(&current) {
+                Ok(Some(current))
+            } else {
+                Ok(candidates.into_iter().next())
+            }
+        }
+    }
+}
+
+fn idx_v2_layout_matches_hash_kind(bytes: &[u8], object_count: usize, kind: HashKind) -> bool {
+    let hash_len = kind.size();
+    let Some(mut cursor) = (8 + FANOUT_LEN).checked_add(object_count.saturating_mul(hash_len))
+    else {
+        return false;
+    };
+    if cursor > bytes.len() {
+        return false;
+    }
+
+    let Some(crc_end) = cursor.checked_add(object_count.saturating_mul(4)) else {
+        return false;
+    };
+    if crc_end > bytes.len() {
+        return false;
+    }
+    cursor = crc_end;
+
+    let Some(offsets_end) = cursor.checked_add(object_count.saturating_mul(4)) else {
+        return false;
+    };
+    if offsets_end > bytes.len() {
+        return false;
+    }
+    let offset_table = &bytes[cursor..offsets_end];
+    cursor = offsets_end;
+
+    let large_count = offset_table
+        .chunks_exact(4)
+        .filter(|raw| {
+            let offset = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            offset & 0x8000_0000 != 0
+        })
+        .count();
+    let Some(trailer_start) = cursor.checked_add(large_count.saturating_mul(8)) else {
+        return false;
+    };
+    if trailer_start > bytes.len() {
+        return false;
+    }
+
+    let remaining = bytes.len() - trailer_start;
+    remaining == hash_len * 2 || remaining == hash_len + 20
 }
 
 fn parse_idx_v1(bytes: &[u8]) -> Result<ParsedIndex, String> {
@@ -476,8 +564,15 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
     pack.decode(
         &mut reader,
         move |entry: MetaAttached<Entry, EntryMeta>| {
+            let decoded_entry = IndexEntry::try_from(&entry)
+                .map(|index| DecodedPackEntry {
+                    index,
+                    object_type: entry.inner.obj_type,
+                    size: entry.inner.data.len(),
+                })
+                .map_err(|error| error.to_string());
             if let Ok(mut guard) = entries_clone.lock() {
-                guard.push(entry);
+                guard.push(decoded_entry);
             }
         },
         None::<fn(ObjectHash)>,
@@ -496,21 +591,14 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
             .with_stable_code(StableErrorCode::InternalInvariant)
     })?;
     for entry in entries {
-        let index_entry = IndexEntry::try_from(&entry).map_err(|error| {
+        let decoded_entry = entry.map_err(|error| {
             CliError::fatal(format!(
                 "failed to derive index metadata from pack '{}': {error}",
                 pack_file.display()
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-        decoded_entries.insert(
-            index_entry.hash,
-            DecodedPackEntry {
-                index: index_entry,
-                object_type: entry.inner.obj_type,
-                size: entry.inner.data.len(),
-            },
-        );
+        decoded_entries.insert(decoded_entry.index.hash, decoded_entry);
     }
 
     Ok(DecodedPack {

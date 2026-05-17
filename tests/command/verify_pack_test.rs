@@ -184,6 +184,39 @@ fn verify_pack_accepts_absolute_index_path_outside_repository() {
 
 #[test]
 #[serial]
+fn verify_pack_accepts_sha256_index_path_outside_repository() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_sha256_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha256");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+    let outside = tempfile::tempdir().expect("create non-repo cwd");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            idx_path.to_str().expect("idx path UTF-8"),
+            "--json",
+        ],
+        outside.path(),
+    );
+    assert_cli_success(
+        &output,
+        "verify-pack should infer sha256 index format outside a repo",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["index_version"], 2);
+    assert_eq!(
+        json["data"]["pack_hash"]
+            .as_str()
+            .expect("pack_hash should be string")
+            .len(),
+        64
+    );
+}
+
+#[test]
+#[serial]
 fn verify_pack_rejects_duplicate_object_ids_even_with_valid_index_checksum() {
     let repo = tempfile::tempdir().expect("create repo");
     init_repo_via_cli(repo.path());
