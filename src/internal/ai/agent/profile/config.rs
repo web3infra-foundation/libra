@@ -1010,4 +1010,52 @@ permission = { write = "deny", read = "allow", shell = "ask" }
              [code.agents.unknown]",
         );
     }
+
+    /// Pins the manual `Display` impl on the [`AgentsConfigValidationErrors`]
+    /// aggregator. The wrapper renders a header line (`agents.toml has N
+    /// validation issue(s):`) followed by one `\n  - {err}` line per child.
+    /// `agents_config_validation_error_display_pins_each_variant` already
+    /// pins the per-variant rendering above; this test pins the aggregator's
+    /// header / separator / empty-list behaviour so a future refactor of
+    /// the wrapper cannot silently change the multi-issue rendering shown
+    /// to operators when `AgentsConfig::validate` fails.
+    #[test]
+    fn agents_config_validation_errors_display_pins_aggregator_format() {
+        assert_eq!(
+            AgentsConfigValidationErrors { errors: vec![] }.to_string(),
+            "agents.toml has 0 validation issue(s):",
+        );
+
+        let single = AgentsConfigValidationErrors {
+            errors: vec![AgentsConfigValidationError::InvalidModelBinding {
+                name: "research".to_string(),
+                value: "openai".to_string(),
+            }],
+        };
+        assert_eq!(
+            single.to_string(),
+            "agents.toml has 1 validation issue(s):\n  - \
+             agent 'research': model string 'openai' is not a valid \
+             `provider/model[@variant]`",
+        );
+
+        let multi = AgentsConfigValidationErrors {
+            errors: vec![
+                AgentsConfigValidationError::InvalidAgentMode {
+                    name: "research".to_string(),
+                    value: "expert".to_string(),
+                },
+                AgentsConfigValidationError::EmptyToolEntry {
+                    name: "research".to_string(),
+                    index: 3,
+                },
+            ],
+        };
+        assert_eq!(
+            multi.to_string(),
+            "agents.toml has 2 validation issue(s):\n  - \
+             agent 'research': mode 'expert' is not one of primary/subagent/all\n  - \
+             agent 'research': tool entry at index 3 is empty",
+        );
+    }
 }
