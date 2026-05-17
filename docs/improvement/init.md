@@ -378,20 +378,28 @@ Initialized empty Libra repository in /Users/eli/projects/my-repo/.libra
 - `CliInvalidArguments` / `CliInvalidTarget` 默认退出码都是 `129`
 - 不再用 `InitError::Io(ErrorKind::InvalidInput)` 笼统承载所有参数/目标错误
 
-**建议的 `InitError` 方向：**
+**已落地的 `InitError` 形态（src/command/init.rs:74-114）：**
 
 ```rust
-enum InitError {
+pub enum InitError {
     InvalidArgument { message: String, hint: Option<String> },
     AlreadyInitialized { path: PathBuf },
     SourcePathNotFound { path: PathBuf },
     InvalidGitRepository { path: PathBuf },
     TemplateNotFound { path: PathBuf },
+    InvalidUtf8Path { path: PathBuf },
     ConversionFailed { source: PathBuf, stage: &'static str, message: String },
-    Io(io::Error),
-    Database(DbErr),
+    VaultInitializationFailed { message: String },
+    IgnoreFile(#[from] ignore::IgnoreFileError),
+    Io(#[from] io::Error),
+    Database(#[from] DbErr),
 }
 ```
+
+相比早期草案新增了 `InvalidUtf8Path`（非 UTF-8 路径无法用作 SQLite/storage key）、
+`VaultInitializationFailed`（vault bootstrap 阶段失败）和 `IgnoreFile`（template
+`.gitignore` 解析失败）三个变体。三者均映射到 `RepoStateInvalid` / `IoReadFailed`
+等已存在的稳定错误码，不引入新错误码类别。
 
 **`InitError -> CliError` 映射原则：**
 
