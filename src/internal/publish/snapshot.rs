@@ -829,4 +829,50 @@ mod tests {
         let collisions = detect_ambiguous_short_refs(&refs);
         assert_eq!(collisions, vec!["dev".to_string()]);
     }
+
+    #[test]
+    fn snapshot_build_error_display_pins_each_variant() {
+        assert_eq!(
+            SnapshotBuildError::InvalidRef {
+                message: "ref name contains control characters".to_string(),
+            }
+            .to_string(),
+            "snapshot ref input is invalid: ref name contains control characters",
+        );
+        assert_eq!(
+            SnapshotBuildError::InvalidOid {
+                oid: "not-a-hex-oid".to_string(),
+            }
+            .to_string(),
+            "snapshot revision oid is invalid: not-a-hex-oid",
+        );
+        assert_eq!(
+            SnapshotBuildError::MissingRevision {
+                revision_oid: "deadbeef".to_string(),
+            }
+            .to_string(),
+            "snapshot revision deadbeef is missing from the revision plan",
+        );
+        assert_eq!(
+            SnapshotBuildError::NonUtf8Path {
+                path: PathBuf::from("src/main.rs"),
+            }
+            .to_string(),
+            "snapshot path \"src/main.rs\" is not valid UTF-8",
+        );
+        assert_eq!(
+            SnapshotBuildError::HashFailure {
+                path: PathBuf::from("docs/diagram.png"),
+            }
+            .to_string(),
+            "snapshot file \"docs/diagram.png\" could not be hashed",
+        );
+        assert_eq!(
+            SnapshotBuildError::UnsupportedMode {
+                path: PathBuf::from("scripts/build.sh"),
+            }
+            .to_string(),
+            "snapshot file \"scripts/build.sh\" is referenced by an unsupported tree mode",
+        );
+    }
 }
