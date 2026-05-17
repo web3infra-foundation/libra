@@ -69,7 +69,7 @@
 | **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [docs/commands/clone.md](../commands/clone.md)） |
 | **4** | `add` | ✅ 已落地 | 执行层/渲染层拆分（`run_add()` → `AddOutput`）；JSON/machine 结构化输出；成功摘要；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；显式 `StableErrorCode`；ignored/failed 按 warning 处理并接入 `--exit-code-on-warning`（详见 [add.md](add.md)） |
 | **5** | `status` | ✅ 已落地 | `StatusData` 共享数据层消除重复计算；upstream tracking（human/JSON/porcelain v2）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；颜色控制统一到 `OutputConfig`（详见 [status.md](status.md)） |
-| **6** | `commit` | ✅ 已落地 | `CommitError`（18 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
+| **6** | `commit` | ✅ 已落地 | `CommitError`（19 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
 | **7** | `push` | ✅ 已落地 | 修复 refspec 语法；60s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
 | **8** | `pull` | ✅ 已落地 | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
 
@@ -82,7 +82,7 @@
 - `clone` 已整体落地：执行层/渲染层拆分、`CloneOutput` 结构化输出、显式 `StableErrorCode` 映射、typed `RestoreError` checkout、`RemoteSpecErrorKind` 分类、cleanup warning 可见性均已完成。性能优化目标仍保留为后续独立批次。
 - `add` 已整体落地：`run_add()` → `AddOutput` 执行层/渲染层拆分；JSON/machine 结构化输出（含 `added`/`modified`/`removed`/`refreshed`/`ignored`/`failed` 分类）；显式 `StableErrorCode` 映射（`AddError → CliError`）；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；ignored/failed 接入共享 warning tracker。
 - `status` 已整体落地：`StatusData` 共享数据层消除 `execute_to()` 与 `collect_status_json()` 的逻辑重复；upstream tracking（human/JSON/short/porcelain v2）；显式 `StatusError → CliError` 映射；新增 `--exit-code` 标志（dirty → exit `1`）；颜色控制统一到 `OutputConfig`。
-- `commit` 已整体落地：`CommitError`（18 变体）typed enum + 显式 `StableErrorCode` 映射；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离（JSON 模式 `Stdio::piped()`）；全部 18 变体单元映射测试 + 11 CLI 级集成测试 + 9 JSON schema 稳定性测试。
+- `commit` 已整体落地：`CommitError`（19 变体）typed enum + 显式 `StableErrorCode` 映射；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离（JSON 模式 `Stdio::piped()`）；全部 19 变体单元映射测试 + 11 CLI 级集成测试 + 9 JSON schema 稳定性测试。
 
 ### 第二批：状态变更确认命令（P0 消灭"沉默"）
 
