@@ -15,20 +15,20 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_exit_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`commit.rs:765` / `commit.rs:785`）
-- `parse_author()` 已存在（`commit.rs:276`），解析 `--author` 参数
-- `resolve_committer_identity()` 已存在（`commit.rs:323`），从 config/env 解析提交者身份；与 `init` 共用 `resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)` 共享 helper
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`commit.rs:773` / `commit.rs:793`）
+- `parse_author()` 已存在（`commit.rs:284`），解析 `--author` 参数
+- `resolve_committer_identity()` 已存在（`commit.rs:331`），从 config/env 解析提交者身份；与 `init` 共用 `resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)` 共享 helper
 - 已有功能完整的 flag 支持：`--message/-m`、`--file/-F`、`--allow-empty`、`--conventional`、`--amend`、`--no-edit`、`--signoff/-s`、`--disable-pre`/`--no-verify`、`--all/-a`、`--author`
 
 **基于当前代码的已交付确认（commit 与其它已现代化命令的统一模式对齐情况）：**
 
-- **typed error enum 已交付**：`pub enum CommitError`（`commit.rs:112-169`）含 19 个 thiserror 变体（`IndexLoad` / `IndexSave` / `NothingToCommit` / `NothingToCommitNoTracked` / `IdentityMissing` / `NoCommitToAmend` / `AmendUnsupported` / `InvalidAuthor` / `MessageFileRead` / `EmptyMessage` / `TreeCreation` / `ObjectStorage` / `ParentCommitLoad` / `HeadUpdate` / `PreCommitHook` / `ConventionalCommit` / `VaultSign` / `AutoStage` / `StagedChanges`），完全替代旧 `Result<(), String>` 模式
-- **StableErrorCode 显式映射已交付**：`impl From<CommitError> for CliError`（`commit.rs:171-230`）每个变体都显式调用 `.with_stable_code(StableErrorCode::XXX)`（`RepoCorrupt` / `IoWriteFailed` / `RepoStateInvalid` / `AuthMissingCredentials` / `ConflictUnresolved` 等），不再依赖 `infer_stable_error_code()` 的子串推断
-- **执行层与渲染层已拆分**：`pub async fn run_commit(args, output) -> Result<CommitOutput, CommitError>`（`commit.rs:398`）纯执行；`fn render_commit_output(result, output) -> CliResult<()>`（`commit.rs:721`）独立渲染，与 `init` / `add` / `status` 模式一致
-- **JSON 向后兼容扩展已交付**：`pub struct CommitOutput`（`commit.rs:249-272`）含 11 个字段：`head`（保留）+ `branch: Option<String>`（新增）+ `commit` / `short_id` / `subject` / `root_commit` / `amend` / `files_changed` / `signoff` / `conventional: Option<bool>` / `signed`。**采用增量扩展策略**：旧字段（`head` / `commit` / `short_id` / `subject` / `root_commit` / `files_changed.total/new/modified/deleted`）保留名称、类型、语义不变；新元数据全部以新增字段形式追加，不破坏已有 JSON consumer
-- **hook I/O 隔离已交付**：`run_pre_commit_hook(output: &OutputConfig) -> Result<(), CommitError>`（`commit.rs:610`）接受 `OutputConfig`，在 `--json` / `--machine` 模式下对 hook 子进程使用 `Stdio::piped()`，确保结构化 stdout/stderr 不被污染；human 模式仍透传 hook 输出
-- **核心 helper 全部返回 typed `CommitError`**：`save_commit_object`（`commit.rs:666`）、`auto_stage_tracked_changes`（`commit.rs:951`）、`update_head`（`commit.rs:1019`）、`update_head_and_reflog`（`commit.rs:1039`）、`run_pre_commit_hook`（`commit.rs:610`）等关键 helper 全部以 `CommitError` 为错误载体，统一传播路径
-- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:53-63` 区域）含 9 条 EXAMPLES（`-m` / `-m --conventional` / `--amend` / `--amend --no-edit` / `-a -m` / `-F message.txt` / `-s -m` / `--allow-empty -m` / `--json -m`），通过 clap `#[command]` 注解挂载
+- **typed error enum 已交付**：`pub enum CommitError`（`commit.rs:119` 起，19 个 thiserror 变体）覆盖 `IndexLoad` / `IndexSave` / `NothingToCommit` / `NothingToCommitNoTracked` / `IdentityMissing` / `NoCommitToAmend` / `AmendUnsupported` / `InvalidAuthor` / `MessageFileRead` / `EmptyMessage` / `TreeCreation` / `ObjectStorage` / `ParentCommitLoad` / `HeadUpdate` / `PreCommitHook` / `ConventionalCommit` / `VaultSign` / `AutoStage` / `StagedChanges`，完全替代旧 `Result<(), String>` 模式
+- **StableErrorCode 显式映射已交付**：`impl From<CommitError> for CliError`（`commit.rs:178` 起的 impl block）每个变体都显式调用 `.with_stable_code(StableErrorCode::XXX)`（`RepoCorrupt` / `IoWriteFailed` / `RepoStateInvalid` / `AuthMissingCredentials` / `ConflictUnresolved` 等），不再依赖 `infer_stable_error_code()` 的子串推断；`TreeCreation` 变体附带 Issues URL hint
+- **执行层与渲染层已拆分**：`pub async fn run_commit(args, output) -> Result<CommitOutput, CommitError>`（`commit.rs:406`）纯执行；`fn render_commit_output(result, output) -> CliResult<()>`（`commit.rs:729`）独立渲染，与 `init` / `add` / `status` 模式一致
+- **JSON 向后兼容扩展已交付**：`pub struct CommitOutput`（`commit.rs:257`）含 11 个字段：`head`（保留）+ `branch: Option<String>`（新增）+ `commit` / `short_id` / `subject` / `root_commit` / `amend` / `files_changed` / `signoff` / `conventional: Option<bool>` / `signed`。**采用增量扩展策略**：旧字段（`head` / `commit` / `short_id` / `subject` / `root_commit` / `files_changed.total/new/modified/deleted`）保留名称、类型、语义不变；新元数据全部以新增字段形式追加，不破坏已有 JSON consumer
+- **hook I/O 隔离已交付**：`run_pre_commit_hook(output: &OutputConfig) -> Result<(), CommitError>`（`commit.rs:618`）接受 `OutputConfig`，在 `--json` / `--machine` 模式下对 hook 子进程使用 `Stdio::piped()`，确保结构化 stdout/stderr 不被污染；human 模式仍透传 hook 输出
+- **核心 helper 全部返回 typed `CommitError`**：`save_commit_object`（`commit.rs:674`）、`auto_stage_tracked_changes`（`commit.rs:961`）、`update_head`（`commit.rs:1029`）、`update_head_and_reflog`（`commit.rs:1049`）、`run_pre_commit_hook`（`commit.rs:618`）等关键 helper 全部以 `CommitError` 为错误载体，统一传播路径
+- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:57-68` 区域）含 9 条 EXAMPLES（`-m` / `-m --conventional` / `--amend` / `--amend --no-edit` / `-a -m` / `-F message.txt` / `-s -m` / `--allow-empty -m` / `--json -m`），通过 clap `#[command]` 注解挂载
 - **`missing_identity_error()` 已显式映射**：`commit.rs:313` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:187` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
 - **测试覆盖已交付**：JSON schema 稳定性测试、CommitError 全变体单元映射测试、CLI 级集成测试均已就绪（详见 README 第 67-68 行 commit 已落地说明）
 
