@@ -79,6 +79,15 @@ enum CheckoutError {
     #[error("creating/switching to '{0}' branch is not allowed")]
     CreatingBranchBlocked(String),
 
+    #[error("switching to '{0}' branch is not allowed")]
+    SwitchingToBranchBlocked(String),
+
+    #[error("branch '{0}' not found")]
+    BranchNotFound(String),
+
+    #[error("path specification '{0}' did not match any files known to libra")]
+    PathSpecNotMatched(String),
+
     #[error("unstaged changes, can't switch branch")]
     DirtyUnstaged,
 
@@ -93,6 +102,16 @@ enum CheckoutError {
 
     #[error("failed to {context}: {detail}")]
     BranchStoreCorrupt { context: String, detail: String },
+
+    #[error("checkout remote branch left HEAD without a commit")]
+    RemoteHeadMissing,
+
+    #[error("failed to {stage} during remote branch checkout: {}", source.message())]
+    RemoteSyncFailed {
+        stage: &'static str,
+        #[source]
+        source: Box<CliError>,
+    },
 
     #[error(transparent)]
     DelegatedCli(#[from] CliError),
@@ -109,6 +128,22 @@ impl From<CheckoutError> for CliError {
             CheckoutError::CreatingBranchBlocked(branch) => CliError::fatal(format!(
                 "creating/switching to '{}' branch is not allowed",
                 branch
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget),
+
+            CheckoutError::SwitchingToBranchBlocked(branch) => {
+                CliError::fatal(format!("switching to '{}' branch is not allowed", branch))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+
+            CheckoutError::BranchNotFound(branch) => {
+                CliError::fatal(format!("branch '{}' not found", branch))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+            }
+
+            CheckoutError::PathSpecNotMatched(spec) => CliError::fatal(format!(
+                "path specification '{}' did not match any files known to libra",
+                spec
             ))
             .with_stable_code(StableErrorCode::CliInvalidTarget),
 
@@ -129,6 +164,23 @@ impl From<CheckoutError> for CliError {
             CheckoutError::BranchStoreCorrupt { context, detail } => {
                 CliError::fatal(format!("failed to {context}: {detail}"))
                     .with_stable_code(StableErrorCode::RepoCorrupt)
+            }
+            CheckoutError::RemoteHeadMissing => {
+                CliError::fatal("checkout remote branch left HEAD without a commit")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            }
+            CheckoutError::RemoteSyncFailed { stage, source } => {
+                let inner = *source;
+                let stable_code = inner.stable_code();
+                let message = format!(
+                    "failed to {stage} during remote branch checkout: {}",
+                    inner.message()
+                );
+                let wrapped = match inner.kind() {
+                    crate::utils::error::CliErrorKind::Fatal => CliError::fatal(message),
+                    _ => CliError::failure(message),
+                };
+                wrapped.with_stable_code(stable_code)
             }
             CheckoutError::DelegatedCli(err) => err,
         }
@@ -232,15 +284,11 @@ async fn run_checkout(
 
     match (args.branch, args.new_branch) {
         (Some(target_branch), _) => {
-            check_and_switch_branch(&target_branch, previous_branch, previous_commit, output)
-                .await
-                .map_err(CheckoutError::DelegatedCli)
+            check_and_switch_branch(&target_branch, previous_branch, previous_commit, output).await
         }
         (None, Some(new_branch)) => {
             let child_output = silent_child_output(output);
-            let commit = create_and_switch_new_branch(&new_branch, &child_output)
-                .await
-                .map_err(CheckoutError::DelegatedCli)?;
+            let commit = create_and_switch_new_branch(&new_branch, &child_output).await?;
             let commit = commit.to_string();
             Ok(CheckoutOutput {
                 action: "create".to_string(),
@@ -257,9 +305,7 @@ async fn run_checkout(
                 tracking: None,
             })
         }
-        (None, None) => show_current_branch(previous_branch, previous_commit)
-            .await
-            .map_err(CheckoutError::DelegatedCli),
+        (None, None) => show_current_branch(previous_branch, previous_commit).await,
     }
 }
 
@@ -297,28 +343,26 @@ pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
     switch_branch_with_output(branch_name, &OutputConfig::default())
         .await
         .map(|_| ())
+        .map_err(CliError::from)
 }
 
 async fn switch_branch_with_output(
     branch_name: &str,
     output: &OutputConfig,
-) -> CliResult<ObjectHash> {
+) -> Result<ObjectHash, CheckoutError> {
     if branch_name == INTENT_BRANCH {
-        return Err(CliError::fatal(format!(
-            "switching to '{}' branch is not allowed",
-            INTENT_BRANCH
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget));
+        return Err(CheckoutError::SwitchingToBranchBlocked(
+            INTENT_BRANCH.to_string(),
+        ));
     }
     let target_branch = Branch::find_branch_result(branch_name, None)
         .await
         .map_err(|error| map_checkout_branch_store_error("resolve branch", error))?
-        .ok_or_else(|| {
-            CliError::fatal(format!("branch '{}' not found", branch_name))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-        })?;
+        .ok_or_else(|| CheckoutError::BranchNotFound(branch_name.to_string()))?;
     let target_commit = target_branch.commit;
-    restore_to_commit(target_branch.commit, output).await?;
+    restore_to_commit(target_branch.commit, output)
+        .await
+        .map_err(CheckoutError::DelegatedCli)?;
     let head = Head::Branch(branch_name.to_string());
     Head::update(head, None).await;
     Ok(target_commit)
@@ -327,40 +371,66 @@ async fn switch_branch_with_output(
 async fn create_and_switch_new_branch(
     new_branch: &str,
     output: &OutputConfig,
-) -> CliResult<ObjectHash> {
-    branch::create_branch_safe(new_branch.to_string(), get_current_branch().await).await?;
+) -> Result<ObjectHash, CheckoutError> {
+    branch::create_branch_safe(new_branch.to_string(), get_current_branch().await)
+        .await
+        .map_err(CheckoutError::DelegatedCli)?;
     switch_branch_with_output(new_branch, output).await
 }
 
-async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<ObjectHash> {
+async fn get_remote(branch_name: &str, output: &OutputConfig) -> Result<ObjectHash, CheckoutError> {
     let remote_branch_name: String = format!("origin/{branch_name}");
     let child_output = silent_child_output(output);
 
-    create_and_switch_new_branch(branch_name, &child_output).await?;
+    create_and_switch_new_branch(branch_name, &child_output)
+        .await
+        .map_err(|err| wrap_remote_proxy_error("create local tracking branch", err))?;
     // Set branch upstream
-    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, &child_output).await?;
+    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, &child_output)
+        .await
+        .map_err(|err| CheckoutError::RemoteSyncFailed {
+            stage: "set upstream",
+            source: Box::new(err),
+        })?;
     // Synchronous branches
     // Use the pull command to update the local branch with the latest changes from the remote branch
-    pull::execute_safe(pull::PullArgs::make(None, None), &child_output).await?;
+    pull::execute_safe(pull::PullArgs::make(None, None), &child_output)
+        .await
+        .map_err(|err| CheckoutError::RemoteSyncFailed {
+            stage: "pull from remote",
+            source: Box::new(err),
+        })?;
     Head::current_commit_result()
         .await
         .map_err(|error| map_checkout_branch_store_error("resolve checkout result", error))?
-        .ok_or_else(|| {
-            CliError::fatal("checkout remote branch left HEAD without a commit")
-                .with_stable_code(StableErrorCode::RepoStateInvalid)
-        })
+        .ok_or(CheckoutError::RemoteHeadMissing)
+}
+
+/// Converts a [`CheckoutError`] surfaced by the local-creation step of remote tracking
+/// into a [`CheckoutError::RemoteSyncFailed`] envelope so downstream callers see a single
+/// proxy-error variant regardless of which sub-step failed.
+fn wrap_remote_proxy_error(stage: &'static str, err: CheckoutError) -> CheckoutError {
+    match err {
+        already @ CheckoutError::RemoteSyncFailed { .. } => already,
+        other => CheckoutError::RemoteSyncFailed {
+            stage,
+            source: Box::new(CliError::from(other)),
+        },
+    }
 }
 
 /// Returns `Ok(Some(true))` if remote branch found, `Ok(Some(false))` if local branch found,
 /// `Ok(None)` if already on the branch.
 pub async fn check_branch(branch_name: &str) -> CliResult<Option<bool>> {
-    check_branch_with_output(branch_name, &OutputConfig::default()).await
+    check_branch_with_output(branch_name, &OutputConfig::default())
+        .await
+        .map_err(CliError::from)
 }
 
 async fn check_branch_with_output(
     branch_name: &str,
     output: &OutputConfig,
-) -> CliResult<Option<bool>> {
+) -> Result<Option<bool>, CheckoutError> {
     if get_current_branch().await == Some(branch_name.to_string()) {
         info_println!(output, "Already on {branch_name}");
         return Ok(None);
@@ -384,11 +454,7 @@ async fn check_branch_with_output(
             );
             Ok(Some(true))
         } else {
-            Err(CliError::fatal(format!(
-                "path specification '{}' did not match any files known to libra",
-                branch_name
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidTarget))
+            Err(CheckoutError::PathSpecNotMatched(branch_name.to_string()))
         }
     } else {
         info_println!(output, "Switched to branch '{branch_name}'");
@@ -401,7 +467,7 @@ async fn check_and_switch_branch(
     previous_branch: Option<String>,
     previous_commit: Option<String>,
     output: &OutputConfig,
-) -> CliResult<CheckoutOutput> {
+) -> Result<CheckoutOutput, CheckoutError> {
     let child_output = silent_child_output(output);
     match check_branch_with_output(branch_name, &child_output).await? {
         Some(true) => {
@@ -473,7 +539,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
 async fn show_current_branch(
     current_branch: Option<String>,
     current_commit: Option<String>,
-) -> CliResult<CheckoutOutput> {
+) -> Result<CheckoutOutput, CheckoutError> {
     match Head::current().await {
         Head::Detached(commit_hash) => {
             let commit = commit_hash.to_string();
@@ -584,6 +650,18 @@ mod tests {
             "creating/switching to 'HEAD' branch is not allowed",
         );
         assert_eq!(
+            CheckoutError::SwitchingToBranchBlocked("intent".to_string()).to_string(),
+            "switching to 'intent' branch is not allowed",
+        );
+        assert_eq!(
+            CheckoutError::BranchNotFound("feature".to_string()).to_string(),
+            "branch 'feature' not found",
+        );
+        assert_eq!(
+            CheckoutError::PathSpecNotMatched("nonexistent".to_string()).to_string(),
+            "path specification 'nonexistent' did not match any files known to libra",
+        );
+        assert_eq!(
             CheckoutError::DirtyUnstaged.to_string(),
             "unstaged changes, can't switch branch",
         );
@@ -610,6 +688,90 @@ mod tests {
             }
             .to_string(),
             "failed to resolve branch 'feature': ref points to non-commit object",
+        );
+        assert_eq!(
+            CheckoutError::RemoteHeadMissing.to_string(),
+            "checkout remote branch left HEAD without a commit",
+        );
+        let proxy_err = CliError::failure("remote not configured")
+            .with_stable_code(StableErrorCode::NetworkUnavailable);
+        assert_eq!(
+            CheckoutError::RemoteSyncFailed {
+                stage: "pull from remote",
+                source: Box::new(proxy_err),
+            }
+            .to_string(),
+            "failed to pull from remote during remote branch checkout: remote not configured",
+        );
+    }
+
+    #[test]
+    fn checkout_error_maps_owned_variants_to_stable_codes() {
+        let cases: Vec<(CheckoutError, StableErrorCode)> = vec![
+            (
+                CheckoutError::CheckingOutBranchBlocked("intent".to_string()),
+                StableErrorCode::CliInvalidTarget,
+            ),
+            (
+                CheckoutError::CreatingBranchBlocked("intent".to_string()),
+                StableErrorCode::CliInvalidTarget,
+            ),
+            (
+                CheckoutError::SwitchingToBranchBlocked("intent".to_string()),
+                StableErrorCode::CliInvalidTarget,
+            ),
+            (
+                CheckoutError::BranchNotFound("feature".to_string()),
+                StableErrorCode::CliInvalidTarget,
+            ),
+            (
+                CheckoutError::PathSpecNotMatched("nope".to_string()),
+                StableErrorCode::CliInvalidTarget,
+            ),
+            (
+                CheckoutError::DirtyUnstaged,
+                StableErrorCode::RepoStateInvalid,
+            ),
+            (
+                CheckoutError::DirtyUncommitted,
+                StableErrorCode::RepoStateInvalid,
+            ),
+            (
+                CheckoutError::UntrackedOverwrite("a.txt".to_string()),
+                StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::RemoteHeadMissing,
+                StableErrorCode::RepoStateInvalid,
+            ),
+        ];
+
+        for (err, expected) in cases {
+            let cli: CliError = err.into();
+            assert_eq!(cli.stable_code(), expected);
+        }
+    }
+
+    #[test]
+    fn checkout_remote_sync_failed_preserves_inner_stable_code() {
+        let inner = CliError::fatal("upstream missing")
+            .with_stable_code(StableErrorCode::NetworkUnavailable);
+        let wrapped = CheckoutError::RemoteSyncFailed {
+            stage: "set upstream",
+            source: Box::new(inner),
+        };
+        let cli: CliError = wrapped.into();
+        assert_eq!(cli.stable_code(), StableErrorCode::NetworkUnavailable);
+        assert!(
+            cli.message()
+                .contains("failed to set upstream during remote branch checkout"),
+            "got: {}",
+            cli.message()
+        );
+        assert!(
+            cli.message().contains("upstream missing"),
+            "got: {}",
+            cli.message()
         );
     }
 }
