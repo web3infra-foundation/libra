@@ -12,6 +12,7 @@ use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
+        object::types::ObjectType,
         pack::{Pack, entry::Entry, pack_index::IndexEntry},
     },
     utils::HashAlgorithm,
@@ -67,6 +68,9 @@ struct VerifyPackOutput {
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackObjectOutput {
     oid: String,
+    object_type: String,
+    size: usize,
+    size_in_pack: u64,
     offset: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     crc32: Option<u32>,
@@ -90,7 +94,15 @@ struct ParsedIndexEntry {
 #[derive(Debug, Clone)]
 struct DecodedPack {
     pack_hash: ObjectHash,
-    entries: BTreeMap<ObjectHash, IndexEntry>,
+    pack_len: u64,
+    entries: BTreeMap<ObjectHash, DecodedPackEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct DecodedPackEntry {
+    index: IndexEntry,
+    object_type: ObjectType,
+    size: usize,
 }
 
 pub async fn execute(args: VerifyPackArgs) -> Result<(), String> {
@@ -127,15 +139,35 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
         .map_err(|detail| verification_failed(&idx_file, &pack_file, detail))?;
 
     let objects = if args.verbose {
+        let size_in_pack_by_hash = pack_entry_sizes(&parsed, decoded.pack_len)?;
         parsed
             .entries
             .iter()
-            .map(|entry| VerifyPackObjectOutput {
-                oid: entry.hash.to_string(),
-                offset: entry.offset,
-                crc32: entry.crc32,
+            .map(|entry| {
+                let decoded_entry = decoded.entries.get(&entry.hash).ok_or_else(|| {
+                    CliError::fatal(format!(
+                        "decoded pack metadata for indexed object {} is missing",
+                        entry.hash
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?;
+                let size_in_pack = *size_in_pack_by_hash.get(&entry.hash).ok_or_else(|| {
+                    CliError::fatal(format!(
+                        "pack size metadata for indexed object {} is missing",
+                        entry.hash
+                    ))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+                })?;
+                Ok(VerifyPackObjectOutput {
+                    oid: entry.hash.to_string(),
+                    object_type: decoded_entry.object_type.to_string(),
+                    size: decoded_entry.size,
+                    size_in_pack,
+                    offset: entry.offset,
+                    crc32: entry.crc32,
+                })
             })
-            .collect()
+            .collect::<CliResult<Vec<_>>>()?
     } else {
         Vec::new()
     };
@@ -421,6 +453,17 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
         ))
         .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
+    let pack_len = file
+        .metadata()
+        .map_err(|error| {
+            CliError::fatal(format!(
+                "could not inspect pack file '{}' metadata: {}",
+                pack_file.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?
+        .len();
     let mut reader = io::BufReader::new(file);
     let entries = Arc::new(Mutex::new(Vec::new()));
     let entries_clone = Arc::clone(&entries);
@@ -460,13 +503,50 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-        decoded_entries.insert(index_entry.hash, index_entry);
+        decoded_entries.insert(
+            index_entry.hash,
+            DecodedPackEntry {
+                index: index_entry,
+                object_type: entry.inner.obj_type,
+                size: entry.inner.data.len(),
+            },
+        );
     }
 
     Ok(DecodedPack {
         pack_hash: pack.signature,
+        pack_len,
         entries: decoded_entries,
     })
+}
+
+fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<ObjectHash, u64>> {
+    let trailer_start = pack_len
+        .checked_sub(get_hash_kind().size() as u64)
+        .ok_or_else(|| {
+            CliError::fatal("pack file is shorter than its trailing checksum")
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+
+    let mut by_offset = index.entries.iter().collect::<Vec<_>>();
+    by_offset.sort_by_key(|entry| entry.offset);
+
+    let mut sizes = BTreeMap::new();
+    for (idx, entry) in by_offset.iter().enumerate() {
+        let next_offset = by_offset
+            .get(idx + 1)
+            .map(|next| next.offset)
+            .unwrap_or(trailer_start);
+        let size_in_pack = next_offset.checked_sub(entry.offset).ok_or_else(|| {
+            CliError::fatal(format!(
+                "pack entry offsets are not monotonically increasing near {}",
+                entry.hash
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+        sizes.insert(entry.hash, size_in_pack);
+    }
+    Ok(sizes)
 }
 
 fn take_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, String> {
@@ -500,18 +580,18 @@ fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Resul
                 entry.hash
             ));
         };
-        if entry.offset != pack_entry.offset {
+        if entry.offset != pack_entry.index.offset {
             return Err(format!(
                 "offset mismatch for {}: index has {}, pack has {}",
-                entry.hash, entry.offset, pack_entry.offset
+                entry.hash, entry.offset, pack_entry.index.offset
             ));
         }
         if let Some(crc32) = entry.crc32
-            && crc32 != pack_entry.crc32
+            && crc32 != pack_entry.index.crc32
         {
             return Err(format!(
                 "crc32 mismatch for {}: index has {crc32:#010x}, pack has {:#010x}",
-                entry.hash, pack_entry.crc32
+                entry.hash, pack_entry.index.crc32
             ));
         }
     }
@@ -533,10 +613,10 @@ fn render_verify_pack_output(
 
     if verbose {
         for object in &result.objects {
-            match object.crc32 {
-                Some(crc32) => println!("{} {} {crc32:#010x}", object.oid, object.offset),
-                None => println!("{} {}", object.oid, object.offset),
-            }
+            println!(
+                "{} {} {} {} {}",
+                object.oid, object.object_type, object.size, object.size_in_pack, object.offset
+            );
         }
     }
     println!("{}: ok", result.idx_file);

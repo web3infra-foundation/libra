@@ -227,10 +227,31 @@ fn verify_pack_accepts_generated_v2_index_with_verbose_objects() {
     assert_cli_success(&output, "verify-pack should accept generated v2 index");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let object_lines = stdout
+        .lines()
+        .filter(|line| !line.ends_with(": ok"))
+        .collect::<Vec<_>>();
     assert!(
-        stdout.lines().any(|line| line.contains("0x")),
-        "verbose output should include crc32 values: {stdout}"
+        !object_lines.is_empty(),
+        "expected verbose object rows: {stdout}"
     );
+    for line in object_lines {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            5,
+            "verbose rows should match Git's '<oid> <type> <size> <size-in-pack> <offset>' shape: {line}"
+        );
+        assert!(
+            matches!(fields[1], "blob" | "tree" | "commit" | "tag"),
+            "verbose type field should be a Git object type: {line}"
+        );
+        for field in &fields[2..] {
+            field
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("verbose numeric field should parse: {line}"));
+        }
+    }
     assert!(
         stdout.trim_end().ends_with(": ok"),
         "verbose output should end with success line: {stdout}"
