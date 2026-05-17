@@ -9,7 +9,7 @@
 ### 已确认落地的基线
 - `run_remote()` + `render_remote_output()` 已完成执行层/渲染层拆分
 - `RemoteOutput` 已覆盖 `add` / `remove` / `rename` / `-v` / `show` / `get-url` / `set-url` / `prune`
-- `RemoteError` 已完成显式 `StableErrorCode` 映射，覆盖 duplicate remote、missing remote、URL pattern 不匹配、config read/write、prune 写失败和远端发现失败
+- `RemoteError` 已完成显式 `StableErrorCode` 映射（11 变体）：`AlreadyExists` / `NotFound` / `NoUrlConfigured` / `UrlPatternNotMatched` / `ConfigRead` / `ConfigWrite` / `BranchList` / `BranchCorrupt` / `BranchDelete` / `ObjectFormatMismatch` / `Fetch`（`#[from] fetch::FetchError`，prune 时的远端发现失败透传）。覆盖 duplicate remote、missing remote、缺 URL、URL pattern 不匹配、config 读写、prune 时的 remote-tracking branch 列举 / 损坏 / 删除失败，以及 object-format 不一致和远端发现失败
 - `remote -v` 已修复多 URL 展示：所有 fetch URL 都会逐行显示，显式 `pushurl` 会优先于 fetch URL fallback
 - `docs/commands/remote.md` 已记录 human/JSON 输出、错误码和子命令行为
 - `tests/command/remote_test.rs` 已补充 verbose 多 URL、JSON `get-url`、duplicate add 错误码，以及原有 prune 回归
