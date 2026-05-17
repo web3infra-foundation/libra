@@ -76,21 +76,24 @@
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum ResetError {
+enum ResetError {
     #[error("not a libra repository")]
     NotInRepo,
 
-    #[error("invalid revision: '{0}'")]
+    #[error("{0}")]
     InvalidRevision(String),
 
-    #[error("HEAD is unborn — no commits in this repository")]
+    #[error("Cannot reset: HEAD is unborn and points to no commit.")]
     HeadUnborn,
 
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    CommitLoad { commit_id: String, detail: String },
+    #[error("failed to resolve HEAD commit: {0}")]
+    HeadRead(String),
 
-    #[error("failed to load tree: {0}")]
-    TreeLoad(String),
+    #[error("stored HEAD reference is corrupt: {0}")]
+    HeadCorrupt(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad { kind: &'static str, object_id: String, detail: String },
 
     #[error("failed to load index: {0}")]
     IndexLoad(String),
@@ -101,8 +104,17 @@ pub enum ResetError {
     #[error("failed to update HEAD: {0}")]
     HeadUpdate(String),
 
+    #[error("failed to read working tree: {0}")]
+    WorktreeRead(String),
+
     #[error("failed to restore working tree: {0}")]
     WorktreeRestore(String),
+
+    #[error("{0}")]
+    RevisionRead(String),
+
+    #[error("{0}")]
+    RevisionCorrupt(String),
 
     #[error("path contains invalid UTF-8: {0}")]
     InvalidPathspecEncoding(String),
@@ -110,13 +122,24 @@ pub enum ResetError {
     #[error("pathspec '{0}' is not compatible with --soft reset")]
     PathspecWithSoft(String),
 
-    #[error("cannot do hard reset with paths")]
+    #[error("Cannot do hard reset with paths.")]
     PathspecWithHard,
 
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
+
+    #[error("refusing to reset to locked branch '{0}'")]
+    LockedTarget(String),
+
+    #[error("{primary}; rollback failed: {rollback}")]
+    Rollback { primary: Box<ResetError>, rollback: Box<ResetError> },
 }
 ```
+
+> Synced with src/command/reset.rs:144-212 (v0.17.417 mapping table).
+> The `kind` field on `ObjectLoad` is `&'static str` ("commit" /
+> "tree" / "blob"), letting one variant cover what the early sketch
+> split into `CommitLoad` + `TreeLoad`.
 
 **`ResetError → CliError` 显式映射：**
 
