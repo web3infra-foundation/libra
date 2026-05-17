@@ -700,4 +700,56 @@ mod tests {
         );
         assert!(BudgetMeasurement::Tokens(100).as_threshold_usd().is_none());
     }
+
+    #[test]
+    fn budget_exceeded_error_display_pins_each_scope_and_axis() {
+        assert_eq!(
+            BudgetExceededError {
+                axis: BudgetAxis::Cost,
+                scope: BudgetScope::Session,
+                threshold: "$5.00".to_string(),
+                actual: "$5.12".to_string(),
+            }
+            .to_string(),
+            "session budget exceeded on cost: actual $5.12 >= configured cap $5.00 \
+             (`LBR-AGENT-001`)",
+        );
+        assert_eq!(
+            BudgetExceededError {
+                axis: BudgetAxis::Tokens,
+                scope: BudgetScope::Agent {
+                    name: "reviewer".to_string(),
+                },
+                threshold: "100000".to_string(),
+                actual: "100050".to_string(),
+            }
+            .to_string(),
+            "agent 'reviewer' budget exceeded on tokens: actual 100050 >= configured cap \
+             100000 (`LBR-AGENT-001`)",
+        );
+        assert_eq!(
+            BudgetExceededError {
+                axis: BudgetAxis::Steps,
+                scope: BudgetScope::Agent {
+                    name: "planner".to_string(),
+                },
+                threshold: "20".to_string(),
+                actual: "21".to_string(),
+            }
+            .to_string(),
+            "agent 'planner' budget exceeded on steps: actual 21 >= configured cap 20 \
+             (`LBR-AGENT-001`)",
+        );
+        assert_eq!(
+            BudgetExceededError {
+                axis: BudgetAxis::WallClockMinutes,
+                scope: BudgetScope::Goal,
+                threshold: "30".to_string(),
+                actual: "31".to_string(),
+            }
+            .to_string(),
+            "goal budget exceeded on wall_clock_minutes: actual 31 >= configured cap 30 \
+             (`LBR-AGENT-001`)",
+        );
+    }
 }
