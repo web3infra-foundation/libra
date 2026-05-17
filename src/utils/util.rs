@@ -1708,4 +1708,33 @@ mod test {
         assert_eq!(location.root, bare.canonicalize().unwrap());
         assert!(location.is_bare);
     }
+
+    #[test]
+    fn commit_base_error_display_pins_each_variant() {
+        assert_eq!(
+            super::CommitBaseError::HeadUnborn.to_string(),
+            "HEAD does not point to a commit",
+        );
+        assert_eq!(
+            super::CommitBaseError::InvalidReference(
+                "load branch 'feature': not found".to_string(),
+            )
+            .to_string(),
+            "load branch 'feature': not found",
+        );
+        assert_eq!(
+            super::CommitBaseError::ReadFailure(
+                "load branch 'main': database is locked".to_string(),
+            )
+            .to_string(),
+            "load branch 'main': database is locked",
+        );
+        assert_eq!(
+            super::CommitBaseError::CorruptReference(
+                "load branch 'main': ref points to non-commit object".to_string(),
+            )
+            .to_string(),
+            "load branch 'main': ref points to non-commit object",
+        );
+    }
 }
