@@ -356,10 +356,25 @@ impl Event for MemoryAnchorEvent {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryAnchorReplay {
     anchors: BTreeMap<Uuid, MemoryAnchor>,
+    /// Last applied `recorded_at` per anchor — used to reject replays that
+    /// would roll the projection backwards (e.g. duplicated events delivered
+    /// out of order on retry, or a malicious / buggy writer emitting an
+    /// older snapshot after a newer one). Earlier-or-equal `recorded_at`
+    /// values are skipped so the projection only moves forward in session
+    /// time.
+    last_applied: BTreeMap<Uuid, DateTime<Utc>>,
 }
 
 impl MemoryAnchorReplay {
     pub fn apply_event(&mut self, event: MemoryAnchorEvent) {
+        if let Some(previous_recorded_at) = self.last_applied.get(&event.anchor_id)
+            && event.recorded_at <= *previous_recorded_at
+        {
+            // Stale or duplicated event — ignoring keeps the projection
+            // monotonic in session time.
+            return;
+        }
+        self.last_applied.insert(event.anchor_id, event.recorded_at);
         self.anchors
             .insert(event.anchor_id, MemoryAnchor::from_event(&event));
     }

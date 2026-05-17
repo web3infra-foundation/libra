@@ -80,6 +80,63 @@ fn memory_anchor_supersede_replay_points_old_anchor_to_replacement() {
 }
 
 #[test]
+fn memory_anchor_replay_rejects_events_with_older_recorded_at() {
+    // Apply a draft, confirm it, then re-apply the original draft event. The
+    // duplicated draft has an older `recorded_at` than the confirm and must
+    // not roll the anchor's review state back to Draft.
+    let mut replay = MemoryAnchorReplay::default();
+    let draft = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+        "Use real DBs for integration tests.",
+        "agent",
+    ));
+    replay.apply_event(draft.clone());
+
+    let anchor = replay
+        .find_unique_by_prefix(&draft.anchor_id.to_string()[..8])
+        .unwrap();
+    let confirm = MemoryAnchorEvent::confirm(&anchor, Some("user confirmed".to_string()));
+    replay.apply_event(confirm.clone());
+
+    let confirmed = replay
+        .find_unique_by_prefix(&draft.anchor_id.to_string()[..8])
+        .unwrap();
+    assert_eq!(confirmed.review_state, MemoryAnchorReviewState::Confirmed);
+
+    // Replay the original (older) draft event again. The replay must skip
+    // it because its `recorded_at` is older than the confirm's.
+    replay.apply_event(draft.clone());
+    let still_confirmed = replay
+        .find_unique_by_prefix(&draft.anchor_id.to_string()[..8])
+        .unwrap();
+    assert_eq!(
+        still_confirmed.review_state,
+        MemoryAnchorReviewState::Confirmed,
+        "older-or-equal recorded_at must not roll the projection backwards"
+    );
+
+    // An event with the same recorded_at is also skipped (duplicate
+    // delivery on retry, same logical state).
+    let mut same_recorded_at = confirm.clone();
+    same_recorded_at.content = "tampered content that must be ignored".to_string();
+    same_recorded_at.review_state = MemoryAnchorReviewState::Revoked;
+    same_recorded_at.updated_at = confirm.updated_at + Duration::seconds(1);
+    same_recorded_at.reason = Some("tamper attempt".to_string());
+    replay.apply_event(same_recorded_at);
+    let still_unchanged = replay
+        .find_unique_by_prefix(&draft.anchor_id.to_string()[..8])
+        .unwrap();
+    assert_eq!(
+        still_unchanged.review_state,
+        MemoryAnchorReviewState::Confirmed,
+        "equal-recorded_at event must be treated as a duplicate"
+    );
+    assert_eq!(
+        still_unchanged.content, "Use real DBs for integration tests.",
+        "tampered content must not overwrite the existing anchor"
+    );
+}
+
+#[test]
 fn prompt_builder_includes_only_confirmed_active_memory_anchors() {
     let tmp = tempfile::TempDir::new().unwrap();
     let confirmed = confirmed_anchor(
