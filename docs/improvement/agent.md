@@ -119,7 +119,7 @@
 | 模块 | 关键交付 | 状态 |
 |------|---------|------|
 | Part B Implementation Phase 0 | Contract Stabilization | 已完成：`Runtime` / `RuntimeConfig` (`src/internal/ai/runtime/mod.rs:34/47`)、`TaskExecutor` trait (`contracts.rs:312`)、`PromptPackage` / `WorkflowPhase` 已导出 |
-| Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（`Cargo.toml:76`）、`runtime/` 模块完整 |
+| Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（`Cargo.toml:77`）、`runtime/` 模块完整 |
 | Part B Implementation Phase 1 / Wave 1B | Codex `CodexTaskExecutor` + `CompletionTaskExecutor<M>` 收敛 | **trait 定义已落地、impl 仍待补齐**（2026-05-02）：`pub trait TaskExecutor` 已在 `runtime/contracts.rs:312` 定义；但**未在 `orchestrator/executor.rs` 找到 `impl TaskExecutor for CodexTaskExecutor` 或 `impl<M> TaskExecutor for CompletionTaskExecutor<M>` 块**。Wave 1B "Definition of Done" 第 1 条仍未达成；Phase 2 主循环尚不能完整通过 `TaskExecutor` 驱动单 task attempt |
 | Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:593`） |
 | Part B Implementation Phase 2 | Thread ID Unification + Projection Resolver | 部分完成：`projection/` 模块存在；canonical thread_id 收敛仍在进行 |
@@ -2437,7 +2437,7 @@ Step 2 出口标准**不**要求 Step 3 候选完成，但要求：
 
 > **来源**：原 `docs/improvement/code.md`（2026-05-02 合入本文档）。本节描述 `libra code` 的 Phase Workflow 状态机、Snapshot/Event/Projection 对象模型、Implementation Phase 0-5 的重构交付顺序，以及 Wave 1A/1B/1C 的 claudecode 清退路径。
 >
-> **代码基线（2026-05-02）**：claudecode 已删除（`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示，详见 `src/cli.rs:522`），dagrs 已升级到 0.8.1（`Cargo.toml:76`），`Runtime` / `RuntimeConfig` / `TaskExecutor` / `Event` / `Snapshot` / `AuditSink` traits 全部已落地（`src/internal/ai/runtime/{mod,contracts,event,snapshot,hardening}.rs`）。Phase 3/4 已有专用模块 `phase3.rs` / `phase4.rs`。
+> **代码基线（2026-05-02）**：claudecode 已删除（`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示，详见 `src/cli.rs:593`），dagrs 已升级到 0.8.1（`Cargo.toml:77`），`Runtime` / `RuntimeConfig` / `TaskExecutor` / `Event` / `Snapshot` / `AuditSink` traits 全部已落地（`src/internal/ai/runtime/{mod,contracts,event,snapshot,hardening}.rs`）。Phase 3/4 已有专用模块 `phase3.rs` / `phase4.rs`。
 
 # Code 命令改进详细计划
 
