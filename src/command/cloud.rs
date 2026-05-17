@@ -576,7 +576,10 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
 enum CloudError {
     /// Required env / vault key set missing — carries the comma-separated key
     /// list parsed out of the underlying "Missing: …" message.
-    MissingEnv(Vec<String>),
+    MissingEnv {
+        detail: String,
+        missing_keys: Vec<String>,
+    },
     /// Repository name is already claimed by another repository in D1.
     NameAlreadyTaken(String),
     /// Repository name is not registered in D1.
@@ -595,7 +598,10 @@ enum CloudError {
 impl From<String> for CloudError {
     fn from(error: String) -> Self {
         if let Some(missing_keys) = parse_missing_cloud_env_keys(&error) {
-            CloudError::MissingEnv(missing_keys)
+            CloudError::MissingEnv {
+                detail: error,
+                missing_keys,
+            }
         } else if error.contains("already taken by another repository") {
             CloudError::NameAlreadyTaken(error)
         } else if error.contains("Repository with name '") && error.contains("not found") {
@@ -619,12 +625,13 @@ impl CloudError {
     /// `operation` ("sync" / "restore" / "status").
     fn into_cli_error(self, operation: &str) -> CliError {
         match self {
-            CloudError::MissingEnv(missing_keys) => {
-                CliError::auth(format!("missing cloud configuration for {operation}"))
-                    .with_stable_code(StableErrorCode::AuthMissingCredentials)
-                    .with_detail("missing_keys", missing_keys)
-                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
-            }
+            CloudError::MissingEnv {
+                detail,
+                missing_keys,
+            } => CliError::auth(detail)
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_detail("missing_keys", missing_keys)
+                .with_hint("set the missing variables in env or vault.env.* before retrying."),
             CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
             CloudError::NameNotFound(detail) => {
@@ -2392,7 +2399,10 @@ mod tests {
             CloudError::from(
                 "Cloud backup requires D1 + R2 configuration. Missing: A, B".to_string()
             ),
-            CloudError::MissingEnv(vec!["A".to_string(), "B".to_string()])
+            CloudError::MissingEnv {
+                detail: "Cloud backup requires D1 + R2 configuration. Missing: A, B".to_string(),
+                missing_keys: vec!["A".to_string(), "B".to_string()],
+            }
         );
         assert!(matches!(
             CloudError::from(
@@ -2429,9 +2439,12 @@ mod tests {
     #[test]
     fn cloud_error_into_cli_error_attaches_stable_codes() {
         assert_eq!(
-            CloudError::MissingEnv(vec!["KEY".to_string()])
-                .into_cli_error("sync")
-                .stable_code(),
+            CloudError::MissingEnv {
+                detail: "Cloud backup requires D1 + R2 configuration. Missing: KEY".to_string(),
+                missing_keys: vec!["KEY".to_string()],
+            }
+            .into_cli_error("sync")
+            .stable_code(),
             StableErrorCode::AuthMissingCredentials
         );
         assert_eq!(

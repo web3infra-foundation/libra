@@ -2032,12 +2032,12 @@ mod tests {
         internal::object::tree::{Tree, TreeItem, TreeItemMode},
     };
 
+    #[cfg(unix)]
+    use super::path_to_index_key;
     use super::{
         RebaseError, ReplayErrorKind, classify_relative_to_base, collect_tree_items_and_paths,
         resolve_three_way, tree_item_name,
     };
-    #[cfg(unix)]
-    use super::path_to_index_key;
     use crate::utils::error::{CliError, StableErrorCode};
 
     #[test]
