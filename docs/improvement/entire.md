@@ -190,7 +190,7 @@ DROP TABLE IF EXISTS `agent_session`;
 
 ### 4.2 改造 `builtin_migrations()`
 
-[`src/internal/db/migration.rs:499`](../../src/internal/db/migration.rs) 当前用 inline SQL。新增条目改用 `include_str!`：
+[`src/internal/db/migration.rs:532`](../../src/internal/db/migration.rs) 的 `builtin_migrations()` 现在全部走 `include_str!`（v0.17.400 起 inline SQL 已抽取）。新增条目继续沿用 `include_str!`：
 
 ```rust
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -324,7 +324,7 @@ pub trait TranscriptChunker: ObservedAgent {
 
 ### 6.2 摄入函数参数化
 
-把现 [hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) 的 `process_hook_event_from_stdin` 抽离为内部参数化函数：
+把现 [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) 的 `process_hook_event_from_stdin` 抽离为内部参数化函数：
 
 ```rust
 pub enum HookTarget { AiIntent, AgentTraces }
