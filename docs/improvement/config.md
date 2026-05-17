@@ -172,7 +172,7 @@ CREATE INDEX idx_config_kv_key ON config_kv(`key`);
   - **隐式布尔值**：如果在 `-z` 输出的 chunk 中找不到 `\n` 分隔符（如 Git 的 `[core] bare` 配置），则视其为隐式布尔值，自动解析 value 并存为 `"true"`
   - **已知多值 key**（`remote.*.fetch`、`remote.*.push`、`remote.*.pushurl`、`branch.*.merge`、`url.*.insteadOf`、`url.*.pushInsteadOf`、`http.*.extraHeader`、`credential.helper`）：按 `--add` 语义追加，`(key, value)` 完全一致才算 duplicate 并跳过
   - **其余 key**：last-one-wins 语义——同 key 多次出现时仅保留最后一个值。**如果检测到未知 key 有多个不同值被压扁，输出 warning**：`warning: key '<key>' has N values in Git config, only last value kept (not in known multi-value list)`，计入导入统计的 `collapsed_multivalue_warnings` 计数
-- `import --system` → 报错 `error: --system scope is not supported`，exit 2
+- `import --system` → 报错 `error: --system scope is not supported`，**exit 129**（v0.17.394 已收口：`CliError::command_usage` → `CliInvalidArguments` → Cli → Usage；旧文档 "exit 2" 对应 fine-mode 数字。所有 `config --system <subcommand>` 触发同一拒绝路径，统一返回 129）
 - 错误处理：
   - `import --local` 在非 Libra 仓库目录 → exit 128，提示 "not a libra repository (use libra init first)"
   - `import --local` 在没有 `.git/` 的 Libra 仓库 → exit 1，提示 "no Git config found (.git/config does not exist)"

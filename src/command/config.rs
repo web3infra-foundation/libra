@@ -458,10 +458,14 @@ pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    // Reject --system early
+    // Reject `--system` early. config.md (line 175) classifies this as a CLI
+    // usage error — the scope value is unsupported by the binary, not a
+    // runtime resource failure. Route through `command_usage` so callers
+    // get the spec-mandated exit 129 (coarse) / exit 2 (fine) rather than
+    // the catch-all 128 the previous `from_legacy_string` path produced.
     if args.system {
-        return Err(CliError::from_legacy_string(
-            "error: --system scope is not supported\n\nhint: use --local or --global",
+        return Err(CliError::command_usage(
+            "--system scope is not supported\n\nhint: use --local or --global",
         ));
     }
 

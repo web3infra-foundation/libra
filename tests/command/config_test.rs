@@ -85,6 +85,30 @@ async fn test_cli_config_local_requires_repo() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_system_scope_is_rejected_as_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(&["config", "--system", "list"], temp_path.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--system scope is not supported"),
+        "stderr should describe the unsupported scope, got: {stderr}"
+    );
+    // config.md line 175: classifies as a CLI usage error (exit 2 fine /
+    // 129 coarse). The previous `from_legacy_string` path collapsed this
+    // to a generic failure (exit 128).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--system rejection must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_import_global_from_git() {
     let temp_dir = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
