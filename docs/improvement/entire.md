@@ -40,9 +40,9 @@
 |------|---------|
 | `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | 本任务必须新增 `Commands::Hooks(HooksArgs)`（兼容层）与 `Commands::Agent(AgentArgs)`（新顶层） |
 | `builtin_migrations()` 当前**用 inline SQL 字符串**，未走 `include_str!`（[migration.rs:499-540](../../src/internal/db/migration.rs)） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源 |
-| [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | 同步更新为"YYYYMMDDNN 形式 + `include_str!` 加载规则" |
-| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（[branch.rs:45](../../src/internal/branch.rs)） | 扩展为可配清单，加入 `agent-traces`；并在 `restore`/`reset` 也调用 `is_locked_branch`（目前仅 `checkout`/`switch` 调用） |
-| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-48, 53, 985](../../tests/db_migration_test.rs)） | 新增迁移时必须同步把这三处更新到 `2026050303` / `agent_capture` |
+| [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
+| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（[branch.rs:45](../../src/internal/branch.rs)） | 部分落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`，`branch`（create / delete）与 `switch`（create）已检查；`restore`/`reset` 命令对锁定分支的拦截属于行为变更，留作独立切片 |
+| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-48, 53, 985](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部六个迁移（`2026050301`..`2026050801`）；新增迁移仍需同步更新这三处断言 |
 
 ---
 
