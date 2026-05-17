@@ -7,7 +7,12 @@
 
 use std::fmt;
 
-use crate::internal::ai::client::{Client as GenericClient, Provider};
+use anyhow::Result;
+
+use crate::internal::{
+    ai::client::{Client as GenericClient, Provider},
+    config::{LocalIdentityTarget, resolve_env_for_target},
+};
 
 /// Zhipu API provider.
 #[derive(Clone)]
@@ -57,10 +62,36 @@ impl Client {
     ///
     /// Reads the `ZHIPU_API_KEY` environment variable.
     /// Also supports `ZHIPU_BASE_URL` for custom endpoints.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
+    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
         let api_key = std::env::var("ZHIPU_API_KEY")?;
         let base_url = std::env::var("ZHIPU_BASE_URL")
             .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
+
+        let provider = ZhipuProvider::new(api_key);
+        Ok(Self::new(&base_url, provider))
+    }
+
+    /// Vault-aware async constructor: resolves `ZHIPU_API_KEY` and
+    /// `ZHIPU_BASE_URL` via [`resolve_env_for_target`], so callers can store
+    /// credentials in repo-local or global `vault.env.*` config without also
+    /// exporting them into the process environment.
+    ///
+    /// Priority order:
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.ZHIPU_API_KEY` / `vault.env.ZHIPU_BASE_URL`)
+    /// 3. Global config
+    ///
+    /// `ZHIPU_BASE_URL` falls back to the canonical Zhipu / GLM endpoint
+    /// (`https://open.bigmodel.cn/api/paas/v4`) when no layer supplies it.
+    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
+        let api_key = resolve_env_for_target("ZHIPU_API_KEY", local_target)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("ZHIPU_API_KEY is not set in env, repo vault, or global config")
+            })?;
+        let base_url = resolve_env_for_target("ZHIPU_BASE_URL", local_target)
+            .await?
+            .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
 
         let provider = ZhipuProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -81,6 +112,8 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     #[test]
@@ -95,5 +128,80 @@ mod tests {
     fn test_zhipu_provider_api_key() {
         let provider = ZhipuProvider::new("test-key".to_string());
         assert_eq!(provider.api_key(), "test-key");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_reads_zhipu_api_key_from_process_env() {
+        let key_guard = TestEnvGuard::set("ZHIPU_API_KEY", Some("zhipu-test-resolved"));
+        let base_guard = TestEnvGuard::set("ZHIPU_BASE_URL", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/zhipu-from-resolved-env-test.db"),
+        );
+
+        let client = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect("from_resolved_env should succeed when ZHIPU_API_KEY is set");
+        assert_eq!(client.provider.api_key(), "zhipu-test-resolved");
+
+        drop(key_guard);
+        drop(base_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
+        let key_guard = TestEnvGuard::set("ZHIPU_API_KEY", None);
+        let base_guard = TestEnvGuard::set("ZHIPU_BASE_URL", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/zhipu-from-resolved-env-test.db"),
+        );
+
+        let err = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect_err("from_resolved_env must fail without an API key");
+        assert!(
+            err.to_string().contains("ZHIPU_API_KEY"),
+            "error should name the missing key, got: {err}"
+        );
+
+        drop(key_guard);
+        drop(base_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial]`, and the guard
+            // restores the previous value on drop.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }
