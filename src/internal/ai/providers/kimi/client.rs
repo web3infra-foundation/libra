@@ -11,7 +11,12 @@
 
 use std::fmt;
 
-use crate::internal::ai::client::{Client as GenericClient, Provider};
+use anyhow::Result;
+
+use crate::internal::{
+    ai::client::{Client as GenericClient, Provider},
+    config::{LocalIdentityTarget, resolve_env_for_target},
+};
 
 /// Kimi (Moonshot AI) API provider.
 ///
@@ -120,10 +125,36 @@ impl Client {
     /// # Errors
     ///
     /// Returns [`std::env::VarError`] if `MOONSHOT_API_KEY` is not set.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
+    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
         let api_key = std::env::var("MOONSHOT_API_KEY")?;
         let base_url =
             std::env::var("MOONSHOT_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+
+        let provider = KimiProvider::new(api_key);
+        Ok(Self::new(&base_url, provider))
+    }
+
+    /// Vault-aware async constructor: resolves `MOONSHOT_API_KEY` and
+    /// `MOONSHOT_BASE_URL` via [`resolve_env_for_target`], so callers can
+    /// store credentials in repo-local or global `vault.env.*` config without
+    /// also exporting them into the process environment.
+    ///
+    /// Priority order:
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
+    /// 3. Global config
+    ///
+    /// `MOONSHOT_BASE_URL` falls back to the canonical Kimi cn endpoint when
+    /// no layer supplies it.
+    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
+        let api_key = resolve_env_for_target("MOONSHOT_API_KEY", local_target)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("MOONSHOT_API_KEY is not set in env, repo vault, or global config")
+            })?;
+        let base_url = resolve_env_for_target("MOONSHOT_BASE_URL", local_target)
+            .await?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let provider = KimiProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -149,6 +180,8 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     /// Scenario: Debug formatting must mask the secret so it cannot leak into
@@ -184,5 +217,80 @@ mod tests {
     fn test_kimi_provider_normalizes_bearer_prefixed_api_key() {
         let provider = KimiProvider::new("Bearer sk-test-key".to_string());
         assert_eq!(provider.api_key(), "sk-test-key");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_reads_kimi_api_key_from_process_env() {
+        let key_guard = TestEnvGuard::set("MOONSHOT_API_KEY", Some("kimi-test-resolved"));
+        let base_guard = TestEnvGuard::set("MOONSHOT_BASE_URL", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/kimi-from-resolved-env-test.db"),
+        );
+
+        let client = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect("from_resolved_env should succeed when MOONSHOT_API_KEY is set");
+        assert_eq!(client.provider.api_key(), "kimi-test-resolved");
+
+        drop(key_guard);
+        drop(base_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
+        let key_guard = TestEnvGuard::set("MOONSHOT_API_KEY", None);
+        let base_guard = TestEnvGuard::set("MOONSHOT_BASE_URL", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/kimi-from-resolved-env-test.db"),
+        );
+
+        let err = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect_err("from_resolved_env must fail without an API key");
+        assert!(
+            err.to_string().contains("MOONSHOT_API_KEY"),
+            "error should name the missing key, got: {err}"
+        );
+
+        drop(key_guard);
+        drop(base_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial]`, and the guard
+            // restores the previous value on drop.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }
