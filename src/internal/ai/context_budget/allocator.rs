@@ -127,13 +127,27 @@ impl ContextBudgetAllocator {
             }
         }
 
-        compressible.sort_by_key(|indexed| {
-            let priority_rank = self
+        // Sort key is (priority_rank, candidate.id, index): the id provides
+        // a deterministic tie-break that survives candidates coming from a
+        // HashMap (or any other unordered source) where the caller-supplied
+        // `index` is itself unstable across runs. Index remains as the final
+        // tie-break for the (uncommon) case where two candidates share both
+        // priority and id, preserving the input order within a single call.
+        compressible.sort_by(|a, b| {
+            let priority_a = self
                 .budget
-                .segment(indexed.candidate.segment)
+                .segment(a.candidate.segment)
                 .map(|segment| segment.priority.retention_rank())
                 .unwrap_or(u8::MAX);
-            (priority_rank, indexed.index)
+            let priority_b = self
+                .budget
+                .segment(b.candidate.segment)
+                .map(|segment| segment.priority.retention_rank())
+                .unwrap_or(u8::MAX);
+            priority_a
+                .cmp(&priority_b)
+                .then_with(|| a.candidate.id.cmp(&b.candidate.id))
+                .then_with(|| a.index.cmp(&b.index))
         });
 
         for indexed in compressible {
