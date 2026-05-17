@@ -24,12 +24,12 @@
 |------|------|------|
 | `HookProvider` trait + Claude/Gemini provider | [src/internal/ai/hooks/provider.rs](../../src/internal/ai/hooks/provider.rs)、[hooks/providers/](../../src/internal/ai/hooks/providers/) | 已能解析 hook envelope → `LifecycleEvent`，并安装 hook 配置 |
 | `LifecycleEvent` / `LifecycleEventKind` / `SessionHookEnvelope` / `make_dedup_key` / `apply_lifecycle_event` / `validate_session_hook_envelope` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) | 完整的事件模型与状态机原语 |
-| `process_hook_event_from_stdin` | [hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
+| `process_hook_event_from_stdin` | [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
 | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
 | `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:338](../../src/internal/ai/session/store.rs)（`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
 | 分层存储 | [src/utils/client_storage.rs:336](../../src/utils/client_storage.rs) | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
 | 云同步 | [src/command/cloud.rs:192](../../src/command/cloud.rs) | 增量按 `object_index` 表迭代 |
-| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:499](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 已注册 `2026050301`(`automation_log`) + `2026050302`(`agent_usage_stats`)，inline SQL；`builtin_runner` / `run_builtin_migrations` 公开 API 可用 |
+| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:532](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 当前注册表共 6 条迁移（`automation_log` / `agent_usage_stats` / `agent_capture` / `agent_checkpoint_parent_nullable` / `approved_permission` / `agent_usage_stats_agent_name`），全部走 `include_str!` 加载（v0.17.400 起 inline SQL 已抽取到文件）；`run_builtin_migrations`（migration.rs:635）公开 API 可用 |
 | `stash::build_tree_recursive` | [src/command/stash.rs](../../src/command/stash.rs) | 工作目录 → tree，已处理 index 合并、忽略文件、子模块 |
 | `restore` 路径还原 | [src/command/restore.rs](../../src/command/restore.rs) | rewind 复用此路径 |
 | `object_index` 表 | [src/utils/object.rs](../../src/utils/object.rs) + [src/internal/db.rs](../../src/internal/db.rs) | 自动驱动云同步 |
@@ -39,7 +39,7 @@
 | 现状 | 必须修正 |
 |------|---------|
 | `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | 本任务必须新增 `Commands::Hooks(HooksArgs)`（兼容层）与 `Commands::Agent(AgentArgs)`（新顶层） |
-| `builtin_migrations()` 当前**用 inline SQL 字符串**，未走 `include_str!`（[migration.rs:499-540](../../src/internal/db/migration.rs)） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源 |
+| `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
 | [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
 | `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（[branch.rs:45](../../src/internal/branch.rs)） | 部分落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`，`branch`（create / delete）与 `switch`（create）已检查；`restore`/`reset` 命令对锁定分支的拦截属于行为变更，留作独立切片 |
 | `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-48, 53, 985](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部六个迁移（`2026050301`..`2026050801`）；新增迁移仍需同步更新这三处断言 |
