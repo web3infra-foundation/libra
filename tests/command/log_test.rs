@@ -444,9 +444,17 @@ async fn test_execute_log() {
     let head = Head::current().await;
     // check if the current branch has any commits
     if let Head::Branch(branch_name) = head.to_owned() {
-        let branch = Branch::find_branch(&branch_name, None).await;
-        if branch.is_none() {
-            panic!("fatal: your current branch '{branch_name}' does not have any commits yet ");
+        // Migrated from `Branch::find_branch` (lossy wrapper) to
+        // `Branch::find_branch_result` per `docs/improvement/branch.md` —
+        // storage errors no longer silently degrade to "no commits yet".
+        match Branch::find_branch_result(&branch_name, None).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                panic!("fatal: your current branch '{branch_name}' does not have any commits yet ")
+            }
+            Err(err) => {
+                panic!("fatal: failed to query branch '{branch_name}': {err:?}")
+            }
         }
     }
 

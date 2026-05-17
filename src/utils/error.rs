@@ -55,6 +55,11 @@ pub const LIBRA_ERROR_JSON_ENV: &str = "LIBRA_ERROR_JSON";
 /// Env var that switches exit codes from the Git-style 128/129 to the legacy
 /// fine-grained 2..=9 category codes. Recognised values: `1`, `true`, `yes`, `on`.
 pub const LIBRA_FINE_EXIT_CODES_ENV: &str = "LIBRA_FINE_EXIT_CODES";
+/// Canonical issue tracker URL shown for unexpected internal failures.
+pub const LIBRA_ISSUES_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+/// Human-facing hint appended to internal-invariant errors.
+pub const INTERNAL_ERROR_REPORT_HINT: &str =
+    "please report this issue at: https://github.com/web3infra-foundation/libra/issues";
 
 /// Returns `true` when `LIBRA_FINE_EXIT_CODES=1` is set, enabling backward-
 /// compatible category-specific exit codes (2–9) instead of the default
@@ -418,6 +423,8 @@ pub struct CliError {
     /// When true, `print_for_output` / `print_stderr` emit nothing.
     /// Used for exit-code-only signalling (e.g. `status --exit-code`).
     silent: bool,
+    /// Whether rendering should append the standard issue-report hint.
+    report_issue_hint: bool,
 }
 
 impl CliError {
@@ -431,6 +438,8 @@ impl CliError {
     fn new(kind: CliErrorKind, message: impl Into<String>) -> Self {
         let message = message.into();
         let stable_code = infer_stable_error_code(kind, &message);
+        let report_issue_hint =
+            stable_code == StableErrorCode::InternalInvariant && is_internal_reportable(&message);
         Self {
             kind,
             stable_code,
@@ -440,6 +449,7 @@ impl CliError {
             details: BTreeMap::new(),
             exit_code_override: None,
             silent: false,
+            report_issue_hint,
         }
     }
 
@@ -462,6 +472,7 @@ impl CliError {
             details: BTreeMap::new(),
             exit_code_override: Some(code),
             silent: true,
+            report_issue_hint: false,
         }
     }
 
@@ -625,6 +636,7 @@ impl CliError {
     /// [`StableErrorCode::IoReadFailed`].
     pub fn with_stable_code(mut self, stable_code: StableErrorCode) -> Self {
         self.stable_code = stable_code;
+        self.report_issue_hint = stable_code == StableErrorCode::InternalInvariant;
         self
     }
 
@@ -725,7 +737,8 @@ impl CliError {
         // future regression in the report type itself.
         serde_json::to_string(&self.report()).unwrap_or_else(|_| {
             "{\"ok\":false,\"error_code\":\"LBR-INTERNAL-001\",\"category\":\"internal\",\
-\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
+\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\",\
+\"hints\":[\"please report this issue at: https://github.com/web3infra-foundation/libra/issues\"]}"
                 .to_string()
         })
     }
@@ -819,11 +832,7 @@ impl CliError {
             severity: self.severity(),
             message: self.message.clone(),
             usage: self.usage.clone(),
-            hints: self
-                .hints
-                .iter()
-                .map(|hint| hint.as_str().to_string())
-                .collect(),
+            hints: self.effective_hints(),
             details: self.details.clone(),
         }
     }
@@ -848,14 +857,32 @@ impl CliError {
             lines.push(usage.trim_end().to_string());
         }
 
-        if !self.hints.is_empty() {
+        let hints = self.effective_hints();
+        if !hints.is_empty() {
             lines.push(String::new());
-            for hint in &self.hints {
-                lines.extend(render_hint(hint.as_str()));
+            for hint in hints {
+                lines.extend(render_hint(&hint));
             }
         }
 
         lines.join("\n")
+    }
+
+    fn effective_hints(&self) -> Vec<String> {
+        let mut hints = self
+            .hints
+            .iter()
+            .map(|hint| hint.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        if self.report_issue_hint && !hints.iter().any(|hint| hint.contains(LIBRA_ISSUES_URL)) {
+            if hints.len() >= 2 {
+                hints.pop();
+            }
+            hints.push(INTERNAL_ERROR_REPORT_HINT.to_string());
+        }
+
+        hints
     }
 }
 
@@ -1341,6 +1368,13 @@ fn is_internal_error(lower: &str) -> bool {
     contains_any(lower, &["internal error", "panic", "invariant"])
 }
 
+fn is_internal_reportable(message: &str) -> bool {
+    contains_any(
+        &message.to_ascii_lowercase(),
+        &["internal error", "panic", "invariant", "unexpected"],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
@@ -1407,11 +1441,46 @@ mod tests {
     #[test]
     fn with_hint_strips_prefix_and_limits_count() {
         let rendered = CliError::failure("bad")
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("hint: first")
             .with_hint("Hint: second")
             .with_hint("third")
             .render();
         assert_eq!(rendered, "error: bad\n\nHint: first\nHint: second");
+    }
+
+    #[test]
+    fn internal_error_render_includes_issue_url() {
+        let rendered = CliError::internal("status index should be loaded").render();
+        assert_eq!(
+            rendered,
+            "fatal: status index should be loaded\n\nHint: please report this issue at: https://github.com/web3infra-foundation/libra/issues"
+        );
+    }
+
+    #[test]
+    fn explicit_internal_code_render_includes_issue_url() {
+        let rendered = CliError::fatal("tree creation failed")
+            .with_stable_code(StableErrorCode::InternalInvariant)
+            .render();
+        assert!(rendered.contains("https://github.com/web3infra-foundation/libra/issues"));
+    }
+
+    #[test]
+    fn inferred_non_reportable_internal_does_not_add_issue_hint() {
+        let rendered = CliError::failure("bad").render();
+        assert_eq!(rendered, "error: bad");
+    }
+
+    #[test]
+    fn internal_error_json_includes_issue_url_hint() {
+        let json = CliError::internal("unexpected state transition").render_json();
+        let payload: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload["error_code"], "LBR-INTERNAL-001");
+        assert_eq!(
+            payload["hints"][0],
+            "please report this issue at: https://github.com/web3infra-foundation/libra/issues"
+        );
     }
 
     #[test]

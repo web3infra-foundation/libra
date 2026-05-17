@@ -490,3 +490,49 @@ fn fallback_function_name(line: &str) -> Option<(String, usize)> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SemanticError, SemanticReadError};
+
+    #[test]
+    fn semantic_error_display_pins_each_variant() {
+        assert_eq!(
+            SemanticError::ParserLanguage("missing grammar".to_string()).to_string(),
+            "failed to initialize Rust parser: missing grammar",
+        );
+        assert_eq!(
+            SemanticError::ParseReturnedNoTree.to_string(),
+            "Rust parser returned no syntax tree",
+        );
+        assert_eq!(
+            SemanticError::Query("invalid capture".to_string()).to_string(),
+            "failed to run Rust semantic query: invalid capture",
+        );
+    }
+
+    #[test]
+    fn semantic_read_error_display_pins_each_variant() {
+        assert_eq!(
+            SemanticReadError::Extract(SemanticError::ParseReturnedNoTree).to_string(),
+            "Rust parser returned no syntax tree",
+        );
+        assert_eq!(
+            SemanticReadError::NotFound {
+                query: "my_fn".to_string(),
+            }
+            .to_string(),
+            "Rust symbol not found: my_fn",
+        );
+        // Display only renders candidates.len(), so an empty Vec is sufficient
+        // to pin the template — the Ambiguous variant carries `Vec<SemanticSymbol>`
+        // whose full construction would require touching every unrelated field.
+        assert_eq!(
+            SemanticReadError::Ambiguous {
+                candidates: Vec::new(),
+            }
+            .to_string(),
+            "Rust symbol query is ambiguous (0 candidates)",
+        );
+    }
+}

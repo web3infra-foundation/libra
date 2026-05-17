@@ -11,7 +11,10 @@
 
 use std::{fs::OpenOptions, path::PathBuf, sync::Mutex};
 
-use libra::{cli, utils::output::OutputConfig};
+use libra::{
+    cli,
+    utils::{error::INTERNAL_ERROR_REPORT_HINT, output::OutputConfig},
+};
 use tracing_subscriber::EnvFilter;
 
 /// Process entry point.
@@ -23,9 +26,10 @@ use tracing_subscriber::EnvFilter;
 ///
 /// Boundary conditions:
 /// - If the CLI thread fails to spawn, exits with code `1` and a fatal message on
-///   stderr (no JSON, since we never got far enough to know the user's preference).
-/// - If the CLI thread panics, also exits `1` with a fixed message; thread panics
-///   bypass the `CliError` rendering path.
+///   stderr (no JSON, since we never got far enough to know the user's preference)
+///   plus the standard internal-error report hint.
+/// - If the CLI thread panics, also exits `1` with a fixed message plus the same
+///   hint; thread panics bypass the `CliError` rendering path.
 /// - On a clean `Err(CliError)`, the exit code is sourced from
 ///   [`CliError::exit_code`] so each error class has a stable code.
 fn main() {
@@ -41,12 +45,14 @@ fn main() {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
             Err(_) => {
-                eprintln!("fatal: CLI thread panicked");
+                eprintln!("fatal: CLI thread panicked\n\nHint: {INTERNAL_ERROR_REPORT_HINT}");
                 std::process::exit(1);
             }
         },
         Err(err) => {
-            eprintln!("fatal: failed to spawn CLI thread: {err}");
+            eprintln!(
+                "fatal: failed to spawn CLI thread: {err}\n\nHint: {INTERNAL_ERROR_REPORT_HINT}"
+            );
             std::process::exit(1);
         }
     };

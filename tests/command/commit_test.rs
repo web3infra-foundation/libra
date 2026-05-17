@@ -179,11 +179,19 @@ async fn test_execute_commit() {
             Head::Branch(name) => name,
             _ => panic!("head not in branch"),
         };
-        let branch = Branch::find_branch(&branch_name, None).await.unwrap();
+        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        let branch = Branch::find_branch_result(&branch_name, None)
+            .await
+            .expect("failed to query branch")
+            .expect("branch should exist");
         let commit: Commit = load_object(&branch.commit).unwrap();
 
         assert_eq!(commit.message.trim(), "init");
-        let branch = Branch::find_branch(&branch_name, None).await.unwrap();
+        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        let branch = Branch::find_branch_result(&branch_name, None)
+            .await
+            .expect("failed to query branch")
+            .expect("branch should exist");
         assert_eq!(branch.commit, commit.id);
     }
 
@@ -210,11 +218,19 @@ async fn test_execute_commit() {
             Head::Branch(name) => name,
             _ => panic!("head not in branch"),
         };
-        let branch = Branch::find_branch(&branch_name, None).await.unwrap();
+        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        let branch = Branch::find_branch_result(&branch_name, None)
+            .await
+            .expect("failed to query branch")
+            .expect("branch should exist");
         let commit: Commit = load_object(&branch.commit).unwrap();
 
         assert_eq!(commit.message.trim(), "init commit");
-        let branch = Branch::find_branch(&branch_name, None).await.unwrap();
+        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        let branch = Branch::find_branch_result(&branch_name, None)
+            .await
+            .expect("failed to query branch")
+            .expect("branch should exist");
         assert_eq!(branch.commit, commit.id);
     }
 

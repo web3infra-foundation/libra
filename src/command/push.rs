@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::{branch, fetch::RemoteClient},
+    command::{branch, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
@@ -281,6 +281,7 @@ pub struct PushOutput {
     pub bytes_pushed: u64,
     /// Number of LFS files uploaded
     pub lfs_files_uploaded: usize,
+    pub lfs_upload: LfsUploadSummary,
     /// Whether this was a dry-run
     pub dry_run: bool,
     /// Whether everything was already up-to-date
@@ -514,6 +515,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: 0,
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: args.dry_run,
             up_to_date: true,
             upstream_set: None,
@@ -575,6 +577,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: result.objs.len(),
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: true,
             up_to_date: false,
             upstream_set: None,
@@ -758,6 +761,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         objects_pushed: obj_count,
         bytes_pushed,
         lfs_files_uploaded,
+        lfs_upload: LfsUploadSummary {
+            files_uploaded: lfs_files_uploaded,
+        },
         dry_run: false,
         up_to_date: false,
         upstream_set,
@@ -1339,6 +1345,115 @@ mod test {
     use git_internal::hash::ObjectHash;
 
     use super::*;
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`PushError`]. These strings are used as the
+    /// `CliError` message via `From<PushError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    ///
+    /// Source-chained variants (ObjectCollection, PackEncoding, Network,
+    /// TrackingRefUpdate, RepoState) wrap upstream error strings via `{0}`
+    /// and are intentionally skipped — their content is owned by the
+    /// wrapped error type.
+    #[test]
+    fn push_error_display_pins_static_message_variants() {
+        assert_eq!(
+            PushError::DetachedHead.to_string(),
+            "HEAD is detached; cannot determine what to push",
+        );
+        assert_eq!(
+            PushError::NoRemoteConfigured.to_string(),
+            "no configured push destination",
+        );
+        assert_eq!(
+            PushError::RemoteNotFound {
+                name: "upstream".to_string(),
+                suggestion: None,
+            }
+            .to_string(),
+            "remote 'upstream' not found",
+        );
+        assert_eq!(
+            PushError::InvalidRefspec("@invalid".to_string()).to_string(),
+            "invalid refspec '@invalid'",
+        );
+        assert_eq!(
+            PushError::SourceRefNotFound("topic/x".to_string()).to_string(),
+            "source ref 'topic/x' not found",
+        );
+        assert_eq!(
+            PushError::UnsupportedLocalFileRemote.to_string(),
+            "pushing to local file repositories is not supported",
+        );
+        assert_eq!(
+            PushError::InvalidRemoteUrl {
+                url: "ftp://example.com/repo".to_string(),
+                detail: "unsupported scheme".to_string(),
+            }
+            .to_string(),
+            "invalid remote URL 'ftp://example.com/repo': unsupported scheme",
+        );
+        assert_eq!(
+            PushError::AuthenticationFailed {
+                url: "https://example.com/repo".to_string(),
+            }
+            .to_string(),
+            "authentication failed for 'https://example.com/repo'",
+        );
+        assert_eq!(
+            PushError::DiscoveryFailed {
+                url: "https://example.com/repo".to_string(),
+                detail: "timed out".to_string(),
+            }
+            .to_string(),
+            "failed to discover references from 'https://example.com/repo': timed out",
+        );
+        assert_eq!(
+            PushError::Timeout {
+                phase: "fetch-refs".to_string(),
+                seconds: 30,
+            }
+            .to_string(),
+            "network timeout during fetch-refs after 30s",
+        );
+        assert_eq!(
+            PushError::NonFastForward {
+                local_ref: "refs/heads/main".to_string(),
+                remote_ref: "refs/heads/main".to_string(),
+            }
+            .to_string(),
+            "cannot push to 'refs/heads/main': non-fast-forward update",
+        );
+        assert_eq!(
+            PushError::HashKindMismatch {
+                remote: "sha1".to_string(),
+                local: "sha256".to_string(),
+            }
+            .to_string(),
+            "remote object format 'sha1' does not match local 'sha256'",
+        );
+        assert_eq!(
+            PushError::RemoteUnpackFailed.to_string(),
+            "remote rejected push: unpack failed",
+        );
+        assert_eq!(
+            PushError::RemoteRefUpdateFailed {
+                refname: "refs/heads/main".to_string(),
+                reason: "non-fast-forward".to_string(),
+            }
+            .to_string(),
+            "remote rejected ref update for 'refs/heads/main': non-fast-forward",
+        );
+        assert_eq!(
+            PushError::LfsUploadFailed {
+                path: "src/big.bin".to_string(),
+                oid: "abc123".to_string(),
+                detail: "remote did not provide an upload action".to_string(),
+            }
+            .to_string(),
+            "LFS upload failed for 'src/big.bin': remote did not provide an upload action",
+        );
+    }
 
     #[test]
     /// Tests successful parsing of push command arguments with different parameter combinations.

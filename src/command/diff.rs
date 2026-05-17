@@ -788,4 +788,46 @@ mod test {
         assert_eq!(blob.len(), 1);
         assert_eq!(blob[0].0, PathBuf::from("not_ignore"));
     }
+
+    #[test]
+    fn diff_error_display_pins_each_variant() {
+        assert_eq!(DiffError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            DiffError::InvalidRevision("HEAD~99".to_string()).to_string(),
+            "invalid revision: 'HEAD~99'",
+        );
+        assert_eq!(
+            DiffError::ObjectLoad {
+                kind: "tree",
+                object_id: "abc1234".to_string(),
+                detail: "corrupted zlib stream".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'abc1234': corrupted zlib stream",
+        );
+        assert_eq!(
+            DiffError::IndexLoad("index is locked".to_string()).to_string(),
+            "failed to load index: index is locked",
+        );
+        assert_eq!(
+            DiffError::WorkdirList("permission denied".to_string()).to_string(),
+            "failed to list working directory files: permission denied",
+        );
+        assert_eq!(
+            DiffError::FileRead {
+                path: "src/main.rs".to_string(),
+                detail: "is a directory".to_string(),
+            }
+            .to_string(),
+            "failed to read file 'src/main.rs': is a directory",
+        );
+        assert_eq!(
+            DiffError::OutputWrite {
+                path: "/tmp/out.patch".to_string(),
+                detail: "no space left on device".to_string(),
+            }
+            .to_string(),
+            "failed to write output file '/tmp/out.patch': no space left on device",
+        );
+    }
 }

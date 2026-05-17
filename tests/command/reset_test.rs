@@ -179,6 +179,94 @@ fn test_reset_hard_with_pathspec_returns_usage_error() {
 }
 
 #[test]
+fn test_reset_soft_with_pathspec_returns_usage_error() {
+    // PathspecWithSoft is documented in docs/improvement/reset.md and mapped
+    // to CliInvalidArguments (LBR-CLI-002, exit 129). The --hard variant
+    // already has coverage above; this pins the --soft side too.
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["reset", "--soft", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("is not compatible with --soft reset")
+            || stderr.contains("--soft only moves HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_onto_locked_branch_rejects_intent() {
+    // Libra refuses to `reset` onto its managed locked branches
+    // (`main`, `intent`, `agent-traces`) — see
+    // src/internal/branch.rs::is_locked_branch and the early guard in
+    // src/command/reset.rs::run_reset. Locked-target rejection maps to
+    // CliInvalidTarget (LBR-CLI-003, exit 129); no integration test
+    // exercised it before this patch, so a regression that removed the
+    // guard could have shipped silently.
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "intent"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("intent"),
+        "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_json_pathspec_omits_previous_commit() {
+    // Pathspec resets do not move HEAD, so the JSON schema documented in
+    // docs/commands/reset.md (line 130: "previous_commit is null for
+    // pathspec-only resets") must emit `null`. Code historically captured
+    // current HEAD into this field even for pathspec resets, contradicting
+    // the user contract; this test pins the documented behavior.
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let output = run_libra_command(
+        &["--json", "reset", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reset");
+    assert_eq!(json["data"]["mode"], "mixed");
+    assert!(
+        json["data"]["previous_commit"].is_null(),
+        "pathspec resets must emit previous_commit=null, got: {}",
+        json["data"]["previous_commit"]
+    );
+    assert_eq!(json["data"]["files_unstaged"], 1);
+    assert_eq!(json["data"]["files_restored"], 0);
+    let pathspecs = json["data"]["pathspecs"]
+        .as_array()
+        .expect("pathspecs should be an array");
+    assert_eq!(pathspecs.len(), 1);
+    assert_eq!(pathspecs[0], "tracked.txt");
+}
+
+#[test]
 fn test_reset_json_hard_with_pathspec_returns_usage_error() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
@@ -209,8 +297,11 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     let target_commit = {
         let _guard = ChangeDirGuard::new(repo.path());
-        InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md —
+        // storage errors no longer collapse into "main branch should exist".
+        InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit
             .to_string()
@@ -297,8 +388,10 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        let head = InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md.
+        let head = InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit;
         let commit: Commit = load_object(&head).expect("load HEAD commit");

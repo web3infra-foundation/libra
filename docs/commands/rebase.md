@@ -39,7 +39,6 @@ Start a new rebase, replaying current branch commits onto the specified upstream
 ```bash
 $ libra rebase main
 Found common ancestor: abc1234
-Rebasing 3 commits from 'feature' onto 'main'...
 Rebasing 3 commits from `feature` onto `main`...
 Applied: def5678 feat: add parser
 Applied: 987abcd feat: add lexer
@@ -108,7 +107,6 @@ Normal rebase progress:
 
 ```text
 Found common ancestor: abc1234
-Rebasing 3 commits from 'feature' onto 'main'...
 Rebasing 3 commits from `feature` onto `main`...
 Applied: def5678 feat: add parser
 Applied: 987abcd feat: add lexer
@@ -119,20 +117,18 @@ Successfully rebased branch 'feature' onto '1234567'.
 Conflict during rebase:
 
 ```text
-error: could not apply 987abcd: feat: add lexer
-CONFLICT in 1 file(s):
-  src/lexer.rs
+fatal: rebase stopped while applying 987abcd: feat: add lexer
 
-After resolving conflicts, mark them with 'libra add <file>'
-then run 'libra rebase --continue'
-To skip this commit, run 'libra rebase --skip'
-To abort and return to the original branch, run 'libra rebase --abort'
+Hint: conflicted files:
+Hint:   src/lexer.rs
+Hint: resolve conflicts, stage them, then run 'libra rebase --continue'.
+Hint: or run 'libra rebase --skip' / 'libra rebase --abort'.
 ```
 
 Already up to date:
 
 ```text
-Current branch is up to date.
+Current branch is ahead of upstream. No rebase needed.
 ```
 
 Fast-forward-only case:
@@ -162,7 +158,10 @@ Start and complete a replay:
     "status": "completed",
     "branch": "feature",
     "commit": "abc1234...",
+    "upstream": "main",
     "onto": "fedcba9...",
+    "common_ancestor": "0123456...",
+    "replay_count": 1,
     "previous_commit": "def5678...",
     "applied_commits": [
       {

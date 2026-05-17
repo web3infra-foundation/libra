@@ -1238,4 +1238,93 @@ mod tests {
         report.continuation_loops_used = 8;
         assert!(validate_completion_report_shape(&spec, &report).is_ok());
     }
+
+    #[test]
+    fn goal_completion_shape_error_display_pins_each_variant() {
+        assert_eq!(
+            GoalCompletionShapeError::UnknownCriterionId {
+                id: "compiles".to_string(),
+            }
+            .to_string(),
+            "GoalCompletionReport.completed_criteria contains id `compiles` which does not \
+             exist in GoalSpec.acceptance_criteria — the verifier (P6.2) cannot reconcile a \
+             claim against a criterion the spec does not declare",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::MissingRequiredCriterion {
+                id: "tests-pass".to_string(),
+            }
+            .to_string(),
+            "GoalCompletionReport omits required criterion `tests-pass` — every criterion \
+             with `required = true` must appear in `completed_criteria` before a Goal can \
+             transition to `Completed`",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::DuplicateClaimedCriterion {
+                id: "compiles".to_string(),
+            }
+            .to_string(),
+            "GoalCompletionReport.completed_criteria contains duplicate id `compiles` — the \
+             verifier keys completion off a `BTreeSet<String>` so duplicates would let one \
+             claim satisfy multiple required criteria",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::MissingEvidenceForRequiredCriterion {
+                id: "tests-pass".to_string(),
+            }
+            .to_string(),
+            "required criterion `tests-pass` has no matching evidence ref under \
+             GoalEvidencePolicy::Standard — every required criterion must be backed by at \
+             least one `GoalEvidenceRef` whose `criterion_id` equals the criterion's id",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::MissingWorkspaceEvidenceForCriterion {
+                id: "edits-file".to_string(),
+            }
+            .to_string(),
+            "required criterion `edits-file` is marked `requires_workspace_change = true` but \
+             no matching evidence ref carries a workspace-bound target \
+             (`GoalEvidenceTarget::File`) — Standard policy mandates VCS state evidence for \
+             workspace-change criteria",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::UnknownVerificationCriterionId {
+                id: "non-existent".to_string(),
+            }
+            .to_string(),
+            "GoalVerificationRecord references id `non-existent` which does not exist in \
+             GoalSpec.acceptance_criteria — verification records cannot attest to criteria \
+             the spec never declared",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::BudgetSpendOverrun {
+                reported: 6_000_000,
+                cap: 5_000_000,
+            }
+            .to_string(),
+            "GoalCompletionReport.total_spent_micro_usd (6000000) exceeds the spec's hard \
+             budget cap (5000000) — the doc rules at opencode.md:660-661 require a budget \
+             overrun to transition to `Blocked { BudgetApprovalRequired }`, never `Completed`",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::BudgetWallClockOverrun {
+                reported: 3_600,
+                cap: 1_800,
+            }
+            .to_string(),
+            "GoalCompletionReport.elapsed_wall_clock_seconds (3600) exceeds the spec's \
+             wall-clock cap (1800) — wall-clock overrun must transition the Goal to \
+             `Blocked { WallClockExpired }`, never `Completed`",
+        );
+        assert_eq!(
+            GoalCompletionShapeError::BudgetLoopOverrun {
+                reported: 24,
+                cap: 16,
+            }
+            .to_string(),
+            "GoalCompletionReport.continuation_loops_used (24) exceeds the spec's \
+             max_continuation_loops cap (16) — loop overrun must transition the Goal to \
+             `Blocked { LoopLimitNeedsUser }`, never `Completed`",
+        );
+    }
 }

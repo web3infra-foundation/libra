@@ -1333,6 +1333,13 @@ impl CodeUiApiError {
                 message: control_error.message(),
             };
         }
+        if let Some(readonly_error) = error.downcast_ref::<ReadOnlyAdapterError>() {
+            return Self {
+                status: 403,
+                code: "CONTROLLER_READONLY".to_string(),
+                message: readonly_error.to_string(),
+            };
+        }
 
         Self {
             status: 422,
@@ -1382,6 +1389,8 @@ pub fn code_ui_error_codes() -> &'static [(&'static str, u16)] {
         ("CONTROLLER_CONFLICT", 409),
         ("BROWSER_CONTROL_DISABLED", 403),
         ("AUTOMATION_CONTROLLER_REQUIRED", 403),
+        // Read-only browser surface rejects mutating commands.
+        ("CONTROLLER_READONLY", 403),
         // Tail: read-side and runtime-availability errors.
         ("CODE_UI_UNAVAILABLE", 404),
         ("INVALID_QUERY_PARAM", 400),
@@ -1409,6 +1418,34 @@ impl ReadOnlyCodeUiAdapter {
     }
 }
 
+/// Typed error emitted by [`ReadOnlyCodeUiAdapter`] when a mutating command is
+/// attempted against a read-only browser surface. The `operation` field names
+/// the rejected adapter method ("submit_message", "respond_interaction", …)
+/// so `CodeUiApiError::unsupported_from_error` can preserve the original
+/// rejection context while emitting the stable `CONTROLLER_READONLY` code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyAdapterError {
+    pub operation: &'static str,
+}
+
+impl ReadOnlyAdapterError {
+    pub fn new(operation: &'static str) -> Self {
+        Self { operation }
+    }
+}
+
+impl std::fmt::Display for ReadOnlyAdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This libra code session is read-only from the browser (rejected: {})",
+            self.operation
+        )
+    }
+}
+
+impl std::error::Error for ReadOnlyAdapterError {}
+
 #[async_trait]
 impl CodeUiReadModel for ReadOnlyCodeUiAdapter {
     fn session(&self) -> Arc<CodeUiSession> {
@@ -1423,9 +1460,7 @@ impl CodeUiCommandAdapter for ReadOnlyCodeUiAdapter {
     }
 
     async fn submit_message(&self, _text: String) -> anyhow::Result<()> {
-        Err(anyhow!(
-            "This libra code session is read-only from the browser"
-        ))
+        Err(ReadOnlyAdapterError::new("submit_message").into())
     }
 
     async fn respond_interaction(
@@ -1433,9 +1468,11 @@ impl CodeUiCommandAdapter for ReadOnlyCodeUiAdapter {
         _interaction_id: &str,
         _response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
-        Err(anyhow!(
-            "This libra code session is read-only from the browser"
-        ))
+        Err(ReadOnlyAdapterError::new("respond_interaction").into())
+    }
+
+    async fn cancel_turn(&self) -> anyhow::Result<()> {
+        Err(ReadOnlyAdapterError::new("cancel_turn").into())
     }
 }
 
@@ -1720,6 +1757,12 @@ mod tests {
                 CodeUiApiError::unsupported_from_error(anyhow::anyhow!("operation refused")),
                 "UNSUPPORTED_OPERATION",
             ),
+            (
+                CodeUiApiError::unsupported_from_error(
+                    ReadOnlyAdapterError::new("submit_message").into(),
+                ),
+                "CONTROLLER_READONLY",
+            ),
         ];
         for (err, expected_code) in cases {
             assert_eq!(
@@ -1788,6 +1831,45 @@ mod tests {
                 "inline producer for '{code}' emits status {observed_status} but the catalogue says {expected}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_adapter_mutations_map_to_controller_readonly_error() {
+        let adapter = ReadOnlyCodeUiAdapter::new(test_session(), CodeUiCapabilities::default());
+
+        let submit_err = adapter
+            .submit_message("hello".to_string())
+            .await
+            .expect_err("submit_message must be rejected on read-only adapter");
+        let api_err = CodeUiApiError::unsupported_from_error(submit_err);
+        assert_eq!(api_err.code, "CONTROLLER_READONLY");
+        assert_eq!(api_err.status, 403);
+        assert!(
+            api_err.message.contains("submit_message"),
+            "message should name the rejected operation, got: {}",
+            api_err.message
+        );
+
+        let respond_err = adapter
+            .respond_interaction("ix-1", CodeUiInteractionResponse::default())
+            .await
+            .expect_err("respond_interaction must be rejected on read-only adapter");
+        let respond_api_err = CodeUiApiError::unsupported_from_error(respond_err);
+        assert_eq!(respond_api_err.code, "CONTROLLER_READONLY");
+        assert_eq!(respond_api_err.status, 403);
+        assert!(
+            respond_api_err.message.contains("respond_interaction"),
+            "message should name the rejected operation, got: {}",
+            respond_api_err.message
+        );
+
+        let cancel_err = adapter
+            .cancel_turn()
+            .await
+            .expect_err("cancel_turn must be rejected on read-only adapter");
+        let cancel_api_err = CodeUiApiError::unsupported_from_error(cancel_err);
+        assert_eq!(cancel_api_err.code, "CONTROLLER_READONLY");
+        assert_eq!(cancel_api_err.status, 403);
     }
 
     #[derive(Clone)]

@@ -1755,6 +1755,25 @@ mod test {
         },
     };
 
+    /// Pin the `Display` format for the static-message variants of
+    /// [`StatusError`]. Only `InvalidPathEncoding` has a fully static
+    /// pattern — the others are all source-chained (`{source}`) and
+    /// owned by their wrapped error type, so they're intentionally
+    /// skipped. The CliError mapping above prefixes "failed to determine
+    /// working tree status: " in front of every variant before sending
+    /// it to the human / --json envelope, so direct-Display matters
+    /// less for this enum than for typed errors with more variants.
+    #[test]
+    fn status_error_display_pins_invalid_path_encoding_variant() {
+        assert_eq!(
+            StatusError::InvalidPathEncoding {
+                path: PathBuf::from("src/foo"),
+            }
+            .to_string(),
+            "path 'src/foo' is not valid UTF-8",
+        );
+    }
+
     #[test]
     fn list_workdir_files_prunes_ignored_directories() {
         let repo = tempdir().expect("failed to create temp repo");

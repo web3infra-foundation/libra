@@ -44,7 +44,7 @@ impl ProtocolClient for HttpsClient {
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()
-            .unwrap();
+            .expect("reqwest client builder failed (likely missing TLS backend)");
         Self { url, client }
     }
 }
@@ -59,7 +59,7 @@ static AUTH: Mutex<Option<BasicAuth>> = Mutex::new(None);
 impl BasicAuth {
     /// set username & password manually
     pub async fn set_auth(auth: BasicAuth) {
-        AUTH.lock().unwrap().replace(auth);
+        AUTH.lock().expect("AUTH mutex poisoned").replace(auth);
     }
 
     /// send request with basic auth, retry 3 times
@@ -72,7 +72,7 @@ impl BasicAuth {
         let mut try_cnt = 0;
         loop {
             let mut request = request_builder().await; // RequestBuilder can't be cloned
-            if let Some(auth) = AUTH.lock().unwrap().deref() {
+            if let Some(auth) = AUTH.lock().expect("AUTH mutex poisoned").deref() {
                 request = request.basic_auth(auth.username.clone(), Some(auth.password.clone()));
             } // if no auth exists, try without auth (e.g. clone public)
             res = request.send().await?;
@@ -92,7 +92,9 @@ impl BasicAuth {
                 break;
             }
             emit_warning("authentication required, retrying...");
-            AUTH.lock().unwrap().replace(ask_basic_auth());
+            AUTH.lock()
+                .expect("AUTH mutex poisoned")
+                .replace(ask_basic_auth());
             try_cnt += 1;
         }
         Ok(res)
@@ -113,10 +115,12 @@ impl HttpsClient {
         service: ServiceType,
     ) -> Result<DiscoveryResult, GitError> {
         let service_name = service.to_string();
+        // INVARIANT: service_name is always a static "git-upload-pack" / "git-receive-pack"
+        // value and self.url is validated by from_url.
         let url = self
             .url
             .join(&format!("info/refs?service={service_name}"))
-            .unwrap();
+            .expect("info/refs?service=... is a valid relative URL");
         let res = BasicAuth::send(|| async { self.client.get(url.clone()) })
             .await
             .map_err(|e| GitError::NetworkError(format!("Failed to send request: {}", e)))?;
@@ -177,7 +181,11 @@ impl HttpsClient {
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
-        let url = self.url.join("git-upload-pack").unwrap();
+        // INVARIANT: "git-upload-pack" is a valid relative URL onto self.url.
+        let url = self
+            .url
+            .join("git-upload-pack")
+            .expect("'git-upload-pack' is a valid relative URL");
         let body = generate_upload_pack_content(have, want, shallow, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
@@ -207,9 +215,14 @@ impl HttpsClient {
         &self,
         data: T,
     ) -> Result<Response, reqwest::Error> {
+        // INVARIANT: "git-receive-pack" is a valid relative URL onto self.url.
+        let receive_pack_url = self
+            .url
+            .join("git-receive-pack")
+            .expect("'git-receive-pack' is a valid relative URL");
         BasicAuth::send(|| async {
             self.client
-                .post(self.url.join("git-receive-pack").unwrap())
+                .post(receive_pack_url.clone())
                 .header(CONTENT_TYPE, "application/x-git-receive-pack-request")
                 .body(data.clone())
         })

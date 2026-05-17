@@ -28,7 +28,7 @@
 - **JSON 向后兼容扩展已交付**：`pub struct CommitOutput`（`commit.rs:249-272`）含 11 个字段：`head`（保留）+ `branch: Option<String>`（新增）+ `commit` / `short_id` / `subject` / `root_commit` / `amend` / `files_changed` / `signoff` / `conventional: Option<bool>` / `signed`。**采用增量扩展策略**：旧字段（`head` / `commit` / `short_id` / `subject` / `root_commit` / `files_changed.total/new/modified/deleted`）保留名称、类型、语义不变；新元数据全部以新增字段形式追加，不破坏已有 JSON consumer
 - **hook I/O 隔离已交付**：`run_pre_commit_hook(output: &OutputConfig) -> Result<(), CommitError>`（`commit.rs:610`）接受 `OutputConfig`，在 `--json` / `--machine` 模式下对 hook 子进程使用 `Stdio::piped()`，确保结构化 stdout/stderr 不被污染；human 模式仍透传 hook 输出
 - **核心 helper 全部返回 typed `CommitError`**：`save_commit_object`（`commit.rs:666`）、`auto_stage_tracked_changes`（`commit.rs:951`）、`update_head`（`commit.rs:1019`）、`update_head_and_reflog`（`commit.rs:1039`）、`run_pre_commit_hook`（`commit.rs:610`）等关键 helper 全部以 `CommitError` 为错误载体，统一传播路径
-- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:60-62` 区域）含 5 条 EXAMPLES（`libra commit -am ...` / `libra commit --amend` / `libra commit --conventional` / `libra commit --allow-empty` / `libra commit --json`），通过 clap `#[command]` 注解挂载
+- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:53-63` 区域）含 9 条 EXAMPLES（`-m` / `-m --conventional` / `--amend` / `--amend --no-edit` / `-a -m` / `-F message.txt` / `-s -m` / `--allow-empty -m` / `--json -m`），通过 clap `#[command]` 注解挂载
 - **`missing_identity_error()` 已显式映射**：`commit.rs:313` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:187` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
 - **测试覆盖已交付**：JSON schema 稳定性测试、CommitError 全变体单元映射测试、CLI 级集成测试均已就绪（详见 README 第 67-68 行 commit 已落地说明）
 
@@ -46,7 +46,7 @@
 - 保持了现有 JSON schema 向后兼容，并以 additive 方式补齐了 `branch` / `amend` / `signoff` / `conventional` / `signed` 等元数据
 - 为 hook 输出建立了结构化隔离规则，`--json` / `--machine` 成功路径不再被 hook stdout/stderr 污染
 - 补齐了 `--signoff` 回归测试，验证 Signed-off-by trailer 在 amend + signoff 组合下稳定写入
-- 补齐了 `--help` EXAMPLES 段（5 条示例）
+- 补齐了 `--help` EXAMPLES 段（9 条示例）
 - 把 `vault_sign_commit` / `create_tree` / `update_head` 等核心 helper 的错误传播统一到 typed `CommitError`
 
 **本批非目标：**
@@ -223,21 +223,22 @@ pub struct FilesChanged {
 
 ```text
 [main abc1234] Add new feature
- 2 files changed, 15 insertions(+), 3 deletions(-)
+ 2 files changed (new: 1, modified: 1, deleted: 0)
 ```
 
 root commit：
 ```text
 [main (root-commit) abc1234] Initial commit
- 1 file changed, 10 insertions(+)
+ 1 file changed (new: 1, modified: 0, deleted: 0)
 ```
 
 amend：
 ```text
 [main abc1234] Updated commit message
- Date: Thu Mar 27 10:00:00 2026 +0800
- 2 files changed, 5 insertions(+), 1 deletion(-)
+ 2 files changed (new: 0, modified: 2, deleted: 0)
 ```
+
+> 注：libra 不复用 Git 的 `insertions(+) / deletions(-)` 行级统计，转而输出文件级分桶 `(new / modified / deleted)`，与 `CommitOutput.files_changed` 子对象逐字段对应；当 `total == 0` 时整行省略。amend 流程不会插入额外的 `Date:` 行——作者时间戳沿用上一条 commit，需要时机器消费方可读取 JSON envelope 中的字段，而非依赖 human 段。
 
 ### 特性 3：JSON 输出设计
 

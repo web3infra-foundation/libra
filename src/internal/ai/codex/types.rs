@@ -610,3 +610,23 @@ impl CodexSession {
         self.thread.current_turn_id.as_deref()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the manual `Display` impl on `ToolStatus`. The wire-format
+    /// strings (`pending` / `in_progress` / `completed` / `failed`) are
+    /// also produced by the `serde(rename_all = "lowercase")` enum tag
+    /// — but the Display path is independent and rendered into TUI
+    /// tool-call status cells, audit log lines and MCP status events.
+    /// Changing them would silently desync the visual surface from the
+    /// JSONL audit truth.
+    #[test]
+    fn tool_status_display_pins_each_variant() {
+        assert_eq!(ToolStatus::Pending.to_string(), "pending");
+        assert_eq!(ToolStatus::InProgress.to_string(), "in_progress");
+        assert_eq!(ToolStatus::Completed.to_string(), "completed");
+        assert_eq!(ToolStatus::Failed.to_string(), "failed");
+    }
+}

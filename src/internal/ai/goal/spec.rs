@@ -471,4 +471,36 @@ mod tests {
             "legacy criterion missing the field must default to no-workspace-change",
         );
     }
+
+    #[test]
+    fn goal_spec_error_display_pins_each_variant() {
+        assert_eq!(
+            GoalSpecError::EmptyObjective.to_string(),
+            "GoalSpec.objective must not be blank — \
+             Goal mode requires an explicit objective string",
+        );
+        assert_eq!(
+            GoalSpecError::ObjectiveTooLong {
+                actual: 2048,
+                max: 1024,
+            }
+            .to_string(),
+            "GoalSpec.objective is 2048 bytes which exceeds the 1024-byte cap; \
+             shorten the objective and add detail through `acceptance_criteria` instead",
+        );
+        assert_eq!(
+            GoalSpecError::DuplicateCriterionId {
+                id: "tests-pass".to_string(),
+            }
+            .to_string(),
+            "GoalSpec.acceptance_criteria contains duplicate id `tests-pass` — \
+             each criterion id must be unique within a Goal so the verifier can match \
+             completion claims unambiguously",
+        );
+        assert_eq!(
+            GoalSpecError::BlankCriterionId { index: 3 }.to_string(),
+            "GoalSpec.acceptance_criteria[3].id must not be blank — \
+             criterion ids are surfaced verbatim in completion claims",
+        );
+    }
 }

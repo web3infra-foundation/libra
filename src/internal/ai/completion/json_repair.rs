@@ -416,15 +416,80 @@ fn normalize_smart_quotes(input: &str) -> Option<String> {
     {
         return None;
     }
-    let normalized = input
-        .chars()
-        .map(|ch| match ch {
-            '“' | '”' | '„' | '‟' => '"',
-            '‘' | '’' | '‚' | '‛' => '\'',
-            other => other,
-        })
-        .collect();
-    Some(normalized)
+
+    /// Tracks which delimiter opened the current string literal so smart
+    /// quotes inside an ASCII-delimited string are preserved (LLM pasted
+    /// typographic quotes as content) while smart quotes that act AS the
+    /// delimiter pair are normalized.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum StringMode {
+        Outside,
+        Ascii,
+        Smart,
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut changed = false;
+    let mut mode = StringMode::Outside;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        match mode {
+            StringMode::Ascii => {
+                // ASCII string literal: smart quotes inside the content stay
+                // as-is. Only the matching ASCII `"` closes.
+                output.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    mode = StringMode::Outside;
+                }
+            }
+            StringMode::Smart => {
+                // Smart-delimited string literal: normalize the closing smart
+                // double quote to `"` (this is the case the LLM mistakenly
+                // emitted `“…”` in place of `"…"`). Inner content stays
+                // verbatim and inner smart single quotes are not normalized
+                // here because they may legitimately appear in content.
+                match ch {
+                    '”' | '„' | '‟' => {
+                        output.push('"');
+                        mode = StringMode::Outside;
+                        changed = true;
+                    }
+                    other => output.push(other),
+                }
+            }
+            StringMode::Outside => match ch {
+                '"' => {
+                    output.push(ch);
+                    mode = StringMode::Ascii;
+                }
+                '“' | '„' | '‟' => {
+                    // Smart-opening quote outside a string: open a
+                    // smart-delimited literal and normalize the delimiter.
+                    output.push('"');
+                    mode = StringMode::Smart;
+                    changed = true;
+                }
+                '”' => {
+                    // Lone closing smart double quote with no opener — most
+                    // likely a stray; normalize to `"` to give the parser a
+                    // chance to recover.
+                    output.push('"');
+                    changed = true;
+                }
+                '‘' | '’' | '‚' | '‛' => {
+                    output.push('\'');
+                    changed = true;
+                }
+                other => output.push(other),
+            },
+        }
+    }
+    if changed { Some(output) } else { None }
 }
 
 fn strip_json_comments(input: &str) -> Option<String> {
@@ -847,4 +912,32 @@ fn is_unquoted_key_continue(ch: char) -> bool {
 
 fn is_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonRepairError, JsonRepairErrorKind};
+
+    #[test]
+    fn json_repair_error_kind_display_pins_snake_case_for_each_variant() {
+        assert_eq!(JsonRepairErrorKind::EmptyInput.to_string(), "empty_input");
+        assert_eq!(
+            JsonRepairErrorKind::NoJsonCandidate.to_string(),
+            "no_json_candidate",
+        );
+        assert_eq!(JsonRepairErrorKind::ParseFailed.to_string(), "parse_failed");
+    }
+
+    #[test]
+    fn json_repair_error_display_pins_kind_colon_message_template() {
+        let err = JsonRepairError {
+            kind: JsonRepairErrorKind::ParseFailed,
+            message: "unexpected token at offset 7".to_string(),
+            parse_error: Some("trailing garbage".to_string()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "parse_failed: unexpected token at offset 7",
+        );
+    }
 }

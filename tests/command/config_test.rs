@@ -85,6 +85,30 @@ async fn test_cli_config_local_requires_repo() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_system_scope_is_rejected_as_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(&["config", "--system", "list"], temp_path.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--system scope is not supported"),
+        "stderr should describe the unsupported scope, got: {stderr}"
+    );
+    // config.md line 175: classifies as a CLI usage error (exit 2 fine /
+    // 129 coarse). The previous `from_legacy_string` path collapsed this
+    // to a generic failure (exit 128).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--system rejection must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_import_global_from_git() {
     let temp_dir = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
@@ -570,6 +594,97 @@ async fn test_config_add_rejects_implicit_encryption_mixed_with_existing_plainte
 
 #[tokio::test]
 #[serial]
+async fn test_config_set_encrypt_plaintext_mutex_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--encrypt",
+            "--plaintext",
+            "custom.token",
+            "value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--encrypt and --plaintext are mutually exclusive"),
+        "stderr should describe the mutex violation, got: {stderr}"
+    );
+    // config.md line 77: classified as a usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "mutex flag error must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_stdin_with_positional_value_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "set", "--stdin", "custom.token", "value"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot use both value argument and --stdin"),
+        "stderr should describe the --stdin vs positional mutex, got: {stderr}"
+    );
+    // config.md line 144: usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--stdin + positional must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_plaintext_on_vault_internal_key_is_failure() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--plaintext",
+            "vault.env.API_KEY",
+            "secret-value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--plaintext cannot be used with vault internal/secret keys"),
+        "stderr should describe the secret-key plaintext reject, got: {stderr}"
+    );
+    // config.md line 77: validation reject (exit 1 fine / 128 coarse) — must
+    // classify as a runtime Failure (exit 128) rather than the previous
+    // legacy-string fallthrough that produced the same number but with the
+    // internal-invariant stable code.
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "vault internal key plaintext reject must classify as Failure (exit 128), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_set_read_failure_does_not_silently_skip_existing_state_check() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -824,6 +939,61 @@ async fn test_config_generate_ssh_key_replaces_vault_generate_ssh_key_flow() {
     assert_cli_success(&get_output, "config get vault.ssh.origin.pubkey");
     let stdout = String::from_utf8_lossy(&get_output.stdout);
     assert!(stdout.contains("ssh-rsa "), "stdout: {stdout}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "bad.name"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid remote name 'bad.name'"),
+        "stderr should describe the validation failure, got: {stderr}"
+    );
+    // CLI usage errors map to exit code 129 in coarse mode (Cli category →
+    // CliExitCode::Usage). The previous implementation collapsed both the
+    // invalid-name and missing-remote branches into `failure` (exit 128),
+    // which is the wrong category for a user-supplied bad argument.
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid remote name must classify as a CLI usage error (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_ssh_key_rejects_unknown_remote_with_invalid_target_code() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "no-such-remote"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("remote 'no-such-remote' not found"),
+        "stderr should describe the missing remote, got: {stderr}"
+    );
+    // Missing remote is a Fatal failure (exit 128 in coarse mode) — the
+    // user-supplied name passed validation but the resource does not exist
+    // at the time of execution.
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "unknown remote must classify as a fatal failure (exit 128), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
 }
 
 #[tokio::test]

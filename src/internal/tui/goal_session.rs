@@ -392,4 +392,29 @@ mod tests {
         assert!(out.contains("ship feature"));
         assert!(out.contains("Acceptance criteria (0)"));
     }
+
+    #[test]
+    fn goal_session_error_display_pins_each_variant() {
+        assert_eq!(
+            GoalSessionError::NotActive.to_string(),
+            "no active Goal in this session — start one with `/goal start <objective>`",
+        );
+        let invalid = GoalSessionError::InvalidObjective {
+            source: GoalSpecError::EmptyObjective,
+        };
+        assert_eq!(
+            invalid.to_string(),
+            format!(
+                "Goal objective failed validation: {}",
+                GoalSpecError::EmptyObjective,
+            ),
+        );
+        assert_eq!(
+            GoalSessionError::InternalApply {
+                detail: "criterion id duplicate".to_string(),
+            }
+            .to_string(),
+            "internal: Goal session apply rejected envelope: criterion id duplicate",
+        );
+    }
 }

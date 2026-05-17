@@ -3,15 +3,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LOSSY_BRANCH_CALLS: [&str; 8] = [
+/// Patterns that the guard scans for in `src/` to ensure production code
+/// never re-introduces calls to lossy branch-store wrappers. As of v0.17.222
+/// the five lossy wrappers + their `_with_conn` variants have been deleted
+/// from `src/internal/branch.rs`, so any production call to these names is
+/// already a compile error — the guard remains as defense-in-depth that
+/// surfaces a clearer message if a contributor reintroduces the wrappers
+/// and then adds a caller.
+const LOSSY_BRANCH_CALLS: [&str; 10] = [
     "Branch::find_branch(",
     "Branch::list_branches(",
     "Branch::delete_branch(",
     "Branch::exists(",
+    "Branch::search_branch(",
     "InternalBranch::find_branch(",
     "InternalBranch::list_branches(",
     "InternalBranch::delete_branch(",
     "InternalBranch::exists(",
+    "InternalBranch::search_branch(",
 ];
 
 #[test]

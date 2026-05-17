@@ -1044,4 +1044,22 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "fn main() {\n    new();\n}\n");
     }
+
+    #[test]
+    fn apply_patch_error_display_pins_owned_variants_and_io_error_template() {
+        assert_eq!(
+            ApplyPatchError::ComputeReplacements("hunk did not match".to_string()).to_string(),
+            "hunk did not match",
+        );
+
+        let io_err = IoError {
+            context: "I/O error".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "patch.txt missing"),
+        };
+        assert_eq!(io_err.to_string(), "I/O error: patch.txt missing");
+
+        let parse_inner =
+            ApplyPatchError::from(ParseError::InvalidPatchError("missing header".to_string()));
+        assert_eq!(parse_inner.to_string(), "invalid patch: missing header");
+    }
 }

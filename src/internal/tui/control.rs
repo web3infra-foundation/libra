@@ -150,3 +150,44 @@ pub enum CancelSource {
     SlashQuit,
     Automation,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TuiControlError;
+
+    #[test]
+    fn tui_control_error_display_pins_each_variant() {
+        assert_eq!(
+            TuiControlError::Busy.to_string(),
+            "The TUI session is busy and cannot accept a new message",
+        );
+        assert_eq!(
+            TuiControlError::InteractionNotActive.to_string(),
+            "The requested interaction is not currently pending",
+        );
+        assert_eq!(
+            TuiControlError::UnsupportedInteractionKind.to_string(),
+            "This interaction kind cannot be answered by automation",
+        );
+        assert_eq!(
+            TuiControlError::ControllerConflict.to_string(),
+            "The local TUI controller is not reclaimable in this session",
+        );
+        assert_eq!(
+            TuiControlError::Internal("downstream blew up".to_string()).to_string(),
+            "downstream blew up",
+        );
+        assert_eq!(
+            TuiControlError::GoalAlreadyActive.to_string(),
+            "A Goal is already active in this session — cancel it first",
+        );
+        assert_eq!(
+            TuiControlError::GoalNotActive.to_string(),
+            "No Goal is active in this session — call goal.start first",
+        );
+        assert_eq!(
+            TuiControlError::GoalInvalidObjective("empty objective".to_string()).to_string(),
+            "Goal objective failed validation: empty objective",
+        );
+    }
+}

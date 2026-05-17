@@ -182,7 +182,7 @@ Unsynced objects:
 
 ## Structured Output
 
-`--json` and `--machine` are currently supported for `cloud status`.
+`--json` and `--machine` are supported for `cloud status` and `cloud sync`.
 `--json` emits a command envelope and `--machine` emits the same envelope as a
 single NDJSON line.
 
@@ -211,10 +211,77 @@ single NDJSON line.
 When `--verbose` is set, the status payload also includes up to 20
 `unsynced_objects` entries with `oid`, `object_type`, and `size`.
 
-`cloud sync` and `cloud restore` still use their legacy human progress streams on
-success. Their structured success/progress contracts remain follow-up work in
-the command improvement plan; failures are still rendered through Libra's
-standard CLI error machinery.
+`cloud sync --json` / `--machine` emits `cloud.sync` on successful sync runs:
+
+```json
+{
+  "ok": true,
+  "command": "cloud.sync",
+  "data": {
+    "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "project_name": "my-project",
+    "total_unsynced": 42,
+    "synced_count": 42,
+    "failed_count": 0,
+    "metadata": {
+      "status": "synced",
+      "references": 3
+    },
+    "agent_capture": {
+      "status": "completed",
+      "sessions_synced": 2,
+      "sessions_failed": 0,
+      "checkpoints_synced": 6,
+      "checkpoints_failed": 0
+    }
+  }
+}
+```
+
+`cloud restore --json` / `--machine` emits `cloud.restore` on successful restore runs:
+
+```json
+{
+  "ok": true,
+  "command": "cloud.restore",
+  "data": {
+    "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "metadata_only": false,
+    "total_objects": 42,
+    "indexes_restored": 42,
+    "object_restore": {
+      "downloaded": 30,
+      "skipped": 12,
+      "failed": 0
+    },
+    "metadata": {
+      "status": "restored"
+    },
+    "agent_capture": {
+      "status": "restored"
+    }
+  }
+}
+```
+
+For `cloud restore --metadata-only`, the payload keeps `metadata_only: true`
+and omits `object_restore`.
+
+`cloud sync --progress=json` emits NDJSON progress events to stderr (no legacy
+human progress text on stdout). Event names cover object, metadata, and
+agent-capture phases, for example:
+
+```json
+{"event":"cloud_sync.start"}
+{"event":"cloud_sync.objects.total","total":42}
+{"event":"cloud_sync.objects.progress","synced":42,"total":42,"failed":0}
+{"event":"cloud_sync.metadata.synced","references":3}
+{"event":"cloud_sync.agent_capture.complete","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0}
+```
+
+`cloud sync` default mode still uses the legacy human progress output.
+`cloud restore` and `cloud sync` failures continue through Libra's standard CLI
+error machinery.
 
 ## Environment Variables
 

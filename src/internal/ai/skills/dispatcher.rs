@@ -64,3 +64,20 @@ impl std::fmt::Display for SkillDispatchError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SkillDispatchError;
+
+    #[test]
+    fn skill_dispatch_error_display_pins_each_variant() {
+        assert_eq!(
+            SkillDispatchError::MissingName.to_string(),
+            "Usage: /skill <name> [key=value ...]",
+        );
+        assert_eq!(
+            SkillDispatchError::UnknownSkill("review".to_string()).to_string(),
+            "Unknown skill `review`.",
+        );
+    }
+}

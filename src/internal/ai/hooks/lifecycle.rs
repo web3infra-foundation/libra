@@ -727,4 +727,40 @@ mod tests {
         };
         assert!(validate_session_hook_envelope(&envelope, 4096).is_err());
     }
+
+    /// Pins the manual `Display` impl on `LifecycleEventKind`. The
+    /// rendered string is the `kind` field that flows into hook
+    /// dispatcher routing, automation event projections and
+    /// `AuditSink::record_event` payloads. Changing any of these names
+    /// would silently desync downstream consumers from the canonical
+    /// kind they match against.
+    #[test]
+    fn lifecycle_event_kind_display_pins_each_variant() {
+        assert_eq!(
+            LifecycleEventKind::SessionStart.to_string(),
+            "session_start",
+        );
+        assert_eq!(LifecycleEventKind::TurnStart.to_string(), "turn_start");
+        assert_eq!(LifecycleEventKind::ToolUse.to_string(), "tool_use");
+        assert_eq!(LifecycleEventKind::ModelUpdate.to_string(), "model_update",);
+        assert_eq!(LifecycleEventKind::Compaction.to_string(), "compaction");
+        assert_eq!(
+            LifecycleEventKind::CompactionCompleted.to_string(),
+            "compaction_completed",
+        );
+        assert_eq!(
+            LifecycleEventKind::PermissionRequest.to_string(),
+            "permission_request",
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceEnabled.to_string(),
+            "source_enabled",
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceDisabled.to_string(),
+            "source_disabled",
+        );
+        assert_eq!(LifecycleEventKind::TurnEnd.to_string(), "turn_end");
+        assert_eq!(LifecycleEventKind::SessionEnd.to_string(), "session_end");
+    }
 }

@@ -356,10 +356,25 @@ impl Event for MemoryAnchorEvent {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryAnchorReplay {
     anchors: BTreeMap<Uuid, MemoryAnchor>,
+    /// Last applied `recorded_at` per anchor — used to reject replays that
+    /// would roll the projection backwards (e.g. duplicated events delivered
+    /// out of order on retry, or a malicious / buggy writer emitting an
+    /// older snapshot after a newer one). Earlier-or-equal `recorded_at`
+    /// values are skipped so the projection only moves forward in session
+    /// time.
+    last_applied: BTreeMap<Uuid, DateTime<Utc>>,
 }
 
 impl MemoryAnchorReplay {
     pub fn apply_event(&mut self, event: MemoryAnchorEvent) {
+        if let Some(previous_recorded_at) = self.last_applied.get(&event.anchor_id)
+            && event.recorded_at <= *previous_recorded_at
+        {
+            // Stale or duplicated event — ignoring keeps the projection
+            // monotonic in session time.
+            return;
+        }
+        self.last_applied.insert(event.anchor_id, event.recorded_at);
         self.anchors
             .insert(event.anchor_id, MemoryAnchor::from_event(&event));
     }
@@ -465,4 +480,90 @@ pub fn build_memory_anchor_prompt_section(
     }
 
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MemoryAnchorConfidence, MemoryAnchorKind, MemoryAnchorLookupError, MemoryAnchorReviewState,
+        MemoryAnchorScope,
+    };
+
+    #[test]
+    fn memory_anchor_lookup_error_display_pins_each_variant() {
+        assert_eq!(
+            MemoryAnchorLookupError::EmptyPrefix.to_string(),
+            "missing memory anchor id prefix",
+        );
+        assert_eq!(
+            MemoryAnchorLookupError::NotFound("abc".to_string()).to_string(),
+            "no memory anchor matches `abc`",
+        );
+        assert_eq!(
+            MemoryAnchorLookupError::Ambiguous("ab".to_string()).to_string(),
+            "memory anchor prefix `ab` is ambiguous",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `MemoryAnchorKind`. The
+    /// rendered string is also the `serde(rename_all = "snake_case")`
+    /// tag, but the Display path is independent — it shows up in
+    /// memory anchor JSONL audit lines and `/anchors` TUI output.
+    #[test]
+    fn memory_anchor_kind_display_pins_each_variant() {
+        assert_eq!(
+            MemoryAnchorKind::UserConstraint.to_string(),
+            "user_constraint",
+        );
+        assert_eq!(
+            MemoryAnchorKind::ProjectInvariant.to_string(),
+            "project_invariant",
+        );
+        assert_eq!(
+            MemoryAnchorKind::ArchitectureDecision.to_string(),
+            "architecture_decision",
+        );
+        assert_eq!(
+            MemoryAnchorKind::VerifiedFinding.to_string(),
+            "verified_finding",
+        );
+        assert_eq!(
+            MemoryAnchorKind::LongRunningTodo.to_string(),
+            "long_running_todo",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `MemoryAnchorScope`. Used in
+    /// anchor scope filters and the TUI scope badge.
+    #[test]
+    fn memory_anchor_scope_display_pins_each_variant() {
+        assert_eq!(MemoryAnchorScope::Session.to_string(), "session");
+        assert_eq!(MemoryAnchorScope::AgentRun.to_string(), "agent_run");
+        assert_eq!(MemoryAnchorScope::Project.to_string(), "project");
+    }
+
+    /// Pins the manual `Display` impl on `MemoryAnchorConfidence`. The
+    /// rendered string is used in anchor draft-time telemetry and in
+    /// the `/anchors confidence=<value>` filter parsing.
+    #[test]
+    fn memory_anchor_confidence_display_pins_each_variant() {
+        assert_eq!(MemoryAnchorConfidence::Low.to_string(), "low");
+        assert_eq!(MemoryAnchorConfidence::Medium.to_string(), "medium");
+        assert_eq!(MemoryAnchorConfidence::High.to_string(), "high");
+    }
+
+    /// Pins the manual `Display` impl on `MemoryAnchorReviewState`.
+    /// The state label gates prompt inclusion: only `confirmed`
+    /// anchors enter the live prompt; `draft` / `revoked` /
+    /// `superseded` ones are filtered out at projection time.
+    #[test]
+    fn memory_anchor_review_state_display_pins_each_variant() {
+        assert_eq!(MemoryAnchorReviewState::Draft.to_string(), "draft");
+        assert_eq!(MemoryAnchorReviewState::Confirmed.to_string(), "confirmed",);
+        assert_eq!(MemoryAnchorReviewState::Revoked.to_string(), "revoked");
+        assert_eq!(
+            MemoryAnchorReviewState::Superseded.to_string(),
+            "superseded",
+        );
+    }
 }

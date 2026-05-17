@@ -125,6 +125,109 @@ async fn test_rebase_json_abort_outputs_restored_branch() {
     );
 }
 
+#[test]
+fn test_rebase_machine_no_state_subcommands_return_repo_state_code() {
+    let repo = create_committed_repo_via_cli();
+
+    for flag in ["--continue", "--abort", "--skip"] {
+        let output = run_libra_command(&["--machine", "rebase", flag], repo.path());
+        assert_eq!(output.status.code(), Some(128), "flag: {flag}");
+        assert!(
+            output.stdout.is_empty(),
+            "expected empty stdout for {flag}, got: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-REPO-003", "flag: {flag}");
+        assert_eq!(report.category, "repo", "flag: {flag}");
+        assert_eq!(report.exit_code, 128, "flag: {flag}");
+        assert_eq!(report.message, "no rebase in progress", "flag: {flag}");
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.contains(&format!("cannot {flag}"))),
+            "expected hint for {flag}, got {:?}",
+            report.hints
+        );
+    }
+}
+
+#[test]
+fn test_rebase_machine_abort_outputs_restored_branch() {
+    use libra::{command::rebase::RebaseState, internal::head::Head};
+
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+    let _guard = ChangeDirGuard::new(repo_path);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("committed repo should have HEAD");
+
+    runtime
+        .block_on(async {
+            RebaseState {
+                head_name: "main".to_string(),
+                onto: head,
+                orig_head: head,
+                todo: VecDeque::new(),
+                done: Vec::new(),
+                stopped_sha: None,
+                current_head: head,
+            }
+            .save()
+            .await
+        })
+        .expect("failed to save rebase state");
+
+    let output = run_libra_command(&["--machine", "rebase", "--abort"], repo_path);
+    assert_cli_success(&output, "machine rebase abort");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "abort");
+    assert_eq!(json["data"]["branch"], "main");
+    assert_eq!(json["data"]["commit"], head.to_string());
+    assert_eq!(json["data"]["previous_commit"], head.to_string());
+    assert_eq!(json["data"]["restored"], true);
+    assert!(output.stderr.is_empty());
+    assert!(
+        !runtime
+            .block_on(RebaseState::is_in_progress())
+            .expect("failed to query rebase state")
+    );
+}
+
+#[test]
+fn test_rebase_machine_continue_outputs_completed_result() {
+    let repo = create_cli_rebase_conflict_repo();
+
+    fs::write(repo.path().join("conflict.txt"), "merged\n").expect("failed to resolve conflict");
+    let output = run_libra_command(&["add", "conflict.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage resolved conflict");
+
+    let output = run_libra_command(&["--machine", "rebase", "--continue"], repo.path());
+    assert_cli_success(&output, "machine rebase continue");
+    assert!(output.stderr.is_empty());
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "rebase");
+    assert_eq!(json["data"]["action"], "continue");
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["applied_commits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["data"]["applied_commits"][0]["subject"],
+        "Feature modifies conflict.txt"
+    );
+    assert!(json["data"]["commit"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["previous_commit"].as_str().unwrap().len() >= 7);
+}
+
 fn commit_file_via_cli(repo: &Path, path: &str, contents: &str, message: &str) {
     fs::write(repo.join(path), contents).expect("failed to write test file");
 
@@ -172,13 +275,9 @@ fn create_cli_rebase_conflict_repo() -> tempfile::TempDir {
     let repo_path = repo.path();
 
     let output = run_libra_command(&["rebase", "main"], repo_path);
+    assert_eq!(output.status.code(), Some(128));
     assert!(
-        output.status.success(),
-        "legacy rebase start should preserve its current process status: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("CONFLICT"),
+        String::from_utf8_lossy(&output.stderr).contains("conflict.txt"),
         "expected conflict setup to stop rebase, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -245,6 +344,66 @@ fn create_cli_rebase_ahead_repo() -> tempfile::TempDir {
 }
 
 #[test]
+fn test_rebase_human_start_uses_structured_runner_output() {
+    let repo = create_cli_rebase_success_repo();
+
+    let output = run_libra_command(&["rebase", "main"], repo.path());
+    assert_cli_success(&output, "human rebase start");
+    assert!(output.stderr.is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Found common ancestor:"),
+        "expected common ancestor progress, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Rebasing 1 commits from `feature` onto `main`..."),
+        "expected replay progress, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Applied:") && stdout.contains("Feature adds file"),
+        "expected applied commit summary, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Successfully rebased branch 'feature' onto"),
+        "expected final success message, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_rebase_human_start_conflict_returns_structured_failure() {
+    let repo = create_cli_rebase_conflict_ready_repo();
+
+    let output = run_libra_command(&["rebase", "main"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        output.stdout.is_empty(),
+        "expected empty stdout on conflict, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("fatal: rebase stopped while applying"),
+        "unexpected stderr: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
+    assert_eq!(report.category, "conflict");
+    assert_eq!(report.details["paths"][0], "conflict.txt");
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint.contains("conflict.txt")),
+        "expected conflicted path hint, got {:?}",
+        report.hints
+    );
+
+    let abort = run_libra_command(&["rebase", "--abort"], repo.path());
+    assert_cli_success(&abort, "abort after human rebase conflict");
+}
+
+#[test]
 fn test_rebase_json_start_outputs_completed_result() {
     let repo = create_cli_rebase_success_repo();
 
@@ -257,7 +416,9 @@ fn test_rebase_json_start_outputs_completed_result() {
     assert_eq!(json["data"]["action"], "start");
     assert_eq!(json["data"]["status"], "completed");
     assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["upstream"], "main");
     assert_eq!(json["data"]["remaining"], 0);
+    assert_eq!(json["data"]["replay_count"], 1);
     assert_eq!(json["data"]["applied_commits"].as_array().unwrap().len(), 1);
     assert_eq!(
         json["data"]["applied_commits"][0]["subject"],
@@ -265,6 +426,7 @@ fn test_rebase_json_start_outputs_completed_result() {
     );
     assert!(json["data"]["commit"].as_str().unwrap().len() >= 7);
     assert!(json["data"]["onto"].as_str().unwrap().len() >= 7);
+    assert!(json["data"]["common_ancestor"].as_str().unwrap().len() >= 7);
     assert!(json["data"]["previous_commit"].as_str().unwrap().len() >= 7);
 }
 
@@ -1182,8 +1344,11 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         rebased_head, orig_head,
         "rebase should rewrite the feature tip"
     );
-    let branch_after_rebase = Branch::find_branch("feature", None)
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "feature branch should exist".
+    let branch_after_rebase = Branch::find_branch_result("feature", None)
         .await
+        .expect("failed to query feature branch")
         .expect("feature branch should exist");
     assert_eq!(branch_after_rebase.commit, rebased_head);
 
@@ -1216,8 +1381,10 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     })
     .await;
 
-    let branch_after_abort = Branch::find_branch("feature", None)
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    let branch_after_abort = Branch::find_branch_result("feature", None)
         .await
+        .expect("failed to query feature branch after abort")
         .expect("feature branch should exist");
     assert_eq!(
         branch_after_abort.commit, orig_head,

@@ -987,3 +987,58 @@ fn get_index_deleted_files_in_filters_typed(
     }
     Ok(deleted)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`RestoreError`].
+    /// These strings are used as the `CliError` message via the
+    /// `From<RestoreError> for CliError` mapping and surface in both
+    /// human and `--json` envelopes for `restore` and the
+    /// checkout-from-commit phase of `clone` / `switch`.
+    ///
+    /// Every variant carries either a static message or an explicit
+    /// `{0}` field interpolation; none wrap an upstream source error,
+    /// so all variants are pinned.
+    #[test]
+    fn restore_error_display_pins_each_variant() {
+        assert_eq!(
+            RestoreError::ResolveSource.to_string(),
+            "failed to resolve checkout source",
+        );
+        assert_eq!(
+            RestoreError::ReferenceNotCommit.to_string(),
+            "reference is not a commit",
+        );
+        assert_eq!(
+            RestoreError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
+            "pathspec 'src/missing.rs' did not match any files",
+        );
+        assert_eq!(RestoreError::ReadIndex.to_string(), "failed to read index");
+        assert_eq!(
+            RestoreError::ReadObject.to_string(),
+            "failed to read object",
+        );
+        assert_eq!(
+            RestoreError::ReadWorktree.to_string(),
+            "failed to read worktree",
+        );
+        assert_eq!(
+            RestoreError::InvalidPathEncoding.to_string(),
+            "invalid path encoding",
+        );
+        assert_eq!(
+            RestoreError::WriteWorktree.to_string(),
+            "failed to write worktree file",
+        );
+        assert_eq!(
+            RestoreError::LfsDownload.to_string(),
+            "failed to download LFS content",
+        );
+        assert_eq!(
+            RestoreError::LockedSource("intent".to_string()).to_string(),
+            "refusing to restore from locked branch 'intent'",
+        );
+    }
+}

@@ -422,6 +422,31 @@ impl ApprovalStore {
         self.map.remove(key).is_some()
     }
 
+    /// Remove every per-command approval whose cache key starts with `prefix`.
+    /// Returns the number of entries removed. Closes the audit follow-up (a)
+    /// where `/approvals revoke <scope>` could only revoke an exact-match key,
+    /// leaving approvals stored under `<scope>::<command>` shaped keys
+    /// stranded until the session ended.
+    ///
+    /// `revoke_by_prefix("")` is a no-op (returns 0) so callers cannot
+    /// accidentally clear the whole store with a missing argument.
+    pub fn revoke_by_prefix(&mut self, prefix: &str) -> usize {
+        if prefix.is_empty() {
+            return 0;
+        }
+        let matching: Vec<String> = self
+            .map
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect();
+        let removed = matching.len();
+        for key in matching {
+            self.map.remove(&key);
+        }
+        removed
+    }
+
     /// Drop the broad "approve every command in this scope" decision so the
     /// next matching command falls back to the regular prompt path. Returns
     /// `true` if a record was removed. Without this, an `ApprovedForAllCommands`
@@ -1833,6 +1858,34 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+
+    #[test]
+    fn approval_store_revoke_by_prefix_removes_matching_keys() {
+        let mut store = ApprovalStore::default();
+        store.put("shell::ls".to_string(), ReviewDecision::ApprovedForSession);
+        store.put("shell::cat".to_string(), ReviewDecision::ApprovedForSession);
+        store.put(
+            "git::status".to_string(),
+            ReviewDecision::ApprovedForSession,
+        );
+
+        let removed = store.revoke_by_prefix("shell::");
+        assert_eq!(removed, 2, "both shell:: keys should be revoked");
+
+        // Surviving entry is untouched.
+        assert!(store.get("git::status").is_some());
+        // Both removed keys are gone.
+        assert!(store.get("shell::ls").is_none());
+        assert!(store.get("shell::cat").is_none());
+
+        // Idempotent: re-running with the same prefix is a no-op.
+        assert_eq!(store.revoke_by_prefix("shell::"), 0);
+
+        // Empty prefix never removes anything (guard against accidental
+        // whole-store wipeouts when the caller forgot to pass a value).
+        assert_eq!(store.revoke_by_prefix(""), 0);
+        assert!(store.get("git::status").is_some());
+    }
 
     #[test]
     fn sandbox_enforcement_env_defaults_to_best_effort() {

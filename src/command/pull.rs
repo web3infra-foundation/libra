@@ -499,4 +499,38 @@ mod tests {
 
         assert_eq!(cli.stable_code(), StableErrorCode::AuthPermissionDenied);
     }
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`PullError`]. These strings are used as the
+    /// `CliError` message via `From<PullError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    ///
+    /// Source-chained variants (Fetch, Merge) wrap upstream
+    /// FetchError / PullMergeError types and are intentionally
+    /// skipped — their `{0}` slot is owned by the wrapped error.
+    #[test]
+    fn pull_error_display_pins_static_message_variants() {
+        assert_eq!(
+            PullError::NotOnBranch.to_string(),
+            "you are not currently on a branch",
+        );
+        assert_eq!(
+            PullError::NoTrackingInfo {
+                branch: "main".to_string(),
+            }
+            .to_string(),
+            "there is no tracking information for the current branch",
+        );
+        assert_eq!(
+            PullError::RemoteNotFound("origin".to_string()).to_string(),
+            "remote 'origin' not found",
+        );
+        assert_eq!(
+            PullError::ManualMergeRequired {
+                upstream: "origin/main".to_string(),
+            }
+            .to_string(),
+            "pull requires a non-fast-forward merge from 'origin/main', which is not yet supported",
+        );
+    }
 }

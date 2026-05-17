@@ -1,8 +1,8 @@
 # Cloud 命令改进详细计划
 
-> 最后编写时间：2026-05-15
+> 最后编写时间：2026-05-16
 
-本文记录第 33 批中 `cloud` 的当前落地状态。`cloud` 同时包含本地状态查询和远端 D1/R2 写入/恢复流程；本轮先收口完全离线可验证的 `cloud status` 输出契约，不改变远端同步/恢复行为。
+本文记录第 33 批中 `cloud` 的当前落地状态。`cloud` 同时包含本地状态查询和远端 D1/R2 写入/恢复流程；`cloud status` / `cloud sync` / `cloud restore` 的执行路径已完成 typed error 与 structured 输出的收口。
 
 ## 当前已落地
 
@@ -12,17 +12,20 @@
 - `cloud status --verbose` 的结构化输出补充最多 20 个 `unsynced_objects`，字段为 `oid`、`object_type`、`size`。
 - status 路径的本地 object index 查询失败映射到 `LBR-IO-001`。
 - CLI 回归测试覆盖空仓库的 JSON 与 machine 输出，且不依赖 Cloudflare 凭据。
+- `cloud sync` 在 `--json` / `--machine` / `--quiet` 路径下改为 silent runner（`run_cloud_sync()` + `SilentCloudSyncProgress`），不再泄露 legacy human progress。
+- `cloud sync --json` / `--machine` 成功路径新增 `cloud.sync` envelope，payload 包含 `repo_id`、`project_name`、`total_unsynced`、`synced_count`、`failed_count`、`metadata`、`agent_capture`。
+- `cloud sync` 在 structured/quiet 路径仍保留原有失败语义：有 failed objects 时返回错误退出码，不输出成功 envelope。
+- `cloud sync --progress=json` 新增 `cloud_sync.*` 事件流（objects / metadata / agent_capture 三阶段），事件写入 stderr，且不再混入 legacy stdout progress。
+- CLI 回归测试覆盖 `cloud sync --json --progress=json` 与 `cloud sync --progress=json` 失败前置校验路径，验证存在 `cloud_sync.start` 事件并且无 `Starting cloud sync...` human 文本。
+- `cloud restore` 在 `--json` / `--machine` / `--quiet` 路径下接入 `run_cloud_restore()`，成功路径输出 `cloud.restore` envelope（metadata-only、对象恢复统计、metadata/agent-capture status）。
+- `cloud restore` 的 structured 路径已静默 worktree/agent-capture human stdout（保留 stderr warning），避免污染 JSON stdout。
+- `cloud_cli_error()` 已新增分类映射：缺失云端配置 → `LBR-AUTH-001`、repo-name not found → `LBR-CLI-003`、D1 失败 → `LBR-NET-002`、对象恢复/同步失败 → `LBR-CONFLICT-002`。
+- `cloud_cli_error()` 已落地 `CloudError` typed enum（`MissingEnv` / `NameAlreadyTaken` / `NameNotFound` / `PartialTransfer` / `D1` / `R2` / `Generic`），集中 String → `StableErrorCode` 的分类映射；由 `cloud_error_classifies_each_failure_shape` + `cloud_error_into_cli_error_attaches_stable_codes` 单测锁定。底层 helper 已切换到 `CloudResult<T>`（`CloudError`），并在执行路径上通过 `cloud_cli_error_typed` 进行稳定代码收口（`cloud status` 也已接入 typed 路径）。
 
 ## 当前未完成
 
-- `cloud sync` / `cloud restore` 成功路径仍使用 legacy human progress 输出。
-- `cloud sync` 的 object / metadata / agent-capture progress 还没有 JSON progress event 契约。
-- `cloud restore` 的 D1/R2 成功摘要、metadata-only 摘要和 agent-capture restore 摘要还没有统一结构化 schema。
-- 远端 D1/R2 错误目前仍多以字符串形式进入 `cloud_cli_error()`，尚未拆成 typed `CloudError`。
+- 本轮 `cloud` 改造已闭环：底层 helper 已全部切到 `CloudError` 返回；`cloud status` 与 `cloud sync`/`cloud restore` 的分类收口与 structured 输出路径已与执行器对齐；当前无本计划待收口条目。
 
 ## 后续切片建议
 
-1. 为 `cloud sync --json` 建立 quiet progress adapter，直接复用 `CloudSyncReport` 输出成功 schema。
-2. 为 `cloud sync --progress=json` 定义 object / metadata / agent-capture progress event，并验证 JSON 模式不混入 human stdout。
-3. 抽 `CloudError` typed enum，覆盖 env 缺失、D1、R2、repo-name 冲突、metadata 和 agent-capture 错误映射。
-4. 为 `cloud restore --metadata-only --json` 建立最小成功 schema，再扩展 full restore 和 agent-capture restore 摘要。
+暂无；本轮 `cloud` 改造已收口。

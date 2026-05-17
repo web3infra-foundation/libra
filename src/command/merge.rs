@@ -360,3 +360,72 @@ fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, ObjectHash>, Pu
     })?;
     Ok(tree.get_plain_items().into_iter().collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`PullMergeError`]
+    /// (also exposed as `MergeError`). These strings are used as the
+    /// CliError message via `From<PullMergeError> for CliError` and
+    /// surface in both human and `--json` envelopes for `merge` and
+    /// the merge phase of `pull`.
+    #[test]
+    fn pull_merge_error_display_pins_each_variant() {
+        assert_eq!(
+            PullMergeError::InvalidTarget("a/b".to_string()).to_string(),
+            "a/b - not something we can merge",
+        );
+        assert_eq!(
+            PullMergeError::TargetLoad {
+                commit_id: "deadbeef".to_string(),
+                detail: "object not found".to_string(),
+            }
+            .to_string(),
+            "failed to load merge target 'deadbeef': object not found",
+        );
+        assert_eq!(
+            PullMergeError::CurrentLoad {
+                commit_id: "feedface".to_string(),
+                detail: "io error".to_string(),
+            }
+            .to_string(),
+            "failed to load current commit 'feedface': io error",
+        );
+        assert_eq!(
+            PullMergeError::History("walk failed".to_string()).to_string(),
+            "failed to inspect merge history: walk failed",
+        );
+        assert_eq!(
+            PullMergeError::UnrelatedHistories.to_string(),
+            "refusing to merge unrelated histories",
+        );
+        assert_eq!(
+            PullMergeError::ManualMergeRequired {
+                upstream: "origin/main".to_string(),
+            }
+            .to_string(),
+            "non-fast-forward merge from 'origin/main' requires manual merge",
+        );
+        assert_eq!(
+            PullMergeError::TreeLoad {
+                tree_id: "abc123".to_string(),
+                detail: "decode failed".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'abc123': decode failed",
+        );
+        assert_eq!(
+            PullMergeError::HeadResolve("db locked".to_string()).to_string(),
+            "failed to resolve HEAD state: db locked",
+        );
+        assert_eq!(
+            PullMergeError::HeadUpdate("write failed".to_string()).to_string(),
+            "failed to update HEAD during merge: write failed",
+        );
+        assert_eq!(
+            PullMergeError::Restore("checkout failed".to_string()).to_string(),
+            "failed to restore working tree after merge: checkout failed",
+        );
+    }
+}

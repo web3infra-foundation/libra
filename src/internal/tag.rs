@@ -337,3 +337,39 @@ pub async fn load_object_trait(hash: &ObjectHash) -> Result<TagObject, GitError>
         _ => Err(GitError::ObjectNotFound(hash.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format contract for [`CreateTagError`]. The
+    /// strings are produced via `thiserror` `#[error(...)]` attributes
+    /// and surface in the `tag` CLI command's human + `--json` output
+    /// envelope. Future refactors that touch the `#[error(...)]`
+    /// attributes will trip this test.
+    #[test]
+    fn create_tag_error_display_pins_each_variant() {
+        // Static-message variants (the source-chained ones below cover
+        // the `{0}` interpolation slot).
+        assert_eq!(
+            CreateTagError::HeadUnborn.to_string(),
+            "Cannot create tag: HEAD does not point to a commit",
+        );
+        assert_eq!(
+            CreateTagError::AlreadyExists("v1.0.0".to_string()).to_string(),
+            "Tag 'v1.0.0' already exists",
+        );
+
+        // Source-chained variants: only assert the surface prefix; the
+        // `{0}` portion forwards to the source error's Display, which
+        // is owned by the upstream crate or by another pinned test
+        // (BranchStoreError in v0.17.272).
+        let resolve = CreateTagError::ResolveHead(BranchStoreError::NotFound("main".to_string()));
+        assert!(
+            resolve
+                .to_string()
+                .starts_with("failed to resolve HEAD commit: "),
+            "unexpected: {resolve}",
+        );
+    }
+}

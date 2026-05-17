@@ -208,6 +208,31 @@ fn json_status_no_stash_entries_field_by_default() {
     );
 }
 
+#[test]
+fn json_status_stash_entries_present_with_show_stash_even_when_zero() {
+    // docs/commands/status.md promises that `stash_entries` is present iff
+    // `--show-stash` is passed, and may legitimately be `0`. Pinning the
+    // opt-in semantics here so a regression cannot silently couple the
+    // field's presence to "at least one stash exists".
+    let repo = create_committed_repo();
+
+    let output = run_libra_command(&["--json", "status", "--show-stash"], repo.path());
+    assert_cli_success(&output, "json status --show-stash");
+
+    let parsed = parse_json_stdout(&output);
+    let data = &parsed["data"];
+    let data_obj = data.as_object().expect("data should be a JSON object");
+    assert!(
+        data_obj.contains_key("stash_entries"),
+        "stash_entries key should be present with --show-stash, got: {data}"
+    );
+    assert_eq!(
+        data["stash_entries"], 0,
+        "fresh repo should report zero stash entries, got: {}",
+        data["stash_entries"]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // No commits yet
 // ---------------------------------------------------------------------------

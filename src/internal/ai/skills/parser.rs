@@ -156,3 +156,28 @@ pub fn render_skill_metadata_json(skill: &SkillDefinition) -> Value {
     );
     Value::Object(object)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SkillParseError;
+
+    #[test]
+    fn skill_parse_error_display_pins_each_variant() {
+        assert_eq!(
+            SkillParseError::MissingFrontmatter.to_string(),
+            "skill is missing TOML frontmatter",
+        );
+        assert_eq!(
+            SkillParseError::UnterminatedFrontmatter.to_string(),
+            "skill frontmatter is missing closing --- fence",
+        );
+        assert_eq!(
+            SkillParseError::InvalidToml("expected `=` after key".to_string()).to_string(),
+            "skill frontmatter is invalid TOML: expected `=` after key",
+        );
+        assert_eq!(
+            SkillParseError::MissingName.to_string(),
+            "skill frontmatter must include `name`",
+        );
+    }
+}

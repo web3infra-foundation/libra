@@ -28,7 +28,7 @@
 - **链接事实**：相对链接必须指向现存文件；已合并或删除的旧计划（例如原 `code.md` / `tui.md`）必须改指向 [agent.md](agent.md) 的对应 Part。
 - **占位事实**：可执行脚本、CI 命令、迁移版本、baseline commit、GitHub required-check 名称不得以 placeholder 形式进入可落地步骤。确实需要未来值时，该步骤必须 fail-fast 并把“需要维护者填值”列为阻塞验收项。
 - **验收事实**：每个计划必须有可运行的验证命令、涉及文件、风险/非目标边界；涉及安全、迁移、数据写入、外部 API 或兼容 surface 的计划还必须有负向测试和 rollback/cleanup 说明。
-- **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。
+- **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。已完成生产 unwrap 审计的文件由 `tests/compat/*_production_unwrap_guard.rs` 防御性保护：单独 guard 覆盖 `src/internal/protocol/lfs_client.rs`（v0.17.260）、`src/internal/config.rs`（v0.17.261）、`src/internal/head.rs`（v0.17.262）、`src/utils/util.rs` 与 `src/utils/client_storage.rs`（v0.17.264）；合并 guard `compat_extra_production_unwrap_guard`（v0.17.266）覆盖 `src/utils/lfs.rs`、`src/utils/object.rs`、`src/utils/storage/local.rs`、`src/utils/storage/tiered.rs`、`src/utils/path_ext.rs`、`src/git_protocol.rs`、`src/lfs_structs.rs`、`src/command/reflog.rs`；最后 `compat_all_production_unwrap_guard`（v0.17.268）作为兜底守卫遍历整个 `src/` 树（410 个 `.rs` 文件），任何新增 bare `.unwrap()` 都会被它捕获。新增生产 `.unwrap()` 会让对应 guard 测试失败，且失败消息会指向 `.expect("INVARIANT: ...")` 或 typed-error sibling 作为修复路径。
 
 **循环退出条件：**
 
@@ -94,7 +94,7 @@
 | **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地；第 30 批补充结构化输出 | 已完成 `SwitchError` 变体匹配适配、`--help` EXAMPLES、`CheckoutOutput`、JSON/machine 成功路径与 checkout-owned stable code；剩余 `CheckoutError` typed enum 另行处理（详见 [checkout.md](checkout.md)） |
 | **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
 | **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
-| **12** | `branch` | 主改造已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪 | 继续把旧调用点迁移到 `internal::branch::*_result` fallible API，减少 legacy best-effort 查询路径（详见 [branch.md](branch.md)） |
+| **12** | `branch` | ✅ 已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪；v0.17.211 → v0.17.217 已把 `tests/command/*` 全部迁到 `*_result` 并删除 8 个 lossy wrapper（详见 [branch.md](branch.md)） | 后续仅维护回归测试和文档同步 |
 
 **理由：** 这些命令改变仓库状态，必须告知用户发生了什么。`checkout` 的兼容收口随 `switch` 一起落地，因为 `switch` 的 `ensure_clean_status()` 签名变更强制要求 `checkout` 同步适配。
 
@@ -184,10 +184,10 @@
 
 | 顺序 | 命令 | 当前状态 | 后续重点 |
 |------|------|--------|--------|
-| **30** | `reflog` / `checkout` | 部分落地：`reflog show/delete/exists` 已有 JSON/machine 成功路径、裸分支解析与显式错误码；`checkout` 已有 `CheckoutOutput`、JSON/machine 成功路径、render split 与 checkout-owned stable code | 剩余 `CheckoutError` typed enum 与更细 remote/pull 代理错误分层 |
+| **30** | `reflog` / `checkout` | ✅ 已落地（checkout 完整收口于 v0.17.372）：`reflog show/delete/exists` 已有 JSON/machine 成功路径、裸分支解析与显式错误码；`checkout` 已有 `CheckoutOutput`、JSON/machine 成功路径、render split、checkout-owned stable code，并补齐完整 `CheckoutError` typed enum（含 `SwitchingToBranchBlocked` / `BranchNotFound` / `PathSpecNotMatched` / `RemoteHeadMissing` / `RemoteSyncFailed { stage, source }` 五个新变体）与 `get_remote()` 内 `set_upstream` / `pull` 代理调用的 `RemoteSyncFailed` 细分层 | 后续仅维护回归测试和文档同步 |
 | **31** | `mv` / `rm` / `worktree` | ✅ 已落地：`mv` / `rm` / worktree 成功路径、非 FUSE worktree 错误路径、FUSE `umount` 成功路径均已有 JSON/machine；后续仅保留 FUSE mount 管理的更细错误码扩展 | destructive 路径的结果模型、显式错误码、确认消息 |
-| **32** | `merge` / `rebase` | 部分落地：[`merge`](merge.md) 已有 `run_merge()` / `render_merge_output()`、fast-forward / already-up-to-date / remote ref JSON/machine、non-fast-forward JSON error envelope 和显式错误码；[`rebase`](rebase.md) 已同步当前 human 输出文档、移除路径处理生产 `unwrap()`，显式化 no-state JSON 错误码，并落地 start / `--abort` / `--continue` / `--skip` 成功 JSON/machine 与 unresolved-conflict typed error | rebase human start path、replay/conflict-stop 细分 typed error；merge 后续仅做兼容 additive 扩展 |
-| **33** | `lfs` / `cloud` | 部分落地：[`lfs`](lfs.md) 已有 `run_lfs()` / `render_lfs_output()`、成功 JSON/machine 和本地路径无 panic 输出收口；[`cloud`](cloud.md) 已有 `cloud status` JSON/machine 与本地查询错误码 | cloud sync/restore JSON progress 契约、lfs 远端 lock API mock 覆盖与网络/权限错误分层 |
+| **32** | `merge` / `rebase` | 部分落地：[`merge`](merge.md) 已有 `run_merge()` / `render_merge_output()`、fast-forward / already-up-to-date / remote ref JSON/machine、non-fast-forward JSON error envelope 和显式错误码；[`rebase`](rebase.md) 已同步当前 human 输出文档、移除路径处理生产 `unwrap()`，显式化 no-state JSON 错误码，并落地 start / `--abort` / `--continue` / `--skip` 成功 JSON/machine、human start 共享 runner、unresolved-conflict typed error；v0.17.190 引入 `ReplayErrorKind`（14 变体，4 个独立稳定错误码），把 replay 内部失败与真实合并冲突分离 | merge 后续仅做兼容 additive 扩展；rebase 仅剩 legacy `execute()` 测试入口收口 |
+| **33** | `lfs` / `cloud` | 部分落地：[`lfs`](lfs.md) 已有 `run_lfs()` / `render_lfs_output()`、成功 JSON/machine、本地路径无 panic 输出收口，`get_locks()` typed network/protocol error 映射，client + CLI 两层 mock 测试（v0.17.190 / v0.17.191）覆盖 locks/lock/unlock 成功 + 403/409 错误码，`ls-files --json` 增加 `full_oid` 字段（v0.17.207），batch protocol 合约回归覆盖 `push_object` 错误对象数（v0.17.232）/ `download_object` 缺 `download` action（v0.17.233）/ `upload_object` 缺 `upload` action（v0.17.234），均返回 typed 错误并携带 oid，v0.17.237 / v0.17.254-258 把 `lfs_client.rs` 全部生产 `.unwrap()` 迁移到 INVARIANT-documented `.expect("...")`（`from_url` trait 实现、`lock`/`unlock`/`verify_locks`/`get_locks`/`upload_object` retry loop 与 URL join 均覆盖，panic 消息指明被破坏契约）；[`cloud`](cloud.md) 已有 `cloud status` JSON/machine、本地查询错误码，`cloud sync --json/--machine/--quiet` silent runner + 成功 schema + `--progress=json` 事件流，`cloud restore --json/--machine/--quiet` 成功 schema，v0.17.208 引入 `CloudError` typed enum 集中 String→StableErrorCode 分类 | cloud 底层 helper 仍 `Result<_, String>`，下一步迁到 `Result<_, CloudError>` 让 enum 成为分类源头而非 CLI 边界重分类 |
 
 **不纳入命令级批次改进的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
@@ -202,10 +202,10 @@
 | **A** | 退出码三级模型统一对齐（0/128/129） | 与各命令改进同步进行 |
 | **B** | 每个子命令 --help 添加 EXAMPLES 段 | 与各命令改进同步进行 |
 | **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
-| **D** | log/diff/blame/show TTY 下使用 pager | 独立改进 |
+| **D** | log/diff/blame/show TTY 下使用 pager | ✅ 已落地：`log` / `diff` / `blame` / `show` human 输出均走共享 `Pager::with_config()`；`--json` / `--machine` / `--quiet` / `--no-pager` 保持不初始化 pager |
 | **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
 | **F** | 拼写纠错建议（确认 clap suggest 已启用） | ✅ 已落地：clap fuzzy suggestion 已启用，并由 `cli::tests::clap_fuzzy_suggests_similar_command` 覆盖 `initt -> init` |
-| **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
+| **G** | 意外错误时输出 GitHub Issues URL | ✅ 已落地：reportable internal errors 的 human / JSON 渲染统一附带 GitHub Issues URL；CLI thread spawn / panic 旁路也输出同一报告 hint |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |
 | **I** | **Git surface 兼容性补齐** → 见 [compatibility/README.md](compatibility/README.md)：4-tier `COMPATIBILITY.md` / 仓库治理 / CI 兼容矩阵 / stash・bisect 子命令面 / worktree 与 checkout 行为差异 | 与各命令批次并行 |
 
@@ -292,7 +292,7 @@ agent.md 内部分工：
 - [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第 30 批）
 - [Reset 命令改进详细计划](reset.md) ✅ 已落地
 - [Tag 命令改进详细计划](tag.md) ✅ 已落地
-- [Branch 命令改进详细计划](branch.md) ✅ 已落地（仍有少量 legacy wrapper 待继续迁移）
+- [Branch 命令改进详细计划](branch.md) ✅ 已落地（v0.17.217 已删除 8 个 lossy wrapper，所有 `tests/command/*` 已迁到 `*_result` API）
 - [Log 命令改进详细计划](log.md) ✅ 已落地（内部统一重构留后续全局收口）
 - [Diff 命令改进详细计划](diff.md) ✅ 已落地
 - [Show 命令改进详细计划](show.md) ✅ 已落地（内部统一重构留后续全局收口）

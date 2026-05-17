@@ -154,6 +154,11 @@ structured report is always present.
 | --- | --- |
 | `LBR-INTERNAL-001` | Unexpected internal invariant failure |
 
+Reportable internal failures (`CliError::internal`, explicit
+`InternalInvariant` mappings, and legacy `internal error` / `panic` /
+`invariant` / `unexpected` messages) include the Libra GitHub Issues URL in
+human and JSON output so users and automation have a stable report destination.
+
 ### Bisect
 
 The `LBR-BISECT-*` codes are emitted exclusively by `libra bisect` and its

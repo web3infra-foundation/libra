@@ -480,3 +480,84 @@ fn sum_segment_tokens(segments: &[ContextSegmentBudget]) -> u64 {
         .map(|segment| segment.max_tokens)
         .fold(0_u64, u64::saturating_add)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextBudgetError, ContextPriority, ContextSegmentKind, TruncationPolicy};
+
+    #[test]
+    fn context_budget_error_display_pins_each_variant() {
+        assert_eq!(
+            ContextBudgetError::EmptySegments.to_string(),
+            "context budget must define at least one segment",
+        );
+        assert_eq!(
+            ContextBudgetError::DuplicateSegment(ContextSegmentKind::RecentMessages).to_string(),
+            "context budget contains duplicate segment 'recent_messages'",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `ContextSegmentKind`. The
+    /// strings round-trip with `serde(rename_all = "snake_case")` and
+    /// are emitted into context budget telemetry, agent prompt
+    /// metadata and `DuplicateSegment` error renderings (see
+    /// `context_budget_error_display_pins_each_variant`).
+    #[test]
+    fn context_segment_kind_display_pins_each_variant() {
+        assert_eq!(ContextSegmentKind::SystemRules.to_string(), "system_rules");
+        assert_eq!(
+            ContextSegmentKind::ProjectMemory.to_string(),
+            "project_memory",
+        );
+        assert_eq!(
+            ContextSegmentKind::MemoryAnchor.to_string(),
+            "memory_anchor",
+        );
+        assert_eq!(
+            ContextSegmentKind::RecentMessages.to_string(),
+            "recent_messages",
+        );
+        assert_eq!(ContextSegmentKind::ToolResults.to_string(), "tool_results");
+        assert_eq!(
+            ContextSegmentKind::SemanticSnippets.to_string(),
+            "semantic_snippets",
+        );
+        assert_eq!(
+            ContextSegmentKind::SourceContext.to_string(),
+            "source_context",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `ContextPriority` — used in
+    /// telemetry labels and the retention-rank tooltip surfaced in
+    /// the TUI context budget badge.
+    #[test]
+    fn context_priority_display_pins_each_variant() {
+        assert_eq!(ContextPriority::Critical.to_string(), "critical");
+        assert_eq!(ContextPriority::High.to_string(), "high");
+        assert_eq!(ContextPriority::Medium.to_string(), "medium");
+        assert_eq!(ContextPriority::Low.to_string(), "low");
+    }
+
+    /// Pins the manual `Display` impl on `TruncationPolicy` — used in
+    /// the context-budget config dump and policy-trace logs the
+    /// compaction agent emits when reducing an over-budget segment.
+    #[test]
+    fn truncation_policy_display_pins_each_variant() {
+        assert_eq!(TruncationPolicy::Never.to_string(), "never");
+        assert_eq!(TruncationPolicy::OldestFirst.to_string(), "oldest_first");
+        assert_eq!(TruncationPolicy::SummaryFirst.to_string(), "summary_first",);
+        assert_eq!(
+            TruncationPolicy::CompressLargeOutputs.to_string(),
+            "compress_large_outputs",
+        );
+        assert_eq!(
+            TruncationPolicy::DropLowConfidence.to_string(),
+            "drop_low_confidence",
+        );
+        assert_eq!(
+            TruncationPolicy::PreserveSourceLabels.to_string(),
+            "preserve_source_labels",
+        );
+    }
+}

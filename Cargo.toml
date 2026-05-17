@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.181"
+version = "0.17.396"
 edition = "2024"
 
 [features]
@@ -162,3 +162,31 @@ path = "tests/compat/matrix_alignment.rs"
 [[test]]
 name = "compat_branch_lossy_wrapper_guard"
 path = "tests/compat/branch_lossy_wrapper_guard.rs"
+
+[[test]]
+name = "compat_lfs_client_production_unwrap_guard"
+path = "tests/compat/lfs_client_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_config_production_unwrap_guard"
+path = "tests/compat/config_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_head_production_unwrap_guard"
+path = "tests/compat/head_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_util_production_unwrap_guard"
+path = "tests/compat/util_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_client_storage_production_unwrap_guard"
+path = "tests/compat/client_storage_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_extra_production_unwrap_guard"
+path = "tests/compat/extra_production_unwrap_guard.rs"
+
+[[test]]
+name = "compat_all_production_unwrap_guard"
+path = "tests/compat/all_production_unwrap_guard.rs"

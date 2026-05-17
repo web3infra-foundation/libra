@@ -42,10 +42,20 @@ pub trait BlobExt {
 }
 
 impl TreeExt for Tree {
+    /// Load a tree object by hash, panicking on missing or corrupt data.
+    ///
+    /// Callers that want to handle the "not found" / corruption case must use
+    /// [`TreeExt::try_load`]. The `.expect()` messages below intentionally name
+    /// the hash and operation so a panic produced through this fast-path API
+    /// stays actionable in logs / stack traces.
     fn load(hash: &ObjectHash) -> Tree {
         let storage = util::objects_storage();
-        let tree_data = storage.get(hash).unwrap();
-        Tree::from_bytes(&tree_data, *hash).unwrap()
+        let tree_data = storage.get(hash).unwrap_or_else(|err| {
+            panic!("Tree::load({hash}): failed to read object from storage: {err}")
+        });
+        Tree::from_bytes(&tree_data, *hash).unwrap_or_else(|err| {
+            panic!("Tree::load({hash}): failed to decode tree bytes: {err:?}")
+        })
     }
 
     fn try_load(hash: &ObjectHash) -> Option<Tree> {
@@ -137,10 +147,17 @@ impl TreeExt for Tree {
 }
 
 impl CommitExt for Commit {
+    /// Load a commit object by hash, panicking on missing or corrupt data.
+    /// Callers that need to handle the "not found" / corruption case must use
+    /// [`CommitExt::try_load`].
     fn load(hash: &ObjectHash) -> Commit {
         let storage = util::objects_storage();
-        let commit_data = storage.get(hash).unwrap();
-        Commit::from_bytes(&commit_data, *hash).unwrap()
+        let commit_data = storage.get(hash).unwrap_or_else(|err| {
+            panic!("Commit::load({hash}): failed to read object from storage: {err}")
+        });
+        Commit::from_bytes(&commit_data, *hash).unwrap_or_else(|err| {
+            panic!("Commit::load({hash}): failed to decode commit bytes: {err:?}")
+        })
     }
 
     fn try_load(hash: &ObjectHash) -> Option<Commit> {
@@ -153,19 +170,29 @@ impl CommitExt for Commit {
 }
 
 impl BlobExt for Blob {
+    /// Load a blob object by hash, panicking on missing or corrupt data.
     fn load(hash: &ObjectHash) -> Blob {
         let storage = util::objects_storage();
-        let blob_data = storage.get(hash).unwrap();
-        Blob::from_bytes(&blob_data, *hash).unwrap()
+        let blob_data = storage.get(hash).unwrap_or_else(|err| {
+            panic!("Blob::load({hash}): failed to read object from storage: {err}")
+        });
+        Blob::from_bytes(&blob_data, *hash).unwrap_or_else(|err| {
+            panic!("Blob::load({hash}): failed to decode blob bytes: {err:?}")
+        })
     }
 
     /// Create a blob from a file
     /// - `path`: absolute  or relative path to current dir
     fn from_file(path: impl AsRef<Path>) -> Blob {
+        let path = path.as_ref();
         let mut data = Vec::new();
-        let file = fs::File::open(path).unwrap();
+        let file = fs::File::open(path).unwrap_or_else(|err| {
+            panic!("Blob::from_file({}): open failed: {err}", path.display())
+        });
         let mut reader = BufReader::new(file);
-        reader.read_to_end(&mut data).unwrap();
+        reader.read_to_end(&mut data).unwrap_or_else(|err| {
+            panic!("Blob::from_file({}): read failed: {err}", path.display())
+        });
         Blob::from_content_bytes(data)
     }
 
@@ -173,9 +200,15 @@ impl BlobExt for Blob {
     /// - include: create a pointer file & copy the file to `.libra/lfs/objects`
     /// - `path`: absolute  or relative path to current dir
     fn from_lfs_file(path: impl AsRef<Path>) -> Blob {
-        let (pointer, oid) = lfs::generate_pointer_file(&path);
+        let path = path.as_ref();
+        let (pointer, oid) = lfs::generate_pointer_file(path);
         tracing::debug!("\n{}", pointer);
-        lfs::backup_lfs_file(&path, &oid).unwrap();
+        lfs::backup_lfs_file(path, &oid).unwrap_or_else(|err| {
+            panic!(
+                "Blob::from_lfs_file({}): backup to .libra/lfs/objects failed: {err}",
+                path.display()
+            )
+        });
         Blob::from_content(&pointer)
     }
 
@@ -183,7 +216,9 @@ impl BlobExt for Blob {
         let storage = util::objects_storage();
         let id = self.id;
         if !storage.exist(&id) {
-            storage.put(&id, &self.data, self.get_type()).unwrap();
+            storage
+                .put(&id, &self.data, self.get_type())
+                .unwrap_or_else(|err| panic!("Blob::save({id}): storage.put failed: {err}"));
         }
         self.id
     }

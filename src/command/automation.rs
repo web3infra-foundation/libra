@@ -1,10 +1,13 @@
 //! `libra automation` command surface for CEX-15.
 
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     info_println,
@@ -21,6 +24,8 @@ use crate::{
         util::{DATABASE, try_get_storage_path},
     },
 };
+
+const DEFAULT_AUTOMATION_RETENTION_DAYS: u32 = 90;
 
 #[derive(Parser, Debug)]
 pub struct AutomationArgs {
@@ -49,6 +54,14 @@ pub enum AutomationSubcommand {
         #[arg(long, default_value_t = 20)]
         limit: u64,
     },
+    /// Delete automation history rows older than the retention window.
+    Prune {
+        /// Retention window in days. Rows whose `finished_at` is older than this
+        /// are deleted. Defaults to the `automation.retention_days` key in
+        /// `<repo>/.libra/config.toml` when present, otherwise 90 days.
+        #[arg(long, value_parser = parse_positive_retention_days)]
+        retention_days: Option<u32>,
+    },
 }
 
 #[derive(Serialize)]
@@ -66,6 +79,9 @@ pub async fn execute_safe(args: AutomationArgs, output: &OutputConfig) -> CliRes
         AutomationSubcommand::List => list_rules(output).await,
         AutomationSubcommand::Run { rule, now, live } => run_rules(rule, now, live, output).await,
         AutomationSubcommand::History { limit } => list_history(limit, output).await,
+        AutomationSubcommand::Prune { retention_days } => {
+            prune_history(retention_days, output).await
+        }
     }
 }
 
@@ -218,4 +234,146 @@ async fn open_repo_db() -> CliResult<sea_orm::DatabaseConnection> {
                 db_path.display()
             ))
         })
+}
+
+async fn prune_history(retention_days: Option<u32>, output: &OutputConfig) -> CliResult<()> {
+    let retention_days = resolve_automation_retention_days(retention_days)?;
+    let db = open_repo_db().await?;
+    let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+    let deleted = AutomationHistory::prune_before(&db, &cutoff.to_rfc3339())
+        .await
+        .map_err(|error| {
+            CliError::failure(format!("failed to prune automation history: {error}"))
+        })?;
+    if output.is_json() {
+        return emit_json_data(
+            "automation.prune",
+            &serde_json::json!({
+                "retention_days": retention_days,
+                "cutoff": cutoff.to_rfc3339(),
+                "deleted": deleted,
+            }),
+            output,
+        );
+    }
+    info_println!(
+        output,
+        "Deleted {deleted} automation history row(s) older than {} day(s).",
+        retention_days
+    );
+    Ok(())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AutomationRetentionProjectConfig {
+    #[serde(default)]
+    automation: AutomationRetentionConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AutomationRetentionConfig {
+    retention_days: Option<u32>,
+}
+
+fn parse_positive_retention_days(raw: &str) -> Result<u32, String> {
+    let days = raw
+        .parse::<u32>()
+        .map_err(|_| format!("'{raw}' is not a valid day count"))?;
+    validate_positive_retention_days(days, "--retention-days").map_err(|error| error.to_string())
+}
+
+fn resolve_automation_retention_days(cli_retention_days: Option<u32>) -> CliResult<u32> {
+    if let Some(days) = cli_retention_days {
+        return validate_positive_retention_days(days, "--retention-days");
+    }
+
+    let storage = try_get_storage_path(None).map_err(|error| {
+        CliError::repo_not_found()
+            .with_hint(format!("failed to resolve repository storage: {error}"))
+    })?;
+    let Some(days) = read_automation_retention_days_config(&storage.join("config.toml"))? else {
+        return Ok(DEFAULT_AUTOMATION_RETENTION_DAYS);
+    };
+    validate_positive_retention_days(days, "automation.retention_days")
+}
+
+fn read_automation_retention_days_config(path: &Path) -> CliResult<Option<u32>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CliError::io(format!(
+                "failed to read automation retention config '{}': {error}",
+                path.display()
+            )));
+        }
+    };
+    automation_retention_days_from_config_toml(&contents).map_err(|error| {
+        CliError::failure(format!(
+            "failed to parse automation retention config '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn automation_retention_days_from_config_toml(
+    contents: &str,
+) -> Result<Option<u32>, toml::de::Error> {
+    let config: AutomationRetentionProjectConfig = toml::from_str(contents)?;
+    Ok(config.automation.retention_days)
+}
+
+fn validate_positive_retention_days(days: u32, source: &str) -> CliResult<u32> {
+    if days == 0 {
+        Err(CliError::command_usage(format!(
+            "{source} must be greater than 0"
+        )))
+    } else {
+        Ok(days)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_retention_days() {
+        let err = validate_positive_retention_days(0, "--retention-days").unwrap_err();
+        assert!(err.message().contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn parse_positive_retention_days_accepts_positive() {
+        assert_eq!(parse_positive_retention_days("7").unwrap(), 7);
+    }
+
+    #[test]
+    fn parse_positive_retention_days_rejects_zero() {
+        let err = parse_positive_retention_days("0").unwrap_err();
+        assert!(err.contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn parse_positive_retention_days_rejects_non_numeric() {
+        let err = parse_positive_retention_days("forever").unwrap_err();
+        assert!(err.contains("not a valid day count"));
+    }
+
+    #[test]
+    fn config_toml_extracts_automation_retention_days() {
+        let toml_src = r#"
+[automation]
+retention_days = 30
+"#;
+        let days = automation_retention_days_from_config_toml(toml_src).unwrap();
+        assert_eq!(days, Some(30));
+    }
+
+    #[test]
+    fn config_toml_missing_section_returns_none() {
+        let toml_src = "";
+        let days = automation_retention_days_from_config_toml(toml_src).unwrap();
+        assert_eq!(days, None);
+    }
 }

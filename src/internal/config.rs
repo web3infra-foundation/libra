@@ -1369,7 +1369,13 @@ impl Config {
             value: Set(value.to_owned()),
             ..Default::default()
         };
-        config.save(db).await.unwrap();
+        // INVARIANT (deprecated lossy API): storage failures here are
+        // unrecoverable for this legacy path. ConfigKv::add / ConfigKv::set
+        // surface the same failure as a typed error.
+        config
+            .save(db)
+            .await
+            .expect("legacy Config::insert_with_conn: DB save failed");
     }
 
     /// Update an existing config row's value. Panics if no matching row
@@ -1381,6 +1387,13 @@ impl Config {
         key: &str,
         value: &str,
     ) -> Model {
+        // INVARIANT (deprecated lossy API): callers must have verified the
+        // (configuration, name, key) tuple exists before calling. The
+        // SeaORM `find().one()` returns `Result<Option<Model>, DbErr>`, so
+        // the outer .expect() surfaces query failures and the inner
+        // .expect() surfaces the missing-row case. Both are unrecoverable
+        // for this legacy path; ConfigKv::set replaces the whole sequence
+        // with an upsert and explicit errors.
         let mut config: ActiveModel = config::Entity::find()
             .filter(config::Column::Configuration.eq(configuration))
             .filter(match name {
@@ -1390,11 +1403,14 @@ impl Config {
             .filter(config::Column::Key.eq(key))
             .one(db)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("legacy Config::update_with_conn: DB query failed")
+            .expect("legacy Config::update_with_conn: target config row missing (use ConfigKv::set for upsert semantics)")
             .into();
         config.value = Set(value.to_owned());
-        config.update(db).await.unwrap()
+        config
+            .update(db)
+            .await
+            .expect("legacy Config::update_with_conn: DB update failed")
     }
 
     /// Internal: list every legacy row matching `(configuration, name, key)`.
@@ -1414,7 +1430,7 @@ impl Config {
             .filter(config::Column::Key.eq(key))
             .all(db)
             .await
-            .unwrap()
+            .expect("legacy Config::query_with_conn: DB query failed")
     }
 
     /// Get the first matching value (insertion order). Returns `None` for
@@ -1462,7 +1478,16 @@ impl Config {
 
     /// Legacy "URL of the current branch's upstream" lookup.
     pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(db: &C) -> Option<String> {
-        match Config::get_current_remote_with_conn(db).await.unwrap() {
+        // INVARIANT (deprecated lossy API): `get_current_remote_with_conn`
+        // returns Err(()) only when HEAD is detached, after already
+        // printing a `fatal: HEAD is detached, cannot get remote` message
+        // to stderr. The legacy contract is to panic in that case rather
+        // than silently treat it as "no remote"; callers that need
+        // graceful handling should use `ConfigKv::get_current_remote_url_with_conn`.
+        match Config::get_current_remote_with_conn(db)
+            .await
+            .expect("legacy Config::get_current_remote_url_with_conn: HEAD is detached")
+        {
             Some(remote) => Some(Config::get_remote_url_with_conn(db, &remote).await),
             None => None,
         }
@@ -1489,7 +1514,7 @@ impl Config {
         config::Entity::find()
             .all(db)
             .await
-            .unwrap()
+            .expect("legacy Config::list_all_with_conn: DB query failed")
             .iter()
             .map(|m| {
                 (
@@ -1551,13 +1576,15 @@ impl Config {
             .filter(config::Column::Name.eq(name))
             .all(db)
             .await
-            .unwrap();
+            .expect("legacy Config::remove_remote_with_conn: DB query failed");
         if remote.is_empty() {
             return Err(format!("fatal: No such remote: {name}"));
         }
         for r in remote {
             let r: ActiveModel = r.into();
-            r.delete(db).await.unwrap();
+            r.delete(db)
+                .await
+                .expect("legacy Config::remove_remote_with_conn: DB delete failed");
         }
         Ok(())
     }
@@ -1583,13 +1610,16 @@ impl Config {
             .filter(config::Column::Name.eq(old))
             .all(db)
             .await
-            .unwrap();
+            .expect("legacy Config::rename_remote_with_conn: DB query failed");
 
         // Update remote.<name>.* entries to point at the new name.
         for entry in remote_entries {
             let mut active: ActiveModel = entry.into();
             active.name = Set(Some(new.to_owned()));
-            active.update(db).await.unwrap();
+            active
+                .update(db)
+                .await
+                .expect("legacy Config::rename_remote_with_conn: DB update failed");
         }
 
         let branch_entries = config::Entity::find()
@@ -1598,13 +1628,16 @@ impl Config {
             .filter(config::Column::Value.eq(old))
             .all(db)
             .await
-            .unwrap();
+            .expect("legacy Config::rename_remote_with_conn: DB query failed");
 
         // Repoint branch.*.remote values that referenced the old remote.
         for entry in branch_entries {
             let mut active: ActiveModel = entry.into();
             active.value = Set(new.to_owned());
-            active.update(db).await.unwrap();
+            active
+                .update(db)
+                .await
+                .expect("legacy Config::rename_remote_with_conn: DB update failed");
         }
 
         Ok(())
@@ -1617,10 +1650,21 @@ impl Config {
             .filter(config::Column::Configuration.eq("remote"))
             .all(db)
             .await
-            .unwrap();
+            .expect("legacy Config::all_remote_configs_with_conn: DB query failed");
+        // INVARIANT: rows with configuration='remote' always have a non-NULL
+        // `name` column (the remote name itself is required by every Libra
+        // write path). External tampering could violate this, in which case
+        // the deprecated lossy API panics; ConfigKv::all_remote_configs_with_conn
+        // surfaces the same condition as a typed error.
         let remote_names = remotes
             .iter()
-            .map(|remote| remote.name.as_ref().unwrap().clone())
+            .map(|remote| {
+                remote
+                    .name
+                    .as_ref()
+                    .expect("legacy remote row missing 'name' column")
+                    .clone()
+            })
             .collect::<HashSet<String>>();
 
         remote_names
@@ -1628,8 +1672,14 @@ impl Config {
             .map(|name| {
                 let url = remotes
                     .iter()
-                    .find(|remote| remote.name.as_ref().unwrap() == name)
-                    .unwrap()
+                    .find(|remote| {
+                        remote
+                            .name
+                            .as_ref()
+                            .expect("legacy remote row missing 'name' column")
+                            == name
+                    })
+                    .expect("remote_names was built from the same `remotes` slice; name must match")
                     .value
                     .to_owned();
                 RemoteConfig {
@@ -1650,9 +1700,11 @@ impl Config {
             .filter(config::Column::Name.eq(name))
             .one(db)
             .await
-            .unwrap();
+            .expect("legacy Config::remote_config_with_conn: DB query failed");
         remote.map(|r| RemoteConfig {
-            name: r.name.unwrap(),
+            // INVARIANT: matched by `Column::Name.eq(name)` above; the row's
+            // `name` column is guaranteed non-NULL.
+            name: r.name.expect("legacy remote row missing 'name' column"),
             url: r.value,
         })
     }
@@ -1675,7 +1727,7 @@ impl Config {
             .filter(config::Column::Name.eq(name))
             .all(db)
             .await
-            .unwrap();
+            .expect("legacy Config::branch_config_with_conn: DB query failed");
         if config_entries.is_empty() {
             None
         } else {

@@ -224,3 +224,41 @@ impl From<MessageError> for CompletionError {
         CompletionError::RequestError(error.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MessageError, Text};
+
+    #[test]
+    fn message_error_display_pins_conversion_error_template() {
+        assert_eq!(
+            MessageError::ConversionError("unsupported role".to_string()).to_string(),
+            "Message conversion error: unsupported role",
+        );
+    }
+
+    /// Pins the manual `Display` impl on `Text`. The wrapper renders
+    /// to the inner `.text` field verbatim — no quotes, no escapes,
+    /// no Debug-style brackets. This contract matters because `Text`
+    /// values flow through provider-agnostic plumbing (transcript
+    /// snippets, log lines, error-context formatting) where any extra
+    /// punctuation would corrupt the downstream parser. Pinning a
+    /// representative payload (multi-line text containing common
+    /// formatting characters) guards against an accidental switch to
+    /// `Debug` / quoted rendering.
+    #[test]
+    fn text_display_renders_inner_string_verbatim() {
+        let payload = "line one\n  - bullet \"quoted\"\nend";
+        let text = Text {
+            text: payload.to_string(),
+        };
+        assert_eq!(text.to_string(), payload);
+        assert_eq!(format!("{text}"), payload);
+        // Empty payload renders to the empty string (no trailing
+        // whitespace, no placeholder).
+        let empty = Text {
+            text: String::new(),
+        };
+        assert_eq!(empty.to_string(), "");
+    }
+}

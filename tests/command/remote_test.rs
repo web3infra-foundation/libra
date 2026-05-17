@@ -602,8 +602,9 @@ async fn test_remote_prune_removes_stale_branches() {
     for branch_name in &branches_to_create {
         let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
         assert!(
-            Branch::find_branch(&tracked_branch, Some("origin"))
+            Branch::find_branch_result(&tracked_branch, Some("origin"))
                 .await
+                .expect("failed to query remote-tracking branch")
                 .is_some(),
             "remote-tracking branch {} should exist after fetch",
             tracked_branch
@@ -634,8 +635,9 @@ async fn test_remote_prune_removes_stale_branches() {
     for branch_name in &branches_to_delete {
         let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
         assert!(
-            Branch::find_branch(&tracked_branch, Some("origin"))
+            Branch::find_branch_result(&tracked_branch, Some("origin"))
                 .await
+                .expect("failed to query remote-tracking branch")
                 .is_none(),
             "stale remote-tracking branch {} should be pruned",
             tracked_branch
@@ -644,8 +646,9 @@ async fn test_remote_prune_removes_stale_branches() {
 
     // Verify remaining branches still exist
     assert!(
-        Branch::find_branch("refs/remotes/origin/feature2", Some("origin"))
+        Branch::find_branch_result("refs/remotes/origin/feature2", Some("origin"))
             .await
+            .expect("failed to query remote-tracking branch")
             .is_some(),
         "non-stale remote-tracking branch should still exist"
     );
@@ -793,8 +796,9 @@ async fn test_remote_prune_dry_run_previews_changes() {
     // Verify remote-tracking branch exists
     let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
     assert!(
-        Branch::find_branch(&tracked_branch, Some("origin"))
+        Branch::find_branch_result(&tracked_branch, Some("origin"))
             .await
+            .expect("failed to query remote-tracking branch")
             .is_some(),
         "remote-tracking branch should exist after fetch"
     );
@@ -818,8 +822,9 @@ async fn test_remote_prune_dry_run_previews_changes() {
 
     // Verify branch still exists (dry-run should not delete)
     assert!(
-        Branch::find_branch(&tracked_branch, Some("origin"))
+        Branch::find_branch_result(&tracked_branch, Some("origin"))
             .await
+            .expect("failed to query remote-tracking branch")
             .is_some(),
         "remote-tracking branch should still exist after dry-run prune"
     );
@@ -833,8 +838,9 @@ async fn test_remote_prune_dry_run_previews_changes() {
 
     // Verify branch is now deleted
     assert!(
-        Branch::find_branch(&tracked_branch, Some("origin"))
+        Branch::find_branch_result(&tracked_branch, Some("origin"))
             .await
+            .expect("failed to query remote-tracking branch")
             .is_none(),
         "remote-tracking branch should be pruned after actual prune"
     );
@@ -961,8 +967,9 @@ async fn test_remote_prune_does_not_report_success_when_delete_fails() {
     {
         let _guard = test::ChangeDirGuard::new(&repo_dir);
         assert!(
-            Branch::find_branch(tracked_branch, Some("origin"))
+            Branch::find_branch_result(tracked_branch, Some("origin"))
                 .await
+                .expect("failed to query remote-tracking branch")
                 .is_some(),
             "expected stale remote-tracking branch to exist before prune"
         );

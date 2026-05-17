@@ -458,11 +458,14 @@ async fn test_fetch_local_repository() {
     )
     .await;
 
-    let tracked_branch = Branch::find_branch(
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "remote-tracking branch not found".
+    let tracked_branch = Branch::find_branch_result(
         &format!("refs/remotes/origin/{current_branch}"),
         Some("origin"),
     )
     .await
+    .expect("failed to query remote-tracking branch")
     .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
 }
@@ -665,11 +668,14 @@ async fn test_fetch_ssh_remote_via_fake_ssh() {
         String::from_utf8_lossy(&fetch_out.stderr)
     );
 
-    let tracked_branch = Branch::find_branch(
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "remote-tracking branch not found".
+    let tracked_branch = Branch::find_branch_result(
         &format!("refs/remotes/origin/{current_branch}"),
         Some("origin"),
     )
     .await
+    .expect("failed to query remote-tracking branch")
     .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
 

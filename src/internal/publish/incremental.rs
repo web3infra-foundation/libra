@@ -71,3 +71,19 @@ pub fn plan_incremental_uploads(
 fn artifact_sort_key(artifact: &PublishArtifact) -> (PublishArtifactKind, String) {
     (artifact.kind, artifact.key.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::IncrementalPlanError;
+
+    #[test]
+    fn incremental_plan_error_display_pins_duplicate_key_template() {
+        assert_eq!(
+            IncrementalPlanError::DuplicateKey {
+                key: "publish/snapshot.json".to_string(),
+            }
+            .to_string(),
+            "publish artefact key \"publish/snapshot.json\" is planned more than once",
+        );
+    }
+}

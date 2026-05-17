@@ -10,12 +10,17 @@ use std::{
 use clap::Subcommand;
 use git_internal::internal::index::Index;
 use reqwest::StatusCode;
-use serde::Serialize;
 
 use crate::{
-    command::status,
-    internal::{head::Head, protocol::lfs_client::LFSClient},
-    lfs_structs::{Lock, LockListQuery},
+    command::{
+        lfs_schema::{LfsFileOutput, LfsOutput},
+        status,
+    },
+    internal::{
+        head::Head,
+        protocol::lfs_client::{LFSClient, LockListError},
+    },
+    lfs_structs::LockListQuery,
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
         lfs,
@@ -67,42 +72,6 @@ pub enum LfsCmds {
         #[clap(long, short)]
         name_only: bool,
     },
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct LfsOutput {
-    action: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    patterns: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    locks: Vec<Lock>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    files: Vec<LfsFileOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refspec: Option<String>,
-    #[serde(skip_serializing_if = "is_false")]
-    name_only: bool,
-    #[serde(skip_serializing_if = "is_false")]
-    show_size: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LfsFileOutput {
-    path: String,
-    oid: String,
-    marker: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display_size: Option<String>,
-}
-
-const fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
@@ -173,6 +142,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                 })?
                 .get_locks(query)
                 .await
+                .map_err(map_lock_list_error)?
                 .locks;
             Ok(LfsOutput {
                 action: "locks".to_string(),
@@ -252,6 +222,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                             limit: "".to_string(),
                         })
                         .await
+                        .map_err(map_lock_list_error)?
                         .locks;
                     if locks.is_empty() {
                         return Err(CliError::fatal(format!("no lock found for path '{path}'"))
@@ -313,6 +284,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         } else {
                             "*"
                         };
+                        let full_oid = oid.clone();
                         let oid = if long { oid } else { oid[..10].to_owned() };
                         let (size_value, display_size) = if size {
                             let display = util::auto_unit_bytes(lfs_size);
@@ -323,6 +295,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         files.push(LfsFileOutput {
                             path: entry.name.clone(),
                             oid,
+                            full_oid,
                             marker: _type.to_string(),
                             size: size_value,
                             display_size,
@@ -424,6 +397,32 @@ async fn current_refspec_or_err() -> CliResult<String> {
     })
 }
 
+fn map_lock_list_error(error: LockListError) -> CliError {
+    match error {
+        LockListError::Request(detail) => {
+            CliError::network(format!("failed to query LFS locks: {detail}"))
+        }
+        LockListError::Http { status, message } => {
+            if status == StatusCode::FORBIDDEN {
+                CliError::fatal("You must have push access to list locks")
+                    .with_stable_code(StableErrorCode::AuthPermissionDenied)
+            } else {
+                CliError::network(format!(
+                    "LFS get locks failed with status {}",
+                    status.as_u16()
+                ))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_detail("status", status.as_u16())
+                .with_detail("body", message)
+            }
+        }
+        LockListError::Decode(detail) => {
+            CliError::network(format!("failed to decode LFS locks response: {detail}"))
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+        }
+    }
+}
+
 /// temp
 fn convert_patterns_to_workdir(patterns: Vec<String>) -> Vec<String> {
     patterns
@@ -506,4 +505,40 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Ve
     }
 
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_lock_list_error_forbidden_maps_to_auth_permission_denied() {
+        let err = map_lock_list_error(LockListError::Http {
+            status: StatusCode::FORBIDDEN,
+            message: "forbidden".to_string(),
+        });
+        assert_eq!(err.stable_code(), StableErrorCode::AuthPermissionDenied);
+        assert!(err.message().contains("push access"));
+    }
+
+    #[test]
+    fn map_lock_list_error_decode_maps_to_network_protocol() {
+        let err = map_lock_list_error(LockListError::Decode("invalid json".to_string()));
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+        assert!(err.message().contains("decode"));
+    }
+
+    #[test]
+    fn map_lock_list_error_http_maps_status_and_body_detail() {
+        let err = map_lock_list_error(LockListError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            message: "upstream unavailable".to_string(),
+        });
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+        assert_eq!(err.details().get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(
+            err.details().get("body"),
+            Some(&serde_json::json!("upstream unavailable"))
+        );
+    }
 }

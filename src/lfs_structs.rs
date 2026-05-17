@@ -140,7 +140,13 @@ impl Link {
             header,
             expires_at: {
                 use chrono::{DateTime, Duration, Utc};
-                let expire_time: DateTime<Utc> = Utc::now() + Duration::try_seconds(86400).unwrap();
+                // INVARIANT: 86_400 is a small constant well inside chrono's
+                // representable range for Duration seconds; `try_seconds`
+                // only returns None for values that overflow i64 nanoseconds
+                // when multiplied by 1_000_000_000.
+                let expire_time: DateTime<Utc> = Utc::now()
+                    + Duration::try_seconds(86400)
+                        .expect("24h in seconds is representable as chrono::Duration");
                 expire_time.to_rfc3339()
             },
         }

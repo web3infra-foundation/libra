@@ -526,4 +526,53 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn publish_storage_error_display_pins_each_variant() {
+        assert_eq!(
+            PublishStorageError::InvalidKey {
+                message: "must not contain '..'".to_string(),
+            }
+            .to_string(),
+            "publish storage key is invalid: must not contain '..'",
+        );
+        assert_eq!(
+            PublishStorageError::NotFound {
+                key: "abc/publish/sites/site01/revisions/r1/manifest.json".to_string(),
+            }
+            .to_string(),
+            "publish object not found at abc/publish/sites/site01/revisions/r1/manifest.json",
+        );
+
+        let store_err = object_store::Error::NotFound {
+            path: "abc/publish/sites/site01/revisions/r1/body.bin".to_string(),
+            source: "missing".into(),
+        };
+        let store_display = store_err.to_string();
+        assert_eq!(
+            PublishStorageError::Store {
+                key: "abc/publish/sites/site01/revisions/r1/body.bin".to_string(),
+                source: store_err,
+            }
+            .to_string(),
+            format!(
+                "publish object store error at \
+                 abc/publish/sites/site01/revisions/r1/body.bin: {store_display}",
+            ),
+        );
+
+        let json_err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
+        let json_display = json_err.to_string();
+        assert_eq!(
+            PublishStorageError::Json {
+                key: "abc/publish/sites/site01/revisions/r1/code-manifest.json".to_string(),
+                source: json_err,
+            }
+            .to_string(),
+            format!(
+                "publish JSON encode/decode error at \
+                 abc/publish/sites/site01/revisions/r1/code-manifest.json: {json_display}",
+            ),
+        );
+    }
 }
