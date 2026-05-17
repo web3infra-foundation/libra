@@ -1163,3 +1163,115 @@ fn should_redact_history_key(key: &str, mode: RedactionMode) -> bool {
             || normalized == "path"
             || normalized.ends_with("path"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_export_error_display_pins_each_variant() {
+        assert_eq!(
+            AiExportError::SiteMismatch {
+                object_type: "chat_session".to_string(),
+                object_id: "cs-001".to_string(),
+                actual: "site-a".to_string(),
+                expected: "site-b".to_string(),
+            }
+            .to_string(),
+            "AI object chat_session/cs-001 belongs to site \"site-a\", expected \"site-b\"",
+        );
+        assert_eq!(
+            AiExportError::RevisionMismatch {
+                object_type: "chat_message".to_string(),
+                object_id: "cm-002".to_string(),
+                actual: "rev-a".to_string(),
+                expected: "rev-b".to_string(),
+            }
+            .to_string(),
+            "AI object chat_message/cm-002 belongs to revision \"rev-a\", expected \"rev-b\"",
+        );
+        assert_eq!(
+            AiExportError::DuplicateObject {
+                object_type: "chat_session".to_string(),
+                object_id: "cs-003".to_string(),
+            }
+            .to_string(),
+            "duplicate AI object chat_session/cs-003 in revision export",
+        );
+        assert_eq!(
+            AiExportError::RedactionMismatch {
+                object_type: "chat_message".to_string(),
+                object_id: "cm-004".to_string(),
+                actual: RedactionMode::Strict,
+                actual_rules: "strict-v2".to_string(),
+                expected: RedactionMode::Default,
+                expected_rules: "default-v1".to_string(),
+            }
+            .to_string(),
+            "AI object chat_message/cm-004 redaction Strict/\"strict-v2\" does not match export \
+             redaction Default/\"default-v1\"",
+        );
+        assert_eq!(
+            AiExportError::MissingRelationshipEndpoint {
+                kind: "spawned_by".to_string(),
+                from_object_type: "chat_message".to_string(),
+                from_object_id: "cm-005".to_string(),
+                to_object_type: "tool_call".to_string(),
+                to_object_id: "tc-006".to_string(),
+            }
+            .to_string(),
+            "AI relationship spawned_by from chat_message/cm-005 to tool_call/tc-006 references \
+             an object that is missing from the export",
+        );
+
+        let serde_err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
+        let serde_display = serde_err.to_string();
+        assert_eq!(
+            AiExportError::Serialize {
+                artifact: "ai/index.json",
+                source: serde_err,
+            }
+            .to_string(),
+            format!("failed to serialize AI publish artefact ai/index.json: {serde_display}"),
+        );
+
+        assert_eq!(
+            AiExportError::ListHistoryObjects {
+                history_type: "chat_session",
+                message: "history branch not found".to_string(),
+            }
+            .to_string(),
+            "failed to list AI history objects for chat_session: history branch not found",
+        );
+        assert_eq!(
+            AiExportError::ReadHistoryObject {
+                history_type: "chat_message",
+                object_id: "cm-007".to_string(),
+                message: "object store unreachable".to_string(),
+            }
+            .to_string(),
+            "failed to read AI history object chat_message/cm-007: object store unreachable",
+        );
+        assert_eq!(
+            AiExportError::HistoryObjectNotBlob {
+                history_type: "chat_session",
+                object_id: "cs-008".to_string(),
+                actual_type: "tree".to_string(),
+            }
+            .to_string(),
+            "AI history object chat_session/cs-008 is tree, expected blob",
+        );
+
+        let parse_err = serde_json::from_str::<serde_json::Value>("{ also not json").unwrap_err();
+        let parse_display = parse_err.to_string();
+        assert_eq!(
+            AiExportError::ParseHistoryObject {
+                history_type: "chat_message",
+                object_id: "cm-009".to_string(),
+                source: parse_err,
+            }
+            .to_string(),
+            format!("failed to parse AI history object chat_message/cm-009: {parse_display}",),
+        );
+    }
+}
