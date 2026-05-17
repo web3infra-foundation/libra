@@ -751,7 +751,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
-| `tests/db_migration_test.rs:47-48,53,985` | `2026050303` / `agent_capture` 加进硬编码断言 |
+| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部六个迁移版本（`2026050301..2026050801`）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
 | `Cargo.toml` | 如需 `regex`、`once_cell`、`fs2` 等新依赖在此声明 |
 
