@@ -523,3 +523,52 @@ async fn update_head(commit_id: &str) -> Result<(), RevertError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revert_error_display_pins_each_variant() {
+        assert_eq!(RevertError::NotInRepo.to_string(), "not a libra repository",);
+        assert_eq!(
+            RevertError::DetachedHead.to_string(),
+            "you are in a 'detached HEAD' state; reverting is not allowed",
+        );
+        assert_eq!(
+            RevertError::InvalidCommit("deadbeef".to_string()).to_string(),
+            "failed to resolve commit reference 'deadbeef'",
+        );
+        assert_eq!(
+            RevertError::MergeCommitUnsupported.to_string(),
+            "reverting merge commits is not yet supported",
+        );
+        assert_eq!(
+            RevertError::Conflict {
+                path: "src/main.rs".to_string(),
+            }
+            .to_string(),
+            "conflict: file 'src/main.rs' was modified in a later commit",
+        );
+        assert_eq!(
+            RevertError::LoadObject("blob not found".to_string()).to_string(),
+            "failed to load object: blob not found",
+        );
+        assert_eq!(
+            RevertError::SaveObject("disk full".to_string()).to_string(),
+            "failed to save object: disk full",
+        );
+        assert_eq!(
+            RevertError::WriteWorktree("permission denied".to_string()).to_string(),
+            "failed to write worktree: permission denied",
+        );
+        assert_eq!(
+            RevertError::IndexSave("index is locked".to_string()).to_string(),
+            "failed to save index: index is locked",
+        );
+        assert_eq!(
+            RevertError::UpdateHead("ref update rejected".to_string()).to_string(),
+            "failed to update HEAD: ref update rejected",
+        );
+    }
+}
