@@ -1296,6 +1296,101 @@ fn render_repair_worktrees(result: &WorktreeRepairOutput, output: &OutputConfig)
     Ok(())
 }
 
+#[cfg(test)]
+mod display_tests {
+    use std::{io, path::PathBuf};
+
+    use super::*;
+
+    /// Pins the manual `Display` impl on `WorktreeError`. All 11
+    /// variants are surfaced (via `into_cli_error()`) into
+    /// `CliError::fatal(self.to_string())`, which then renders into
+    /// human stderr and JSON `message` envelopes for every
+    /// `libra worktree add / remove / move / repair / list / prune /
+    /// umount` failure. Pinning the rendered strings keeps the
+    /// operator-visible failure text stable across refactors.
+    #[test]
+    fn worktree_error_display_pins_each_variant() {
+        let io_err = || io::Error::new(io::ErrorKind::PermissionDenied, "permission denied");
+
+        assert_eq!(
+            WorktreeError::InvalidTarget("not a path".to_string()).to_string(),
+            "not a path",
+        );
+        assert_eq!(
+            WorktreeError::OperationBlocked("merge in progress".to_string()).to_string(),
+            "merge in progress",
+        );
+        assert_eq!(
+            WorktreeError::NoSuchWorktree {
+                path: "/tmp/feature".to_string(),
+            }
+            .to_string(),
+            "no such worktree: /tmp/feature",
+        );
+        assert_eq!(
+            WorktreeError::MainWorktree {
+                action: "remove",
+                path: "/repo".to_string(),
+            }
+            .to_string(),
+            "cannot remove main worktree: /repo",
+        );
+        assert_eq!(
+            WorktreeError::LockedWorktree {
+                action: "move",
+                path: "/tmp/feature".to_string(),
+            }
+            .to_string(),
+            "cannot move locked worktree: /tmp/feature",
+        );
+        assert_eq!(
+            WorktreeError::DirtyWorktree {
+                path: "/tmp/feature".to_string(),
+            }
+            .to_string(),
+            "cannot delete dirty worktree '/tmp/feature' (uncommitted changes)",
+        );
+        let io_display = io_err().to_string();
+        assert_eq!(
+            WorktreeError::StateRead {
+                path: PathBuf::from("/repo/.libra/worktrees/x.json"),
+                source: io_err(),
+            }
+            .to_string(),
+            format!("failed to read worktree state '/repo/.libra/worktrees/x.json': {io_display}"),
+        );
+        assert_eq!(
+            WorktreeError::StateWrite {
+                path: PathBuf::from("/repo/.libra/worktrees/x.json"),
+                source: io_err(),
+            }
+            .to_string(),
+            format!("failed to write worktree state '/repo/.libra/worktrees/x.json': {io_display}"),
+        );
+        assert_eq!(
+            WorktreeError::StateCorrupt {
+                path: PathBuf::from("/repo/.libra/worktrees/x.json"),
+                source: "expected JSON object".to_string(),
+            }
+            .to_string(),
+            "worktree state '/repo/.libra/worktrees/x.json' is corrupt: expected JSON object",
+        );
+        assert_eq!(
+            WorktreeError::StateRepair { source: io_err() }.to_string(),
+            format!("failed to repair worktree state invariant: {io_display}"),
+        );
+        assert_eq!(
+            WorktreeError::IoRead("registry file vanished".to_string()).to_string(),
+            "registry file vanished",
+        );
+        assert_eq!(
+            WorktreeError::IoWrite("disk full".to_string()).to_string(),
+            "disk full",
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use tempfile::tempdir;
