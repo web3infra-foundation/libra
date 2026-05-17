@@ -2495,6 +2495,58 @@ mod tests {
         ));
     }
 
+    /// Pins the manual `Display` impl on `CloudError`. The
+    /// `MissingEnv` variant has two formats (empty list → static
+    /// hint, non-empty list → `"Missing: K1, K2"`); the other six
+    /// variants pass the inner detail string through verbatim. The
+    /// rendered string is the user-facing `error.message` in human
+    /// stderr and the JSON envelope produced by
+    /// `cloud_cli_error_typed` for every `cloud sync / restore /
+    /// status` failure.
+    #[test]
+    fn cloud_error_display_pins_each_variant() {
+        assert_eq!(
+            CloudError::MissingEnv(vec![]).to_string(),
+            "missing cloud environment configuration",
+        );
+        assert_eq!(
+            CloudError::MissingEnv(vec![
+                "LIBRA_D1_ACCOUNT_ID".to_string(),
+                "LIBRA_D1_API_TOKEN".to_string(),
+            ])
+            .to_string(),
+            "Missing: LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN",
+        );
+        assert_eq!(
+            CloudError::NameAlreadyTaken(
+                "Repository name 'demo' already taken by another repository".to_string(),
+            )
+            .to_string(),
+            "Repository name 'demo' already taken by another repository",
+        );
+        assert_eq!(
+            CloudError::NameNotFound("Repository with name 'demo' not found".to_string())
+                .to_string(),
+            "Repository with name 'demo' not found",
+        );
+        assert_eq!(
+            CloudError::PartialTransfer("2 objects failed to sync".to_string()).to_string(),
+            "2 objects failed to sync",
+        );
+        assert_eq!(
+            CloudError::D1("Failed to query D1: timeout".to_string()).to_string(),
+            "Failed to query D1: timeout",
+        );
+        assert_eq!(
+            CloudError::R2("R2 PUT failed".to_string()).to_string(),
+            "R2 PUT failed",
+        );
+        assert_eq!(
+            CloudError::Generic("something unexpected".to_string()).to_string(),
+            "something unexpected",
+        );
+    }
+
     #[test]
     fn cloud_error_into_cli_error_attaches_stable_codes() {
         assert_eq!(
