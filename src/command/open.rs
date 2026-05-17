@@ -352,4 +352,32 @@ mod tests {
             "\"https://evil.example/repo&calc.exe\""
         );
     }
+
+    #[test]
+    fn open_error_display_pins_each_variant() {
+        assert_eq!(
+            OpenError::NotInRepo.to_string(),
+            "not a libra repository (or any of the parent directories): .libra",
+        );
+        assert_eq!(
+            OpenError::ConfigRead("database is locked".to_string()).to_string(),
+            "failed to read remote configuration: database is locked",
+        );
+        assert_eq!(
+            OpenError::NoRemoteConfigured.to_string(),
+            "no remote configured",
+        );
+        assert_eq!(
+            OpenError::RemoteMissingUrl("origin".to_string()).to_string(),
+            "remote 'origin' is configured but has no URL",
+        );
+        assert_eq!(
+            OpenError::UnsafeUrl("file:///etc/passwd".to_string()).to_string(),
+            "calculated URL 'file:///etc/passwd' is unsafe or invalid. Only http/https are supported.",
+        );
+        assert_eq!(
+            OpenError::BrowserLaunch("xdg-open not found".to_string()).to_string(),
+            "failed to open browser: xdg-open not found",
+        );
+    }
 }
