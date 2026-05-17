@@ -127,7 +127,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `AskForApproval` 四档（Never / OnFailure / OnRequest / UnlessTrusted）
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
-- 沙箱拒绝关键词触发升级重试提示（mod.rs:178-186）
+- 沙箱拒绝关键词触发升级重试提示（mod.rs::is_likely_sandbox_denied，当前位于 mod.rs:1763；调用点在 mod.rs:1033）
 - 每次命令执行前注入私有 0o700 tmp，并在执行后清理 `TMPDIR` / `TEMP` / `TMP` 指向目录
 - 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs](../../src/internal/ai/tools/handlers/shell.rs)）
 
