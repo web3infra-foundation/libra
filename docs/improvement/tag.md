@@ -76,34 +76,43 @@ pub enum TagError {
     #[error("tag '{0}' not found")]
     NotFound(String),
 
-    #[error("tag name is required")]
-    MissingName,
+    #[error("{0}")]
+    MissingName(String),
 
-    #[error("cannot create tag: HEAD does not point to a commit")]
+    #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
 
-    #[error("failed to read existing tags before creating '{name}': {detail}")]
-    CheckExistingFailed { name: String, detail: String },
+    #[error("failed to resolve HEAD commit: {0}")]
+    ResolveHead(#[source] branch::BranchStoreError),
+
+    #[error("failed to read existing tags before creating '{name}': {source}")]
+    CheckExistingFailed { name: String, #[source] source: DbErr },
 
     #[error("failed to serialize annotated tag object: {0}")]
-    SerializeAnnotatedTag(String),
+    SerializeAnnotatedTag(#[source] GitError),
 
     #[error("failed to store annotated tag object: {0}")]
-    StoreObjectFailed(String),
+    StoreObjectFailed(#[source] io::Error),
 
-    #[error("failed to persist tag reference '{name}': {detail}")]
-    PersistReferenceFailed { name: String, detail: String },
+    #[error("failed to persist tag reference '{name}': {source}")]
+    PersistReferenceFailed { name: String, #[source] source: DbErr },
 
-    #[error("failed to delete tag '{name}': {detail}")]
-    DeleteFailed { name: String, detail: String },
+    #[error("failed to delete tag '{name}': {source}")]
+    DeleteFailed { name: String, #[source] source: anyhow::Error },
 
-    #[error("failed to load tag '{name}': {detail}")]
-    LoadFailed { name: String, detail: String },
+    #[error("failed to load tag '{name}': {source}")]
+    LoadFailed { name: String, #[source] source: anyhow::Error },
 
     #[error("failed to list tags: {0}")]
     ListFailed(#[source] tag::ListTagError),
 }
 ```
+
+> 实际的源字段使用 `#[source]` 包裹具体类型（`branch::BranchStoreError` / `DbErr` /
+> `GitError` / `io::Error` / `anyhow::Error` / `tag::ListTagError`），而不是仅传 `String`，
+> 让上游错误可以通过 `error.source()` 链式访问，也方便 `classify_tag_load_error()` /
+> `classify_list_tag_error()` 做精确分类。早期草案曾把所有字段统一为 `detail: String`，
+> 现已与 src/command/tag.rs:100-156 对齐。
 
 > **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，当前代码通过 `map_create_tag_error()` 完成收口映射：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
 
