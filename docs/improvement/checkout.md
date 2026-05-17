@@ -24,15 +24,15 @@
 - `config_kv` 后端已落地
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`checkout.rs:33/42`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`checkout.rs:190/209`）
 - `checkout` 当前支持三种主场景：
   - `libra checkout`：显示当前分支
   - `libra checkout <branch>`：切换到现有本地/远程分支
   - `libra checkout -b <branch>`：创建并切换到新分支
 - **当前分支 no-op 语义已实现**：若目标分支就是当前分支，返回 `action="already-on"`，人类模式输出 `Already on {branch}`，并且不先做脏状态检查
-- **脏工作树检查已委托给 `switch::ensure_clean_status(output)`**（`checkout.rs:69-83`）
-- `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:131-136`）
-- 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:138-148`）
+- **脏工作树检查已委托给 `switch::ensure_clean_status(output)`** / `ensure_clean_status_for_commit()`（`checkout.rs:267-268`）
+- `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:371`）
+- 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:381`），并通过 `CheckoutError::RemoteSyncFailed { stage, source }` 把 `set_upstream` / `pull` 的代理失败分类到具体阶段
 - quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:708-741`）
 - `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:746-766`）
 
