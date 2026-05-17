@@ -145,6 +145,8 @@ pub enum BranchError {
 | `DetachedHead` | `RepoStateInvalid` | 128 | `checkout a branch first` |
 | `InvalidCommit` | `CliInvalidTarget` | 129 | `use 'libra log --oneline' to see available commits` |
 | `InvalidUpstream` | `CliInvalidTarget` | 129 | `expected format: 'remote/branch'` |
+| `ConfigReadFailed` | `IoReadFailed` | 128 | `check whether the repository database is readable.` |
+| `ConfigWriteFailed` | `IoWriteFailed` | 128 | `check whether the repository database is writable.` |
 | `StorageQueryFailed` | `IoReadFailed` | 128 | 无 |
 | `StoredReferenceCorrupt` | `RepoCorrupt` | 128 | 无 |
 | `CreateFailed` | `IoWriteFailed` | 128 | 无 |
@@ -296,6 +298,20 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
     "name": "main",
     "detached": false,
     "commit": "abc1234..."
+  }
+}
+```
+
+**set-upstream `--json`：**
+
+```json
+{
+  "ok": true,
+  "command": "branch",
+  "data": {
+    "action": "set-upstream",
+    "branch": "main",
+    "upstream": "origin/main"
   }
 }
 ```
