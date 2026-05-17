@@ -555,4 +555,58 @@ mod tests {
             "OnlyIgnored policy should hide tracked files even if they match ignore patterns"
         );
     }
+
+    #[test]
+    fn ignore_file_error_display_pins_each_variant() {
+        let io_perm = || io::Error::new(io::ErrorKind::PermissionDenied, "permission denied");
+
+        assert_eq!(
+            IgnoreFileError::Read {
+                path: PathBuf::from(".libraignore"),
+                source: io_perm(),
+            }
+            .to_string(),
+            "failed to read ignore file '.libraignore': permission denied",
+        );
+
+        assert_eq!(
+            IgnoreFileError::CreateDirectory {
+                path: PathBuf::from("/tmp/nested"),
+                target: PathBuf::from("/tmp/nested/.libraignore"),
+                source: io_perm(),
+            }
+            .to_string(),
+            "failed to create parent directory '/tmp/nested' for ignore file \
+             '/tmp/nested/.libraignore': permission denied",
+        );
+
+        assert_eq!(
+            IgnoreFileError::Write {
+                path: PathBuf::from(".libraignore"),
+                source: io_perm(),
+            }
+            .to_string(),
+            "failed to write ignore file '.libraignore': permission denied",
+        );
+
+        assert_eq!(
+            IgnoreFileError::Walk {
+                path: PathBuf::from("/repo"),
+                source: io_perm(),
+            }
+            .to_string(),
+            "failed to scan ignore files under '/repo': permission denied",
+        );
+
+        assert_eq!(
+            IgnoreFileError::RelativePath {
+                root: PathBuf::from("/repo"),
+                path: PathBuf::from("/outside/.gitignore"),
+                message: "path escapes repository root".to_string(),
+            }
+            .to_string(),
+            "failed to resolve ignore file path '/outside/.gitignore' relative to '/repo': \
+             path escapes repository root",
+        );
+    }
 }
