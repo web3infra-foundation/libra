@@ -121,7 +121,7 @@
 | Part B Implementation Phase 0 | Contract Stabilization | 已完成：`Runtime` / `RuntimeConfig` (`src/internal/ai/runtime/mod.rs:34/47`)、`TaskExecutor` trait (`contracts.rs:312`)、`PromptPackage` / `WorkflowPhase` 已导出 |
 | Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（`Cargo.toml:76`）、`runtime/` 模块完整 |
 | Part B Implementation Phase 1 / Wave 1B | Codex `CodexTaskExecutor` + `CompletionTaskExecutor<M>` 收敛 | **trait 定义已落地、impl 仍待补齐**（2026-05-02）：`pub trait TaskExecutor` 已在 `runtime/contracts.rs:312` 定义；但**未在 `orchestrator/executor.rs` 找到 `impl TaskExecutor for CodexTaskExecutor` 或 `impl<M> TaskExecutor for CompletionTaskExecutor<M>` 块**。Wave 1B "Definition of Done" 第 1 条仍未达成；Phase 2 主循环尚不能完整通过 `TaskExecutor` 驱动单 task attempt |
-| Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:522`） |
+| Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:593`） |
 | Part B Implementation Phase 2 | Thread ID Unification + Projection Resolver | 部分完成：`projection/` 模块存在；canonical thread_id 收敛仍在进行 |
 | Part B Implementation Phase 3 | Code UI Source Of Truth Unification | 进行中：`runtime/phase3.rs` 已存在；`CodeUiCommandAdapter` trait 与 `BrowserControllerLease` 已落地（详见 Part C） |
 | Part B Implementation Phase 4 | ArtifactLedger + ValidatorEngine + DecisionProposal | 部分完成：`runtime/phase4.rs` 已存在；ValidatorEngine 仍归 planner gate 路径 |
