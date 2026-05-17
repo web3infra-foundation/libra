@@ -79,6 +79,18 @@ pub trait ToolLoopObserver: Send {
         self.on_model_usage(usage);
     }
 
+    /// Provider returned a response but it carried no usage metadata. Observers
+    /// should advance any wall-clock / call-count counters they expose; token
+    /// totals stay unchanged because the provider gave us no values to add.
+    /// Default impl is a no-op so existing observers compile without change.
+    fn on_model_missing_usage_recorded(&mut self, _tool_call_count: u64, _wall_clock_ms: u64) {}
+
+    /// Provider request failed before any usage could be recorded. Observers
+    /// should advance failure counters (and wall-clock) so the displayed
+    /// usage state matches the persisted `agent_usage_stats` failure row.
+    /// Default impl is a no-op so existing observers compile without change.
+    fn on_model_usage_failed(&mut self, _error_kind: &str, _wall_clock_ms: u64) {}
+
     fn on_model_stream_event(&mut self, _event: &CompletionStreamEvent) {}
 
     fn on_assistant_step_text(&mut self, _text: &str) {}
@@ -361,15 +373,21 @@ where
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
+                let error_kind = completion_error_kind(&error);
                 if let (Some(recorder), Some(context)) = (
                     config.usage_recorder.as_ref(),
                     config.usage_context.as_ref(),
                 ) && let Err(record_error) = recorder
-                    .record_failure(context, completion_error_kind(&error), Some(wall_clock_ms))
+                    .record_failure(context, error_kind, Some(wall_clock_ms))
                     .await
                 {
                     tracing::warn!("failed to record failed model usage stats: {record_error}");
                 }
+                // Mirror the success path: observers must advance wall-clock /
+                // failure counters even though no usage summary was produced,
+                // otherwise the live TUI snapshot drifts from the persisted
+                // `agent_usage_stats` failure row.
+                observer.on_model_usage_failed(error_kind, wall_clock_ms);
                 return Err(error);
             }
         };
@@ -413,6 +431,11 @@ where
                     {
                         tracing::warn!("failed to record estimated model usage stats: {error}");
                     }
+                    // Mirror the recorded-summary path: even when the provider
+                    // omits usage, the live TUI snapshot must advance its
+                    // wall-clock / call-count so the displayed state matches
+                    // the persisted `agent_usage_stats` estimated row.
+                    observer.on_model_missing_usage_recorded(tool_call_count, wall_clock_ms);
                 }
             }
         } else if let Some(usage) = response.raw_response.usage_summary() {
@@ -1400,6 +1423,8 @@ mod tests {
         ends: Vec<(String, String, bool)>,
         result_texts: Vec<String>,
         stream_events: Vec<CompletionStreamEvent>,
+        missing_usage_calls: Vec<(u64, u64)>,
+        failed_usage_calls: Vec<(String, u64)>,
     }
 
     impl ToolLoopObserver for RecordingObserver {
@@ -1428,6 +1453,52 @@ mod tests {
                 result.as_ref().is_ok_and(|o| o.is_success()),
             ));
         }
+
+        fn on_model_missing_usage_recorded(&mut self, tool_call_count: u64, wall_clock_ms: u64) {
+            self.missing_usage_calls
+                .push((tool_call_count, wall_clock_ms));
+        }
+
+        fn on_model_usage_failed(&mut self, error_kind: &str, wall_clock_ms: u64) {
+            self.failed_usage_calls
+                .push((error_kind.to_string(), wall_clock_ms));
+        }
+    }
+
+    #[test]
+    fn observer_default_impls_are_no_op_for_missing_usage_and_failure_paths() {
+        // Default trait impls must compile and run on a bare struct that does
+        // not override the new failure / missing-usage callbacks. This pins
+        // the additive contract: existing ToolLoopObserver implementors
+        // continue to work without any change.
+        struct BareObserver;
+        impl ToolLoopObserver for BareObserver {}
+
+        let mut observer = BareObserver;
+        observer.on_model_missing_usage_recorded(0, 0);
+        observer.on_model_usage_failed("timeout", 1_234);
+    }
+
+    #[test]
+    fn observer_missing_usage_and_failure_callbacks_are_recorded() {
+        // Custom impls receive both signals with the values the tool loop
+        // would pass on the failure / missing-usage paths. This guards the
+        // wiring at the trait level without requiring a full tool-loop
+        // integration harness.
+        let mut observer = RecordingObserver::default();
+        observer.on_model_missing_usage_recorded(3, 250);
+        observer.on_model_missing_usage_recorded(0, 9_000);
+        observer.on_model_usage_failed("timeout", 100);
+        observer.on_model_usage_failed("provider_error", 250);
+
+        assert_eq!(observer.missing_usage_calls, vec![(3, 250), (0, 9_000)]);
+        assert_eq!(
+            observer.failed_usage_calls,
+            vec![
+                ("timeout".to_string(), 100),
+                ("provider_error".to_string(), 250),
+            ]
+        );
     }
 
     #[test]
