@@ -60,11 +60,13 @@ the migration only flip schema state.
 
 The four legacy helpers in `src/internal/db.rs`
 (`ensure_config_kv_schema`, `ensure_ai_projection_schema`,
-`ensure_ai_runtime_contract_schema`, plus the bootstrap
-`sqlite_20260309_init.sql`) own their tables. A new migration whose `up`
-DDL targets one of those tables but ships a different shape will silently
-no-op against legacy DBs (because of `IF NOT EXISTS`) and create a hidden
-schema drift between fresh and legacy installs.
+`ensure_ai_runtime_contract_schema`), plus the two bootstrap files
+(`sqlite_20260309_init.sql` for core git + AI baseline, and
+`sqlite_20260415_ai_runtime_contract.sql` for the AI runtime-contract
+extension), own their tables. A new migration whose `up` DDL targets one
+of those tables but ships a different shape will silently no-op against
+legacy DBs (because of `IF NOT EXISTS`) and create a hidden schema drift
+between fresh and legacy installs.
 
 If a CEX must touch a legacy-owned table, it should:
 
