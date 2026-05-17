@@ -1646,26 +1646,36 @@ async fn handle_generate_ssh_key(
     _scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    // Validate remote name
+    // Validate remote name. config.md "generate-ssh-key" spec classifies
+    // this as a CLI usage error (`error: invalid remote name '<name>': only
+    // [a-zA-Z0-9_-] allowed`), so we must surface it via
+    // `CliError::command_usage` (which maps to the `Cli` category → exit
+    // 129 in coarse mode, 2 in fine mode) rather than the generic
+    // `from_legacy_string` path that collapses to `Failure` / exit 128.
     if !remote
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         || remote.is_empty()
         || remote.len() > 64
     {
-        return Err(CliError::from_legacy_string(format!(
-            "error: invalid remote name '{remote}': only [a-zA-Z0-9_-] allowed, 1-64 chars"
+        return Err(CliError::command_usage(format!(
+            "invalid remote name '{remote}': only [a-zA-Z0-9_-] allowed, 1-64 chars"
         )));
     }
 
-    // Verify remote exists
+    // Verify remote exists. Missing remote is a Fatal failure (the user's
+    // input is well-formed but the resource does not exist at execution
+    // time), classified under the Repo category — exit 128 in coarse mode
+    // matches the pre-existing behaviour from the legacy `from_legacy_string`
+    // routing this branch used to follow.
     let remote_exists = ConfigKv::remote_config(remote)
         .await
         .map_err(|e| CliError::from_legacy_string(e.to_string()))?;
     if remote_exists.is_none() {
-        return Err(CliError::from_legacy_string(format!(
-            "error: remote '{remote}' not found, add it first with libra remote add"
-        )));
+        return Err(CliError::failure(format!(
+            "remote '{remote}' not found, add it first with libra remote add"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     // Get vault root dir and unseal key
