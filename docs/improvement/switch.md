@@ -201,6 +201,7 @@ restore::execute_safe(args, output)
 | `InternalBranchBlocked` | `CliInvalidTarget` | 129 | 无 |
 | `DirtyUnstaged` | `RepoStateInvalid` | 128 | `commit or stash your changes before switching.` |
 | `DirtyUncommitted` | `RepoStateInvalid` | 128 | `commit or stash your changes before switching.` |
+| `UntrackedOverwrite` | `ConflictOperationBlocked` | 128 | `move or remove it before switching.` |
 | `StatusCheck` | `IoReadFailed` | 128 | 无 |
 | `CommitResolve` | `CliInvalidTarget` | 129 | `check the revision name and try again.` |
 | `BranchCreate` | `IoWriteFailed` | 128 | 无 |
