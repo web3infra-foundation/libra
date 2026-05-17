@@ -25,7 +25,7 @@
 | `HookProvider` trait + Claude/Gemini provider | [src/internal/ai/hooks/provider.rs](../../src/internal/ai/hooks/provider.rs)、[hooks/providers/](../../src/internal/ai/hooks/providers/) | 已能解析 hook envelope → `LifecycleEvent`，并安装 hook 配置 |
 | `LifecycleEvent` / `LifecycleEventKind` / `SessionHookEnvelope` / `make_dedup_key` / `apply_lifecycle_event` / `validate_session_hook_envelope` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) | 完整的事件模型与状态机原语 |
 | `process_hook_event_from_stdin` | [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
-| `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
+| `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（`new_with_ref` :176、`resolve_history_head` :459、`create_append_commit` :601、`update_ref_if_matches` :745） | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
 | `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:440](../../src/internal/ai/session/store.rs)（`SessionFileLock` 类型在 store.rs:44；`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
 | 分层存储 | [src/utils/client_storage.rs:347](../../src/utils/client_storage.rs)（`LIBRA_STORAGE_THRESHOLD` 解析）+ `put()`（client_storage.rs:490） | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
 | 云同步 | [src/command/cloud.rs::run_cloud_sync](../../src/command/cloud.rs)（当前位于 cloud.rs:817；`ensure_object_index_table` 在 :838 起 driver query） | 增量按 `object_index` 表迭代 |
@@ -617,7 +617,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 | 目的 | 复用对象 | 位置 |
 |------|---------|------|
-| 孤儿 ref CAS | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) |
+| 孤儿 ref CAS | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（:176 / :459 / :601 / :745） |
 | Hook 摄入流水线 | `process_hook_event_from_stdin` → 抽离为 `process_hook_event_with_target` + 旧 API 包装 | [src/internal/ai/hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) |
 | 事件模型 | `LifecycleEvent` / `LifecycleEventKind` / `make_dedup_key` / `normalize_json_value` / `validate_session_hook_envelope` / `apply_lifecycle_event` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) |
 | Unknown-event-safe envelope 模式 | 借鉴 `AgentRunEvent` / `AgentRunEventEnvelope`（`agent_run/` gated 在 `subagent-scaffold`，**不直接依赖**） | [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) |
