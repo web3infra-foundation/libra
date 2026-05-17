@@ -570,4 +570,46 @@ fn silent_child_output(output: &OutputConfig) -> OutputConfig {
 
 /// Unit tests for the checkout module
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkout_error_display_pins_owned_variants() {
+        assert_eq!(
+            CheckoutError::CheckingOutBranchBlocked("HEAD".to_string()).to_string(),
+            "checking out 'HEAD' branch is not allowed",
+        );
+        assert_eq!(
+            CheckoutError::CreatingBranchBlocked("HEAD".to_string()).to_string(),
+            "creating/switching to 'HEAD' branch is not allowed",
+        );
+        assert_eq!(
+            CheckoutError::DirtyUnstaged.to_string(),
+            "unstaged changes, can't switch branch",
+        );
+        assert_eq!(
+            CheckoutError::DirtyUncommitted.to_string(),
+            "uncommitted changes, can't switch branch",
+        );
+        assert_eq!(
+            CheckoutError::UntrackedOverwrite("src/new.rs".to_string()).to_string(),
+            "untracked working tree file would be overwritten by checkout: src/new.rs",
+        );
+        assert_eq!(
+            CheckoutError::BranchStoreRead {
+                context: "load branch 'main'".to_string(),
+                detail: "database is locked".to_string(),
+            }
+            .to_string(),
+            "failed to load branch 'main': database is locked",
+        );
+        assert_eq!(
+            CheckoutError::BranchStoreCorrupt {
+                context: "resolve branch 'feature'".to_string(),
+                detail: "ref points to non-commit object".to_string(),
+            }
+            .to_string(),
+            "failed to resolve branch 'feature': ref points to non-commit object",
+        );
+    }
+}
