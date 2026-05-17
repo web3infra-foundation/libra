@@ -108,7 +108,8 @@ pub enum DiffError {
 | `WorkdirList` | `IoReadFailed` | 128 | 无 |
 | `FileRead` | `IoReadFailed` | 128 | 无 |
 | `OutputWrite` | `IoWriteFailed` | 128 | 无 |
-| `DiffCompute` | `InternalInvariant` | 128 | Issues URL |
+
+`DiffError` 在 src/command/diff.rs:123-148 当前只保留 7 个变体；早期计划中的 `DiffCompute` 没有实际入箱——`similar` crate 的 diff 计算不会失败，所以没有对应的 `InternalInvariant` 入口。如未来引入会失败的 diff 算法（如 patience / minimal），应同时新增变体并补 Issues URL hint。
 
 ### 特性 2：执行层与渲染层拆分
 
