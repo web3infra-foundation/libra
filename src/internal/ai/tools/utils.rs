@@ -420,10 +420,129 @@ fn destructive_shell_blast_radius(parts: &[String]) -> Option<BlastRadius> {
         "chown" if args.iter().any(|arg| arg == "-R" || arg.starts_with("-R")) => {
             Some(BlastRadius::Workspace)
         }
-        "dd" if args.iter().any(|arg| arg.starts_with("of=/dev/")) => Some(BlastRadius::System),
+        "dd" => dd_args_blast_radius(args),
         "mkfs" | "mkfs.ext4" | "shutdown" | "reboot" | "poweroff" => Some(BlastRadius::System),
+        "ln" if ln_args_target_outside_workspace(args) => ln_blast_radius_for_target(args),
+        "tee" => tee_args_blast_radius(args),
         _ => None,
     }
+}
+
+/// `ln -s <source> <target>` (or with the `-f` overwrite flag) is a credential-
+/// pivot vector when the target is an absolute path outside the workspace: an
+/// attacker can plant a symlink at e.g. `/tmp/foo -> /etc/shadow` to read it
+/// through a subsequent permitted read. Classify any `ln` invocation whose
+/// link/target argument is an absolute path as out-of-workspace.
+fn ln_args_target_outside_workspace(args: &[String]) -> bool {
+    if !args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-s" | "-sf" | "-fs" | "--symbolic"))
+    {
+        return false;
+    }
+    args.iter().any(|arg| {
+        let trimmed = arg.trim_start_matches("--target-directory=");
+        trimmed.starts_with('/') && !is_within_workspace_path(trimmed)
+    })
+}
+
+fn ln_blast_radius_for_target(args: &[String]) -> Option<BlastRadius> {
+    if args.iter().any(|arg| {
+        arg.starts_with("/dev/") || arg.starts_with("/proc/") || arg.starts_with("/sys/")
+    }) {
+        Some(BlastRadius::System)
+    } else {
+        Some(BlastRadius::Workspace)
+    }
+}
+
+/// `tee /etc/passwd` (or `tee -a /etc/sudoers`) overwrites or appends to system
+/// files when run with elevated privilege; even unprivileged it can clobber
+/// developer config under `$HOME`. Classify any `tee` invocation whose first
+/// non-flag argument is an absolute path outside the workspace as destructive.
+fn tee_args_blast_radius(args: &[String]) -> Option<BlastRadius> {
+    let mut iter = args.iter();
+    for arg in iter.by_ref() {
+        if arg.starts_with('-') {
+            // `--` ends the option list, everything after is a positional path.
+            if arg == "--" {
+                break;
+            }
+            continue;
+        }
+        if arg.starts_with('/') && !is_within_workspace_path(arg) {
+            return if arg.starts_with("/dev/")
+                || arg.starts_with("/proc/")
+                || arg.starts_with("/sys/")
+                || arg.starts_with("/etc/")
+                || arg.starts_with("/usr/")
+                || arg.starts_with("/bin/")
+                || arg.starts_with("/sbin/")
+                || arg.starts_with("/boot/")
+            {
+                Some(BlastRadius::System)
+            } else {
+                Some(BlastRadius::Workspace)
+            };
+        }
+        // First positional path was relative or inside the workspace — allow.
+        return None;
+    }
+    // We exited the loop only after consuming `--` (or because the list was
+    // empty). Continue scanning the remaining args for an out-of-workspace
+    // absolute path.
+    for arg in iter {
+        if !arg.starts_with('-') && arg.starts_with('/') && !is_within_workspace_path(arg) {
+            return Some(BlastRadius::Workspace);
+        }
+    }
+    None
+}
+
+/// `dd of=<path>` rewrites the entire target. Already-covered `of=/dev/*` is the
+/// most destructive shape; this helper extends the rule to any absolute target
+/// outside the workspace (covering `dd if=/dev/zero of=/usr/bin/critical`).
+fn dd_args_blast_radius(args: &[String]) -> Option<BlastRadius> {
+    let of_target = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("of="))
+        .map(str::trim)?;
+    if of_target.is_empty() {
+        return None;
+    }
+    if of_target.starts_with("/dev/") {
+        return Some(BlastRadius::System);
+    }
+    if of_target.starts_with('/') && !is_within_workspace_path(of_target) {
+        return if of_target.starts_with("/proc/")
+            || of_target.starts_with("/sys/")
+            || of_target.starts_with("/etc/")
+            || of_target.starts_with("/usr/")
+            || of_target.starts_with("/bin/")
+            || of_target.starts_with("/sbin/")
+            || of_target.starts_with("/boot/")
+        {
+            Some(BlastRadius::System)
+        } else {
+            Some(BlastRadius::Workspace)
+        };
+    }
+    None
+}
+
+/// Heuristic guard that recognizes a small set of paths that classify as
+/// "still inside the workspace" for the destructive command rules. The
+/// guard intentionally treats `/tmp/` and `/var/tmp/` as out-of-workspace
+/// because credential-pivot attacks routinely stage there. `/private/tmp/`
+/// is the macOS expansion of `/tmp`. Callers should pass an absolute path.
+fn is_within_workspace_path(absolute: &str) -> bool {
+    // No reliable workspace anchor is available at this layer; we use a
+    // small conservative allowlist of paths that the existing safety
+    // surface already treats as inside-workspace (none currently). Returning
+    // false for every absolute path is the safe default — symlink / tee /
+    // dd into ANY absolute path is destructive when issued by AI shell.
+    let _ = absolute;
+    false
 }
 
 fn rm_args_are_recursive_force(args: &[String]) -> bool {
@@ -651,5 +770,97 @@ mod tests {
         assert!(!command_invokes_git_version_control(
             "grep gitignore README.md"
         ));
+    }
+
+    fn parts(command: &str) -> Vec<String> {
+        command.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn destructive_shell_blast_radius_flags_symlink_pivot_attacks() {
+        // Symlinking inside system / sensitive prefixes — System radius so
+        // shell handler treats this as deny.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("ln -s /etc/shadow /dev/null-pivot")),
+            Some(BlastRadius::System)
+        );
+        // Symlink staged at /tmp pointing at credentials — Workspace radius
+        // is enough to deny but distinguishes from kernel/system targets.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("ln -s /etc/shadow /tmp/leak")),
+            Some(BlastRadius::Workspace)
+        );
+        // -sf overwrite form is equally dangerous.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("ln -sf /etc/passwd /tmp/p")),
+            Some(BlastRadius::Workspace)
+        );
+        // Plain `ln` (hardlink) is not in this rule; classification is None.
+        assert_eq!(destructive_shell_blast_radius(&parts("ln /foo /bar")), None);
+        // `ln -s` with relative target is not pivoting outside workspace.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("ln -s ./src ./link")),
+            None
+        );
+    }
+
+    #[test]
+    fn destructive_shell_blast_radius_flags_tee_to_system_paths() {
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("tee /etc/passwd")),
+            Some(BlastRadius::System)
+        );
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("tee -a /etc/sudoers")),
+            Some(BlastRadius::System)
+        );
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("tee /usr/local/bin/payload")),
+            Some(BlastRadius::System)
+        );
+        // tee to an arbitrary absolute path outside workspace is at least
+        // Workspace radius (still denied by shell safety surface).
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("tee /tmp/leak")),
+            Some(BlastRadius::Workspace)
+        );
+        // tee to a relative path is allowed (classification None — the
+        // existing shell handler will still gate writes via workspace
+        // boundary validation).
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("tee ./local.log")),
+            None
+        );
+    }
+
+    #[test]
+    fn destructive_shell_blast_radius_flags_dd_to_critical_targets() {
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero of=/dev/sda")),
+            Some(BlastRadius::System)
+        );
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero of=/usr/bin/critical")),
+            Some(BlastRadius::System)
+        );
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero of=/etc/sudoers")),
+            Some(BlastRadius::System)
+        );
+        // Absolute non-system target falls back to Workspace radius.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero of=/tmp/payload")),
+            Some(BlastRadius::Workspace)
+        );
+        // dd with a relative output target is not destructive at this layer.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero of=./out.bin")),
+            None
+        );
+        // dd without of= (e.g. read-only) is None.
+        assert_eq!(
+            destructive_shell_blast_radius(&parts("dd if=/dev/zero count=1")),
+            None
+        );
     }
 }
