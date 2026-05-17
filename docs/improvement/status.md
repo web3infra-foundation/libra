@@ -23,7 +23,7 @@
 - `--show-stash` 标志已实现（标准模式）
 - `--ignored` 标志已实现（所有模式）
 - `--untracked-files` 标志已实现（`normal`/`all`/`no`）
-- `StatusError` 枚举已定义 5 个变体（`status.rs:101-113`）
+- `StatusError` 枚举已定义 5 个变体（`status.rs:171-182`）
 - human 模式已有"下一步命令建议"（`use "libra add ..."` / `use "libra restore ..."` 等）
 - `StatusError` 已实现 `From<StatusError> for CliError`，每个变体都有显式 `StableErrorCode`
 
