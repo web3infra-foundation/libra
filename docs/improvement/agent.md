@@ -6013,7 +6013,7 @@ v1 行为：
 - `--control observe` 下自动化只读，不可 attach write。
 - `--control write` 下，automation 凭 control token 申请 takeover。
 - 自动化持有 lease 时：
-  - TUI 输入框只读（参考 [app.rs:800-1000](../../src/internal/tui/app.rs) 主事件循环），Enter 不再提交。
+  - TUI 输入框只读（参考 [src/internal/tui/app.rs::handle_key_event](../../src/internal/tui/app.rs)，当前位于 :1395；早期文档中的 :800-1000 范围已随 TUI 重构上移），Enter 不再提交。
   - TUI 仍渲染事件、pending interaction、tool progress、diagnostics 摘要。
   - `Ctrl-C` / `/quit` 可结束本地 session（最终控制权）。
   - 提供人工抢回入口 `/control reclaim`；抢回会撤销 automation lease 并 broadcast controller change snapshot。
