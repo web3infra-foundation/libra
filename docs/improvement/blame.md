@@ -14,11 +14,11 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, out_config)` 双入口已存在（`blame.rs:45/54`）
-- `Pager::with_config(out_config)` 集成已实现（`blame.rs:197`）
-- `--quiet` 已实现（`blame.rs:74, 196`）
+- `execute()` / `execute_safe(args, out_config)` 双入口已存在（`blame.rs:149/170`）
+- `Pager::with_config(out_config)` 集成已实现（`blame.rs:210`）
+- `--quiet` 已实现（`blame.rs:177` 静默早退；模块 doc-comment 第 12 行说明 quiet/JSON/paged-text 三态）
 - `-L, --line-range` 已实现，支持 "10"、"10,20"、"10,+5" 格式
-- 基于内容相等性的 blame 算法已实现（BFS 历史回溯，`blame.rs:94-146`）
+- 基于内容相等性的 blame 算法已实现（BFS 历史回溯；入口在 `blame_file()`，blame.rs:221 起的文档注释描述算法步骤）
 - SHA-1 和 SHA-256 双格式支持已测试
 - `run_blame()` + `BlameOutput` 已落地，`--json` / `--machine` 可返回逐行结构化结果
 - `BlameError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
