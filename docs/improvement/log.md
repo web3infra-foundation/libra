@@ -16,12 +16,12 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:313/322`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:453/462`）
 - `Pager` 支持 `Pager::with_config(output)` 自动检测 TTY 与 `--no-pager`
 - `internal/log/formatter.rs`（205 行）提供 Full/Oneline/Custom 三种格式
 - `internal/log/date_parser.rs`（89 行）支持绝对日期、Unix 时间戳和相对日期
-- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:121-197`）
-- `GraphState` 支持 ASCII 图形渲染（`log.rs:805-876`）
+- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:234` 起的 struct + impl）
+- `GraphState` 支持 ASCII 图形渲染（`log.rs:1127` 起的 struct + impl）
 - `--stat` / `--name-only` / `--name-status` / `--patch` 输出模式已实现
 - `--decorate` 支持 no/short/full/auto（从 `log.decorate` 配置读取默认值）
 - `run_log()` + `LogOutput` 已落地，`--json` / `--machine` 已可返回结构化提交列表
