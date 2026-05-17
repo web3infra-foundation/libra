@@ -428,9 +428,9 @@ async fn process_hook_event_with_target(
 
 ### 7.5 与现有命令交互
 
-- 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：新增匹配 `agent-traces`
-- 在 [`command/restore.rs`](../../src/command/restore.rs) 与 [`command/reset.rs`](../../src/command/reset.rs) 的入口增加 `is_locked_branch(target_branch_name)` 检查并拒绝
-- `git log refs/libra/agent-traces` 直接可用
+- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）与 `switch`（create）均已调用
+- 部分：[`command/restore.rs`](../../src/command/restore.rs) 已通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`；[`command/reset.rs`](../../src/command/reset.rs) 已通过 `ResetError::LockedTarget` 守 `reset --hard <locked-ref>`。但**cwd 当前位于锁定分支时拦截 worktree-modifying commands** 属于行为变更，仍留作独立切片，未在本批落地
+- ✅ `git log refs/libra/agent-traces` 直接可用
 
 ---
 
