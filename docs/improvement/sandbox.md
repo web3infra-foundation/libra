@@ -118,7 +118,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - 危险 writable root 拒绝：`/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock`
 
 **运行时层** [src/internal/ai/sandbox/runtime.rs](../../src/internal/ai/sandbox/runtime.rs)
-- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs:282-313），`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 已嵌入
+- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs::create_seatbelt_command_args，当前位于 :506；`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 通过 `include_str!` 嵌入，runtime.rs:512-513）
 - Linux：调用外部 `libra-linux-sandbox` 可执行文件，支持 seccomp 或 bwrap 两种模式，经 `LIBRA_LINUX_SANDBOX_EXE` 与 `LIBRA_USE_LINUX_SANDBOX_BWRAP` 控制
 - Windows：`SandboxTransformError::WindowsSandboxNotImplemented`，与 Claude Code 当前状态对齐
 - 网络控制：沙箱策略联动 `LIBRA_SANDBOX_NETWORK_DISABLED` 环境变量和 Seatbelt 网络策略
