@@ -625,7 +625,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:440](../../src/internal/ai/session/store.rs) |
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
-| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:45](../../src/internal/branch.rs)、[checkout.rs:71-83](../../src/command/checkout.rs)、[switch.rs:35,265](../../src/command/switch.rs) |
+| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/353](../../src/command/checkout.rs)（多个 INTENT_BRANCH match arm 散落在 219/222/226/229/353/355 等）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
 | 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:347/490](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
 | 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
