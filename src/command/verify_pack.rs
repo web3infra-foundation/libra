@@ -598,7 +598,13 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-        decoded_entries.insert(decoded_entry.index.hash, decoded_entry);
+        insert_decoded_pack_entry(&mut decoded_entries, decoded_entry).map_err(|detail| {
+            CliError::fatal(format!(
+                "failed to decode pack file '{}': {detail}",
+                pack_file.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
     }
 
     Ok(DecodedPack {
@@ -606,6 +612,17 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
         pack_len,
         entries: decoded_entries,
     })
+}
+
+fn insert_decoded_pack_entry(
+    entries: &mut BTreeMap<ObjectHash, DecodedPackEntry>,
+    entry: DecodedPackEntry,
+) -> Result<(), String> {
+    let hash = entry.index.hash;
+    if entries.insert(hash, entry).is_some() {
+        return Err(format!("pack contains duplicate object ID {hash}"));
+    }
+    Ok(())
 }
 
 fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<ObjectHash, u64>> {
@@ -765,5 +782,37 @@ fn format_io_error(err: &io::Error) -> String {
         io::ErrorKind::NotFound => "No such file or directory".to_string(),
         io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
         _ => err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+    use super::*;
+
+    fn decoded_entry(hash: ObjectHash) -> DecodedPackEntry {
+        DecodedPackEntry {
+            index: IndexEntry {
+                hash,
+                crc32: 0,
+                offset: 12,
+            },
+            object_type: ObjectType::Blob,
+            size: 5,
+        }
+    }
+
+    #[test]
+    fn insert_decoded_pack_entry_rejects_duplicate_hashes() {
+        let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+        let hash = ObjectHash::new(b"duplicate");
+        let mut entries = BTreeMap::new();
+
+        insert_decoded_pack_entry(&mut entries, decoded_entry(hash)).expect("first insert");
+        let err = insert_decoded_pack_entry(&mut entries, decoded_entry(hash))
+            .expect_err("duplicate hash should fail");
+
+        assert!(err.contains("duplicate object ID"));
     }
 }

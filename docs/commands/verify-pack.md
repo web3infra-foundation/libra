@@ -23,8 +23,9 @@ decodes the corresponding pack file, and verifies that both files agree on:
 By default the pack path is derived by replacing the index file extension with
 `.pack`. Use `--pack <PACK_FILE>` when the pack archive lives elsewhere.
 The command does not require a Libra repository. When run inside a repository,
-it uses that repository's object format; outside a repository, it defaults to
-SHA-1.
+it uses that repository's object format. Outside a repository, version 2 index
+files infer SHA-1 vs SHA-256 from the index layout; version 1 indexes are SHA-1
+only.
 
 ## Options
 
@@ -32,7 +33,7 @@ SHA-1.
 |------|-------|-------------|---------|
 | `<IDX_FILE>` | | Pack index file to verify | Required |
 | `--pack <PATH>` | | Pack archive to verify against | `<IDX_FILE>` with `.pack` extension |
-| `--verbose` | `-v` | Print each indexed object and offset | Off |
+| `--verbose` | `-v` | Print each indexed object using Git-compatible verbose fields | Off |
 | `--json` | | Emit a structured JSON envelope | Off |
 | `--machine` | | Emit the same envelope as one compact JSON line | Off |
 
@@ -53,13 +54,17 @@ Successful non-verbose verification prints one summary line:
 objects/pack/pack-abc123.idx: ok
 ```
 
-Verbose mode prints indexed objects before the summary line. Version 2 indexes
-also include each object's CRC32:
+Verbose mode prints indexed objects before the summary line using Git's base
+field layout:
 
 ```text
-3b18e512dba79e4c8300dd08aeb37f8e728b8dad 12 0x1a2b3c4d
+3b18e512dba79e4c8300dd08aeb37f8e728b8dad blob 12 21 48
 objects/pack/pack-abc123.idx: ok
 ```
+
+The fields are `<oid> <type> <size> <size-in-pack> <offset>`. CRC32 values for
+version 2 indexes are validated and remain available in structured output, but
+are not printed in human verbose mode.
 
 ## Structured Output
 
@@ -79,8 +84,8 @@ objects/pack/pack-abc123.idx: ok
 }
 ```
 
-When `--verbose` is combined with `--json`, `data.objects[]` contains
-`oid`, `offset`, and optional `crc32`.
+When `--verbose` is combined with `--json`, `data.objects[]` contains `oid`,
+`object_type`, `size`, `size_in_pack`, `offset`, and optional `crc32`.
 
 ## Compatibility
 
