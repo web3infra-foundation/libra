@@ -13,7 +13,12 @@
 
 use std::{env, fmt};
 
-use crate::internal::ai::client::{Client as HttpClient, Provider};
+use anyhow::Result;
+
+use crate::internal::{
+    ai::client::{Client as HttpClient, Provider},
+    config::{LocalIdentityTarget, resolve_env_for_target},
+};
 
 /// Gemini API provider that carries the API key and injects the
 /// `x-goog-api-key` authentication header into every request.
@@ -72,8 +77,34 @@ impl Client {
     /// Gemini's public API has no stable proxy contract for end users.
     /// Test-only consumers that need to point at a localhost stub should
     /// use [`Client::with_base_url`].
-    pub fn from_env() -> Result<Self, env::VarError> {
+    pub fn from_env() -> std::result::Result<Self, env::VarError> {
         let api_key = env::var("GEMINI_API_KEY")?;
+        let provider = GeminiProvider::new(api_key);
+        Ok(Self::new(
+            "https://generativelanguage.googleapis.com",
+            provider,
+        ))
+    }
+
+    /// Vault-aware async constructor: resolves `GEMINI_API_KEY` via
+    /// [`resolve_env_for_target`], so callers can store the key in repo-local
+    /// or global `vault.env.GEMINI_API_KEY` config without exporting it to
+    /// the process environment.
+    ///
+    /// Priority order:
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.GEMINI_API_KEY`)
+    /// 3. Global config
+    ///
+    /// Gemini does not expose a base-URL override env var (see [`from_env`])
+    /// — `from_resolved_env` matches the same single-env-var contract. Tests
+    /// that need a stub endpoint should keep using [`with_base_url`].
+    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
+        let api_key = resolve_env_for_target("GEMINI_API_KEY", local_target)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("GEMINI_API_KEY is not set in env, repo vault, or global config")
+            })?;
         let provider = GeminiProvider::new(api_key);
         Ok(Self::new(
             "https://generativelanguage.googleapis.com",
@@ -102,5 +133,83 @@ impl Client {
     /// fail at request time with a 404.
     pub fn completion_model(&self, model: &str) -> super::completion::CompletionModel {
         super::completion::CompletionModel::new(self.clone(), model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
+
+    use super::*;
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_reads_gemini_api_key_from_process_env() {
+        let key_guard = TestEnvGuard::set("GEMINI_API_KEY", Some("gem-test-resolved"));
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/gemini-from-resolved-env-test.db"),
+        );
+
+        let client = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect("from_resolved_env should succeed when GEMINI_API_KEY is set");
+        assert_eq!(client.provider.api_key(), "gem-test-resolved");
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
+        let key_guard = TestEnvGuard::set("GEMINI_API_KEY", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/gemini-from-resolved-env-test.db"),
+        );
+
+        let err = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect_err("from_resolved_env must fail without an API key");
+        assert!(
+            err.to_string().contains("GEMINI_API_KEY"),
+            "error should name the missing key, got: {err}"
+        );
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial]`, and the guard
+            // restores the previous value on drop.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }
