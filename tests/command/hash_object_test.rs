@@ -43,6 +43,25 @@ async fn hash_object_stdin_matches_git_blob_hash() {
 }
 
 #[tokio::test]
+async fn hash_object_read_only_uses_sha256_repository_format() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    let init = run_libra_command(&["init", "--object-format", "sha256"], repo.path());
+    assert_cli_success(&init, "failed to initialize sha256 repository");
+    fs::write(repo.path().join("hello.txt"), b"hello world\n").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "hello.txt"], repo.path());
+    assert_cli_success(
+        &output,
+        "read-only hash-object should use repository object format",
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "0bd69098bd9b9cc5934a610ab65da429b525361147faa7b5b922919e9a23143d"
+    );
+}
+
+#[tokio::test]
 async fn hash_object_file_works_outside_repository() {
     let dir = tempfile::tempdir().expect("create temp dir");
     fs::write(dir.path().join("hello.txt"), b"hello world\n").expect("write fixture");

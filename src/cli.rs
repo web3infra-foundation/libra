@@ -754,7 +754,12 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
-        Commands::HashObject(args) if !args.write => Ok(CommandPreflight::sha1_without_repo()),
+        Commands::HashObject(args) if !args.write => {
+            match utils::util::try_get_storage_path(None) {
+                Ok(storage) => Ok(CommandPreflight::repo(storage)),
+                Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+            }
+        }
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
