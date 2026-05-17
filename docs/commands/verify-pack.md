@@ -27,6 +27,9 @@ it uses that repository's object format. Outside a repository, version 2 index
 files infer SHA-1 vs SHA-256 from the index layout; version 1 indexes are SHA-1
 only.
 
+Compatibility note: this command currently accepts one `<IDX_FILE>` per
+invocation and does not expose Git's `-s` / `--stat-only` form.
+
 ## Options
 
 | Flag | Short | Description | Default |
@@ -91,8 +94,9 @@ When `--verbose` is combined with `--json`, `data.objects[]` contains `oid`,
 
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
-| Verify pack index | `libra verify-pack <idx>` | `git verify-pack <idx>` | N/A |
+| Verify pack index | `libra verify-pack <idx>` | `git verify-pack <idx>...` | N/A |
 | Verbose objects | `-v` / `--verbose` | `-v` | N/A |
+| Stat-only mode | Unsupported | `-s` / `--stat-only` | N/A |
 | Explicit pack path | `--pack <path>` | N/A | N/A |
 | JSON output | `--json` / `--machine` | N/A | N/A |
 | Version 1 index | Supported for SHA-1 repositories | Supported | N/A |
