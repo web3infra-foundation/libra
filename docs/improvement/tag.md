@@ -101,7 +101,7 @@ pub enum TagError {
     LoadFailed { name: String, detail: String },
 
     #[error("failed to list tags: {0}")]
-    ListFailed(String),
+    ListFailed(#[source] tag::ListTagError),
 }
 ```
 
@@ -116,13 +116,17 @@ pub enum TagError {
 | `NotFound` | `CliInvalidTarget` | 129 | `use 'libra tag -l' to list available tags` |
 | `MissingName` | `CliInvalidArguments` | 129 | `provide a tag name` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first before tagging HEAD` |
-| `CheckExistingFailed` | `RepoCorrupt` | 128 | 无 |
+| `CheckExistingFailed` | `IoReadFailed` | 128 | 无 |
 | `SerializeAnnotatedTag` | `InternalInvariant` | 128 | 附带 Issues URL |
 | `StoreObjectFailed` | `IoWriteFailed` | 128 | 无 |
 | `PersistReferenceFailed` | `IoWriteFailed` | 128 | 无 |
 | `DeleteFailed` | `IoWriteFailed` | 128 | 无 |
-| `LoadFailed` | `RepoCorrupt` | 128 | 无 |
-| `ListFailed` | `RepoCorrupt` | 128 | 无 |
+| `LoadFailed` | `IoReadFailed` / `RepoCorrupt` | 128 | 无 |
+| `ListFailed` | `IoReadFailed` / `RepoCorrupt` | 128 | 无 |
+
+`LoadFailed` 与 `ListFailed` 不是单一 stable code：
+- `LoadFailed` 携带 `anyhow::Error` 源，命令层用 `classify_tag_load_error()` 检查 chain 是否含 `DbErr` —— 是则 `IoReadFailed`，否则 `RepoCorrupt`（结构性损坏）。
+- `ListFailed` 携带 `tag::ListTagError`（v0.17.408 起为 typed enum），命令层 `classify_list_tag_error()` 走精确的变体匹配：`Query(DbErr)` → `IoReadFailed`，`MissingCommit` / `InvalidObjectHash` / `MissingName` / `LoadObject` → `RepoCorrupt`。
 
 **与当前代码中 inline 错误的对应关系：**
 
