@@ -7,7 +7,12 @@
 //! The default base URL is `https://api.deepseek.com`; a custom URL can be
 //! supplied via [`Client::with_base_url`].
 
-use crate::internal::ai::client::{Client as GenericClient, Provider};
+use anyhow::Result;
+
+use crate::internal::{
+    ai::client::{Client as GenericClient, Provider},
+    config::{LocalIdentityTarget, resolve_env_for_target},
+};
 
 /// DeepSeek API provider.
 ///
@@ -107,12 +112,34 @@ impl Client {
     /// # Errors
     ///
     /// Returns [`std::env::VarError`] if `DEEPSEEK_API_KEY` is not set.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
+    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
         let api_key = std::env::var("DEEPSEEK_API_KEY")?;
         let base_url = "https://api.deepseek.com".to_string();
 
         let provider = DeepSeekProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
+    }
+
+    /// Vault-aware async constructor: resolves `DEEPSEEK_API_KEY` via
+    /// [`resolve_env_for_target`], so callers can store the key in repo-local
+    /// or global `vault.env.DEEPSEEK_API_KEY` config without exporting it to
+    /// the process environment.
+    ///
+    /// Priority order:
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 3. Global config
+    ///
+    /// DeepSeek does not expose a base-URL env override. Tests that need a
+    /// stub endpoint should keep using [`Client::with_base_url`].
+    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
+        let api_key = resolve_env_for_target("DEEPSEEK_API_KEY", local_target)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("DEEPSEEK_API_KEY is not set in env, repo vault, or global config")
+            })?;
+        let provider = DeepSeekProvider::new(api_key);
+        Ok(Self::new("https://api.deepseek.com", provider))
     }
 
     /// Creates a DeepSeek client with the given API key and the default
@@ -134,6 +161,8 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     /// Scenario: Debug formatting must mask the secret so it cannot leak into
@@ -169,5 +198,76 @@ mod tests {
     fn test_deepseek_provider_normalizes_bearer_prefixed_api_key() {
         let provider = DeepSeekProvider::new("Bearer test-key".to_string());
         assert_eq!(provider.api_key(), "test-key");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_reads_deepseek_api_key_from_process_env() {
+        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", Some("ds-test-resolved"));
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/deepseek-from-resolved-env-test.db"),
+        );
+
+        let client = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect("from_resolved_env should succeed when DEEPSEEK_API_KEY is set");
+        assert_eq!(client.provider.api_key(), "ds-test-resolved");
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
+        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/deepseek-from-resolved-env-test.db"),
+        );
+
+        let err = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect_err("from_resolved_env must fail without an API key");
+        assert!(
+            err.to_string().contains("DEEPSEEK_API_KEY"),
+            "error should name the missing key, got: {err}"
+        );
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial]`, and the guard
+            // restores the previous value on drop.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }
