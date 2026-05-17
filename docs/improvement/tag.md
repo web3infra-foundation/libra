@@ -112,7 +112,7 @@ pub enum TagError {
 > `GitError` / `io::Error` / `anyhow::Error` / `tag::ListTagError`），而不是仅传 `String`，
 > 让上游错误可以通过 `error.source()` 链式访问，也方便 `classify_tag_load_error()` /
 > `classify_list_tag_error()` 做精确分类。早期草案曾把所有字段统一为 `detail: String`，
-> 现已与 src/command/tag.rs:100-156 对齐。
+> 现已与 src/command/tag.rs:106-161（`TagError` enum）+ tag.rs:184（`From<TagError>` impl）对齐。
 
 > **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，当前代码通过 `map_create_tag_error()` 完成收口映射：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
 
@@ -158,7 +158,7 @@ pub enum TagError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**已落地部分（保持不变）：** `TagOutput` enum（含 `List`/`Create`/`Delete` 三变体）、`TagListEntry` 结构体均已存在于 `tag.rs:41-63`，JSON schema 已稳定。
+**已落地部分（保持不变）：** `TagOutput` enum（含 `List`/`Create`/`Delete` 三变体）位于 `tag.rs:63`，`TagListEntry` 结构体位于 `tag.rs:78`，JSON schema 已稳定。
 
 **本批变更：统一 `run_tag()` / `render_tag_output()` 分层**
 
