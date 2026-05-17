@@ -69,7 +69,7 @@ C1（Audit P0）
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
-| stash | partial | push / pop / list / apply / drop supported; show / branch / clear / create / store not supported |
+| stash | partial | push / pop / list / apply / drop / show / branch / clear supported; create / store unsupported (see [declined.md#d8-stash-create](../../improvement/compatibility/declined.md#d8) / [#d9-stash-store](../../improvement/compatibility/declined.md#d9)) |
 | lfs | partial | built-in Libra LFS command; uses `.libraattributes`, not Git LFS filters/hooks |
 | log | supported | |
 | shortlog | supported | |
