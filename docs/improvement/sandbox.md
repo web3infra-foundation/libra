@@ -193,7 +193,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 已新增 `enforcement: Required | PreferStrict | BestEffort`；当前默认保持 `BestEffort`，避免未显式配置的既有运行环境突然失败
    - `Required` 语义：内部 sandbox policy 需要 OS 后端时，若无法构造有效 sandbox，则返回 `SandboxTransformError::EnforcementFailed`
    - 与现有 `SandboxPermissions::RequireEscalated` 解耦：后者表达"这次调用合法地需要无沙箱"，前者表达"系统配置强制要求沙箱生效"；当前实现仍允许显式 escalated 调用绕过内部策略校验
-2. **修改降级路径**（`runtime.rs:224-228`）
+2. **修改降级路径**（`runtime.rs::SandboxManager::transform` 内的 `EnforcementFailed` 返回；当前位于 runtime.rs:302 和 :350 两处）
    - 已改为根据 `enforcement` 决策：
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }` 返回给调用方
     - `PreferStrict` → 已在 shell approval 路径复用 `ExecApprovalRequest` 弹用户确认；拒绝时不得裸跑
