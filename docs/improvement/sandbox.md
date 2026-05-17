@@ -113,7 +113,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **策略层** [src/internal/ai/sandbox/policy.rs](../../src/internal/ai/sandbox/policy.rs)
 - `SandboxPolicy` 四档：`ReadOnly` / `WorkspaceWrite` / `ExternalSandbox` / `DangerFullAccess`
 - `WritableRoot` 写入根 + 保护子路径（`.git` / `.libra` / `.codex` / `.agents`）
-- 路径通过 `canonicalize` 规范化（policy.rs:164-170）
+- 路径通过 `canonicalize` 规范化（policy.rs:280 / 296）
 - `/tmp` 与 `TMPDIR` 由策略显式纳入写入根
 - 危险 writable root 拒绝：`/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock`
 
