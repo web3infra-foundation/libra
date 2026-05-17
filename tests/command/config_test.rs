@@ -570,6 +570,97 @@ async fn test_config_add_rejects_implicit_encryption_mixed_with_existing_plainte
 
 #[tokio::test]
 #[serial]
+async fn test_config_set_encrypt_plaintext_mutex_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--encrypt",
+            "--plaintext",
+            "custom.token",
+            "value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--encrypt and --plaintext are mutually exclusive"),
+        "stderr should describe the mutex violation, got: {stderr}"
+    );
+    // config.md line 77: classified as a usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "mutex flag error must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_stdin_with_positional_value_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "set", "--stdin", "custom.token", "value"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot use both value argument and --stdin"),
+        "stderr should describe the --stdin vs positional mutex, got: {stderr}"
+    );
+    // config.md line 144: usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--stdin + positional must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_plaintext_on_vault_internal_key_is_failure() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--plaintext",
+            "vault.env.API_KEY",
+            "secret-value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--plaintext cannot be used with vault internal/secret keys"),
+        "stderr should describe the secret-key plaintext reject, got: {stderr}"
+    );
+    // config.md line 77: validation reject (exit 1 fine / 128 coarse) — must
+    // classify as a runtime Failure (exit 128) rather than the previous
+    // legacy-string fallthrough that produced the same number but with the
+    // internal-invariant stable code.
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "vault internal key plaintext reject must classify as Failure (exit 128), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_set_read_failure_does_not_silently_skip_existing_state_check() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

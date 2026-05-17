@@ -804,18 +804,25 @@ async fn handle_set(
         .with_exit_code(1));
     }
 
-    // --encrypt and --plaintext are mutually exclusive
+    // `--encrypt` and `--plaintext` are mutually exclusive. config.md (line 77)
+    // classifies this as a CLI usage error (exit 2 in fine mode, 129 in
+    // coarse) — route through `command_usage` so the category matches.
     if encrypt && plaintext {
-        return Err(CliError::from_legacy_string(
-            "error: --encrypt and --plaintext are mutually exclusive",
+        return Err(CliError::command_usage(
+            "--encrypt and --plaintext are mutually exclusive",
         ));
     }
 
-    // --plaintext must not be used with vault internal/secret keys
+    // `--plaintext` must not be used with vault internal/secret keys.
+    // config.md (line 77) classifies this as a validation reject (exit 1 in
+    // fine mode). We use `Failure` (coarse 128) with a stable code so the
+    // error class is recoverable rather than silently falling through to
+    // `InternalInvariant`.
     if plaintext && (is_vault_internal_key(key) || key.starts_with("vault.env.")) {
-        return Err(CliError::from_legacy_string(
-            "error: --plaintext cannot be used with vault internal/secret keys",
-        ));
+        return Err(CliError::failure(
+            "--plaintext cannot be used with vault internal/secret keys",
+        )
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     // Check encryption state inheritance from existing entries.
@@ -831,9 +838,11 @@ async fn handle_set(
 
     // Resolve the value
     let resolved_value = if stdin {
+        // `--stdin` and a positional value are mutually exclusive (config.md
+        // line 144 — usage error, exit 2 fine / 129 coarse).
         if value.is_some() {
-            return Err(CliError::from_legacy_string(
-                "error: cannot use both value argument and --stdin",
+            return Err(CliError::command_usage(
+                "cannot use both value argument and --stdin",
             ));
         }
         let mut buf = String::new();
@@ -890,11 +899,16 @@ async fn handle_set(
         is_sensitive_key(key)
     };
 
-    // Same-key-same-state constraint for --add.
+    // Same-key-same-state constraint for `--add`. config.md (line 79)
+    // classifies this as a state-conflict validation reject (exit 1 fine /
+    // 128 coarse). Use `Failure` with a stable code so the wire shape and
+    // exit code are deterministic instead of falling through to the legacy
+    // `from_legacy_string` path.
     if add && ((should_encrypt && has_plaintext) || (!should_encrypt && has_encrypted)) {
-        return Err(CliError::from_legacy_string(
-            "error: cannot mix encrypted and plaintext values for the same key",
-        ));
+        return Err(CliError::failure(
+            "cannot mix encrypted and plaintext values for the same key",
+        )
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     // Encrypt the value if needed
