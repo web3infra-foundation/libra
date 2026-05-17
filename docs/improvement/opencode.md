@@ -404,7 +404,7 @@ pub enum PermissionReply {
 | `Always` | 当次通过；按 `request.always` 中的每个 pattern 追加一条 `{permission, pattern, action: Allow}` 到 `approved` ruleset；同时把 pending 队列里所有「permission 相同、所有 pattern 都被新 approved 包含」的请求一并放行 | project-scope（写入 SQLite，重启后保留） |
 | `Reject { feedback }` | 当次失败；同 session 的其它 pending ask 全部以 Reject 失败；如果 `feedback` 非空，错误以 `PermissionCorrectedError { feedback }` 形态返回模型，模型必须把 feedback 视为用户指令调整后续动作 | 不持久化，但失败链一致 |
 
-Libra 现有 `ApprovalCachePolicy`（[src/internal/ai/sandbox/mod.rs:136](../../src/internal/ai/sandbox/mod.rs)）覆盖了 TTL、Scope、Sensitivity Tier，但**没有 `Always` 与 `request.always[]` 的 pattern-level 持久化合同**。OC-Phase 2 必须在 `ApprovalCachePolicy` 之上新增 `ApprovedRuleset` 投影：
+Libra 现有 `ApprovalCachePolicy`（[src/internal/ai/sandbox/mod.rs:145](../../src/internal/ai/sandbox/mod.rs)）覆盖了 TTL、Scope、Sensitivity Tier，但**没有 `Always` 与 `request.always[]` 的 pattern-level 持久化合同**。OC-Phase 2 必须在 `ApprovalCachePolicy` 之上新增 `ApprovedRuleset` 投影：
 
 ```rust
 pub struct ApprovedRuleset {
