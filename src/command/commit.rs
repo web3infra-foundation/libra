@@ -61,6 +61,12 @@ use crate::{
 /// libra commit --allow-empty -m "Trigger CI" Create an empty commit
 /// libra commit --json -m "Add feature"       Structured JSON output for agents
 /// ```
+// GitHub Issues URL surfaced on internal-invariant bug paths
+// (`CommitError::TreeCreation`) so users can report unexpected
+// tree-build failures. Mirrors push.rs / tag.rs's hint pattern per
+// Cross-Cutting G.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
     #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
@@ -205,7 +211,8 @@ impl From<CommitError> for CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("use -m to provide a commit message"),
             CommitError::TreeCreation(..) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::InternalInvariant),
+                .with_stable_code(StableErrorCode::InternalInvariant)
+                .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
             CommitError::ObjectStorage(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -1094,6 +1101,21 @@ mod test {
         assert_eq!(err.exit_code(), 128);
         assert_eq!(err.stable_code().as_str(), "LBR-REPO-003");
         assert!(err.message().contains("nothing to commit"));
+    }
+
+    /// Cross-Cutting G: `TreeCreation` is the lone CommitError variant
+    /// that maps to `InternalInvariant`. It must include the GitHub
+    /// Issues URL hint so users can report the bug.
+    #[test]
+    fn test_commit_error_tree_creation_has_issue_url_hint() {
+        let err: CliError =
+            CommitError::TreeCreation("synthetic tree-build failure".to_string()).into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "TreeCreation must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
+        );
     }
 
     /// Pin the `Display` format for the static-message and direct-message
