@@ -125,16 +125,22 @@ pub enum ResetError {
 | `NotInRepo` | `RepoNotFound` | 128 | `run 'libra init' to create a repository` |
 | `InvalidRevision` | `CliInvalidTarget` | 129 | `check the revision name and try again` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first` |
-| `CommitLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
-| `TreeLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
+| `HeadRead` | `IoReadFailed` | 128 | 无（解析 HEAD 时的 SQLite/sea-orm 失败） |
+| `HeadCorrupt` | `RepoCorrupt` | 128 | 无（HEAD ref 行结构损坏） |
+| `ObjectLoad { kind, object_id, detail }` | `RepoCorrupt` | 128 | `the object store may be corrupted`（取代原计划的独立 `CommitLoad` / `TreeLoad`；`kind` 字段携带 commit/tree/blob 三种语义） |
 | `IndexLoad` | `RepoCorrupt` | 128 | `the index file may be corrupted` |
 | `IndexSave` | `IoWriteFailed` | 128 | 无 |
 | `HeadUpdate` | `IoWriteFailed` | 128 | 无 |
+| `WorktreeRead` | `IoReadFailed` | 128 | 无（pathspec 模式枚举工作树失败） |
 | `WorktreeRestore` | `IoWriteFailed` | 128 | 无 |
+| `RevisionRead` | `IoReadFailed` | 128 | 无（解析 revision 字符串时 SQLite 失败） |
+| `RevisionCorrupt` | `RepoCorrupt` | 128 | 无（resolve 出的 ref 行结构损坏） |
 | `InvalidPathspecEncoding` | `CliInvalidArguments` | 129 | `rename the path or invoke libra from a path representable as UTF-8` |
 | `PathspecWithSoft` | `CliInvalidArguments` | 129 | `--soft only moves HEAD; use --mixed to reset index for specific paths` |
 | `PathspecWithHard` | `CliInvalidArguments` | 129 | `--hard updates the working tree; omit pathspecs or use --mixed for specific paths` |
 | `PathspecNotMatched` | `CliInvalidTarget` | 129 | `check the path and try again` |
+| `LockedTarget` | `CliInvalidTarget` | 129 | 无（拒绝 reset 到 `intent` / `agent-traces` 等 Libra 锁定分支） |
+| `Rollback { primary, rollback }` | 继承 `primary` 的 stable code | 128 | 无（rollback 失败时把原错误与 rollback 失败包起来一起传递） |
 
 **与当前代码中 inline 错误的对应关系：**
 
