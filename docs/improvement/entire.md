@@ -560,14 +560,14 @@ HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch().await?;
 
 ### 9.2 分支保护
 
-修改 [`src/internal/branch.rs:45`](../../src/internal/branch.rs)：
+已落地在 [`src/internal/branch.rs:51`](../../src/internal/branch.rs)：
 ```rust
 pub fn is_locked_branch(name: &str) -> bool {
-    name == DEFAULT_BRANCH
-        || name == INTENT_BRANCH
-        || name == "agent-traces"
+    name == DEFAULT_BRANCH || name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
 }
 ```
+
+其中 `AGENT_TRACES_BRANCH` 作为常量在 branch.rs:42 定义为 `"agent-traces"`，避免把 ref 字面值散落在多个调用点。
 
 并在 [`src/command/restore.rs`](../../src/command/restore.rs)、[`src/command/reset.rs`](../../src/command/reset.rs) 入口增加：
 ```rust
