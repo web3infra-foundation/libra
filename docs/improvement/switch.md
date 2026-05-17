@@ -113,7 +113,7 @@ pub enum SwitchError {
     #[error("a branch named '{0}' already exists")]
     BranchAlreadyExists(String),
 
-    #[error("creating/switching to '{0}' branch is not allowed")]
+    #[error("'{0}' is a reserved branch name")]
     InternalBranchBlocked(String),
 
     #[error("unstaged changes, can't switch branch")]
@@ -121,6 +121,9 @@ pub enum SwitchError {
 
     #[error("uncommitted changes, can't switch branch")]
     DirtyUncommitted,
+
+    #[error("untracked working tree file would be overwritten by switch: {0}")]
+    UntrackedOverwrite(String),
 
     #[error("failed to determine working tree status: {0}")]
     StatusCheck(String),
