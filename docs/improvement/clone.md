@@ -497,7 +497,7 @@ InvalidRemoteSpec {
 
 **hint 预算与优先级说明：**
 
-当前 `CliError::with_hint()` 最多只保留 2 条 hint（`src/utils/error.rs:411-422`）。clone 不能假设可以无限追加 hint，必须遵守固定优先级：
+当前 `CliError::with_hint()` 最多只保留 2 条 hint（`src/utils/error.rs:651-663` 的 `pub fn with_hint`，前置截断逻辑 `if self.hints.len() >= 2 { return self; }`）。clone 不能假设可以无限追加 hint，必须遵守固定优先级：
 
 1. cleanup warning（如果存在）
 2. 根因对应的 primary actionable hint
