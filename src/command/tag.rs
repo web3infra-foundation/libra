@@ -152,10 +152,10 @@ enum TagError {
     },
 
     #[error("failed to list tags: {0}")]
-    ListFailed(#[source] anyhow::Error),
+    ListFailed(#[source] tag::ListTagError),
 }
 
-fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
+fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
     if error
         .chain()
         .any(|cause| cause.downcast_ref::<DbErr>().is_some())
@@ -163,6 +163,16 @@ fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
         StableErrorCode::IoReadFailed
     } else {
         StableErrorCode::RepoCorrupt
+    }
+}
+
+fn classify_list_tag_error(error: &tag::ListTagError) -> StableErrorCode {
+    match error {
+        tag::ListTagError::Query(_) => StableErrorCode::IoReadFailed,
+        tag::ListTagError::MissingCommit { .. }
+        | tag::ListTagError::InvalidObjectHash { .. }
+        | tag::ListTagError::MissingName
+        | tag::ListTagError::LoadObject { .. } => StableErrorCode::RepoCorrupt,
     }
 }
 
@@ -210,10 +220,10 @@ impl From<TagError> for CliError {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
             TagError::LoadFailed { source, .. } => {
-                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+                CliError::fatal(message).with_stable_code(classify_tag_load_error(&source))
             }
             TagError::ListFailed(source) => {
-                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+                CliError::fatal(message).with_stable_code(classify_list_tag_error(&source))
             }
         }
     }
@@ -648,18 +658,20 @@ mod tests {
 
     #[test]
     fn test_tag_list_db_error_maps_as_io_read() {
-        let cli_error = CliError::from(TagError::ListFailed(anyhow::Error::new(DbErr::Custom(
-            "database is locked".to_string(),
-        ))));
+        let cli_error = CliError::from(TagError::ListFailed(tag::ListTagError::Query(
+            DbErr::Custom("database is locked".to_string()),
+        )));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
     }
 
     #[test]
     fn test_tag_list_object_error_maps_as_repo_corrupt() {
-        let cli_error = CliError::from(TagError::ListFailed(anyhow::anyhow!(
-            "Invalid ObjectHash: not-a-valid-hash"
-        )));
+        let cli_error =
+            CliError::from(TagError::ListFailed(tag::ListTagError::InvalidObjectHash {
+                name: "v1.0".to_string(),
+                detail: "not-a-valid-hash".to_string(),
+            }));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
     }
