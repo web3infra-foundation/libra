@@ -95,7 +95,7 @@ pub enum BranchError {
     #[error("the branch '{0}' is not fully merged")]
     NotFullyMerged(String),
 
-    #[error("the '{0}' branch is locked by another process")]
+    #[error("the '{0}' branch is locked and cannot be modified")]
     Locked(String),
 
     #[error("HEAD is detached")]
