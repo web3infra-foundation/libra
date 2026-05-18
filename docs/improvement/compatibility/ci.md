@@ -27,6 +27,7 @@ C2（Audit P1）
 - 把 base.yml 现有质量门规范为全局唯一 display name：
   - `compat-rustfmt`
   - `compat-clippy`
+  - `compat-web-check`
   - `compat-redundancy`
   - `compat-offline-core`
   - `compat-network-remotes`
