@@ -5351,7 +5351,7 @@ libra code (CLI / TUI / Web / MCP)
 
 ### Entry Point
 
-Codex TUI 运行时在 `run_tui_turn_with_revision()` 中调用 `runtime_handle.adapter().submit_message(prompt)`。实际的 prompt assembly 发生在 `CodexCodeUiAdapter::submit_message()` 与 `submit_thread_message()` 中。
+Codex TUI 运行时在 `App<M>::start_managed_code_turn()`（[`src/internal/tui/app.rs:4093`](../../src/internal/tui/app.rs)）中调用 `adapter.submit_message(text)`（adapter 由 `runtime.adapter()` 获取）。实际的 prompt assembly 发生在 `CodexCodeUiAdapter::submit_message()`（[`src/internal/ai/codex/mod.rs:1557`](../../src/internal/ai/codex/mod.rs)）中——旧版本提到的 `run_tui_turn_with_revision()` / `submit_thread_message()` 在代码中不存在，已统一到上述单一入口。
 
 最终发给 Codex app-server 的 `turn/start` 请求：
 
