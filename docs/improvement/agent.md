@@ -118,7 +118,7 @@
 
 | 模块 | 关键交付 | 状态 |
 |------|---------|------|
-| Part B Implementation Phase 0 | Contract Stabilization | 已完成：`Runtime` / `RuntimeConfig` (`src/internal/ai/runtime/mod.rs:34/47`)、`TaskExecutor` trait (`contracts.rs:312`)、`PromptPackage` / `WorkflowPhase` 已导出 |
+| Part B Implementation Phase 0 | Contract Stabilization | 已完成：`RuntimeConfig` (`src/internal/ai/runtime/mod.rs:34`) + `Runtime` (`src/internal/ai/runtime/mod.rs:47`)、`TaskExecutor` trait (`contracts.rs:312`)、`PromptPackage` / `WorkflowPhase` 已导出 |
 | Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（`Cargo.toml:77`）、`runtime/` 模块完整 |
 | Part B Implementation Phase 1 / Wave 1B | Codex `CodexTaskExecutor` + `CompletionTaskExecutor<M>` 收敛 | **trait 定义已落地、impl 仍待补齐**（2026-05-02）：`pub trait TaskExecutor` 已在 `runtime/contracts.rs:312` 定义；但**未在 `orchestrator/executor.rs` 找到 `impl TaskExecutor for CodexTaskExecutor` 或 `impl<M> TaskExecutor for CompletionTaskExecutor<M>` 块**。Wave 1B "Definition of Done" 第 1 条仍未达成；Phase 2 主循环尚不能完整通过 `TaskExecutor` 驱动单 task attempt |
 | Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:599`） |
