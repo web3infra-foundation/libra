@@ -7,7 +7,7 @@ C3（Audit P1）
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
-- [`src/command/clone.rs`](../../../src/command/clone.rs) 已暴露 `--depth` 和 `--single-branch`（[clone.rs:81-89](../../../src/command/clone.rs#L81)）。
+- [`src/command/clone.rs`](../../../src/command/clone.rs) 已暴露 `--depth` 和 `--single-branch`（[clone.rs:111-119](../../../src/command/clone.rs#L111)）。
 - [`src/command/fetch.rs`](../../../src/command/fetch.rs) 已暴露 `--depth <N>`，并透传到 `fetch_repository_with_result(..., depth)`。
 - `fetch` 会处理 upload-pack 返回的 `shallow` / `unshallow` 响应帧，把 shallow boundary 持久化到 `.libra/shallow`，并在后续浅 fetch negotiation 中发送现有 boundary。
 - 第 5 批 [fetch.md](../fetch.md) 与 [`tests/command/fetch_test.rs`](../../../tests/command/fetch_test.rs) 已覆盖 fetch 顶层 JSON / machine / 错误码契约；C3 又补齐浅 fetch 端到端用例。
