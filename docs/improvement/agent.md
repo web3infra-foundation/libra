@@ -5368,15 +5368,13 @@ Codex TUI 运行时在 `App<M>::start_managed_code_turn()`（[`src/internal/tui/
 
 | 分支 | 判定条件 | 发送内容 |
 |---|---|---|
-| 计划修订 | 当前线程存在 `pending_plan_revision` | 使用 `codex_revise_plan_prompt(plan_text, user_request)`，且 `plan_first = false` |
-| 默认提交 | 不存在 `pending_plan_revision` | 先保留用户输入 `text`，再在 `submit_thread_message()` 中按 `plan_first = true` 包装 |
-| 执行已批准计划（Code UI 交互） | `respond_interaction()` 收到 `selected_option == "execute"` | 使用 `codex_execute_approved_plan_prompt(plan.text)`，且 `plan_first = false` |
+| 计划修订 | 当前线程存在 `pending_plan_revision`（`App<M>` 字段，见 `src/internal/tui/app.rs:493`） | 把 revision 命令原文（含 `IntentSpec` patch instruction）直接交给 `CodexCodeUiAdapter::submit_message(text)`；plan-first system prompt 由 codex app-server 自身的 `codex_plan_mode_developer_instructions` / `codex_plan_mode_base_instructions`（`codex/mod.rs:1127`、`:1142`）持续注入 |
+| 默认提交 | 不存在 `pending_plan_revision` | 用户输入 `text` 原样传给 `CodexCodeUiAdapter::submit_message(text)`，Libra 侧不再做任何 wrapper 包装；plan-first 提示同上由 codex 端长驻 |
+| 执行已批准计划（Code UI 交互） | `respond_interaction()` 收到 `selected_option == "execute"` | 走 `CodexCodeUiAdapter::respond_interaction()`，把 approve 决策回传给 codex app-server；不在 Libra 侧重新拼装 prompt |
 
 ### Current Prompt Templates
 
-1. 首轮 / 普通消息：`codex_plan_first_prompt(request)`。
-2. 计划修订：`codex_revise_plan_prompt(plan_text, request)`。
-3. 执行已批准计划：`codex_execute_approved_plan_prompt(plan_text)`。
+历史上曾存在三个 Libra 侧 wrapper（`codex_plan_first_prompt` / `codex_revise_plan_prompt` / `codex_execute_approved_plan_prompt`）；它们 **已经从代码中移除**。当前 `CodexCodeUiAdapter::submit_message()`（`src/internal/ai/codex/mod.rs:1557`）把用户 `text` 直接放进 `turn/start` 的 `input[{type:"text", text:<request_text>}]`，无任何本地 prompt 包装。Codex app-server 一侧的 plan-first 系统 prompt 由 `codex_plan_mode_developer_instructions` / `codex_plan_mode_base_instructions`（`src/internal/ai/codex/mod.rs:1127` / `:1142`）持续提供。
 
 目标态按 Phase 拆成三条共享入口：
 
@@ -5390,7 +5388,7 @@ Codex TUI 运行时在 `App<M>::start_managed_code_turn()`（[`src/internal/tui/
 
 当前路径：
 
-`用户原始输入 -> codex_plan_first_prompt(request) -> turn/start -> Codex 返回 plan text / response text -> Libra 本地 resolve_intentspec(...) -> Markdown review`
+`用户原始输入 -> CodexCodeUiAdapter::submit_message(text) -> turn/start -> Codex (plan-first system prompt 已由 codex 端注入) 返回 plan text / response text -> Libra 本地 resolve_intentspec(...) -> Markdown review`
 
 目标路径：
 
