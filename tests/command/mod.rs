@@ -280,6 +280,7 @@ mod config_test;
 mod describe_test;
 mod diff_test;
 mod fetch_test;
+mod fsck_test;
 mod graph_test;
 mod grep_test;
 mod hash_object_test;

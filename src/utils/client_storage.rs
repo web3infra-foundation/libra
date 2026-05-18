@@ -152,6 +152,10 @@ pub struct ClientStorage {
 }
 
 impl ClientStorage {
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+
     /// Construct a `ClientStorage` rooted at `base_path` (typically `.libra/objects`).
     ///
     /// Functional scope:

@@ -426,16 +426,15 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     })?;
     let current_dir = env::current_dir().map_err(|source| AddError::Workdir { source })?;
 
-    let (mut visible_changes, ignored_changes) =
-        status::changes_to_be_staged_split_safe().map_err(|source| AddError::Status { source })?;
+    let (mut visible_changes, mut ignored_changes) = if args.force {
+        status::changes_to_be_staged_split_force().map_err(|source| AddError::Status { source })?
+    } else {
+        status::changes_to_be_staged_split_safe().map_err(|source| AddError::Status { source })?
+    };
     if args.force {
         visible_changes.extend(ignored_changes.clone());
+        ignored_changes = Changes::default();
     }
-    let ignored_changes = if args.force {
-        Changes::default()
-    } else {
-        ignored_changes
-    };
 
     let validated = validate_pathspecs(
         &args.pathspec,
@@ -978,6 +977,12 @@ async fn stage_a_file(
     let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
         path: file.to_path_buf(),
     })?;
+
+    // Skip directories - they cannot be staged as blobs
+    if file_abs.is_dir() {
+        return Ok(StagedAction::Unchanged);
+    }
+
     let file_status = check_file_status(file, index, workdir)?;
     match file_status {
         FileStatus::New => {
