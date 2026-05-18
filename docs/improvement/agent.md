@@ -124,7 +124,7 @@
 | Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:599`） |
 | Part B Implementation Phase 2 | Thread ID Unification + Projection Resolver | 部分完成：`projection/` 模块存在；canonical thread_id 收敛仍在进行 |
 | Part B Implementation Phase 3 | Code UI Source Of Truth Unification | 进行中：`runtime/phase3.rs` 已存在；`CodeUiCommandAdapter` trait 与 `ControllerLease`（曾名 `BrowserControllerLease`，已统一为 kind-aware 形态）已落地（详见 Part C） |
-| Part B Implementation Phase 4 | ArtifactLedger + ValidatorEngine + DecisionProposal | 部分完成：`runtime/phase4.rs` 已存在；ValidatorEngine 仍归 planner gate 路径 |
+| Part B Implementation Phase 4 | ArtifactLedger + ValidatorEngine + DecisionProposal | 部分完成：`runtime/phase4.rs` 已存在并提供 `DecisionProposal`（`:82`）+ `DecisionProposalSummary`（`:72`）+ `DecisionProposalStore`（`:187`）；`ArtifactLedger`（`runtime/phase3.rs:20`）与 `ValidatorEngine`（`runtime/phase3.rs:94`）实际定义在 phase3，仍归 planner gate 路径 |
 | Part B Implementation Phase 5 | Security / Permission / Diagnostics / Testing Hardening | 进行中：`AuditSink` trait 已落地（`hardening.rs:333`），含 `record_decision` / `record_event` 语义化入口；但 from_env → resolve_env 改造**7 个 provider 仍用 from_env**（`gemini` / `openai` / `anthropic` / `deepseek` / `zhipu` / `ollama` / `kimi`），属于 Phase 5 收尾项 |
 | Part C Phase 0 | Contract（v1 HTTP / lease / redaction 表） | 已交付（本文 Part C 即 Phase 0 输出） |
 | Part C Phase 1 | Security Envelope（CLI 参数 + token / info / lock 文件 + 校验 helper） | **已落地**：`ControlMode` enum (`code.rs:232`)、`--control` / `--control-token-file` / `--control-info-file` (`code.rs:459` 起的 CodeArgs 字段)、`code_control_files.rs` 模块、`ControlInfo` / `ControlPaths` / `ControlLockGuard` 全部已存在 |
