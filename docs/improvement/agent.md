@@ -6074,7 +6074,7 @@ v1 行为：
 
 ### Audit Event Schema
 
-沿用 [hardening.rs:178](../../src/internal/ai/runtime/hardening.rs) `AuditEvent` 与 `TracingAuditSink`（[hardening.rs:256](../../src/internal/ai/runtime/hardening.rs)），但不要假设 `AuditEvent` 有 control 专属字段。新增一个内部 `ControlAuditRecord`，序列化成 redacted JSON 后写入 `AuditEvent.redacted_summary`；`AuditEvent` 的其它字段按下列规则填充：
+沿用 [hardening.rs:311](../../src/internal/ai/runtime/hardening.rs) `AuditEvent` 与 `TracingAuditSink`（[hardening.rs:476](../../src/internal/ai/runtime/hardening.rs)），但不要假设 `AuditEvent` 有 control 专属字段。新增一个内部 `ControlAuditRecord`，序列化成 redacted JSON 后写入 `AuditEvent.redacted_summary`；`AuditEvent` 的其它字段按下列规则填充：
 
 - `trace_id`：优先用当前 session/thread trace id；没有 canonical thread 时用启动时生成的 trace id。
 - `principal_id`：`local-tui-control:<controller_kind>:<client_id>`，client id 先经长度限制与 redaction。
@@ -6413,7 +6413,7 @@ cargo test --all
 #### Task 4.2 — Audit event 接入
 
 - File: [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs)
-- `WebAppState` 加 `audit_sink: Arc<dyn AuditSink>`（启动时默认 `Arc::new(TracingAuditSink)`，复用 [hardening.rs:256](../../src/internal/ai/runtime/hardening.rs)）。
+- `WebAppState` 加 `audit_sink: Arc<dyn AuditSink>`（启动时默认 `Arc::new(TracingAuditSink)`，复用 [hardening.rs:476](../../src/internal/ai/runtime/hardening.rs)）。
 - 新增 `ControlAuditRecord` + `append_control_audit(...)` helper，把 control 专属字段 redacted 后写入 `AuditEvent.redacted_summary`；不要直接改 `AuditEvent` 字段结构。
 - 在 5 个 write handler 入口/出口 await `append_control_audit(...)`。
 - 失败也写 audit（`result: "error", error_code: "..."`）。
