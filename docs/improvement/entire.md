@@ -27,7 +27,7 @@
 | `process_hook_event_from_stdin` | [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
 | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（`new_with_ref` :176、`resolve_history_head` :459、`create_append_commit` :601、`update_ref_if_matches` :745） | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
 | `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:440](../../src/internal/ai/session/store.rs)（`SessionFileLock` 类型在 store.rs:44；`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
-| 分层存储 | [src/utils/client_storage.rs:351](../../src/utils/client_storage.rs)（`LIBRA_STORAGE_THRESHOLD` 解析）+ `put()`（client_storage.rs:494） | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
+| 分层存储 | [src/utils/client_storage.rs:351](../../src/utils/client_storage.rs)（`LIBRA_STORAGE_THRESHOLD` 解析）+ `put()`（client_storage.rs:500） | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
 | 云同步 | [src/command/cloud.rs::run_cloud_sync](../../src/command/cloud.rs)（当前位于 cloud.rs:840；`ensure_object_index_table` 在 :861 起 driver query） | 增量按 `object_index` 表迭代 |
 | Migration runner（CEX-12.5） | [src/internal/db/migration.rs:532](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 当前注册表共 6 条迁移（`automation_log` / `agent_usage_stats` / `agent_capture` / `agent_checkpoint_parent_nullable` / `approved_permission` / `agent_usage_stats_agent_name`），全部走 `include_str!` 加载（v0.17.400 起 inline SQL 已抽取到文件）；`run_builtin_migrations`（migration.rs:635）公开 API 可用 |
 | `stash::build_tree_recursive` | [src/command/stash.rs](../../src/command/stash.rs) | 工作目录 → tree，已处理 index 合并、忽略文件、子模块 |
@@ -626,7 +626,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
 | 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/353](../../src/command/checkout.rs)（多个 INTENT_BRANCH match arm 散落在 219/222/226/229/353/355 等）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
-| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:351/494](../../src/utils/client_storage.rs) |
+| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:351/500](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
 | 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
 | 现 Claude/Gemini provider | 保留 `HookProvider`，新加 `ObservedAgent` wrapper 组合复用 | [hooks/providers/](../../src/internal/ai/hooks/providers/) |
