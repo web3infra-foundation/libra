@@ -5,7 +5,7 @@
 `libra code` 是仓库目前最复杂的子命令：一条入口同时拉起 TUI、HTTP/SSE Web 服务、MCP 服务、AI Agent 工具循环、Codex 旁路、Local TUI Automation Control。当前测试侧已经从最初的 smoke 覆盖扩展到 L2 数据驱动矩阵、L3 live 模型 gate 与多条纵深面专项测试：
 
 - L0 单元/契约：headless / projection / wire / codex 默认 TUI 守卫，以及 tool loop / session jsonl / redaction / wire 序列化等通过 Code 路径间接受益的测试。
-- L2 PTY+HTTP smoke：[tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 已覆盖 attach/detach/cancel/conflict/oversize 等 13 条场景。
+- L2 PTY+HTTP smoke：[tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 已覆盖 attach/detach/cancel/conflict/oversize 等 17 条场景。
 - L2 数据驱动：[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 已覆盖 10 条 lease case；SSE/state/security/generation/approval/model_generation 均已有 Rust runner。
 - L3 真实模型：[tests/code_ui_remote_model_generation_matrix.rs](../../tests/code_ui_remote_model_generation_matrix.rs) 已接入 `libra code` 服务路径，默认由 `.env.test` + `LIBRA_RUN_LIVE=1` gate 驱动 DeepSeek live case；nightly 工作流仍依赖 maintainer 配置 `DEEPSEEK_API_KEY` 后收集连续稳定性。
 
@@ -23,7 +23,7 @@
 | PTY Session Harness | ✅ 就位 | `tests/harness/code_session.rs`：`CodeSession::spawn()`、`snapshot()`、`matrix_attach/detach/submit()`、`open_event_stream()`、`respond_interaction()`、`read_repo_file()`、`run_repo_command()`、`with_control_observe()`、`with_lease_duration_ms()` |
 | Lease TTL override | ✅ 就位 | `src/internal/ai/web/code_ui.rs` 有 `test_lease_duration_override()`；`src/command/code.rs` 在 `cfg(feature = "test-provider")` 下解析 `LIBRA_CODE_LEASE_DURATION_MS` |
 | 全部 JSON 数据文件 | ✅ 就位 | `tests/data/code_ui_remote/` 下 6 个矩阵 JSON + `provider_fixtures/` 下 4 个 fake fixture |
-| 现有 L2 smoke | ✅ 就位 | `tests/code_ui_scenarios.rs` 13 条 case（10 条 `#[cfg(feature = "test-provider")]` + 3 条 browser） |
+| 现有 L2 smoke | ✅ 就位 | `tests/code_ui_scenarios.rs` 17 条 case（全部 `#[cfg(feature = "test-provider")]`，7 条 TUI 写通道 + 10 条 browser 写通道） |
 | 现有 L2 lease | ✅ 就位 | `tests/code_ui_remote_lease_matrix.rs` 已覆盖 10 条 case（含 observe-mode automation attach 拒绝） |
 | 现有 L2 远端矩阵 | ✅ 就位 | SSE 7/7、Generation 3/3、Approval 7/7、State 7/7、Security 6/6、Model generation 2/2 live-gated runner |
 | Inline 网络层测试 | ✅ 就位 | `src/internal/ai/web/mod.rs` `mod tests` 已覆盖 loopback、control auth、body limit、audit、route-level loopback gate |
@@ -88,7 +88,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 | 领域 | 当前已有 | 备注 |
 |---|---|---|
-| L2 smoke | [tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 13 条 case | automation 和 browser 两条写通道的端到端场景 |
+| L2 smoke | [tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 17 条 case | automation 和 browser 两条写通道的端到端场景 |
 | Harness browser helper | [tests/harness/code_session.rs](../../tests/harness/code_session.rs) 已有 `with_browser_control_loopback()`、`attach_browser()`、browser submit/cancel/detach/oversize/respond_interaction helper | 删除“待建 browser helper”假设 |
 | Control mode | CLI 只有 `observe` / `write`，见 [src/command/code.rs](../../src/command/code.rs) 的 `ControlMode` | 原方案里的 `--control read` 不存在，应改为默认 `observe`；`CodeSessionOptions::with_control_observe()` 已存在 |
 | Fake provider | [src/internal/ai/providers/fake/fixture.rs](../../src/internal/ai/providers/fake/fixture.rs) 已支持 `text`、`tool_call`、`error` 和 `stream` delta | tool case 的风险不是缺 `tool_call` variant，而是需要避免重复命中同一 tool_call 造成循环 |
