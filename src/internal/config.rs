@@ -1036,12 +1036,19 @@ fn trim_non_empty_config_value(value: String) -> Option<String> {
 /// values in separate fields so callers (notably `libra commit`) can apply
 /// `user.useConfigOnly` semantics — refusing to fall back to env vars when
 /// the user has explicitly opted into config-only identity.
+///
+/// Failures while reading the config DB (missing file, stale schema, locked
+/// SQLite) are downgraded to `tracing::warn!` + `None` rather than hard
+/// errors. Identity is auxiliary at vault-init time (the caller falls back
+/// to env vars or hard-coded defaults), and at `commit` time the missing
+/// value still surfaces as a clear `IdentityMissing` error — so a corrupted
+/// `~/.libra/config.db` no longer blocks `libra init` / `libra clone`.
 pub async fn resolve_user_identity_sources(
     local_target: LocalIdentityTarget<'_>,
 ) -> Result<UserIdentitySources> {
     Ok(UserIdentitySources {
-        config_name: read_cascaded_config_value(local_target, "user.name").await?,
-        config_email: read_cascaded_config_value(local_target, "user.email").await?,
+        config_name: read_identity_field_with_warning(local_target, "user.name").await,
+        config_email: read_identity_field_with_warning(local_target, "user.email").await,
         env_name: env_first_non_empty(&[
             "GIT_COMMITTER_NAME",
             "GIT_AUTHOR_NAME",
@@ -1054,6 +1061,23 @@ pub async fn resolve_user_identity_sources(
             "LIBRA_COMMITTER_EMAIL",
         ]),
     })
+}
+
+async fn read_identity_field_with_warning(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Option<String> {
+    match read_cascaded_config_value(local_target, key).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                key = key,
+                error = %format!("{error:#}"),
+                "failed to read identity field from config; treating as unset"
+            );
+            None
+        }
+    }
 }
 
 /// Read a `vault.env.*` entry from the local target, decrypting if needed.

@@ -1014,7 +1014,7 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
         resolve_user_identity_sources(LocalIdentityTarget::ExplicitDb(database_path))
             .await
             .map_err(|error| InitError::VaultInitializationFailed {
-                message: error.to_string(),
+                message: format!("{error:#}"),
             })?;
     let user_name = identity_sources
         .config_name
@@ -1027,14 +1027,14 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
 
     let (unseal_key, enc_token) = vault::init_vault(root_dir).await.map_err(|error| {
         InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         }
     })?;
 
     if let Err(error) = vault::store_credentials(&unseal_key, &enc_token).await {
         rollback_failed_vault_init(root_dir).await;
         return Err(InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         });
     }
 
@@ -1043,7 +1043,7 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
     {
         rollback_failed_vault_init(root_dir).await;
         return Err(InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         });
     }
 
@@ -1062,7 +1062,7 @@ async fn set_vault_signing_value(database_path: &Path, enabled: bool) -> Result<
     )
     .await
     .map_err(|error| InitError::VaultInitializationFailed {
-        message: error.to_string(),
+        message: format!("{error:#}"),
     })
 }
 

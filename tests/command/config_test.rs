@@ -1123,3 +1123,53 @@ async fn test_config_cross_platform_paths() {
         }
     }
 }
+
+/// Regression: a corrupted/incompatible `~/.libra/config.db` must not block
+/// identity resolution.
+///
+/// Reproduced from a real 0.17.500 user report: `libra clone` aborted with
+/// "fatal: vault initialization failed: failed to open config database
+/// '/home/eli/.libra/config.db'" because the global config DB existed but
+/// could not be opened (the only fix path was to delete the file). After
+/// v0.17.515 `resolve_user_identity_sources` downgrades that failure to a
+/// warning and returns `Ok` with `config_*` set to `None`, letting init
+/// fall back to env vars / "Libra User" defaults.
+#[tokio::test]
+#[serial]
+async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
+    use libra::internal::config::{LocalIdentityTarget, resolve_user_identity_sources};
+
+    let temp_dir = tempdir().unwrap();
+    let global_db_path = temp_dir.path().join("corrupt_config.db");
+    // A non-SQLite payload: opening this file as a sea-orm SQLite connection
+    // (or running the schema-compat check on it) is guaranteed to fail.
+    std::fs::write(&global_db_path, b"this is not a sqlite database").unwrap();
+
+    let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
+
+    // Ensure env-var fallbacks are empty so we can attribute the result to
+    // config-read tolerance, not env shadowing.
+    let _git_committer_name = EnvVarGuard::set("GIT_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _git_committer_email = EnvVarGuard::set("GIT_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+    let _git_author_name = EnvVarGuard::set("GIT_AUTHOR_NAME", std::ffi::OsStr::new(""));
+    let _git_author_email = EnvVarGuard::set("GIT_AUTHOR_EMAIL", std::ffi::OsStr::new(""));
+    let _email = EnvVarGuard::set("EMAIL", std::ffi::OsStr::new(""));
+    let _libra_committer_name = EnvVarGuard::set("LIBRA_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _libra_committer_email =
+        EnvVarGuard::set("LIBRA_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+
+    let sources = resolve_user_identity_sources(LocalIdentityTarget::None)
+        .await
+        .expect("identity resolution must not propagate global DB read failures");
+
+    assert!(
+        sources.config_name.is_none(),
+        "expected config_name to be None when global DB is unreadable, got {:?}",
+        sources.config_name
+    );
+    assert!(
+        sources.config_email.is_none(),
+        "expected config_email to be None when global DB is unreadable, got {:?}",
+        sources.config_email
+    );
+}
