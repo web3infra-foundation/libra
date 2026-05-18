@@ -45,7 +45,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux 执行路径仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`）；`src/internal/ai/sandbox/runtime.rs` 已新增内建 `create_bwrap_command_args()` 参数构造层，但尚未接入真实执行选择。
 - macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 参数构造层已把 `deny_read` 映射为 `--tmpfs` 遮蔽。
 - `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
-- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs::NetworkAccess`（当前位于 policy.rs:81-87）、`src/internal/ai/sandbox/mod.rs` 内部 `effective_network_access()`、以及 `src/command/code.rs` 中传递 `--network-access` 的入口。锚点改为函数 / 枚举名而非行号，避免 sandbox 子系统继续重构时再次失锚。
+- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs::NetworkAccess`（当前位于 policy.rs:79-83）、`src/internal/ai/sandbox/mod.rs` 内部 `effective_network_access()`、以及 `src/command/code.rs` 中传递 `--network-access` 的入口。锚点改为函数 / 枚举名而非行号，避免 sandbox 子系统继续重构时再次失锚。
 
 ## 0.17.25 增量收口（2026-05-12）
 
