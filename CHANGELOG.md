@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`libra fsck`**: Repository integrity checker analogous to `git fsck`. Verifies
+  object hash integrity (SHA1/SHA256), object format validity, ref consistency,
+  index integrity, and cross-reference validation (including object type mismatch
+  detection for tree entries). Supports `--verbose`, `--json`, `--objects-only`,
+  `--no-cross-ref-check`, `--no-index-check`, and `--fix` (auto-repair broken refs
+  and rebuild corrupted index). Exit codes use a bitmask scheme:
+  bit 0 = object corruption, bit 1 = broken refs, bit 2 = index corruption.
+- **`docs/commands/fsck.md`**: Comprehensive documentation for the `fsck` command
+  including parameter comparison with Git, design rationale, and CI/CD examples.
+
 ## [0.1.6]
 
 ### Breaking Changes

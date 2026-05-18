@@ -279,6 +279,14 @@ enum Commands {
         alias = "cp"
     )]
     CherryPick(command::cherry_pick::CherryPickArgs),
+    #[command(about = "Update remote refs along with associated objects")]
+    Push(command::push::PushArgs),
+    #[command(about = "Download objects and refs from another repository")]
+    Fetch(command::fetch::FetchArgs),
+    #[command(about = "Fetch from and integrate with another repository or a local branch")]
+    Pull(command::pull::PullArgs),
+    #[command(about = "Verify the integrity of objects, refs, and index")]
+    Fsck(command::fsck::FsckArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -292,12 +300,6 @@ enum Commands {
 
     #[command(subcommand, about = "Manage set of tracked repositories")]
     Remote(command::remote::RemoteCmds),
-    #[command(about = "Download objects and refs from another repository")]
-    Fetch(command::fetch::FetchArgs),
-    #[command(about = "Fetch from and integrate with another repository or a local branch")]
-    Pull(command::pull::PullArgs),
-    #[command(about = "Update remote refs along with associated objects")]
-    Push(command::push::PushArgs),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
@@ -1064,6 +1066,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
+        Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
