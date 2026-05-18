@@ -43,21 +43,25 @@ use crate::{
 // Args & enums
 // ---------------------------------------------------------------------------
 
+const STATUS_EXAMPLES: &str = "\
+EXAMPLES:
+    libra status                       Show working tree status
+    libra status -s                    Short format output
+    libra status --porcelain           Machine-readable output (v1)
+    libra status --porcelain v2        Extended machine-readable output
+    libra status --branch              Include branch info in short/porcelain
+    libra status --show-stash          Show stash count
+    libra status --ignored             Include ignored files
+    libra status --untracked-files=no  Hide untracked files
+    libra status --json                Structured JSON output for agents
+    libra status --exit-code           Exit 1 if working tree is dirty
+    libra status --quiet --exit-code   Silent dirty check for scripts";
+
 /// Show the working tree status.
 ///
-/// EXAMPLES:
-///     libra status                       Show working tree status
-///     libra status -s                    Short format output
-///     libra status --porcelain           Machine-readable output (v1)
-///     libra status --porcelain v2        Extended machine-readable output
-///     libra status --branch              Include branch info in short/porcelain
-///     libra status --show-stash          Show stash count
-///     libra status --ignored             Include ignored files
-///     libra status --untracked-files=no  Hide untracked files
-///     libra status --json                Structured JSON output for agents
-///     libra status --exit-code           Exit 1 if working tree is dirty
-///     libra status --quiet --exit-code   Silent dirty check for scripts
+/// See `libra status --help` for the same EXAMPLES rendered through clap.
 #[derive(Parser, Debug, Default)]
+#[command(after_help = STATUS_EXAMPLES)]
 pub struct StatusArgs {
     /// Output in a machine-readable format (default v1). Use v2 for extended format.
     #[clap(

@@ -14,11 +14,11 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, out_config)` 双入口已存在（`blame.rs:45/54`）
-- `Pager::with_config(out_config)` 集成已实现（`blame.rs:197`）
-- `--quiet` 已实现（`blame.rs:74, 196`）
+- `execute()` / `execute_safe(args, out_config)` 双入口已存在（`blame.rs:149/170`）
+- `Pager::with_config(out_config)` 集成已实现（`blame.rs:210`）
+- `--quiet` 已实现（`blame.rs:177` 静默早退；模块 doc-comment 第 12 行说明 quiet/JSON/paged-text 三态）
 - `-L, --line-range` 已实现，支持 "10"、"10,20"、"10,+5" 格式
-- 基于内容相等性的 blame 算法已实现（BFS 历史回溯，`blame.rs:94-146`）
+- 基于内容相等性的 blame 算法已实现（BFS 历史回溯；入口在 `blame_file()`，blame.rs:221 起的文档注释描述算法步骤）
 - SHA-1 和 SHA-256 双格式支持已测试
 - `run_blame()` + `BlameOutput` 已落地，`--json` / `--machine` 可返回逐行结构化结果
 - `BlameError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
@@ -67,24 +67,27 @@
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum BlameError {
+enum BlameError {
     #[error("not a libra repository")]
     NotInRepo,
 
-    #[error("failed to resolve revision '{revision}': {detail}")]
-    InvalidRevision { revision: String, detail: String },
+    #[error("invalid revision: '{0}'")]
+    InvalidRevision(String),
 
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    CommitLoad { commit_id: String, detail: String },
+    /// A repository object (commit/tree/blob) failed to load — typically
+    /// indicates corruption or partial fetch.
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad {
+        kind: &'static str,
+        object_id: String,
+        detail: String,
+    },
 
     #[error("file '{path}' not found in revision '{revision}'")]
     FileNotFound { path: String, revision: String },
 
-    #[error("invalid line range: {detail}")]
-    InvalidLineRange { detail: String },
-
-    #[error("file '{path}' is empty")]
-    EmptyFile { path: String },
+    #[error("invalid line range: {0}")]
+    InvalidLineRange(String),
 }
 ```
 
@@ -94,10 +97,13 @@ pub enum BlameError {
 |----------------|-----------------|--------|------|
 | `NotInRepo` | `RepoNotFound` | 128 | `run 'libra init' to create a repository` |
 | `InvalidRevision` | `CliInvalidTarget` | 129 | `check the revision name and try again` |
-| `CommitLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
+| `ObjectLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
 | `FileNotFound` | `CliInvalidTarget` | 129 | `check the file path; use 'libra show <rev>:' to list available files` |
 | `InvalidLineRange` | `CliInvalidArguments` | 129 | `supported formats: "10", "10,20", "10,+5"` |
-| `EmptyFile` | `RepoStateInvalid` | 128 | 无 |
+
+`ObjectLoad` 的 `kind` 字段对 commit/tree/blob 三种对象加载失败进行分类（实际代码取消了
+原计划中的 `CommitLoad` 单独变体，避免一个对象类型一个变体）。空文件不再保留为单独的
+`EmptyFile` 变体——空 blob 直接渲染为 0 行 blame 输出而非错误。
 
 ### 特性 2：执行层与渲染层拆分
 

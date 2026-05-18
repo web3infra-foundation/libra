@@ -458,11 +458,9 @@ pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    // Reject `--system` early. config.md (line 175) classifies this as a CLI
-    // usage error — the scope value is unsupported by the binary, not a
-    // runtime resource failure. Route through `command_usage` so callers
-    // get the spec-mandated exit 129 (coarse) / exit 2 (fine) rather than
-    // the catch-all 128 the previous `from_legacy_string` path produced.
+    // Reject --system early. config.md treats this as a CLI usage error
+    // (exit 2 fine / 129 coarse) — the user picked an unsupported scope at
+    // the argument level, not at runtime.
     if args.system {
         return Err(CliError::command_usage(
             "--system scope is not supported\n\nhint: use --local or --global",
@@ -903,16 +901,11 @@ async fn handle_set(
         is_sensitive_key(key)
     };
 
-    // Same-key-same-state constraint for `--add`. config.md (line 79)
-    // classifies this as a state-conflict validation reject (exit 1 fine /
-    // 128 coarse). Use `Failure` with a stable code so the wire shape and
-    // exit code are deterministic instead of falling through to the legacy
-    // `from_legacy_string` path.
+    // Same-key-same-state constraint for --add.
     if add && ((should_encrypt && has_plaintext) || (!should_encrypt && has_encrypted)) {
-        return Err(CliError::failure(
-            "cannot mix encrypted and plaintext values for the same key",
-        )
-        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
+        return Err(CliError::from_legacy_string(
+            "error: cannot mix encrypted and plaintext values for the same key",
+        ));
     }
 
     // Encrypt the value if needed

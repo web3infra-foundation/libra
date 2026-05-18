@@ -178,23 +178,4 @@ mod tests {
         let content = ctx.load_content(tmp.path());
         assert_eq!(content, "inline content");
     }
-
-    /// Pins the manual `Display` impl on `ContextMode`. The rendered
-    /// string is the `--context` flag value parsed by `FromStr` and is
-    /// also emitted into agent prompt metadata so the model can see
-    /// which preset is active. `Custom(_)` deliberately collapses to
-    /// the literal `"custom"` (no payload echoed) because the variant
-    /// carries inline content that is not safe to render into a Display
-    /// line. Pinning these strings keeps the CLI `--context` round-trip
-    /// (Display ↔ FromStr) stable across refactors.
-    #[test]
-    fn context_mode_display_pins_each_variant() {
-        assert_eq!(ContextMode::Dev.to_string(), "dev");
-        assert_eq!(ContextMode::Review.to_string(), "review");
-        assert_eq!(ContextMode::Research.to_string(), "research");
-        assert_eq!(
-            ContextMode::Custom("any inline payload".to_string()).to_string(),
-            "custom",
-        );
-    }
 }

@@ -1103,21 +1103,6 @@ mod test {
         assert!(err.message().contains("nothing to commit"));
     }
 
-    /// Cross-Cutting G: `TreeCreation` is the lone CommitError variant
-    /// that maps to `InternalInvariant`. It must include the GitHub
-    /// Issues URL hint so users can report the bug.
-    #[test]
-    fn test_commit_error_tree_creation_has_issue_url_hint() {
-        let err: CliError =
-            CommitError::TreeCreation("synthetic tree-build failure".to_string()).into();
-        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
-        assert!(
-            err.hints().iter().any(|h| h.as_str().contains("issues")),
-            "TreeCreation must include the GitHub Issues URL hint, got hints: {:?}",
-            err.hints()
-        );
-    }
-
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`CommitError`]. These strings are used as the
     /// `CliError` message via `From<CommitError> for CliError` and
@@ -1651,6 +1636,21 @@ mod test {
         assert!(
             no_verify_result.is_ok(),
             "--no-verify should skip conventional check"
+        );
+    }
+
+    /// Cross-Cutting G: `TreeCreation` is the lone CommitError variant
+    /// that maps to `InternalInvariant`. It must include the GitHub
+    /// Issues URL hint so users can report the bug.
+    #[test]
+    fn test_commit_error_tree_creation_has_issue_url_hint() {
+        let err: CliError =
+            CommitError::TreeCreation("synthetic tree-build failure".to_string()).into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "TreeCreation must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
         );
     }
 }

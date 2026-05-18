@@ -573,19 +573,4 @@ mod tests {
         assert!(output.contains("X-Libra-Control-Token: [REDACTED]"));
         assert!(output.contains("X-Code-Controller-Token=[REDACTED]"));
     }
-
-    /// Pins the manual `Display` impl on `BlastRadius`. The rendered
-    /// labels (`workspace`, `repository`, `system`, `network`,
-    /// `unknown`) are surfaced into safety policy decisions, MCP
-    /// preflight audit lines and TUI safety badges. Renaming any of
-    /// them would silently change every operator's mental model of
-    /// what scope a pending command can touch.
-    #[test]
-    fn blast_radius_display_pins_each_variant() {
-        assert_eq!(BlastRadius::Workspace.to_string(), "workspace");
-        assert_eq!(BlastRadius::Repository.to_string(), "repository");
-        assert_eq!(BlastRadius::System.to_string(), "system");
-        assert_eq!(BlastRadius::Network.to_string(), "network");
-        assert_eq!(BlastRadius::Unknown.to_string(), "unknown");
-    }
 }

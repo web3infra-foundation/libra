@@ -15,9 +15,6 @@
 {"name":"line_comments","input":"{\n// choose file\n\"file_path\":\"Cargo.toml\"\n}","expected":{"file_path":"Cargo.toml"},"repaired":true}
 {"name":"block_comments","input":"{/*comment*/\"file_path\":\"Cargo.toml\"}","expected":{"file_path":"Cargo.toml"},"repaired":true}
 {"name":"smart_quotes","input":"{\u201cfile_path\u201d: \u201cCargo.toml\u201d}","expected":{"file_path":"Cargo.toml"},"repaired":true}
-{"name":"smart_quotes_inside_string_literal_are_preserved","input":"{\"quote_label\": \"He said \u201chello\u201d to her\"}","expected":{"quote_label":"He said \u201chello\u201d to her"},"repaired":false}
-{"name":"smart_single_quotes_inside_string_literal_are_preserved","input":"{\"note\": \"can\u2019t reach the user\"}","expected":{"note":"can\u2019t reach the user"},"repaired":false}
-{"name":"smart_quotes_outside_strings_with_typographic_quotes_in_value","input":"{\u201cnote\u201d: \"contains \u201cinner\u201d quotes\"}","expected":{"note":"contains \u201cinner\u201d quotes"},"repaired":true}
 {"name":"top_level_fields","input":"\"file_path\":\"Cargo.toml\",\"limit\":5","expected":{"file_path":"Cargo.toml","limit":5},"repaired":true}
 {"name":"top_level_unquoted_fields","input":"file_path:'Cargo.toml', limit:5","expected":{"file_path":"Cargo.toml","limit":5},"repaired":true}
 {"name":"extra_closing_delimiter","input":"{\"file_path\":\"Cargo.toml\"}}","expected":{"file_path":"Cargo.toml"},"repaired":true}

@@ -51,25 +51,6 @@ impl AutomationHistory {
 
         rows.into_iter().map(decode_row).collect()
     }
-
-    /// Delete `automation_log` rows whose `finished_at` is strictly older than
-    /// `cutoff_rfc3339`. Returns the number of rows removed. Idempotent: re-running
-    /// against the same cutoff after a successful prune deletes zero rows.
-    pub async fn prune_before(
-        conn: &DatabaseConnection,
-        cutoff_rfc3339: &str,
-    ) -> Result<u64, AutomationError> {
-        let backend = conn.get_database_backend();
-        let outcome = conn
-            .execute(Statement::from_sql_and_values(
-                backend,
-                "DELETE FROM automation_log WHERE finished_at < ?",
-                [cutoff_rfc3339.to_string().into()],
-            ))
-            .await
-            .map_err(database_error)?;
-        Ok(outcome.rows_affected())
-    }
 }
 
 fn decode_row(row: sea_orm::QueryResult) -> Result<AutomationRunResult, AutomationError> {

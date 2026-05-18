@@ -7,13 +7,13 @@ C4（Audit P2）
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
-- 第 4 批 [stash.md](../stash.md) 已落地：`StashError` typed enum（11 变体）、`run_stash()` / `render_stash_output()` 拆分、JSON / machine / human 三套渲染共用同一份 `StashOutput`、`STASH_EXAMPLES` `--help` 接入。
-- [`src/command/stash.rs`](../../../src/command/stash.rs) 已实现 `Push` / `Pop` / `List` / `Apply` / `Drop` 五个 variant；`StashOutput` 是 `#[serde(tag = "action")]` enum，扩展时直接加新 variant。
-- [`tests/command/stash_test.rs`](../../../tests/command/stash_test.rs) 已覆盖五个现有子命令的 happy path / error path / JSON 输出。
+- 第 4 批 [stash.md](../stash.md) 已落地：`StashError` typed enum（14 变体）、`run_stash()` / `render_stash_output()` 拆分、JSON / machine / human 三套渲染共用同一份 `StashOutput`、`STASH_EXAMPLES` `--help` 接入。
+- [`src/command/stash.rs`](../../../src/command/stash.rs) 与 [`src/cli.rs`](../../../src/cli.rs) 中的 `Stash` enum 已实现 `Push` / `Pop` / `List` / `Apply` / `Drop` / `Show` / `Branch` / `Clear` 八个 variant；C4 计划的 `show` / `branch` / `clear` 扩展已经在主分支落地（参见 src/cli.rs:335-382）。`StashOutput` 是 `#[serde(tag = "action")]` enum，扩展时直接加新 variant。
+- [`tests/command/stash_test.rs`](../../../tests/command/stash_test.rs) 已覆盖八个子命令的 happy path / error path / JSON 输出（含 `BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` 三个新增 typed-error 变体）。
 
 ### 基于当前代码的 Review 结论
-- 第 4 批的 scaffolding（typed error / render split / JSON enum tag）已经为本批扩展铺好路；C4 只需向 `Stash` enum 加 variant，不需要改架构。
-- `show` / `branch` / `clear` 是审计 P2 中"用户视野中已存在但子命令面缺失"的最高优先级三项。
+- 第 4 批的 scaffolding（typed error / render split / JSON enum tag）已经在第 5/30+ 批被实际扩展使用：`show` / `branch` / `clear` 的子命令面、对应的 `StashError` 变体（`BranchExists` / `BranchLookupFailed` / `ClearRequiresForce`）、`StashOutput` 的新 action variant 与 `STASH_EXAMPLES` 的扩展都已合入。C4 计划本身已经收口，剩余职责只是把 `COMPATIBILITY.md` 的对应行从 `partial` 升级到 `supported`（如尚未升级）并保持文档同步。
+- 历史上 `show` / `branch` / `clear` 是审计 P2 中"用户视野中已存在但子命令面缺失"的最高优先级三项；现已全部落地。
 - `create` / `store` 属于 stash 内部 plumbing（构建 stash object、把 object 写入 stash ref），非用户日常路径，本批不做。
 
 ## 目标与非目标

@@ -17,12 +17,7 @@
 
 use std::fmt;
 
-use anyhow::Result;
-
-use crate::internal::{
-    ai::client::{Client as GenericClient, Provider},
-    config::{LocalIdentityTarget, resolve_env_for_target},
-};
+use crate::internal::ai::client::{Client as GenericClient, Provider};
 
 /// OpenAI API provider.
 #[derive(Clone)]
@@ -73,37 +68,10 @@ impl Client {
     ///
     /// Reads the `OPENAI_API_KEY` environment variable.
     /// Also supports `OPENAI_BASE_URL` for custom endpoints.
-    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
+    pub fn from_env() -> Result<Self, std::env::VarError> {
         let api_key = std::env::var("OPENAI_API_KEY")?;
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-
-        let provider = OpenAIProvider::new(api_key);
-        Ok(Self::new(&base_url, provider))
-    }
-
-    /// Vault-aware async constructor: resolves `OPENAI_API_KEY` and
-    /// `OPENAI_BASE_URL` via [`resolve_env_for_target`], so callers can
-    /// store credentials in repo-local or global `vault.env.*` config without
-    /// also exporting them into the process environment.
-    ///
-    /// Priority order matches the rest of Libra's config cascade:
-    /// 1. Process env var
-    /// 2. Local repo config (`vault.env.OPENAI_API_KEY` / `vault.env.OPENAI_BASE_URL`)
-    /// 3. Global config
-    ///
-    /// `OPENAI_BASE_URL` falls back to the canonical OpenAI v1 URL when no
-    /// layer supplies it. `from_env` is preserved as a low-level process-env
-    /// only API.
-    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
-        let api_key = resolve_env_for_target("OPENAI_API_KEY", local_target)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("OPENAI_API_KEY is not set in env, repo vault, or global config")
-            })?;
-        let base_url = resolve_env_for_target("OPENAI_BASE_URL", local_target)
-            .await?
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
         let provider = OpenAIProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -124,8 +92,6 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
-
     use super::*;
 
     #[test]
@@ -140,86 +106,5 @@ mod tests {
     fn test_openai_provider_api_key() {
         let provider = OpenAIProvider::new("sk-test-key".to_string());
         assert_eq!(provider.api_key(), "sk-test-key");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn from_resolved_env_reads_openai_api_key_from_process_env() {
-        let key_guard = TestEnvGuard::set("OPENAI_API_KEY", Some("sk-test-resolved"));
-        let base_guard = TestEnvGuard::set("OPENAI_BASE_URL", None);
-        let global_guard = TestEnvGuard::set(
-            "LIBRA_CONFIG_GLOBAL_DB",
-            Some("/nonexistent/openai-from-resolved-env-test.db"),
-        );
-
-        let client = Client::from_resolved_env(LocalIdentityTarget::None)
-            .await
-            .expect("from_resolved_env should succeed when OPENAI_API_KEY is set");
-        assert_eq!(client.provider.api_key(), "sk-test-resolved");
-
-        drop(key_guard);
-        drop(base_guard);
-        drop(global_guard);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
-        let key_guard = TestEnvGuard::set("OPENAI_API_KEY", None);
-        let base_guard = TestEnvGuard::set("OPENAI_BASE_URL", None);
-        let global_guard = TestEnvGuard::set(
-            "LIBRA_CONFIG_GLOBAL_DB",
-            Some("/nonexistent/openai-from-resolved-env-test.db"),
-        );
-
-        let err = Client::from_resolved_env(LocalIdentityTarget::None)
-            .await
-            .expect_err("from_resolved_env must fail without an API key");
-        let message = err.to_string();
-        assert!(
-            message.contains("OPENAI_API_KEY"),
-            "error should name the missing key, got: {message}"
-        );
-
-        drop(key_guard);
-        drop(base_guard);
-        drop(global_guard);
-    }
-
-    /// RAII guard that sets an env var for the duration of a test and
-    /// restores the previous value (or removes the variable when there was
-    /// none) on drop. Pairs with `#[serial]` to keep concurrent unit tests
-    /// from racing on the same env var name.
-    struct TestEnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl TestEnvGuard {
-        fn set(key: &'static str, value: Option<&str>) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: tests are serialized via `#[serial]`, and the guard
-            // restores the previous value on drop.
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for TestEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `set`. The guard runs after the test body and the
-            // serial gate guarantees no concurrent reader.
-            unsafe {
-                match &self.original {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
     }
 }

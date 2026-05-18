@@ -327,68 +327,6 @@ async fn automation_history_uses_builtin_migration() {
     assert_eq!(rows[0].status, AutomationRunStatus::Succeeded);
 }
 
-#[tokio::test]
-async fn automation_history_prune_removes_only_older_rows_idempotently() {
-    use libra::internal::ai::automation::AutomationRunResult;
-    use sea_orm::Database;
-
-    let conn = Database::connect("sqlite::memory:")
-        .await
-        .expect("connect sqlite");
-    run_builtin_migrations(&conn).await.expect("run migrations");
-
-    let old = AutomationRunResult {
-        id: "row-old".to_string(),
-        rule_id: "rule-old".to_string(),
-        trigger_kind: "cron".to_string(),
-        action_kind: "prompt".to_string(),
-        status: AutomationRunStatus::Succeeded,
-        message: "old run".to_string(),
-        details: serde_json::json!({}),
-        started_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-        finished_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 1).unwrap(),
-    };
-    let recent = AutomationRunResult {
-        id: "row-recent".to_string(),
-        rule_id: "rule-recent".to_string(),
-        trigger_kind: "cron".to_string(),
-        action_kind: "prompt".to_string(),
-        status: AutomationRunStatus::Succeeded,
-        message: "recent run".to_string(),
-        details: serde_json::json!({}),
-        started_at: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-        finished_at: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 1).unwrap(),
-    };
-
-    AutomationHistory::append(&conn, &old)
-        .await
-        .expect("append old row");
-    AutomationHistory::append(&conn, &recent)
-        .await
-        .expect("append recent row");
-
-    let cutoff = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-    let deleted = AutomationHistory::prune_before(&conn, &cutoff.to_rfc3339())
-        .await
-        .expect("prune older rows");
-    assert_eq!(deleted, 1, "old row should be removed");
-
-    let rows = AutomationHistory::list_recent(&conn, 10)
-        .await
-        .expect("list automation log");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].rule_id, "rule-recent");
-
-    // Second prune at the same cutoff is a no-op (idempotent).
-    let deleted_again = AutomationHistory::prune_before(&conn, &cutoff.to_rfc3339())
-        .await
-        .expect("repeat prune");
-    assert_eq!(
-        deleted_again, 0,
-        "idempotent re-prune must delete zero rows"
-    );
-}
-
 #[test]
 fn automation_lifecycle_event_kinds_are_available_for_step_two() {
     assert_eq!(

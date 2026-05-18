@@ -2,72 +2,99 @@
 
 ## Project Overview
 
-Libra is an **AI agent–native version control system** written in Rust. It partially implements a Git client with full on-disk format compatibility (`objects`, `index`, `pack`, `pack-index`) while using SQLite for transactional metadata (`config`, `HEAD`, `refs`). It is designed for monorepo/trunk-based development with tiered cloud storage (S3/R2).
+Libra is an **AI agent–native version control system** written in Rust. It partially implements a Git client with full on-disk format compatibility (`objects`, `index`, `pack`, `pack-index`) while using SQLite for transactional metadata (`config`, `HEAD`, `refs`). It is designed for monorepo/trunk-based development with tiered cloud storage (S3/R2) and a Cloudflare D1/R2 backup path.
 
-The `libra code` command launches an interactive TUI (with a background web server) for collaborative AI-agent and human-driven development. It also supports web-only and stdio/MCP modes for integration with AI clients like Claude Desktop.
+The `libra code` command launches an interactive TUI (with a background web server, MCP server, and an automation-control session surface) for collaborative AI-agent and human-driven development. The Git surface is governed by a four-tier compatibility matrix (`supported` / `partial` / `unsupported` / `intentionally-different`) tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md); AI-only commands (`code`, `code-control`, `automation`, `usage`, `graph`, `sandbox`, `agent`, `publish`) are explicitly Libra-only extensions.
+
+The repository also contains a Next.js frontend (`web/`) embedded into the binary via `rust-embed` and a Cloudflare Worker (`worker/`) for read-only `libra publish` hosting.
 
 ## Repository Structure
 
 ```
 src/
-├── main.rs                      # Binary entry point (tokio runtime)
+├── main.rs                      # Binary entry point (tracing setup, 32 MiB-stack worker thread, tokio runtime)
 ├── lib.rs                       # Library root, sync/async exec helpers
-├── cli.rs                       # Clap CLI definition, subcommand dispatch
-├── common_utils.rs              # Shared utility functions
-├── git_protocol.rs              # Git protocol helpers
-├── lfs_structs.rs               # LFS data types (used by command/lfs.rs and protocol/lfs_client.rs)
-├── command/                     # All subcommand implementations (39 modules)
+├── cli.rs                       # Clap CLI definition, subcommand dispatch, hash-kind preflight
+├── common_utils.rs, git_protocol.rs, lfs_structs.rs
+├── command/                     # All subcommand implementations (~57 modules)
 │   ├── mod.rs                   # Re-exports, shared helpers (load/save objects, auth)
 │   ├── init.rs, clone.rs, add.rs, commit.rs, push.rs, pull.rs, fetch.rs, fsck.rs
 │   ├── status.rs, log.rs, show.rs, diff.rs, blame.rs, shortlog.rs, describe.rs
 │   ├── branch.rs, tag.rs, switch.rs, checkout.rs, merge.rs, rebase.rs, cherry_pick.rs
 │   ├── reset.rs, restore.rs, remove.rs, mv.rs, clean.rs, stash.rs, revert.rs
-│   ├── reflog.rs, config.rs, remote.rs, worktree.rs, cloud.rs, lfs.rs
-│   ├── open.rs, index_pack.rs   # Browser open, pack index operations
-│   └── code.rs                  # `libra code` — TUI/Web/MCP entry
+│   ├── reflog.rs, config.rs, remote.rs, worktree.rs, worktree-fuse.rs, cloud.rs, lfs.rs, lfs_schema.rs
+│   ├── bisect.rs, cat_file.rs, ls_remote.rs, show_ref.rs, symbolic_ref.rs, rev_parse.rs, rev_list.rs, grep.rs
+│   ├── open.rs, index_pack.rs, db.rs, hooks.rs, web_assets.rs, usage.rs
+│   ├── code.rs, code_control.rs, code_control_files.rs   # `libra code` TUI + automation control session
+│   ├── automation.rs, graph.rs, sandbox.rs, publish.rs   # AI automation, version-graph, sandbox, Worker publish
+│   └── agent/                   # `libra agent` subcommands (checkpoint, clean, doctor, hooks, push, rpc, session, status)
 ├── internal/                    # Core logic
 │   ├── ai/                      # AI Agent Infrastructure
-│   │   ├── agent/               # Agent framework, builder, profiles, runtime
-│   │   ├── providers/           # LLM backends (gemini, openai, anthropic, deepseek, kimi, zhipu, ollama)
-│   │   ├── tools/               # Tool registry & handlers (ApplyPatch, Shell, ReadFile, Grep, etc.)
-│   │   ├── completion/          # CompletionModel trait, request/response types
-│   │   ├── mcp/                 # Model Context Protocol server
-│   │   ├── session/             # Session state & persistence
-│   │   ├── prompt/              # Prompt engineering & templates
-│   │   ├── commands/            # Agent command parsing & dispatch
-│   │   └── hooks/               # Git hooks integration
-│   ├── tui/                     # Terminal UI (ratatui + crossterm)
-│   ├── model/                   # Sea-ORM data models (config, reference, reflog, object_index)
-│   ├── protocol/                # Network clients (git, https, lfs, local)
+│   │   ├── agent/               # Agent framework: builder, profiles (architect/coder/…), runtime, classifier, budget
+│   │   ├── agent_run/           # Run records: budget, context_pack, decision, evidence, patchset, permission, task
+│   │   ├── automation/          # Rule-based automation runtime, scheduler, history, executor
+│   │   ├── codex/               # Codex protocol/schema bridge (history, model, schema_v2, view)
+│   │   ├── commands/            # Agent command parsing & dispatch (+ embedded/*.md command prompts)
+│   │   ├── completion/          # CompletionModel trait, request/response, retry/throttle, JSON repair
+│   │   ├── context_budget/      # Context window allocator, compaction, frame, handoff, memory anchors
+│   │   ├── goal/                # Goal state, supervisor, verifier, spec
+│   │   ├── hooks/               # Git hooks integration (config, lifecycle, runner, providers)
+│   │   ├── intentspec/          # Intent canonicalisation, draft/repair/validator/review/scope/profiles
+│   │   ├── mcp/                 # Model Context Protocol server (server, resource)
+│   │   ├── observed_agents/     # External-agent capture adapters (Claude Code, Gemini, …) + redaction/preview
+│   │   ├── orchestrator/        # Plan/decide/execute pipeline (planner, decider, executor, verifier, replan, gate, ACL)
+│   │   ├── permission/          # Permission rules, evaluation, approved-permission inheritance
+│   │   ├── projection/          # Thread/intent projection index, resolver, rebuild scheduler
+│   │   ├── prompt/              # Prompt engineering (builder, context, dynamic_context, rules, loader, embedded/*.md)
+│   │   ├── providers/           # LLM backends (anthropic, openai, deepseek, gemini, kimi, zhipu, ollama, fake) + factory/transform
+│   │   ├── runtime/             # Runtime contracts, phase3/phase4 state machines, hardening, environment, snapshot
+│   │   ├── sandbox/             # Command-safety policy, runtime, macOS seatbelt SBPL policies
+│   │   ├── session/             # Session state, JSONL store, file history, migration
+│   │   ├── skills/              # Skill loader/scanner/parser/dispatcher
+│   │   ├── sources/             # External source pool (MCP, OpenAPI) configuration
+│   │   ├── tools/               # Tool registry, handlers (apply_patch, shell, read_file, grep, plan, …), semantic-search tools
+│   │   ├── usage/               # Usage stats: recorder, pricing, query, format
+│   │   └── web/                 # Code-UI bridge (code_ui.rs, headless)
+│   ├── tui/                     # Terminal UI (ratatui + crossterm): app, chatwidget, history_cell, slash_command, theme
+│   ├── model/                   # Sea-ORM data models (config, config_kv, reference, reflog, object_index, schema_version, ai_*)
+│   ├── protocol/                # Network clients (git, https, ssh, lfs, local)
+│   ├── publish/                 # Read-only Cloudflare Worker publishing (contract, snapshot, upload, preflight, incremental, ai_export)
+│   ├── db/migration.rs          # Versioned schema migrations runner (MigrationRunner)
 │   ├── db.rs                    # SQLite database initialization
+│   ├── vault.rs                 # libvault-backed secret storage
 │   ├── branch.rs, tag.rs, config.rs, head.rs, reflog.rs
 │   └── log/                     # Log formatting & date parsing
 └── utils/                       # Shared utilities
     ├── client_storage.rs        # Tiered storage (local + S3/R2 with LRU cache)
+    ├── storage/                 # Storage backends (local, remote, tiered, publish_storage)
     ├── d1_client.rs             # Cloudflare D1 client
-    ├── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in)
-    └── ...                      # Path, object, tree, ignore, LFS utilities
+    ├── error.rs, output.rs      # CliError/CliResult + stable error codes; OutputConfig (--json / --machine)
+    ├── pager.rs, ignore.rs, lfs.rs, fuse.rs, worktree.rs
+    ├── object.rs, object_ext.rs, tree.rs, path.rs, path_ext.rs, storage_ext.rs, text.rs, convert.rs, util.rs
+    └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in, require_env!)
 
-tests/
-├── command/                     # Integration tests (one file per command)
-│   ├── mod.rs                   # Shared test helpers
-│   └── init_test.rs, add_test.rs, commit_test.rs, ...
-├── objects/                     # Object-level tests
-├── data/                        # Test fixtures (pack files, objects, indices)
-├── command_test.rs              # Top-level command integration test
-├── e2e_mcp_flow.rs              # MCP end-to-end tests
-├── mcp_integration_test.rs      # MCP integration tests
-├── ai_agent_test.rs             # AI agent tests
-├── ai_chat_agent_test.rs        # AI chat agent tests
-├── ai_dag_tool_loop_test.rs     # AI DAG tool loop tests
-├── ai_storage_flow_test.rs      # AI storage flow tests
-├── intent_flow_test.rs          # Intent flow tests
-├── cloud_storage_backup_test.rs # Cloud storage backup tests
-└── storage_r2_test.rs           # R2 storage tests
+tests/                           # 98 integration test files, layered L1/L2/L3 (see "Test Layers" below)
+├── command/                     # Per-command integration tests mirroring real Git workflows
+├── compat/                      # Compatibility-surface guards (must be registered as [[test]] in Cargo.toml)
+├── harness/, helpers/, fixtures/, data/, objects/
+├── ai_*.rs                      # AI agent, runtime, provider, scheduler, goal, projection, context, …
+├── code_*.rs                    # `libra code` CLI dispatch, runtime, TUI scenarios, remote SSE/lease/state matrices
+├── publish_*.rs                 # Publish snapshot/upload/preflight/refs/redaction/ai_export tests
+└── command_test.rs, e2e_mcp_flow.rs, mcp_integration_test.rs, network_remotes_test.rs, storage_r2_test.rs, …
 
-docs/                            # Community docs, contributing guide, agent specs
-sql/sqlite_20260309_init.sql     # SQLite schema bootstrap
-template/                        # Git hook templates (pre-commit, exclude)
+benches/ai_runtime_baseline.rs   # Criterion-style runtime baseline benchmark
+examples/                        # `hello_world.rs`, `multi_agent.toml`
+build.rs                         # Builds the Next.js web frontend into web/out/ unless LIBRA_SKIP_WEB_BUILD=1
+docs/                            # Community docs, contributing guide, agent specs, improvement walkthroughs, error-codes
+sql/
+├── sqlite_20260309_init.sql                 # SQLite bootstrap schema
+├── sqlite_20260415_ai_runtime_contract.sql  # AI runtime contract extension
+├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
+└── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
+scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh, compare/
+template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description)
+web/                             # Next.js 15 frontend (pnpm); built into web/out/ and embedded via rust-embed
+worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
 ```
 
 ## Build & Development Commands
@@ -78,14 +105,14 @@ template/                        # Git hook templates (pre-commit, exclude)
 # Format code (requires nightly toolchain)
 cargo +nightly fmt --all
 
-# Lint — all warnings must be resolved before committing
+# Lint — all warnings must be resolved before committing (all features on)
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Quick compile check
-cargo build
-cargo check
+# Quick compile check (skip the Next.js web build for speed)
+LIBRA_SKIP_WEB_BUILD=1 cargo check
+LIBRA_SKIP_WEB_BUILD=1 cargo build
 
-# Run full test suite
+# Run full test suite (L1 only by default; L2/L3 auto-skip when env vars are unset)
 cargo test --all
 
 # Run specific tests
@@ -94,15 +121,45 @@ cargo test add_test
 
 # Run the CLI
 cargo run -- <command>          # e.g. cargo run -- status
+
+# Build the embedded web frontend (normally driven by build.rs)
+pnpm --dir web install --frozen-lockfile && pnpm --dir web build
 ```
+
+### Cargo Features
+
+| Feature | Purpose |
+|---------|---------|
+| `worktree-fuse` | Enable Unix FUSE-backed worktree commands (Linux/macOS only) |
+| `test-network` | Gate L2 tests requiring outbound network but no secrets |
+| `test-live-ai` | Gate L3 tests calling real LLM APIs |
+| `test-live-cloud` | Gate L3 tests hitting real D1/R2 endpoints |
+| `test-provider` | Deterministic hidden provider for local TUI automation tests (requires `LIBRA_ENABLE_TEST_PROVIDER=1`) |
+| `subagent-scaffold` | Schema-only sub-agent contract scaffold (CEX-S2-10, gated on CP-4 in production) |
 
 ### CI Pipeline (`.github/workflows/base.yml`)
 
-All PRs must pass these checks:
-1. `cargo +nightly fmt --all --check` — formatting
-2. `cargo clippy --all-targets --all-features -- -D warnings` — linting (zero warnings)
-3. Redundancy check on `third-party/rust/crates`
-4. `cargo test --all` — full test suite
+All PRs must pass these jobs on the `[self-hosted]` runner pool:
+1. **compat-rustfmt** — `cargo +nightly fmt --all --check`
+2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings` (with `LIBRA_SKIP_WEB_BUILD=1`)
+3. **compat-web-check** — `pnpm --dir web lint` + `pnpm --dir web build` so `web/out/` cannot drift from `WebAssets`
+4. **compat-redundancy** — directory-shape check on `third-party/rust/crates`
+5. **compat-offline-core** — `scripts/check_compat_matrix.sh` + `cargo test --all` + a second pass with `--features test-provider` for the TUI automation matrices (`code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix`) under `--test-threads=1`
+6. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test`
+
+Additional workflows: `codeql.yml` (security analysis), `model-generation-nightly.yml` (nightly model-generation matrix), `release.yml` (release pipeline).
+
+## Test Layers
+
+Libra tests are organised into three layers — `cargo test --all` runs L1 only; L2/L3 are silently skipped when their env vars are unset. See `docs/tests.md` for the canonical guide.
+
+| Layer | Dependencies | Trigger |
+|-------|--------------|---------|
+| **L1 — Deterministic** | None (tempdir, in-memory stores, mock models) | `cargo test --all` |
+| **L2 — Network** | GitHub token for temporary repo creation | `LIBRA_TEST_GITHUB_TOKEN` + `LIBRA_TEST_GITHUB_NAMESPACE` |
+| **L3 — Live Services** | Real AI API keys (`DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, …) or cloud credentials (`LIBRA_D1_*`, `LIBRA_STORAGE_*`, `LIBRA_TEST_S3_*`) | Set the relevant env vars |
+
+Gate tests with the `require_env!` macro — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
 
 ## Coding Conventions
 
@@ -139,11 +196,13 @@ All PRs must pass these checks:
 ## Testing Guidelines
 
 - **Integration tests** in `tests/command/` mirror real Git workflows; prefer these for new commands
+- **Compatibility-surface tests** in `tests/compat/` guard against regressions in CLI flag/help wording, declined-feature drift, and the production `unwrap()` audit. Each `*.rs` under `tests/compat/` must be registered as a `[[test]]` entry in `Cargo.toml` (Cargo's default discovery only picks up files directly under `tests/`)
 - **Isolation**: Use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state
 - **Serial execution**: Mark tests `#[serial]` (from `serial_test` crate) if they mutate shared state
 - **Async tests**: Use `#[tokio::test]` (or `flavor = "multi_thread"` when needed)
-- **Fixtures**: Keep small and local in `tests/data/`; reuse helpers from `tests/command/mod.rs`
-- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test
+- **Fixtures**: Keep small and local in `tests/data/` and `tests/fixtures/`; reuse helpers from `tests/command/mod.rs`, `tests/harness/`, and `tests/helpers/`
+- **Gating**: Use the `require_env!` macro for tests that need network or credentials so missing vars skip cleanly. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
+- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface
 
 ## Commit & PR Conventions
 
@@ -172,21 +231,36 @@ docs(readme): update provider table
 |----------|--------|
 | Git internals | `git-internal` |
 | CLI | `clap` (derive) |
-| Async runtime | `tokio` (multi-thread) |
+| Async runtime | `tokio` (multi-thread), `async-stream`, `tokio-stream` |
 | Database | `sea-orm` + `sqlx-sqlite` |
-| HTTP server | `axum` |
-| HTTP client | `reqwest` (rustls) |
-| AI/LLM | `rig-core`, `rmcp` (MCP protocol) |
-| TUI | `ratatui`, `crossterm` |
-| Cloud storage | `object_store` (S3/R2/Azure/GCP) |
+| HTTP server | `axum`, `tower`, `tower-http`, `hyper-util` |
+| HTTP client | `reqwest` (rustls), `tokio-tungstenite` |
+| AI/LLM | `rig-core` (rmcp/rustls features), `rmcp` (MCP protocol), `dagrs` (DAG scheduler) |
+| TUI | `ratatui`, `crossterm`, `unicode-width`, `pulldown-cmark` (markdown render) |
+| Cloud storage | `object_store` (S3/R2/Azure/GCP), `lru-mem` |
+| Embedded assets | `rust-embed`, `mime_guess` |
+| Code analysis | `tree-sitter` + `tree-sitter-bash`, `tree-sitter-rust` |
+| FUSE worktrees (Unix) | `libfuse-fs`, `rfuse3`, `pager`, `libc` |
+| Secret storage | `libvault` (SQLite-backed) |
 | Error handling | `anyhow`, `thiserror` |
-| Serialization | `serde`, `serde_json` |
+| Serialization | `serde`, `serde_json`, `toml` |
 | Logging | `tracing`, `tracing-subscriber` |
-| Diff/patch | `similar`, `diffy`, `diffs` |
+| Diff/patch | `diffy`, `diffs`, `similar` |
+| Dev/test | `serial_test`, `testcontainers`, `assert_cmd`, `tempfile`, `gag`, `portable-pty`, `pgp` |
 
 ## Database Schema
 
-SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20260309_init.sql`.
+SQLite database at `.libra/libra.db`. Tables fall into three groups:
+
+- **Git core**: `config`, `config_kv`, `reference`, `reflog`, `rebase_state`, `object_index`, `schema_version`
+- **AI threads & scheduling**: `ai_thread`, `ai_thread_participant`, `ai_thread_intent`, `ai_thread_provider_metadata`, `ai_scheduler_state`, `ai_scheduler_plan_head`, `ai_scheduler_selected_plan`, `ai_live_context_window`
+- **AI runtime contracts**: `ai_index_intent_plan`, `ai_index_intent_task`, `ai_index_intent_context_frame`, `ai_index_plan_step_task`, `ai_index_run_event`, `ai_index_run_patchset`, `ai_index_task_run`, `ai_decision_proposal`, `ai_risk_score_breakdown`, `ai_validation_report`
+
+Bootstrap files: `sql/sqlite_20260309_init.sql` (core + AI baseline) and `sql/sqlite_20260415_ai_runtime_contract.sql` (runtime-contract extension).
+
+**Versioned migrations** live under `sql/migrations/` and are applied by `internal::db::migration::MigrationRunner`. Filenames follow `YYYYMMDDNN_<snake_case_name>.sql` (forward) with optional matching `*_down.sql` (rollback). Forward DDL must be idempotent (`CREATE TABLE IF NOT EXISTS …`). See `sql/migrations/README.md`.
+
+The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`, `0002_publish_digest_check.sql`, `0003_publish_max_preview_trigger_replace.sql`, `0004_publish_refs_index.sql`).
 
 ## Environment Variables
 
@@ -206,3 +280,26 @@ SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog
 
 ### Cloud Backup (D1/R2)
 `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, `LIBRA_D1_DATABASE_ID`
+
+### Build & Runtime
+- `LIBRA_SKIP_WEB_BUILD=1` — skip the Next.js web build in `build.rs` (set by every CI job except `compat-web-check`)
+- `LIBRA_LOG`, `RUST_LOG` — `tracing-subscriber` env filter
+- `LIBRA_LOG_FILE` — append-mode tracing sink path
+- `LIBRA_PAGER` — pager override (falls back to system `PAGER` then `less`)
+- `LIBRA_NO_HIDE_PASSWORD` — show password prompts in plain text (debugging)
+- `LIBRA_CONFIG_GLOBAL_DB` — override the global config SQLite path
+- `LIBRA_COMMITTER_NAME` / `LIBRA_COMMITTER_EMAIL` — committer identity overrides
+- `LIBRA_SSH_COMMAND`, `LIBRA_SSH_STRICT_HOST_KEY_CHECKING` — SSH protocol tuning
+- `LIBRA_CODE_LEASE_DURATION_MS` — `libra code` automation lease length
+- `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/improvement/sandbox.md`)
+- `LIBRA_VCS_TIMEOUT_SECONDS`, `LIBRA_VCS_DEFAULT_APPROVAL_SCOPE` — AI-VCS tool guardrails
+- `LIBRA_ERROR_JSON`, `LIBRA_FINE_EXIT_CODES` — stable-error-code surface toggles
+- `LIBRA_ISSUES_URL` — override the "report an issue" URL printed on internal errors
+
+### Tests
+- `LIBRA_TEST_GITHUB_TOKEN`, `LIBRA_TEST_GITHUB_NAMESPACE` — L2 GitHub gate (creates/deletes a temporary `libra-test-*` repo)
+- `LIBRA_TEST_S3_ENDPOINT`, `LIBRA_TEST_S3_BUCKET`, `LIBRA_TEST_S3_ACCESS_KEY`, `LIBRA_TEST_S3_SECRET_KEY`, `LIBRA_TEST_S3_REGION`, `LIBRA_TEST_S3_ALLOW_HTTP` — L3 S3 protocol gate (separate from the R2 backup credentials above)
+- `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN`, `LIBRA_PUBLISH_LIVE_CLONE_DOMAIN`, `LIBRA_PUBLISH_LIVE_SLUG`, `LIBRA_PUBLISH_LIVE_FILE_PATH` — `publish_live` deploy-smoke gate
+- `LIBRA_TEST_MEGA_SERVER` — LFS protocol live-server gate
+- `LIBRA_ENABLE_TEST_PROVIDER` — activate the `test-provider` deterministic LLM for TUI scenarios (required alongside `--features test-provider`)
+- `LIBRA_TEST_LOG`, `LIBRA_TEST_HOME`, `LIBRA_TEST_ENV` — test-only logging/home/sentinel overrides

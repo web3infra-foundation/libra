@@ -396,22 +396,3 @@ fn id_newtypes_serialize_as_transparent_uuids() {
     let back: AgentTaskId = serde_json::from_value(json).unwrap();
     assert_eq!(task_id, back);
 }
-
-/// CEX-S2-10 audit follow-up (h): the previous macro-generated `Default`
-/// impl for ID newtypes returned a fresh v4 UUID on every call, which is a
-/// footgun for callers expecting `default()` to be a stable sentinel. The
-/// macro now only emits `new()`. This test relies on the `new()` path being
-/// the only allocation entry point and exercises it once to make the
-/// contract explicit; a regression that reintroduces `impl Default` would
-/// be caught by a build/audit review rather than a runtime assertion.
-#[test]
-fn id_newtypes_use_new_only_per_audit_follow_up_h() {
-    let task_id = AgentTaskId::new();
-    let run_id = AgentRunId::new();
-    let another_task = AgentTaskId::new();
-    assert_ne!(
-        task_id, another_task,
-        "AgentTaskId::new() must allocate a unique UUID per call"
-    );
-    let _ = run_id;
-}

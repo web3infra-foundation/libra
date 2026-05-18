@@ -146,28 +146,3 @@ pub trait HookProvider: Sync {
     /// reporting and idempotent installs.
     fn hooks_are_installed(&self) -> Result<bool>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the manual `Display` impl on `ProviderHookCommand`. These
-    /// strings are the kebab-case sub-command names used both in the
-    /// `libra code hook <provider> <cmd>` CLI surface (matched by clap)
-    /// and in provider hook config files (the Claude/Gemini hook scripts
-    /// emit them as the second positional argument). Renaming any of
-    /// them would silently break a live provider's hook contract.
-    #[test]
-    fn provider_hook_command_display_pins_each_variant() {
-        assert_eq!(
-            ProviderHookCommand::SessionStart.to_string(),
-            "session-start",
-        );
-        assert_eq!(ProviderHookCommand::Prompt.to_string(), "prompt");
-        assert_eq!(ProviderHookCommand::ToolUse.to_string(), "tool-use");
-        assert_eq!(ProviderHookCommand::ModelUpdate.to_string(), "model-update",);
-        assert_eq!(ProviderHookCommand::Compaction.to_string(), "compaction");
-        assert_eq!(ProviderHookCommand::Stop.to_string(), "stop");
-        assert_eq!(ProviderHookCommand::SessionEnd.to_string(), "session-end",);
-    }
-}

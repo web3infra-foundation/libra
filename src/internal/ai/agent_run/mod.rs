@@ -78,20 +78,14 @@ macro_rules! uuid_newtype {
         pub struct $name(pub Uuid);
 
         impl $name {
-            /// Allocates a fresh v4 UUID. Use this in producer code (event
-            /// writers, dispatchers, scheduler).
-            ///
-            /// **Default-impl note (audit follow-up h):** there is no
-            /// `Default` impl for ID newtypes — calling `default()` would
-            /// silently produce a brand-new random UUID on every call, which
-            /// is a footgun for callers that expect "default" to mean a
-            /// stable sentinel. Producers must call `new()` explicitly so
-            /// the ID allocation is locally visible at the call site. The
-            /// clippy lint that normally suggests adding `Default` is
-            /// suppressed for the same reason.
-            #[allow(clippy::new_without_default)]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
             }
         }
 
@@ -181,7 +175,6 @@ pub struct Sha256(pub String);
 /// distillation downstream (Step 3.D) can consume `AgentEvidence` directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum AnchorScope {
     Session,
     AgentRun,

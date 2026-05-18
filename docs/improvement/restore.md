@@ -7,10 +7,10 @@
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
-- `RestoreError` typed enum（restore.rs:52）含 9 变体（`ResolveSource` / `ReferenceNotCommit` / `PathspecNotMatched` / `ReadIndex` / `ReadObject` / `ReadWorktree` / `InvalidPathEncoding` / `WriteWorktree` / `LfsDownload`）；每个变体在 restore.rs:76-84 有显式 `StableErrorCode` 映射，覆盖 source / pathspec / index / object / LFS 失败分类
-- `run_restore()`（restore.rs:173）+ `render_restore_output()`（restore.rs:231）已完成执行层/渲染层拆分
-- `RestoreOutput`（restore.rs:118）已覆盖 `source`、`worktree`、`staged`、`restored_files`、`deleted_files`
-- `checkout` 兼容路径已复用 typed restore API（`execute_checked_typed` at restore.rs:512 返回 `Result<(), RestoreError>`），而不是继续走裸 `io::Error`
+- `RestoreError` typed enum（restore.rs:52）含 10 变体（`ResolveSource` / `ReferenceNotCommit` / `PathspecNotMatched` / `ReadIndex` / `ReadObject` / `ReadWorktree` / `InvalidPathEncoding` / `WriteWorktree` / `LfsDownload` / `LockedSource`）；每个变体在 `RestoreError::stable_code()`（restore.rs:78-93）有显式 `StableErrorCode` 映射，覆盖 source / pathspec / index / object / LFS / Libra-managed 锁定分支拒绝分类。`LockedSource` 在 `--source` 指向 `intent` / `agent-traces` 等被 `is_locked_revision` 命中的 ref 时返回 `CliInvalidTarget`，阻止用户通过 `restore` 覆写 AI agent 状态
+- `run_restore()`（restore.rs:185）+ `render_restore_output()`（restore.rs:252）已完成执行层/渲染层拆分
+- `RestoreOutput`（restore.rs:130）已覆盖 `source`、`worktree`、`staged`、`restored_files`、`deleted_files`
+- `checkout` 兼容路径已复用 typed restore API（`execute_checked_typed` at restore.rs:533 返回 `Result<(), RestoreError>`），而不是继续走裸 `io::Error`
 - `docs/commands/restore.md` 已记录 JSON schema、错误码和常用示例
 - `tests/command/restore_test.rs` 现含 10 个 test，覆盖正向与错误两侧：
   - 正向：`test_restore_worktree_overwrites_modification_with_committed_blob`（worktree restore + 确认消息断言）、`test_restore_staged_resets_index_entry_to_head`（staged restore + status 二次校验）、`test_restore_json_envelope_reports_restored_files`（`--json` envelope schema 与字段断言）、`test_restore_quiet_suppresses_confirmation_but_still_restores`（`--quiet` 静默语义）

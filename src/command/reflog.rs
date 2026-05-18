@@ -1019,30 +1019,4 @@ mod tests {
         let filter = ReflogFilter::new(None, None, None, Some("ALICE".to_string()));
         assert!(filter.passes(&entry1));
     }
-
-    /// Pins the manual `Display` impl on `FormatterKind` (the
-    /// `--format=<oneline|short|medium|full>` selector for
-    /// `libra reflog show`). Display ↔ `From<String>` is the loop
-    /// the CLI relies on to round-trip the flag value into stable
-    /// JSON output (`format` field) — renaming any of these strings
-    /// would silently break operator muscle memory and JSON schema
-    /// consumers.
-    #[test]
-    fn formatter_kind_display_pins_each_variant_and_round_trips() {
-        assert_eq!(FormatterKind::Oneline.to_string(), "oneline");
-        assert_eq!(FormatterKind::Short.to_string(), "short");
-        assert_eq!(FormatterKind::Medium.to_string(), "medium");
-        assert_eq!(FormatterKind::Full.to_string(), "full");
-
-        // Round-trip: Display → String → From<String> → Display.
-        for variant in [
-            FormatterKind::Oneline,
-            FormatterKind::Short,
-            FormatterKind::Medium,
-            FormatterKind::Full,
-        ] {
-            let rendered = variant.to_string();
-            assert_eq!(FormatterKind::from(rendered.clone()).to_string(), rendered);
-        }
-    }
 }

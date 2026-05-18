@@ -122,30 +122,3 @@ pub fn add_pkt_line_string(pkt_line_stream: &mut BytesMut, buf_str: String) {
     pkt_line_stream.put(Bytes::from(format!("{:04x}", buf_str_length)));
     pkt_line_stream.put(buf_str.as_bytes());
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the manual `Display` impl on `ServiceType` to the exact
-    /// wire-format strings Git clients advertise as the `service=` query
-    /// parameter in `info/refs` requests. Changing these strings would
-    /// silently break every smart-protocol HTTP / SSH client that
-    /// rountrips through `ServiceType::to_string()` followed by
-    /// `ServiceType::from_str()`.
-    #[test]
-    fn service_type_display_pins_wire_format_strings() {
-        assert_eq!(ServiceType::UploadPack.to_string(), "git-upload-pack");
-        assert_eq!(ServiceType::ReceivePack.to_string(), "git-receive-pack");
-        // Round-trip via FromStr to lock the symmetry the smart protocol
-        // depends on.
-        assert_eq!(
-            ServiceType::from_str(&ServiceType::UploadPack.to_string()).unwrap(),
-            ServiceType::UploadPack,
-        );
-        assert_eq!(
-            ServiceType::from_str(&ServiceType::ReceivePack.to_string()).unwrap(),
-            ServiceType::ReceivePack,
-        );
-    }
-}

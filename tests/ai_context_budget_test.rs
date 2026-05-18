@@ -121,50 +121,6 @@ fn allocator_drops_low_priority_context_before_high_priority_context() {
 }
 
 #[test]
-fn allocator_tie_break_is_stable_across_input_orderings() {
-    // Two compressible candidates share the same segment (and therefore the
-    // same priority rank). Only one fits the segment / total budget. The
-    // allocator must deterministically prefer the same candidate id
-    // regardless of the order the caller emitted them in — otherwise
-    // HashMap-sourced candidates (whose iteration order can change between
-    // runs) would non-deterministically swap which one survives.
-    let budget = ContextBudget::from_segments(
-        200,
-        vec![
-            ContextSegmentBudget::new(
-                ContextSegmentKind::SystemRules,
-                100,
-                TruncationPolicy::Never,
-            )
-            .non_compressible(true),
-            ContextSegmentBudget::new(
-                ContextSegmentKind::SourceContext,
-                100,
-                TruncationPolicy::PreserveSourceLabels,
-            ),
-        ],
-    )
-    .expect("budget");
-
-    let candidate_a =
-        ContextBudgetCandidate::new("alpha-source", ContextSegmentKind::SourceContext, 80);
-    let candidate_b =
-        ContextBudgetCandidate::new("zeta-source", ContextSegmentKind::SourceContext, 80);
-
-    let order_one = ContextBudgetAllocator::new(budget.clone())
-        .allocate(vec![candidate_a.clone(), candidate_b.clone()]);
-    let order_two =
-        ContextBudgetAllocator::new(budget).allocate(vec![candidate_b.clone(), candidate_a]);
-
-    assert_eq!(order_one.selected_ids(), order_two.selected_ids());
-    // Lexicographic id sort means `alpha-source` (the lower id) wins, so
-    // both orderings select alpha and omit zeta.
-    assert_eq!(order_one.selected_ids(), vec!["alpha-source"]);
-    assert!(order_one.omission_for("zeta-source").is_some());
-    assert!(order_two.omission_for("zeta-source").is_some());
-}
-
-#[test]
 fn allocator_keeps_noncompressible_safety_rules_even_when_they_exceed_budget() {
     let budget = ContextBudget::from_segments(
         100,

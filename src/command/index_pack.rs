@@ -473,40 +473,6 @@ mod tests {
         ));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::IoWriteFailed);
-        // Specific failure mode (write failed) should NOT carry the
-        // Issues URL hint — that's reserved for the InternalInvariant
-        // fall-through.
-        assert!(
-            !cli_error
-                .hints()
-                .iter()
-                .any(|h| h.as_str().contains("issues")),
-            "IoWriteFailed must not carry the Issues URL hint, got hints: {:?}",
-            cli_error.hints()
-        );
-    }
-
-    /// Cross-Cutting G: the unknown-GitError fall-through path classifies
-    /// as `InternalInvariant` and must include the GitHub Issues URL hint
-    /// so users can report the unexpected case.
-    #[test]
-    fn index_pack_error_maps_unknown_git_error_with_issue_url_hint() {
-        // `UnCompletedPackObject` is one of the variants that does not
-        // match any explicit arm in `index_pack_error` and therefore
-        // falls through to the `_ => InternalInvariant` branch.
-        let cli_error = index_pack_error(GitError::UnCompletedPackObject(
-            "synthetic uncompleted pack object".to_string(),
-        ));
-
-        assert_eq!(cli_error.stable_code(), StableErrorCode::InternalInvariant);
-        assert!(
-            cli_error
-                .hints()
-                .iter()
-                .any(|h| h.as_str().contains("issues")),
-            "InternalInvariant fall-through must include the Issues URL hint, got hints: {:?}",
-            cli_error.hints()
-        );
     }
 
     #[test]
@@ -564,5 +530,28 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Cross-Cutting G: when `index_pack_error` falls through to the
+    /// catch-all `_ => InternalInvariant` arm (an unrecognised upstream
+    /// `GitError` variant) it must surface the GitHub Issues URL hint
+    /// so users can report the unmapped variant. Specific failure modes
+    /// (e.g. write failures classified as `IoWriteFailed`) must NOT
+    /// carry the hint — that's reserved for bug paths.
+    #[test]
+    fn index_pack_error_maps_unknown_git_error_with_issue_url_hint() {
+        let cli_error = index_pack_error(GitError::UnCompletedPackObject(
+            "synthetic uncompleted pack object".to_string(),
+        ));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            cli_error
+                .hints()
+                .iter()
+                .any(|h| h.as_str().contains("issues")),
+            "InternalInvariant fall-through must include the Issues URL hint, got hints: {:?}",
+            cli_error.hints()
+        );
     }
 }

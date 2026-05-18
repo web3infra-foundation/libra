@@ -20,8 +20,8 @@
 - `AddError` 枚举已覆盖主要错误场景，并显式映射到 `StableErrorCode`
 - `--dry-run` 已实现结构化预览；JSON / machine 模式返回同一 `AddOutput`
 - `--verbose` 已由渲染层控制，不再在执行层裸 `println!()`
-- `--force` 已实现（`add.rs:59`），允许暂存被 `.libraignore` 忽略的文件
-- `--refresh` 已实现（`add.rs:51`），仅更新索引元数据不暂存新文件
+- `--force` 已实现（`add.rs:95`），允许暂存被 `.libraignore` 忽略的文件
+- `--refresh` 已实现（`add.rs:87`），仅更新索引元数据不暂存新文件
 - `finish_ignored()` 在忽略文件被拦截时返回 `CliError::failure()` + hint
 
 **基于当前代码的 Review 结论（2026-05-11 复核）：**

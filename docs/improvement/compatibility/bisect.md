@@ -31,7 +31,7 @@ C4（Audit P2）；同时承担 bisect 模块"首次入计划"职责。
 - `bisect view`：展示当前 bisect 状态——剩余候选 commit 数、当前 HEAD、good / bad 边界、已 skip 列表。
 - 引入最小 `BisectError` 与 `BisectOutput`（不要求 18 变体的完整覆盖；至少覆盖 `NotInBisect` / `RunCommandFailed { exit_code }` / `NoMoreCandidates` / `Other`）。
 - 将 `BisectError` 接入 `StableErrorCode`；`bisect run` 的脚本退出码通过 `RunCommandFailed { exit_code }` 透传给上层。
-- **新建** `BISECT_EXAMPLES` 常量（当前 `src/command/bisect.rs` 不存在该常量），加入 `bisect run` 与 `bisect view` 示例，并在 `Bisect` enum 的 `#[command(...)]` 中加 `after_help = BISECT_EXAMPLES`。
+- **扩展** `BISECT_EXAMPLES` 常量（已存在于 `src/command/bisect.rs:371`，本批 baseline 已列出），追加 `bisect run` 与 `bisect view` 示例，并在 `Bisect` enum 的 `#[command(...)]` 中通过 `after_help = BISECT_EXAMPLES` 渲染。
 - `COMPATIBILITY.md` 中 bisect 行更新为 `partial`，notes "run / view added in C4; replay / terms deferred"。
 
 **非目标：**

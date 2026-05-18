@@ -16,12 +16,7 @@
 
 use std::fmt;
 
-use anyhow::Result;
-
-use crate::internal::{
-    ai::client::{Client as GenericClient, Provider},
-    config::{LocalIdentityTarget, resolve_env_for_target},
-};
+use crate::internal::ai::client::{Client as GenericClient, Provider};
 
 /// Anthropic API provider that carries the API key and injects
 /// authentication headers into every request.
@@ -92,43 +87,10 @@ impl Client {
     /// - Returns `std::env::VarError::NotPresent` when `ANTHROPIC_API_KEY` is missing
     ///   so callers can surface a friendly "no API key" message.
     /// - `ANTHROPIC_BASE_URL`, when set, is forwarded verbatim — no scheme validation.
-    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
+    pub fn from_env() -> Result<Self, std::env::VarError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")?;
         let base_url = std::env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-
-        let provider = AnthropicProvider::new(api_key);
-        Ok(Self::new(&base_url, provider))
-    }
-
-    /// Vault-aware async constructor: resolves `ANTHROPIC_API_KEY` and
-    /// `ANTHROPIC_BASE_URL` via [`resolve_env_for_target`], so callers can
-    /// store credentials in repo-local or global `vault.env.*` config without
-    /// also exporting them into the process environment.
-    ///
-    /// Functional scope (priority order matches the rest of Libra's config
-    /// cascade):
-    /// 1. Process env var
-    /// 2. Local repo config (`vault.env.ANTHROPIC_API_KEY` / `vault.env.ANTHROPIC_BASE_URL`)
-    /// 3. Global config
-    ///
-    /// Boundary conditions:
-    /// - Returns an error tagged `ANTHROPIC_API_KEY is not set in env, repo
-    ///   vault, or global config` when the key cannot be resolved from any
-    ///   layer. The `from_env` sync constructor is preserved as a low-level
-    ///   programmatic API for callers that explicitly only want process-env
-    ///   resolution.
-    /// - `ANTHROPIC_BASE_URL` falls back to the canonical Anthropic URL when
-    ///   no layer supplies it.
-    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
-        let api_key = resolve_env_for_target("ANTHROPIC_API_KEY", local_target)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("ANTHROPIC_API_KEY is not set in env, repo vault, or global config")
-            })?;
-        let base_url = resolve_env_for_target("ANTHROPIC_BASE_URL", local_target)
-            .await?
-            .unwrap_or_else(|| "https://api.anthropic.com".to_string());
 
         let provider = AnthropicProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -155,8 +117,6 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
-
     use super::*;
 
     /// Scenario: Debug formatting must never leak the API key, otherwise it would
@@ -175,94 +135,5 @@ mod tests {
     fn test_anthropic_provider_api_key() {
         let provider = AnthropicProvider::new("sk-ant-test-key".to_string());
         assert_eq!(provider.api_key(), "sk-ant-test-key");
-    }
-
-    /// Scenario: `from_resolved_env` reads `ANTHROPIC_API_KEY` from the
-    /// process environment when it is set, mirroring the legacy `from_env`
-    /// fast path and producing a usable client.
-    #[tokio::test]
-    #[serial]
-    async fn from_resolved_env_reads_anthropic_api_key_from_process_env() {
-        let key_guard = TestEnvGuard::set("ANTHROPIC_API_KEY", Some("sk-ant-test-resolved"));
-        let base_guard = TestEnvGuard::set("ANTHROPIC_BASE_URL", None);
-        // Redirect global config to a path that does not exist so the test
-        // does not depend on the developer's real `~/.libra/config.db`.
-        let global_guard = TestEnvGuard::set(
-            "LIBRA_CONFIG_GLOBAL_DB",
-            Some("/nonexistent/anthropic-from-resolved-env-test.db"),
-        );
-
-        let client = Client::from_resolved_env(LocalIdentityTarget::None)
-            .await
-            .expect("from_resolved_env should succeed when ANTHROPIC_API_KEY is set");
-        assert_eq!(client.provider.api_key(), "sk-ant-test-resolved");
-
-        drop(key_guard);
-        drop(base_guard);
-        drop(global_guard);
-    }
-
-    /// Scenario: `from_resolved_env` returns a clear error referencing the
-    /// missing env var when no cascade layer (process env, repo vault, global
-    /// vault) supplies `ANTHROPIC_API_KEY`.
-    #[tokio::test]
-    #[serial]
-    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
-        let key_guard = TestEnvGuard::set("ANTHROPIC_API_KEY", None);
-        let base_guard = TestEnvGuard::set("ANTHROPIC_BASE_URL", None);
-        let global_guard = TestEnvGuard::set(
-            "LIBRA_CONFIG_GLOBAL_DB",
-            Some("/nonexistent/anthropic-from-resolved-env-test.db"),
-        );
-
-        let err = Client::from_resolved_env(LocalIdentityTarget::None)
-            .await
-            .expect_err("from_resolved_env must fail without an API key");
-        let message = err.to_string();
-        assert!(
-            message.contains("ANTHROPIC_API_KEY"),
-            "error should name the missing key, got: {message}"
-        );
-
-        drop(key_guard);
-        drop(base_guard);
-        drop(global_guard);
-    }
-
-    /// RAII guard that sets an env var for the duration of a test and
-    /// restores the previous value (or removes the variable when there was
-    /// none) on drop. Pairs with `#[serial]` to keep concurrent unit tests
-    /// from racing on the same env var name.
-    struct TestEnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl TestEnvGuard {
-        fn set(key: &'static str, value: Option<&str>) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: tests are serialized via `#[serial]`, and the guard
-            // restores the previous value on drop.
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for TestEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `set`. The guard runs after the test body and the
-            // serial gate guarantees no concurrent reader.
-            unsafe {
-                match &self.original {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
     }
 }

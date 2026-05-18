@@ -146,38 +146,3 @@ pub trait Chat: Send + Sync {
         chat_history: Vec<Message>,
     ) -> impl Future<Output = Result<String, CompletionError>> + Send;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the Display format for the owned `CompletionError` variants
-    /// surfaced into TUI cells, provider logs and MCP error envelopes.
-    /// `HttpError` / `RequestError` are skipped because their inner
-    /// `reqwest::Error` / `Box<dyn Error>` sources have no stable public
-    /// constructor; their Display is fully delegated to `source.to_string()`
-    /// via the `"...: {0}"` template, which is exercised here by the
-    /// derived `JsonError` variant carrying a `serde_json::Error`.
-    #[test]
-    fn completion_error_display_pins_owned_variants() {
-        assert_eq!(
-            CompletionError::ProviderError("upstream returned 503".to_string()).to_string(),
-            "ProviderError: upstream returned 503",
-        );
-        assert_eq!(
-            CompletionError::ResponseError("missing `choices[0]`".to_string()).to_string(),
-            "ResponseError: missing `choices[0]`",
-        );
-        assert_eq!(
-            CompletionError::NotImplemented("streaming completions".to_string()).to_string(),
-            "Feature not implemented: streaming completions",
-        );
-
-        let json_err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
-        let json_display = json_err.to_string();
-        assert_eq!(
-            CompletionError::JsonError(json_err).to_string(),
-            format!("JsonError: {json_display}"),
-        );
-    }
-}

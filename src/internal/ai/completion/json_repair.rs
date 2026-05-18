@@ -416,80 +416,15 @@ fn normalize_smart_quotes(input: &str) -> Option<String> {
     {
         return None;
     }
-
-    /// Tracks which delimiter opened the current string literal so smart
-    /// quotes inside an ASCII-delimited string are preserved (LLM pasted
-    /// typographic quotes as content) while smart quotes that act AS the
-    /// delimiter pair are normalized.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum StringMode {
-        Outside,
-        Ascii,
-        Smart,
-    }
-
-    let mut output = String::with_capacity(input.len());
-    let mut changed = false;
-    let mut mode = StringMode::Outside;
-    let mut escaped = false;
-
-    for ch in input.chars() {
-        match mode {
-            StringMode::Ascii => {
-                // ASCII string literal: smart quotes inside the content stay
-                // as-is. Only the matching ASCII `"` closes.
-                output.push(ch);
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    mode = StringMode::Outside;
-                }
-            }
-            StringMode::Smart => {
-                // Smart-delimited string literal: normalize the closing smart
-                // double quote to `"` (this is the case the LLM mistakenly
-                // emitted `“…”` in place of `"…"`). Inner content stays
-                // verbatim and inner smart single quotes are not normalized
-                // here because they may legitimately appear in content.
-                match ch {
-                    '”' | '„' | '‟' => {
-                        output.push('"');
-                        mode = StringMode::Outside;
-                        changed = true;
-                    }
-                    other => output.push(other),
-                }
-            }
-            StringMode::Outside => match ch {
-                '"' => {
-                    output.push(ch);
-                    mode = StringMode::Ascii;
-                }
-                '“' | '„' | '‟' => {
-                    // Smart-opening quote outside a string: open a
-                    // smart-delimited literal and normalize the delimiter.
-                    output.push('"');
-                    mode = StringMode::Smart;
-                    changed = true;
-                }
-                '”' => {
-                    // Lone closing smart double quote with no opener — most
-                    // likely a stray; normalize to `"` to give the parser a
-                    // chance to recover.
-                    output.push('"');
-                    changed = true;
-                }
-                '‘' | '’' | '‚' | '‛' => {
-                    output.push('\'');
-                    changed = true;
-                }
-                other => output.push(other),
-            },
-        }
-    }
-    if changed { Some(output) } else { None }
+    let normalized = input
+        .chars()
+        .map(|ch| match ch {
+            '“' | '”' | '„' | '‟' => '"',
+            '‘' | '’' | '‚' | '‛' => '\'',
+            other => other,
+        })
+        .collect();
+    Some(normalized)
 }
 
 fn strip_json_comments(input: &str) -> Option<String> {

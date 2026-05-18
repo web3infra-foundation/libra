@@ -77,8 +77,8 @@ pub enum DiffError {
     #[error("invalid revision: '{0}'")]
     InvalidRevision(String),
 
-    #[error("failed to load object '{commit_id}': {detail}")]
-    ObjectLoad { commit_id: String, detail: String },
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad { kind: &'static str, object_id: String, detail: String },
 
     #[error("failed to load index: {0}")]
     IndexLoad(String),
@@ -91,11 +91,13 @@ pub enum DiffError {
 
     #[error("failed to write output file '{path}': {detail}")]
     OutputWrite { path: String, detail: String },
-
-    #[error("failed to compute diff: {0}")]
-    DiffCompute(String),
 }
 ```
+
+> 实际的 `ObjectLoad` 用 `kind: &'static str`（"commit" / "tree" / "blob"）替代了
+> 早期草案中的单一 `commit_id`，与 `BlameError::ObjectLoad` / `ResetError::ObjectLoad`
+> 形态保持一致。`DiffCompute` 没有真正落地——`similar` crate 的 diff 计算是 infallible
+> 入口，没有需要 `InternalInvariant` 的失败路径，参见上一节"实施状态"。
 
 **`DiffError → CliError` 显式映射：**
 
@@ -108,7 +110,8 @@ pub enum DiffError {
 | `WorkdirList` | `IoReadFailed` | 128 | 无 |
 | `FileRead` | `IoReadFailed` | 128 | 无 |
 | `OutputWrite` | `IoWriteFailed` | 128 | 无 |
-| `DiffCompute` | `InternalInvariant` | 128 | Issues URL |
+
+`DiffError` 在 src/command/diff.rs:123-148 当前只保留 7 个变体；早期计划中的 `DiffCompute` 没有实际入箱——`similar` crate 的 diff 计算不会失败，所以没有对应的 `InternalInvariant` 入口。如未来引入会失败的 diff 算法（如 patience / minimal），应同时新增变体并补 Issues URL hint。
 
 ### 特性 2：执行层与渲染层拆分
 

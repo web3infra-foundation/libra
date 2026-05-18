@@ -28,7 +28,7 @@
 - **链接事实**：相对链接必须指向现存文件；已合并或删除的旧计划（例如原 `code.md` / `tui.md`）必须改指向 [agent.md](agent.md) 的对应 Part。
 - **占位事实**：可执行脚本、CI 命令、迁移版本、baseline commit、GitHub required-check 名称不得以 placeholder 形式进入可落地步骤。确实需要未来值时，该步骤必须 fail-fast 并把“需要维护者填值”列为阻塞验收项。
 - **验收事实**：每个计划必须有可运行的验证命令、涉及文件、风险/非目标边界；涉及安全、迁移、数据写入、外部 API 或兼容 surface 的计划还必须有负向测试和 rollback/cleanup 说明。
-- **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。已完成生产 unwrap 审计的文件由 `tests/compat/*_production_unwrap_guard.rs` 防御性保护：单独 guard 覆盖 `src/internal/protocol/lfs_client.rs`（v0.17.260）、`src/internal/config.rs`（v0.17.261）、`src/internal/head.rs`（v0.17.262）、`src/utils/util.rs` 与 `src/utils/client_storage.rs`（v0.17.264）；合并 guard `compat_extra_production_unwrap_guard`（v0.17.266）覆盖 `src/utils/lfs.rs`、`src/utils/object.rs`、`src/utils/storage/local.rs`、`src/utils/storage/tiered.rs`、`src/utils/path_ext.rs`、`src/git_protocol.rs`、`src/lfs_structs.rs`、`src/command/reflog.rs`；最后 `compat_all_production_unwrap_guard`（v0.17.268）作为兜底守卫遍历整个 `src/` 树（410 个 `.rs` 文件），任何新增 bare `.unwrap()` 都会被它捕获。新增生产 `.unwrap()` 会让对应 guard 测试失败，且失败消息会指向 `.expect("INVARIANT: ...")` 或 typed-error sibling 作为修复路径。
+- **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。已完成生产 unwrap 审计的文件由 `tests/compat/*_production_unwrap_guard.rs` 防御性保护：单独 guard 覆盖 `src/internal/protocol/lfs_client.rs`（v0.17.260）、`src/internal/config.rs`（v0.17.261）、`src/internal/head.rs`（v0.17.262）、`src/utils/util.rs` 与 `src/utils/client_storage.rs`（v0.17.264）；合并 guard `compat_extra_production_unwrap_guard`（v0.17.266）覆盖 `src/utils/lfs.rs`、`src/utils/object.rs`、`src/utils/storage/local.rs`、`src/utils/storage/tiered.rs`、`src/utils/path_ext.rs`、`src/git_protocol.rs`、`src/lfs_structs.rs`、`src/command/reflog.rs`；最后 `compat_all_production_unwrap_guard`（v0.17.268）作为兜底守卫遍历整个 `src/` 树（v0.17.268 时是 410 个 `.rs` 文件，现已增至 411 个；guard 仍按发现的所有文件扫描），任何新增 bare `.unwrap()` 都会被它捕获。新增生产 `.unwrap()` 会让对应 guard 测试失败，且失败消息会指向 `.expect("INVARIANT: ...")` 或 typed-error sibling 作为修复路径。
 
 **循环退出条件：**
 
@@ -69,7 +69,7 @@
 | **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [docs/commands/clone.md](../commands/clone.md)） |
 | **4** | `add` | ✅ 已落地 | 执行层/渲染层拆分（`run_add()` → `AddOutput`）；JSON/machine 结构化输出；成功摘要；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；显式 `StableErrorCode`；ignored/failed 按 warning 处理并接入 `--exit-code-on-warning`（详见 [add.md](add.md)） |
 | **5** | `status` | ✅ 已落地 | `StatusData` 共享数据层消除重复计算；upstream tracking（human/JSON/porcelain v2）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；颜色控制统一到 `OutputConfig`（详见 [status.md](status.md)） |
-| **6** | `commit` | ✅ 已落地 | `CommitError`（18 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
+| **6** | `commit` | ✅ 已落地 | `CommitError`（19 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
 | **7** | `push` | ✅ 已落地 | 修复 refspec 语法；60s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
 | **8** | `pull` | ✅ 已落地 | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
 
@@ -82,7 +82,7 @@
 - `clone` 已整体落地：执行层/渲染层拆分、`CloneOutput` 结构化输出、显式 `StableErrorCode` 映射、typed `RestoreError` checkout、`RemoteSpecErrorKind` 分类、cleanup warning 可见性均已完成。性能优化目标仍保留为后续独立批次。
 - `add` 已整体落地：`run_add()` → `AddOutput` 执行层/渲染层拆分；JSON/machine 结构化输出（含 `added`/`modified`/`removed`/`refreshed`/`ignored`/`failed` 分类）；显式 `StableErrorCode` 映射（`AddError → CliError`）；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；ignored/failed 接入共享 warning tracker。
 - `status` 已整体落地：`StatusData` 共享数据层消除 `execute_to()` 与 `collect_status_json()` 的逻辑重复；upstream tracking（human/JSON/short/porcelain v2）；显式 `StatusError → CliError` 映射；新增 `--exit-code` 标志（dirty → exit `1`）；颜色控制统一到 `OutputConfig`。
-- `commit` 已整体落地：`CommitError`（18 变体）typed enum + 显式 `StableErrorCode` 映射；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离（JSON 模式 `Stdio::piped()`）；全部 18 变体单元映射测试 + 11 CLI 级集成测试 + 9 JSON schema 稳定性测试。
+- `commit` 已整体落地：`CommitError`（19 变体）typed enum + 显式 `StableErrorCode` 映射；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离（JSON 模式 `Stdio::piped()`）；全部 19 变体单元映射测试 + 11 CLI 级集成测试 + 9 JSON schema 稳定性测试。
 
 ### 第二批：状态变更确认命令（P0 消灭"沉默"）
 

@@ -111,7 +111,6 @@ Layer ordering matches the runtime gate order — a failing request short-circui
 | `CONTROLLER_CONFLICT` | 409 | controller attach raced by another client |
 | `BROWSER_CONTROL_DISABLED` | 403 | browser write surface gated off |
 | `AUTOMATION_CONTROLLER_REQUIRED` | 403 | route requires automation lease specifically |
-| `CONTROLLER_READONLY` | 403 | adapter is read-only (no submit / cancel / respond) — typed rejection from `ReadOnlyCodeUiAdapter` |
 | `CODE_UI_UNAVAILABLE` | 404 | runtime not constructed in this build / mode |
 | `INVALID_QUERY_PARAM` | 400 | read-side query param validation (e.g. `/threads?limit=abc`) |
 | `STORAGE_PATH_INVALID` | 500 | storage-root resolution failed |
