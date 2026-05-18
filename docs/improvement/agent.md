@@ -6420,7 +6420,7 @@ cargo test --all
 
 #### Task 4.3 — Redaction 规则覆盖与 golden test
 
-- 扩充 `SecretRedactor` markers（[hardening.rs:153-161](../../src/internal/ai/runtime/hardening.rs)）补 control token 模式。
+- 扩充 `SecretRedactor` markers（[hardening.rs:267-296](../../src/internal/ai/runtime/hardening.rs)）补 control token 模式（`control_token:` / `control-token:` / `x-code-controller-token:` / `x-libra-control-token:` 等已在 `default_runtime()` markers 列表中落地）。
 - 新增 `tests/diagnostics_redaction_test.rs` golden-style integration test，覆盖 diagnostics 中 controller owner / active interaction 等字符串字段会经 `SecretRedactor` 过滤。
 - 单测覆盖：env dump / provider body / shell excerpt 全部经规则表过滤。
 
