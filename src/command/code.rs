@@ -1047,7 +1047,30 @@ fn build_any_completion_model_for_args(
     String,
 )> {
     build_any_completion_model_for_args_with_lookup(args, env_file, working_dir, |key| {
-        std::env::var(key).ok()
+        // Vault-aware fallback chain: try process env first (cheap), then
+        // fall back to the libra config DB (repo-local + global
+        // `vault.env.<name>`) via the sync resolver. Phase 5 from_env →
+        // resolve_env call-site cutover: users who configured an API key
+        // once via `libra config --global add vault.env.GEMINI_API_KEY <…>`
+        // no longer need to re-export it in every shell.
+        //
+        // The DB read may fail (e.g. stale global config schema); we treat
+        // any error as "value not present" here so the provider bootstrap
+        // path falls through to its existing "API key not set" error,
+        // matching the v0.17.534 fallback semantics. Hard schema-mismatch
+        // chains are still surfaced via `tracing::warn!` inside
+        // `resolve_env_for_target`.
+        match crate::internal::config::resolve_env_sync(key) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    key = key,
+                    error = %format!("{error:#}"),
+                    "vault-aware env resolution failed; falling back to None"
+                );
+                None
+            }
+        }
     })
 }
 

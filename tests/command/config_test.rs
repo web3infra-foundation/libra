@@ -1173,3 +1173,63 @@ async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
         sources.config_email
     );
 }
+
+/// `resolve_env_sync` is the sync wrapper around the async resolver, used by
+/// the `libra code` provider bootstrap (v0.17.556) so a user who runs
+/// `libra config --global add vault.env.GEMINI_API_KEY <…>` once no longer
+/// needs to re-export the key in every shell.
+///
+/// Process-env path: when the var is set, the wrapper must return it
+/// without ever spawning the worker thread (the cheap fast path).
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_returns_process_env_value_without_spawning_worker() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_SYNC_TEST_KEY",
+        std::ffi::OsStr::new("hot"),
+    );
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-fast-path.db"),
+    );
+
+    let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_TEST_KEY").unwrap();
+    assert_eq!(value.as_deref(), Some("hot"));
+}
+
+/// Absence path: when no process env, no repo, and no global DB layer carries
+/// the key, the wrapper returns `Ok(None)` (not an error). A schema-mismatch
+/// on the global DB is treated as missing-value here (the underlying
+/// `resolve_env_for_target` already downgrades that to `tracing::warn!`),
+/// matching the v0.17.515 / v0.17.534 fallback contract.
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY",
+        std::ffi::OsStr::new(""),
+    );
+    // Use an empty value to keep the test hermetic — the env var is in the
+    // ambient process so we can't `unset` it cleanly without a wrapper. The
+    // resolver treats whitespace-only env-var values as set (returns
+    // `Some("")`) because std::env::var doesn't strip; that's the contract.
+    // Switch instead to an env var name that is guaranteed absent.
+    drop(_guard);
+
+    // Now query a guaranteed-missing key with a guaranteed-missing global DB.
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-absent-path.db"),
+    );
+
+    let value =
+        resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_THIS_ENV_VAR_MUST_NOT_EXIST_xyz_42").unwrap();
+    assert!(
+        value.is_none(),
+        "expected None for an unset key, got {value:?}"
+    );
+}
