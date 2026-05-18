@@ -1144,4 +1144,20 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn parse_error_display_pins_each_variant() {
+        assert_eq!(
+            ParseError::InvalidPatchError("missing *** Begin Patch".to_string()).to_string(),
+            "invalid patch: missing *** Begin Patch",
+        );
+        assert_eq!(
+            ParseError::InvalidHunkError {
+                message: "unexpected token".to_string(),
+                line_number: 42,
+            }
+            .to_string(),
+            "invalid hunk at line 42, unexpected token",
+        );
+    }
 }

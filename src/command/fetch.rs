@@ -1710,10 +1710,83 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FetchError, SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
-        emit_remote_progress, ensure_vault_ssh_tmp_dir, redact_url_credentials,
+        FetchError, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
+        cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        redact_url_credentials,
     };
     use crate::utils::test::ScopedEnvVar;
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`FetchError`]. These strings are used as the
+    /// `CliError` message via `From<FetchError> for CliError` and
+    /// surface in both human and `--json` envelopes for `fetch`, `clone`,
+    /// and `pull`.
+    ///
+    /// Source-chained variants (Discovery, FetchObjects, PacketRead,
+    /// ObjectsDirNotFound, PackDirCreate, PackWrite, IndexPack) wrap
+    /// upstream io::Error / GitError types and are intentionally
+    /// skipped — their `{source}` slot is owned by the wrapped type.
+    #[test]
+    fn fetch_error_display_pins_static_message_variants() {
+        // InvalidRemoteSpec echoes the `reason` field verbatim.
+        assert_eq!(
+            FetchError::InvalidRemoteSpec {
+                spec: "/missing/repo".to_string(),
+                kind: RemoteSpecErrorKind::MissingLocalRepo,
+                reason: "local path does not exist".to_string(),
+            }
+            .to_string(),
+            "local path does not exist",
+        );
+        assert_eq!(
+            FetchError::ObjectFormatMismatch {
+                remote: git_internal::hash::HashKind::Sha1,
+                local: git_internal::hash::HashKind::Sha256,
+            }
+            .to_string(),
+            "remote object format 'sha1' does not match local 'sha256'",
+        );
+        assert_eq!(
+            FetchError::RemoteBranchNotFound {
+                branch: "feature".to_string(),
+                remote: "origin".to_string(),
+            }
+            .to_string(),
+            "remote branch feature not found in upstream origin",
+        );
+        assert_eq!(
+            FetchError::InvalidPktHeader {
+                header: "zzzz".to_string(),
+            }
+            .to_string(),
+            "invalid packet line header 'zzzz'",
+        );
+        assert_eq!(
+            FetchError::RemoteSideband {
+                message: "access denied".to_string(),
+            }
+            .to_string(),
+            "remote reported an error: access denied",
+        );
+        assert_eq!(
+            FetchError::ChecksumMismatch.to_string(),
+            "pack checksum mismatch",
+        );
+        assert_eq!(
+            FetchError::UpdateRefs {
+                message: "ref database is read-only".to_string(),
+            }
+            .to_string(),
+            "failed to update references after fetch: ref database is read-only",
+        );
+        assert_eq!(
+            FetchError::LocalState {
+                message: "missing object directory".to_string(),
+            }
+            .to_string(),
+            "failed to inspect local repository state: missing object directory",
+        );
+    }
 
     fn capture_remote_progress(
         payload: &[u8],

@@ -1161,4 +1161,16 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    #[test]
+    fn transform_error_display_pins_invalid_request_template() {
+        assert_eq!(
+            TransformError::InvalidRequest {
+                provider: "openai",
+                reason: "missing tool name".to_string(),
+            }
+            .to_string(),
+            "transform 'openai' rejected request: missing tool name",
+        );
+    }
 }

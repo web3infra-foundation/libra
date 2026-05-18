@@ -259,4 +259,12 @@ mod tests {
         assert_eq!(AgentKind::from_cli_slug("not-an-agent"), None);
         assert_eq!(AgentKind::from_cli_slug(""), None);
     }
+
+    #[test]
+    fn agent_error_display_pins_not_yet_implemented_template() {
+        assert_eq!(
+            AgentError::NotYetImplemented("Gemini").to_string(),
+            "adapter for 'Gemini' is preview-only and not yet implemented",
+        );
+    }
 }

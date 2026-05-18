@@ -1099,14 +1099,80 @@ fn detect_system_ssh_key() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::{
+        io::{Read, Write},
+        path::PathBuf,
+    };
 
     use gag::BufferRedirect;
     use serial_test::serial;
     use tempfile::tempdir;
 
-    use super::{DEFAULT_BRANCH, InitArgs, run_init};
+    use super::{DEFAULT_BRANCH, InitArgs, InitError, run_init};
     use crate::utils::test::{self, ChangeDirGuard};
+
+    #[test]
+    fn init_error_display_pins_owned_variants() {
+        assert_eq!(
+            InitError::InvalidArgument {
+                message: "missing target".to_string(),
+                hint: Some("provide a path".to_string()),
+            }
+            .to_string(),
+            "missing target",
+        );
+        assert_eq!(
+            InitError::AlreadyInitialized {
+                path: PathBuf::from("/tmp/repo"),
+            }
+            .to_string(),
+            "repository already initialized at '/tmp/repo'",
+        );
+        assert_eq!(
+            InitError::SourcePathNotFound {
+                path: PathBuf::from("/missing/repo"),
+            }
+            .to_string(),
+            "source git repository '/missing/repo' does not exist",
+        );
+        assert_eq!(
+            InitError::InvalidGitRepository {
+                path: PathBuf::from("/tmp/not-git"),
+            }
+            .to_string(),
+            "'/tmp/not-git' is not a valid Git repository",
+        );
+        assert_eq!(
+            InitError::TemplateNotFound {
+                path: PathBuf::from("/tmp/template"),
+            }
+            .to_string(),
+            "template directory '/tmp/template' does not exist",
+        );
+        assert_eq!(
+            InitError::InvalidUtf8Path {
+                path: PathBuf::from("/tmp/utf8"),
+            }
+            .to_string(),
+            "path '/tmp/utf8' is not valid UTF-8",
+        );
+        assert_eq!(
+            InitError::ConversionFailed {
+                repo: PathBuf::from("/tmp/source"),
+                stage: "objects",
+                message: "missing pack".to_string(),
+            }
+            .to_string(),
+            "conversion from git repository '/tmp/source' failed during objects: missing pack",
+        );
+        assert_eq!(
+            InitError::VaultInitializationFailed {
+                message: "no keyring".to_string(),
+            }
+            .to_string(),
+            "vault initialization failed: no keyring",
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     #[serial]

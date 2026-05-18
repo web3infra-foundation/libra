@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
+    fmt,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::Arc,
@@ -495,13 +496,13 @@ pub async fn execute(args: CloudArgs) -> CliResult<()> {
     match args.command {
         CloudCommand::Sync(sync_args) => execute_sync(sync_args)
             .await
-            .map_err(|e| cloud_cli_error("sync", e))?,
+            .map_err(|e| cloud_cli_error_typed("sync", e))?,
         CloudCommand::Restore(restore_args) => execute_restore(restore_args)
             .await
-            .map_err(|e| cloud_cli_error("restore", e))?,
+            .map_err(|e| cloud_cli_error_typed("restore", e))?,
         CloudCommand::Status(status_args) => execute_status(status_args)
             .await
-            .map_err(|e| cloud_cli_error("status", e))?,
+            .map_err(|e| cloud_cli_error_typed("status", e))?,
     }
 
     Ok(())
@@ -524,7 +525,7 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
                     };
                 let report = run_cloud_sync(ctx, progress)
                     .await
-                    .map_err(|e| cloud_cli_error("sync", e))?;
+                    .map_err(|e| cloud_cli_error_typed("sync", e))?;
                 if report.failed_count > 0 {
                     // Variant is known here — skip the String -> CloudError
                     // classification round-trip and surface PartialTransfer directly.
@@ -540,19 +541,19 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
             } else {
                 execute_sync(sync_args)
                     .await
-                    .map_err(|e| cloud_cli_error("sync", e))?;
+                    .map_err(|e| cloud_cli_error_typed("sync", e))?;
             }
         }
         CloudCommand::Restore(restore_args) => {
             if output.is_json() || output.quiet {
                 let report = run_cloud_restore(restore_args)
                     .await
-                    .map_err(|e| cloud_cli_error("restore", e))?;
+                    .map_err(|e| cloud_cli_error_typed("restore", e))?;
                 render_cloud_restore_output(&report, output)?;
             } else {
                 execute_restore(restore_args)
                     .await
-                    .map_err(|e| cloud_cli_error("restore", e))?;
+                    .map_err(|e| cloud_cli_error_typed("restore", e))?;
             }
         }
         CloudCommand::Status(status_args) => {
@@ -573,7 +574,7 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
 /// Variants document the trigger conditions; the contained `String` carries
 /// the original detail so the human / JSON error envelope can preserve it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CloudError {
+pub(crate) enum CloudError {
     /// Required env / vault key set missing — carries the comma-separated key
     /// list parsed out of the underlying "Missing: …" message.
     MissingEnv {
@@ -594,6 +595,8 @@ enum CloudError {
     /// Anything else — kept as the original detail string.
     Generic(String),
 }
+
+type CloudResult<T> = std::result::Result<T, CloudError>;
 
 impl From<String> for CloudError {
     fn from(error: String) -> Self {
@@ -616,6 +619,31 @@ impl From<String> for CloudError {
             CloudError::R2(error)
         } else {
             CloudError::Generic(error)
+        }
+    }
+}
+
+impl fmt::Display for CloudError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CloudError::MissingEnv {
+                detail,
+                missing_keys,
+            } => {
+                if !detail.is_empty() {
+                    write!(f, "{detail}")
+                } else if missing_keys.is_empty() {
+                    write!(f, "missing cloud environment configuration")
+                } else {
+                    write!(f, "Missing: {}", missing_keys.join(", "))
+                }
+            }
+            CloudError::NameAlreadyTaken(detail)
+            | CloudError::NameNotFound(detail)
+            | CloudError::PartialTransfer(detail)
+            | CloudError::D1(detail)
+            | CloudError::R2(detail)
+            | CloudError::Generic(detail) => write!(f, "{detail}"),
         }
     }
 }
@@ -650,6 +678,7 @@ impl CloudError {
     }
 }
 
+#[cfg(test)]
 fn cloud_cli_error(operation: &str, error: String) -> CliError {
     cloud_cli_error_typed(operation, error.into())
 }
@@ -764,7 +793,7 @@ fn render_cloud_restore_output(
 }
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
-async fn execute_sync(args: SyncArgs) -> Result<(), String> {
+async fn execute_sync(args: SyncArgs) -> CloudResult<()> {
     let ctx = CloudSyncContext {
         batch_size: args.batch_size,
         force: args.force,
@@ -775,7 +804,10 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     // surface as a hard error after the human-readable summary has
     // already been emitted by `ConsoleCloudSyncProgress`.
     if report.failed_count > 0 {
-        return Err(format!("{} objects failed to sync", report.failed_count));
+        return Err(CloudError::PartialTransfer(format!(
+            "{} objects failed to sync",
+            report.failed_count
+        )));
     }
     Ok(())
 }
@@ -794,12 +826,14 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 /// `Err`. Per-object failures are captured in `failed_count` and skip
 /// the metadata + agent_capture phases (preserving the pre-Phase-1
 /// "block follow-up work on object failure" gate).
-pub async fn run_cloud_sync(
+pub(crate) async fn run_cloud_sync(
     ctx: CloudSyncContext,
     progress: &dyn CloudSyncProgress,
-) -> Result<CloudSyncReport, String> {
+) -> CloudResult<CloudSyncReport> {
     if ctx.batch_size < 1 {
-        return Err("Batch size must be at least 1".to_string());
+        return Err(CloudError::Generic(
+            "Batch size must be at least 1".to_string(),
+        ));
     }
 
     progress.on_starting();
@@ -809,13 +843,13 @@ pub async fn run_cloud_sync(
     // Initialize D1 client.
     let d1_client = D1Client::from_env()
         .await
-        .map_err(|e| format!("D1 client error: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("D1 client error: {}", e.message)))?;
 
     // Ensure D1 table exists before any operations.
     d1_client
         .ensure_object_index_table()
         .await
-        .map_err(|e| format!("Failed to create D1 table: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("Failed to create D1 table: {}", e.message)))?;
 
     // Get database connection.
     let db_conn = db::get_db_conn_instance().await;
@@ -846,23 +880,34 @@ pub async fn run_cloud_sync(
         });
 
     // Ensure repositories table exists.
-    d1_client
-        .ensure_repositories_table()
-        .await
-        .map_err(|e| format!("Failed to create repositories table: {}", e.message))?;
+    d1_client.ensure_repositories_table().await.map_err(|e| {
+        CloudError::D1(format!(
+            "Failed to create repositories table: {}",
+            e.message
+        ))
+    })?;
 
     // Upsert repository info.
     let repo_row = d1_client
         .upsert_repository(&repo_id, &project_name)
         .await
-        .map_err(|e| format!("Failed to upsert repository: {}", e.message))?;
+        .map_err(|e| {
+            if e.message.contains("UNIQUE constraint failed: repositories.name") {
+                CloudError::NameAlreadyTaken(format!(
+                    "Project name '{}' is already taken by another repository. Please choose a different name in cloud.name config.",
+                    project_name
+                ))
+            } else {
+                CloudError::D1(format!("Failed to upsert repository: {}", e.message))
+            }
+        })?;
 
     // Verify repo_id matches (to detect name conflict).
     if repo_row.repo_id != repo_id {
-        return Err(format!(
+        return Err(CloudError::NameAlreadyTaken(format!(
             "Project name '{}' is already taken by another repository (ID: {}). Please choose a different name in cloud.name config.",
             project_name, repo_row.repo_id
-        ));
+        )));
     }
 
     // Query unsynced objects.
@@ -877,7 +922,7 @@ pub async fn run_cloud_sync(
     let unsynced_objects = query
         .all(&db_conn)
         .await
-        .map_err(|e| format!("Database query failed: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
 
     // Initialize R2 storage.
     let r2_storage = create_r2_storage(&repo_id).await?;
@@ -886,9 +931,7 @@ pub async fn run_cloud_sync(
 
     if unsynced_objects.is_empty() {
         progress.on_no_objects();
-        let metadata = sync_metadata(&db_conn, &r2_storage, progress)
-            .await
-            .map_err(|e| format!("Metadata sync failed: {e}"))?;
+        let metadata = sync_metadata(&db_conn, &r2_storage, progress).await?;
         // CEX-EntireIO §10.2: even when there are no new git objects to
         // ship, the agent_session/agent_checkpoint catalog may have new
         // rows from local hook ingestion. Mirror them on every sync.
@@ -896,6 +939,7 @@ pub async fn run_cloud_sync(
             match sync_agent_capture_tables(&db_conn, &d1_client, &repo_id, progress).await {
                 Ok(outcome) => outcome,
                 Err(err) => {
+                    let err = err.to_string();
                     progress.on_agent_capture_warning(&err);
                     AgentCaptureSyncOutcome::Failed { error: err }
                 }
@@ -936,7 +980,8 @@ pub async fn run_cloud_sync(
                     synced_count += 1;
                 }
                 Err(e) => {
-                    progress.on_object_error(&obj.o_id, &e);
+                    let err = e.to_string();
+                    progress.on_object_error(&obj.o_id, &err);
                     failed_count += 1;
                 }
             }
@@ -958,9 +1003,7 @@ pub async fn run_cloud_sync(
         });
     }
 
-    let metadata = sync_metadata(&db_conn, &r2_storage, progress)
-        .await
-        .map_err(|e| format!("Metadata sync failed: {e}"))?;
+    let metadata = sync_metadata(&db_conn, &r2_storage, progress).await?;
     // CEX-EntireIO §10.2: append agent capture catalog mirroring at the
     // tail of the sync flow per the plan. Errors here surface as a
     // warning rather than a hard failure so an entirely green object
@@ -969,6 +1012,7 @@ pub async fn run_cloud_sync(
         match sync_agent_capture_tables(&db_conn, &d1_client, &repo_id, progress).await {
             Ok(outcome) => outcome,
             Err(err) => {
+                let err = err.to_string();
                 progress.on_agent_capture_warning(&err);
                 AgentCaptureSyncOutcome::Failed { error: err }
             }
@@ -991,11 +1035,11 @@ async fn sync_single_object(
     local_storage: &LocalStorage,
     r2_storage: &RemoteStorage,
     d1_client: &D1Client,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     let hash = ObjectHash::from_bytes(
-        &hex::decode(&obj.o_id).map_err(|e| format!("Invalid hash: {}", e))?,
+        &hex::decode(&obj.o_id).map_err(|e| CloudError::Generic(format!("Invalid hash: {}", e)))?,
     )
-    .map_err(|e| format!("Invalid object hash: {}", e))?;
+    .map_err(|e| CloudError::Generic(format!("Invalid object hash: {}", e)))?;
 
     // Phase 1: Upload to R2 (idempotent - same hash will just overwrite)
     // Check if already exists in R2 to avoid unnecessary upload
@@ -1004,13 +1048,13 @@ async fn sync_single_object(
         let (data, obj_type) = local_storage
             .get(&hash)
             .await
-            .map_err(|e| format!("Failed to read local object: {}", e))?;
+            .map_err(|e| CloudError::Generic(format!("Failed to read local object: {}", e)))?;
 
         // Upload to R2
         r2_storage
             .put(&hash, &data, obj_type)
             .await
-            .map_err(|e| format!("R2 upload failed: {}", e))?;
+            .map_err(|e| CloudError::R2(format!("R2 upload failed: {}", e)))?;
     }
 
     // Phase 2: Upsert to D1 (idempotent - will update if exists)
@@ -1023,7 +1067,7 @@ async fn sync_single_object(
             obj.created_at,
         )
         .await
-        .map_err(|e| format!("D1 write failed: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("D1 write failed: {}", e.message)))?;
 
     Ok(())
 }
@@ -1038,11 +1082,12 @@ pub(crate) async fn restore_indexed_objects_from_remote(
     indexes: &[ObjectIndexRow],
     r2_storage: &RemoteStorage,
     local_storage: &LocalStorage,
-) -> Result<ObjectRestoreReport, String> {
+) -> CloudResult<ObjectRestoreReport> {
     let mut report = ObjectRestoreReport::default();
 
     for idx in indexes {
-        let decoded = hex::decode(&idx.o_id).map_err(|e| format!("Invalid hash: {}", e))?;
+        let decoded = hex::decode(&idx.o_id)
+            .map_err(|e| CloudError::Generic(format!("Invalid hash: {}", e)))?;
         let hash = match ObjectHash::from_bytes(&decoded) {
             Ok(hash) => hash,
             Err(e) => {
@@ -1092,34 +1137,38 @@ pub(crate) async fn restore_indexed_objects_from_remote(
     Ok(report)
 }
 
-async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, String> {
+async fn run_cloud_restore(args: RestoreArgs) -> CloudResult<CloudRestoreOutput> {
     validate_cloud_backup_env(args.metadata_only).await?;
 
     let d1_client = D1Client::from_env()
         .await
-        .map_err(|e| format!("D1 client error: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("D1 client error: {}", e.message)))?;
 
     let repo_id = if let Some(name) = &args.name {
-        d1_client
-            .ensure_repositories_table()
-            .await
-            .map_err(|e| format!("Failed to ensure repositories table: {}", e.message))?;
+        d1_client.ensure_repositories_table().await.map_err(|e| {
+            CloudError::D1(format!(
+                "Failed to ensure repositories table: {}",
+                e.message
+            ))
+        })?;
 
         let id = d1_client
             .get_repo_id_by_name(name)
             .await
-            .map_err(|e| format!("Failed to resolve repo name: {}", e.message))?;
-        id.ok_or_else(|| format!("Repository with name '{}' not found", name))?
+            .map_err(|e| CloudError::D1(format!("Failed to resolve repo name: {}", e.message)))?;
+        id.ok_or_else(|| {
+            CloudError::NameNotFound(format!("Repository with name '{}' not found", name))
+        })?
     } else {
         args.repo_id
             .clone()
-            .ok_or_else(|| "repo_id is required".to_string())?
+            .ok_or_else(|| CloudError::NameNotFound("repo_id is required".to_string()))?
     };
 
     let indexes = d1_client
         .get_object_indexes(&repo_id)
         .await
-        .map_err(|e| format!("Failed to query D1: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("Failed to query D1: {}", e.message)))?;
 
     let db_conn = db::get_db_conn_instance().await;
     for idx in &indexes {
@@ -1128,7 +1177,7 @@ async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, Stri
             .filter(object_index::Column::RepoId.eq(&idx.repo_id))
             .one(&db_conn)
             .await
-            .map_err(|e| format!("DB error: {}", e))?;
+            .map_err(|e| CloudError::Generic(format!("DB error: {}", e)))?;
 
         if let Some(existing_model) = existing {
             let mut active: object_index::ActiveModel = existing_model.into();
@@ -1203,10 +1252,10 @@ async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, Stri
         eprintln!("{warning}");
     }
     if object_report.failed > 0 {
-        return Err(format!(
+        return Err(CloudError::PartialTransfer(format!(
             "{} objects failed to restore",
             object_report.failed
-        ));
+        )));
     }
 
     let metadata = match restore_metadata(&db_conn, &r2_storage).await {
@@ -1218,20 +1267,22 @@ async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, Stri
             emit_warning(format!("failed to restore metadata: {}", e));
             CloudRestoreMetadataOutput {
                 status: "warning".to_string(),
-                warning: Some(e),
+                warning: Some(e.to_string()),
             }
         }
     };
 
     let head_commit = Head::current_commit_result()
         .await
-        .map_err(|error| format!("failed to resolve HEAD commit: {error}"))?;
+        .map_err(|error| CloudError::Generic(format!("failed to resolve HEAD commit: {error}")))?;
     if head_commit.is_some() {
         let _ = restore_worktree_to_head(false).await;
     } else {
         let main_branch = Branch::find_branch_result("main", None)
             .await
-            .map_err(|error| format!("failed to resolve main branch: {error}"))?;
+            .map_err(|error| {
+                CloudError::Generic(format!("failed to resolve main branch: {error}"))
+            })?;
         if main_branch.is_some() {
             Head::update(Head::Branch("main".to_string()), None).await;
             let _ = restore_worktree_to_head(false).await;
@@ -1240,7 +1291,7 @@ async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, Stri
 
     restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id, false)
         .await
-        .map_err(|e| format!("agent capture restore failed: {}", e))?;
+        .map_err(|error| CloudError::D1(format!("agent capture restore failed: {error}")))?;
 
     Ok(CloudRestoreOutput {
         repo_id,
@@ -1259,14 +1310,14 @@ async fn run_cloud_restore(args: RestoreArgs) -> Result<CloudRestoreOutput, Stri
     })
 }
 
-/// Execute restore command - resolves project name (if provided) and restores from D1/R2
-async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
+/// Execute restore command - resolves project name (if provided) and restores from D1/R2.
+async fn execute_restore(args: RestoreArgs) -> CloudResult<()> {
     validate_cloud_backup_env(args.metadata_only).await?;
 
     // Initialize D1 client
     let d1_client = D1Client::from_env()
         .await
-        .map_err(|e| format!("D1 client error: {}", e.message))?;
+        .map_err(|error| CloudError::D1(format!("D1 client error: {}", error.message)))?;
 
     let repo_id = if let Some(name) = &args.name {
         // Ensure repositories table exists before resolving name
@@ -1274,17 +1325,23 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         d1_client
             .ensure_repositories_table()
             .await
-            .map_err(|e| format!("Failed to ensure repositories table: {}", e.message))?;
+            .map_err(|error| {
+                CloudError::D1(format!(
+                    "Failed to ensure repositories table: {}",
+                    error.message
+                ))
+            })?;
 
-        let id = d1_client
-            .get_repo_id_by_name(name)
-            .await
-            .map_err(|e| format!("Failed to resolve repo name: {}", e.message))?;
-        id.ok_or_else(|| format!("Repository with name '{}' not found", name))?
+        let id = d1_client.get_repo_id_by_name(name).await.map_err(|error| {
+            CloudError::D1(format!("Failed to resolve repo name: {}", error.message))
+        })?;
+        id.ok_or_else(|| {
+            CloudError::NameNotFound(format!("Repository with name '{}' not found", name))
+        })?
     } else {
         args.repo_id
             .clone()
-            .ok_or_else(|| "repo_id is required".to_string())?
+            .ok_or_else(|| CloudError::NameNotFound("repo_id is required".to_string()))?
     };
 
     println!("Starting restore for repo: {}", repo_id);
@@ -1293,7 +1350,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     let indexes = d1_client
         .get_object_indexes(&repo_id)
         .await
-        .map_err(|e| format!("Failed to query D1: {}", e.message))?;
+        .map_err(|error| CloudError::D1(format!("Failed to query D1: {}", error.message)))?;
 
     println!("Found {} objects in cloud for repo.", indexes.len());
 
@@ -1312,7 +1369,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
             .filter(object_index::Column::RepoId.eq(&idx.repo_id))
             .one(&db_conn)
             .await
-            .map_err(|e| format!("DB error: {}", e))?;
+            .map_err(|error| CloudError::Generic(format!("DB error: {error}")))?;
 
         if let Some(existing_model) = existing {
             let mut active: object_index::ActiveModel = existing_model.into();
@@ -1366,7 +1423,10 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     );
 
     if report.failed > 0 {
-        Err(format!("{} objects failed to restore", report.failed))
+        Err(CloudError::PartialTransfer(format!(
+            "{} objects failed to restore",
+            report.failed
+        )))
     } else {
         // Restore metadata
         if let Err(e) = restore_metadata(&db_conn, &r2_storage).await {
@@ -1382,9 +1442,9 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         // user to start working in the restored tree (Codex Q3).
 
         // Check if HEAD has a commit (either restored or existing)
-        let head_commit = Head::current_commit_result()
-            .await
-            .map_err(|error| format!("failed to resolve HEAD commit: {error}"))?;
+        let head_commit = Head::current_commit_result().await.map_err(|error| {
+            CloudError::Generic(format!("failed to resolve HEAD commit: {error}"))
+        })?;
 
         if let Some(commit) = head_commit {
             println!("Restoring working directory to HEAD ({})", commit);
@@ -1396,7 +1456,9 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
             // We look for 'main' branch in the reference table as a fallback
             let main_branch = Branch::find_branch_result("main", None)
                 .await
-                .map_err(|error| format!("failed to resolve main branch: {error}"))?;
+                .map_err(|error| {
+                    CloudError::Generic(format!("failed to resolve main branch: {error}"))
+                })?;
 
             if let Some(branch) = main_branch {
                 println!("Found main branch: {}", branch.commit);
@@ -1419,13 +1481,13 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         // worktree materialization that runs above.
         restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id, true)
             .await
-            .map_err(|e| format!("agent capture restore failed: {}", e))?;
+            .map_err(|e| CloudError::D1(format!("agent capture restore failed: {}", e)))?;
 
         Ok(())
     }
 }
 
-async fn restore_worktree_to_head(render_human: bool) -> Result<(), String> {
+async fn restore_worktree_to_head(render_human: bool) -> CloudResult<()> {
     let restore_args = RestoreWorktreeArgs {
         pathspec: vec![".".to_string()], // restore everything
         source: Some("HEAD".to_string()),
@@ -1435,7 +1497,9 @@ async fn restore_worktree_to_head(render_human: bool) -> Result<(), String> {
 
     if let Err(e) = restore_cmd::execute_checked(restore_args).await {
         emit_warning(format!("failed to restore worktree files: {}", e));
-        Err(e.to_string())
+        Err(CloudError::Generic(format!(
+            "failed to restore worktree files: {e}"
+        )))
     } else {
         if render_human {
             println!("Successfully restored working directory files.");
@@ -1445,8 +1509,10 @@ async fn restore_worktree_to_head(render_human: bool) -> Result<(), String> {
 }
 
 /// Execute status command - shows sync status
-async fn execute_status(args: StatusArgs) -> Result<(), String> {
-    let status = run_cloud_status(args).await.map_err(|e| e.to_string())?;
+async fn execute_status(args: StatusArgs) -> CloudResult<()> {
+    let status = run_cloud_status(args)
+        .await
+        .map_err(|error| CloudError::Generic(error.to_string()))?;
     render_cloud_status_human(&status);
     Ok(())
 }
@@ -1567,16 +1633,17 @@ fn render_cloud_status_human(status: &CloudStatusOutput) {
     }
 }
 
-fn cloud_local_db_path() -> Result<PathBuf, String> {
-    let storage = util::try_get_storage_path(None)
-        .map_err(|e| format!("failed to resolve current repository storage: {e}"))?;
+fn cloud_local_db_path() -> CloudResult<PathBuf> {
+    let storage = util::try_get_storage_path(None).map_err(|e| {
+        CloudError::Generic(format!("failed to resolve current repository storage: {e}"))
+    })?;
     Ok(storage.join(util::DATABASE))
 }
 
 async fn resolve_cloud_env(
     name: &str,
     local_db_path: Option<&std::path::Path>,
-) -> Result<Option<String>, String> {
+) -> CloudResult<Option<String>> {
     let local_target = match local_db_path {
         Some(db_path) => crate::internal::config::LocalIdentityTarget::ExplicitDb(db_path),
         None => crate::internal::config::LocalIdentityTarget::CurrentRepo,
@@ -1584,21 +1651,28 @@ async fn resolve_cloud_env(
 
     crate::internal::config::resolve_env_for_target(name, local_target)
         .await
-        .map_err(|e| format!("failed to resolve '{name}' from env or config: {e}"))
+        .map_err(|e| {
+            CloudError::Generic(format!(
+                "failed to resolve '{name}' from env or config: {e}"
+            ))
+        })
 }
 
 async fn resolve_required_cloud_env(
     name: &str,
     local_db_path: Option<&std::path::Path>,
-) -> Result<String, String> {
+) -> CloudResult<String> {
     match resolve_cloud_env(name, local_db_path).await? {
         Some(value) if !value.is_empty() => Ok(value),
-        _ => Err(format!("{name} not set")),
+        _ => Err(CloudError::MissingEnv {
+            detail: format!("Missing: {name}"),
+            missing_keys: vec![name.to_string()],
+        }),
     }
 }
 
 /// Create R2 remote storage from environment variables and config.
-async fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
+async fn create_r2_storage(repo_id: &str) -> CloudResult<RemoteStorage> {
     let local_db_path = cloud_local_db_path()?;
     create_r2_storage_for_db_path(repo_id, &local_db_path).await
 }
@@ -1606,7 +1680,7 @@ async fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
 async fn create_r2_storage_for_db_path(
     repo_id: &str,
     local_db_path: &std::path::Path,
-) -> Result<RemoteStorage, String> {
+) -> CloudResult<RemoteStorage> {
     let store = create_r2_object_store_for_db_path(local_db_path).await?;
     Ok(RemoteStorage::new_with_prefix(store, repo_id.to_string()))
 }
@@ -1616,16 +1690,16 @@ async fn create_r2_storage_for_db_path(
 pub(crate) async fn create_publish_storage(
     repo_id: &str,
     site_id: &str,
-) -> Result<PublishStorage, String> {
+) -> CloudResult<PublishStorage> {
     let local_db_path = cloud_local_db_path()?;
     let store = create_r2_object_store_for_db_path(&local_db_path).await?;
     PublishStorage::new(store, repo_id, site_id)
-        .map_err(|e| format!("failed to build publish storage prefix: {e}"))
+        .map_err(|e| CloudError::Generic(format!("failed to build publish storage prefix: {e}")))
 }
 
 async fn create_r2_object_store_for_db_path(
     local_db_path: &std::path::Path,
-) -> Result<Arc<dyn object_store::ObjectStore>, String> {
+) -> CloudResult<Arc<dyn object_store::ObjectStore>> {
     let endpoint =
         resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT", Some(local_db_path)).await?;
     let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET", Some(local_db_path)).await?;
@@ -1646,12 +1720,12 @@ async fn create_r2_object_store_for_db_path(
         .with_secret_access_key(&secret_key)
         .with_virtual_hosted_style_request(false)
         .build()
-        .map_err(|e| format!("Failed to build R2 client: {}", e))?;
+        .map_err(|e| CloudError::R2(format!("Failed to build R2 client: {}", e)))?;
 
     Ok(Arc::new(s3))
 }
 
-async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
+async fn validate_cloud_backup_env(skip_r2: bool) -> CloudResult<()> {
     let mut required = vec![
         "LIBRA_D1_ACCOUNT_ID",
         "LIBRA_D1_API_TOKEN",
@@ -1668,22 +1742,22 @@ async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
     }
 
     let local_db_path = cloud_local_db_path()?;
-    let mut missing = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for key in required {
         match resolve_cloud_env(key, Some(&local_db_path)).await? {
             Some(value) if !value.is_empty() => {}
-            _ => missing.push(key),
+            _ => missing.push(key.to_string()),
         }
     }
 
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "Cloud backup requires D1{} configuration. Missing: {}",
-            if skip_r2 { "" } else { " + R2" },
-            missing.join(", ")
-        ))
+        let detail = format!("Missing: {}", missing.join(", "));
+        Err(CloudError::MissingEnv {
+            detail,
+            missing_keys: missing,
+        })
     }
 }
 
@@ -1724,12 +1798,12 @@ async fn sync_metadata(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
     progress: &dyn CloudSyncProgress,
-) -> Result<MetadataSyncOutcome, String> {
+) -> CloudResult<MetadataSyncOutcome> {
     progress.on_metadata_starting();
     let references = reference::Entity::find()
         .all(db_conn)
         .await
-        .map_err(|e| format!("Failed to fetch references: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("Failed to fetch references: {}", e)))?;
 
     // Sort to ensure deterministic output for hashing.
     let mut sorted_refs = references;
@@ -1742,7 +1816,7 @@ async fn sync_metadata(
     });
 
     let json = serde_json::to_vec(&sorted_refs)
-        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("Failed to serialize metadata: {}", e)))?;
 
     let current_hash = calculate_metadata_hash(&json);
 
@@ -1762,7 +1836,7 @@ async fn sync_metadata(
     r2_storage
         .put_metadata(&json)
         .await
-        .map_err(|e| format!("Failed to upload metadata: {}", e))?;
+        .map_err(|e| CloudError::R2(format!("Failed to upload metadata: {}", e)))?;
 
     // Update stored hash.
     let _ = ConfigKv::set("cloud.metadata_hash", &current_hash.to_string(), false).await;
@@ -1786,7 +1860,7 @@ async fn sync_agent_capture_tables(
     d1_client: &D1Client,
     repo_id: &str,
     progress: &dyn CloudSyncProgress,
-) -> Result<AgentCaptureSyncOutcome, String> {
+) -> CloudResult<AgentCaptureSyncOutcome> {
     use sea_orm::{ConnectionTrait, Statement};
 
     // Bail out cleanly when the migration that creates these tables
@@ -1800,7 +1874,7 @@ async fn sync_agent_capture_tables(
             [],
         ))
         .await
-        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .map_err(|e| CloudError::Generic(format!("query sqlite_master: {e}")))?
         .is_some();
     if !session_present {
         // Older local schema — nothing to mirror.
@@ -1811,11 +1885,11 @@ async fn sync_agent_capture_tables(
     d1_client
         .ensure_agent_session_table()
         .await
-        .map_err(|e| format!("ensure_agent_session_table: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("ensure_agent_session_table: {}", e.message)))?;
     d1_client
         .ensure_agent_checkpoint_table()
         .await
-        .map_err(|e| format!("ensure_agent_checkpoint_table: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("ensure_agent_checkpoint_table: {}", e.message)))?;
 
     // Pull every session, push it. The on-disk catalog is small in v1
     // (capped at the number of agent sessions per repo) so a full
@@ -1830,7 +1904,7 @@ async fn sync_agent_capture_tables(
             [],
         ))
         .await
-        .map_err(|e| format!("query agent_session: {e}"))?;
+        .map_err(|e| CloudError::Generic(format!("query agent_session: {e}")))?;
 
     let mut sessions_synced = 0usize;
     let mut sessions_failed = 0usize;
@@ -1870,7 +1944,7 @@ async fn sync_agent_capture_tables(
             [],
         ))
         .await
-        .map_err(|e| format!("query agent_checkpoint: {e}"))?;
+        .map_err(|e| CloudError::Generic(format!("query agent_checkpoint: {e}")))?;
 
     let mut checkpoints_synced = 0usize;
     let mut checkpoints_failed = 0usize;
@@ -1905,10 +1979,10 @@ async fn sync_agent_capture_tables(
         checkpoints_failed,
     );
     if sessions_failed > 0 || checkpoints_failed > 0 {
-        Err(format!(
+        Err(CloudError::Generic(format!(
             "{} session + {} checkpoint upserts failed",
             sessions_failed, checkpoints_failed
-        ))
+        )))
     } else {
         Ok(AgentCaptureSyncOutcome::Completed {
             sessions_synced,
@@ -1940,7 +2014,7 @@ async fn restore_agent_capture_from_d1(
     d1_client: &D1Client,
     repo_id: &str,
     render_human: bool,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
     // Codex round-2 follow-up: check BOTH tables locally — a partial
@@ -1957,7 +2031,7 @@ async fn restore_agent_capture_from_d1(
             [],
         ))
         .await
-        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .map_err(|e| CloudError::Generic(format!("query sqlite_master: {e}")))?
         .is_some();
     let checkpoint_present = db_conn
         .query_one(Statement::from_sql_and_values(
@@ -1966,7 +2040,7 @@ async fn restore_agent_capture_from_d1(
             [],
         ))
         .await
-        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .map_err(|e| CloudError::Generic(format!("query sqlite_master: {e}")))?
         .is_some();
     if !session_present || !checkpoint_present {
         // Codex review Q4: emit an actionable hint instead of silently
@@ -1997,20 +2071,25 @@ async fn restore_agent_capture_from_d1(
     d1_client
         .ensure_agent_session_table()
         .await
-        .map_err(|e| format!("ensure_agent_session_table on D1: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("ensure_agent_session_table on D1: {}", e.message)))?;
     d1_client
         .ensure_agent_checkpoint_table()
         .await
-        .map_err(|e| format!("ensure_agent_checkpoint_table on D1: {}", e.message))?;
+        .map_err(|e| {
+            CloudError::D1(format!(
+                "ensure_agent_checkpoint_table on D1: {}",
+                e.message
+            ))
+        })?;
 
     let session_rows = d1_client
         .list_agent_sessions(repo_id)
         .await
-        .map_err(|e| format!("list_agent_sessions: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("list_agent_sessions: {}", e.message)))?;
     let checkpoint_rows = d1_client
         .list_agent_checkpoints(repo_id)
         .await
-        .map_err(|e| format!("list_agent_checkpoints: {}", e.message))?;
+        .map_err(|e| CloudError::D1(format!("list_agent_checkpoints: {}", e.message)))?;
 
     restore_agent_capture_from_rows(db_conn, &session_rows, &checkpoint_rows, render_human).await
 }
@@ -2027,7 +2106,7 @@ async fn restore_agent_capture_from_rows(
     session_rows: &[AgentSessionRow],
     checkpoint_rows: &[AgentCheckpointRow],
     render_human: bool,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
     let backend = db_conn.get_database_backend();
@@ -2149,10 +2228,10 @@ async fn restore_agent_capture_from_rows(
         );
     }
     if sessions_failed > 0 || checkpoints_failed > 0 {
-        Err(format!(
+        Err(CloudError::Generic(format!(
             "{} session + {} checkpoint inserts failed",
             sessions_failed, checkpoints_failed
-        ))
+        )))
     } else {
         Ok(())
     }
@@ -2161,7 +2240,7 @@ async fn restore_agent_capture_from_rows(
 async fn restore_metadata(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     println!("Restoring metadata...");
 
     let data = match r2_storage.get_metadata().await {
@@ -2185,39 +2264,41 @@ async fn restore_metadata(
 pub(crate) async fn restore_metadata_strict(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     let data = r2_storage
         .get_metadata()
         .await
-        .map_err(|e| format!("failed to download metadata: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("failed to download metadata: {}", e)))?;
     restore_metadata_from_bytes_strict(db_conn, &data).await
 }
 
 async fn restore_metadata_from_bytes(
     db_conn: &sea_orm::DatabaseConnection,
     data: &[u8],
-) -> Result<(), String> {
+) -> CloudResult<()> {
     let references: Vec<reference::Model> = serde_json::from_slice(data)
-        .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("Failed to deserialize metadata: {}", e)))?;
     restore_metadata_models(db_conn, references, false).await
 }
 
 async fn restore_metadata_from_bytes_strict(
     db_conn: &sea_orm::DatabaseConnection,
     data: &[u8],
-) -> Result<(), String> {
+) -> CloudResult<()> {
     let references: Vec<reference::Model> = serde_json::from_slice(data)
-        .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+        .map_err(|e| CloudError::Generic(format!("Failed to deserialize metadata: {}", e)))?;
     validate_strict_refs_metadata(&references)?;
     restore_metadata_models(db_conn, references, true).await
 }
 
-fn validate_strict_refs_metadata(references: &[reference::Model]) -> Result<(), String> {
+fn validate_strict_refs_metadata(references: &[reference::Model]) -> CloudResult<()> {
     if !references
         .iter()
         .any(|model| model.kind == reference::ConfigKind::Head && model.remote.is_none())
     {
-        return Err("metadata does not contain local HEAD reference".to_string());
+        return Err(CloudError::Generic(
+            "metadata does not contain local HEAD reference".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2226,7 +2307,7 @@ async fn restore_metadata_models(
     db_conn: &sea_orm::DatabaseConnection,
     references: Vec<reference::Model>,
     strict: bool,
-) -> Result<(), String> {
+) -> CloudResult<()> {
     for ref_model in references {
         // Build query to find matching reference
         let remote_filter = match &ref_model.remote {
@@ -2249,7 +2330,7 @@ async fn restore_metadata_models(
         let existing = query
             .one(db_conn)
             .await
-            .map_err(|e| format!("DB error: {}", e))?;
+            .map_err(|e| CloudError::Generic(format!("DB error: {}", e)))?;
 
         if let Some(existing_model) = existing {
             let mut active: reference::ActiveModel = existing_model.into();
@@ -2260,7 +2341,7 @@ async fn restore_metadata_models(
             if let Err(e) = active.update(db_conn).await {
                 let message = format!("failed to update reference {:?}: {}", ref_model.name, e);
                 if strict {
-                    return Err(message);
+                    return Err(CloudError::Generic(message));
                 }
                 eprintln!("warning: {message}");
             }
@@ -2275,7 +2356,7 @@ async fn restore_metadata_models(
             if let Err(e) = active.insert(db_conn).await {
                 let message = format!("failed to insert reference {:?}: {}", ref_model.name, e);
                 if strict {
-                    return Err(message);
+                    return Err(CloudError::Generic(message));
                 }
                 eprintln!("warning: {message}");
             }
@@ -2640,9 +2721,10 @@ mod tests {
                 .await
                 .expect_err("strict metadata restore must fail on missing metadata.json");
 
+            let message = error.to_string();
             assert!(
-                error.contains("failed to download metadata"),
-                "error should explain metadata download failure: {error}",
+                message.contains("failed to download metadata"),
+                "error should explain metadata download failure: {message}",
             );
         });
     }
@@ -2675,9 +2757,10 @@ mod tests {
                 .await
                 .expect_err("strict metadata restore must reject metadata without HEAD");
 
+            let message = error.to_string();
             assert!(
-                error.contains("metadata does not contain local HEAD reference"),
-                "error should explain missing HEAD: {error}",
+                message.contains("metadata does not contain local HEAD reference"),
+                "error should explain missing HEAD: {message}",
             );
         });
     }
@@ -3038,9 +3121,10 @@ mod tests {
             let err = restore_agent_capture_from_rows(&db_conn, &[bad, good], &[], true)
                 .await
                 .expect_err("strict restore should bubble the failure");
+            let message = err.to_string();
             assert!(
-                err.contains("session") || err.contains("checkpoint"),
-                "error message identifies the failing kind: {err}"
+                message.contains("session") || message.contains("checkpoint"),
+                "error message identifies the failing kind: {message}"
             );
 
             // Good row still landed — we report aggregate failure but do not
@@ -3142,10 +3226,11 @@ mod tests {
         let err = rt
             .block_on(validate_cloud_backup_env(true))
             .expect_err("global config resolution failure should surface");
+        let message = err.to_string();
         assert!(
-            err.contains("failed to open config database")
-                || err.contains("failed to connect to global config"),
-            "unexpected error: {err}"
+            message.contains("failed to open config database")
+                || message.contains("failed to connect to global config"),
+            "unexpected error: {message}"
         );
     }
 }

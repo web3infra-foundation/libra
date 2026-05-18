@@ -3,7 +3,6 @@
 use std::io::Write;
 
 use clap::Parser;
-use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
@@ -11,7 +10,7 @@ use crate::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
         head::Head,
-        tag,
+        tag::{self, ListTagError},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -97,15 +96,13 @@ fn show_ref_branch_store_error(context: &str, error: BranchStoreError) -> CliErr
     }
 }
 
-fn show_ref_tag_list_error(error: anyhow::Error) -> CliError {
-    // TODO: Remove this DbErr-chain heuristic once tag::list() returns a typed error.
-    let stable_code = if error
-        .chain()
-        .any(|cause| cause.downcast_ref::<DbErr>().is_some())
-    {
-        StableErrorCode::IoReadFailed
-    } else {
-        StableErrorCode::RepoCorrupt
+fn show_ref_tag_list_error(error: ListTagError) -> CliError {
+    let stable_code = match error {
+        ListTagError::Query(_) => StableErrorCode::IoReadFailed,
+        ListTagError::MissingCommit { .. }
+        | ListTagError::InvalidObjectHash { .. }
+        | ListTagError::MissingName
+        | ListTagError::LoadObject { .. } => StableErrorCode::RepoCorrupt,
     };
 
     CliError::fatal(format!("failed to list tags: {error}")).with_stable_code(stable_code)

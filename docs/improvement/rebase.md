@@ -15,14 +15,15 @@
 - 命令文档已同步当前 human 输出，包括 `Found common ancestor`、`Rebasing N commits`、`Applied:`、conflict 提示、abort 恢复消息和 fast-forward 消息。
 - 创建树和重置工作区时的路径处理不再使用生产 `unwrap()`；空路径和非 UTF-8 路径会返回带上下文的错误。
 - replay 内部失败分类已细化为 `ReplayErrorKind`（14 个变体），通过 `ReplayResult::Internal { kind, detail }` 与新增的 `RebaseError::ReplayInternal { commit, subject, kind, detail }` 透传，映射到 4 个独立稳定错误码（`RepoCorrupt` 用于对象/parent 加载失败、`IoReadFailed` 用于 index 读取、`IoWriteFailed` 用于 tree/commit/index/workdir 写入、`ConflictOperationBlocked` 用于 untracked overwrite）；不再让真实合并冲突与内部 IO 失败共用 `LBR-CONFLICT-001`。
+- `execute()` 已回收 legacy 内部路径；`execute` 与 `execute_safe` 共享同一运行路径，减少历史输出风格差异。
 
 ## 当前未完成
 
-- 直接调用 legacy `execute(args).await` 的内部/测试路径仍保留旧打印行为；公开 CLI 入口已走 `execute_safe()`。
+- 仍有 `--onto` / interactive / autosquash / exec / rebase-merges 等历史 git 功能未纳入；本次范围聚焦于结构化输出与状态机收口。
 
 ## 后续切片建议
 
-1. 收口或下沉 legacy `execute(args).await` 直接调用点，最终让内部调用也返回 `CliResult`。
+1. 已补齐：`rebase --continue` / `--abort` / `--skip` 的 machine/json 边界回归测试，覆盖成功路径与无状态错误路径，且 `--skip`/`--continue`/`--abort` 的 machine/json 输出边界均覆盖。
 
 ## 非目标
 

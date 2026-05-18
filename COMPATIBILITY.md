@@ -32,7 +32,7 @@ batch document.
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
-| rm | partial | `--force` / `--dry-run` / `--quiet` not exposed |
+| rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
 | mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
 | restore | supported | |
 | status | supported | |
@@ -58,7 +58,7 @@ batch document.
 | cherry-pick | supported | |
 | push | partial | local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
-| pull | partial | `--ff-only` / `--rebase` / `--squash` subset |
+| pull | partial | fast-forward only (mirroring `merge`); no `--ff-only` / `--rebase` / `--squash` strategy flags exposed; non-FF integrations report `ManualMergeRequired` |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
@@ -75,8 +75,9 @@ batch document.
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
+| verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. JSON/machine success output and render split supported; typed `CheckoutError` pending |
+| checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. JSON/machine success output, render split, and typed `CheckoutError` all supported |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`

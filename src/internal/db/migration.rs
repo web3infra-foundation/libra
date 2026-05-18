@@ -534,81 +534,18 @@ pub fn builtin_migrations() -> Vec<Migration> {
         Migration {
             version: 2026050301,
             name: "automation_log",
-            up: r#"
-CREATE TABLE IF NOT EXISTS `automation_log` (
-    `id` TEXT PRIMARY KEY,
-    `rule_id` TEXT NOT NULL,
-    `trigger_kind` TEXT NOT NULL,
-    `action_kind` TEXT NOT NULL,
-    `status` TEXT NOT NULL,
-    `message` TEXT NOT NULL,
-    `started_at` TEXT NOT NULL,
-    `finished_at` TEXT NOT NULL,
-    `details_json` TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS `idx_automation_log_finished_at`
-    ON `automation_log` (`finished_at`);
-CREATE INDEX IF NOT EXISTS `idx_automation_log_rule_id`
-    ON `automation_log` (`rule_id`);
-"#,
-            down: Some(
-                r#"
-DROP INDEX IF EXISTS `idx_automation_log_rule_id`;
-DROP INDEX IF EXISTS `idx_automation_log_finished_at`;
-DROP TABLE IF EXISTS `automation_log`;
-"#,
-            ),
+            up: include_str!("../../../sql/migrations/2026050301_automation_log.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050301_automation_log_down.sql"
+            )),
         },
         Migration {
             version: 2026050302,
             name: "agent_usage_stats",
-            up: r#"
-CREATE TABLE IF NOT EXISTS `agent_usage_stats` (
-    `id` TEXT PRIMARY KEY,
-    `session_id` TEXT,
-    `thread_id` TEXT,
-    `agent_run_id` TEXT,
-    `run_id` TEXT,
-    `provider` TEXT NOT NULL,
-    `model` TEXT NOT NULL,
-    `request_kind` TEXT NOT NULL DEFAULT 'completion',
-    `intent` TEXT,
-    `prompt_tokens` INTEGER NOT NULL DEFAULT 0,
-    `completion_tokens` INTEGER NOT NULL DEFAULT 0,
-    `cached_tokens` INTEGER NOT NULL DEFAULT 0,
-    `reasoning_tokens` INTEGER NOT NULL DEFAULT 0,
-    `total_tokens` INTEGER NOT NULL DEFAULT 0,
-    `tool_call_count` INTEGER NOT NULL DEFAULT 0,
-    `wall_clock_ms` INTEGER NOT NULL DEFAULT 0,
-    `provider_latency_ms` INTEGER,
-    `cost_estimate_micro_dollars` INTEGER,
-    `cost_usd` REAL,
-    `usage_estimated` INTEGER NOT NULL DEFAULT 0,
-    `started_at` TEXT,
-    `finished_at` TEXT,
-    `success` INTEGER NOT NULL DEFAULT 1,
-    `error_kind` TEXT,
-    `schema_version` INTEGER NOT NULL DEFAULT 1,
-    `created_at` TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_provider_model`
-    ON `agent_usage_stats` (`provider`, `model`);
-CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_thread`
-    ON `agent_usage_stats` (`thread_id`);
-CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_session`
-    ON `agent_usage_stats` (`session_id`);
-CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_started`
-    ON `agent_usage_stats` (`started_at`);
-"#,
-            down: Some(
-                r#"
-DROP INDEX IF EXISTS `idx_agent_usage_stats_started`;
-DROP INDEX IF EXISTS `idx_agent_usage_stats_session`;
-DROP INDEX IF EXISTS `idx_agent_usage_stats_thread`;
-DROP INDEX IF EXISTS `idx_agent_usage_stats_provider_model`;
-DROP TABLE IF EXISTS `agent_usage_stats`;
-"#,
-            ),
+            up: include_str!("../../../sql/migrations/2026050302_agent_usage_stats.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050302_agent_usage_stats_down.sql"
+            )),
         },
         // CEX-EntireIO Phase 1.1: external-agent capture catalog. Uses
         // `include_str!` to keep DDL out of the Rust file — the path resolves
@@ -807,5 +744,50 @@ mod tests {
             }])
             .unwrap_err();
         assert!(matches!(err, MigrationError::DuplicateVersion { .. }));
+    }
+
+    #[test]
+    fn migration_error_display_pins_owned_variants() {
+        assert_eq!(
+            MigrationError::DuplicateVersion {
+                version: 3,
+                existing: "schema_versions",
+                new: "schema_versions_again",
+            }
+            .to_string(),
+            "duplicate migration version 3 \
+             (existing name: schema_versions, new name: schema_versions_again)",
+        );
+        assert_eq!(
+            MigrationError::NonMonotonicRegistration {
+                prev_version: 7,
+                prev_name: "add_refs",
+                new_version: 5,
+                new_name: "add_objects",
+            }
+            .to_string(),
+            "migration versions must be strictly increasing; \
+             got 5 (add_objects) after 7 (add_refs)",
+        );
+        assert_eq!(
+            MigrationError::IrreversibleMigration {
+                version: 4,
+                name: "drop_legacy",
+            }
+            .to_string(),
+            "migration 4 (drop_legacy) has no down DDL — cannot rollback past it",
+        );
+        assert_eq!(
+            MigrationError::RollbackTargetNotBelowCurrent {
+                target: 9,
+                current: 8,
+            }
+            .to_string(),
+            "rollback target 9 is at or above current version 8",
+        );
+        assert_eq!(
+            MigrationError::RollbackOnEmptyDatabase { target: 2 }.to_string(),
+            "rollback target 2 requested but no migrations are applied",
+        );
     }
 }

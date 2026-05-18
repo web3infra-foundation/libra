@@ -36,6 +36,7 @@ pub mod hooks;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
+pub mod lfs_schema;
 pub mod log;
 pub mod ls_remote;
 pub mod merge;
@@ -60,6 +61,7 @@ pub mod show_ref;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;
+pub mod verify_pack;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 #[path = "worktree-fuse.rs"]
 pub mod worktree;

@@ -68,6 +68,7 @@ Commands:
   agent         Manage external-agent capture (Claude Code, Gemini, ...)
   cat-file      Provide content, type or size info for repository objects
   hash-object   Compute Git-compatible object IDs
+  verify-pack   Validate pack index files against pack archives
   checkout      Branch compatibility surface; prefer 'switch' for branches and 'restore' for files
   bisect        Use binary search to find the commit that introduced a bug
   help          Print this message or the help of the given subcommand(s)
@@ -580,7 +581,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `prune` – remove loose objects that are no longer reachable
 - `fsck` – verify repository integrity
 - `maintenance` – periodic maintenance tasks
-- `verify-pack` – validate pack files
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
 - `remote-show` – show detailed remote info
 - `fetch-pack` / `push-pack` – low-level fetch/push operations

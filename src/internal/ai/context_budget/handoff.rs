@@ -965,4 +965,31 @@ This is prose, not a bullet.
         assert!(formatted.contains("## Progress"));
         assert!(formatted.contains("## Constraints & Preferences"));
     }
+
+    #[test]
+    fn context_handoff_parse_error_display_pins_each_variant() {
+        assert_eq!(
+            ContextHandoffParseError::SchemaMismatch {
+                missing_sections: vec!["### Done".to_string(), "## Key Decisions".to_string()],
+            }
+            .to_string(),
+            "context handoff summary is missing required section(s): ### Done, ## Key Decisions",
+        );
+        assert_eq!(
+            ContextHandoffParseError::OutOfOrder {
+                observed: vec!["## Progress".to_string(), "## Goal".to_string()],
+                expected: vec!["## Goal".to_string(), "## Progress".to_string()],
+            }
+            .to_string(),
+            "context handoff summary headings are out of canonical order: \
+             observed [## Progress, ## Goal], expected [## Goal, ## Progress]",
+        );
+        assert_eq!(
+            ContextHandoffParseError::DuplicateHeading {
+                heading: "## Goal".to_string(),
+            }
+            .to_string(),
+            "context handoff summary contains duplicate heading: ## Goal",
+        );
+    }
 }

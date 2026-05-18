@@ -251,18 +251,37 @@ Detached HEAD:
 - `upstream.ahead` / `upstream.behind` are `null` when `gone` is `true`
 - `is_clean` is `true` when all staged, unstaged, and untracked lists are empty
 - `has_commits` is `false` in a freshly initialized repository with no commits
+- `stash_entries` (optional, integer): present only when `--show-stash` is
+  passed. Counts the entries on the stash stack (matching `libra stash list`)
+  and may be `0`. Omitted entirely without `--show-stash` so JSON consumers
+  can distinguish "stash subsystem not queried" from "stash subsystem
+  queried, returned zero" — i.e. the field's *presence* signals an
+  explicit opt-in, not the existence of stashed work.
 
 ## Design Rationale
 
-### Porcelain v1 only (no v2)
+### Porcelain v1 and v2
 
-Git introduced porcelain v2 in Git 2.11 to provide richer information (renamed file tracking,
-submodule status, stash count) in a structured but still line-oriented text format. Libra
-accepts the `--porcelain v2` argument for forward compatibility but currently implements v1
-semantics. The rationale is that Libra's `--json` output already provides all the structured
-data that porcelain v2 was designed to expose (upstream tracking, stash info, detailed file
-status), making a line-oriented v2 format redundant. The JSON envelope is strictly more
-expressive and easier for tools to parse than porcelain v2's custom text encoding.
+`libra status --porcelain` (no version) emits Git's classic v1 short-format
+layout (`XY <path>` per file). `libra status --porcelain v2` emits the
+extended v2 line layout — for each tracked file:
+
+```text
+1 XY <sub> <mode_HEAD> <mode_index> <mode_worktree> <hash_HEAD> <hash_index> <path>
+```
+
+Untracked entries collapse to `? <path>` and ignored entries to `! <path>`,
+matching Git's own v2 encoding. The implementation lives in
+`src/command/status.rs::output_porcelain_v2` and is fed by
+`build_porcelain_v2_data`, which pulls mode + hash metadata out of the
+index and HEAD tree before rendering.
+
+Most consumers should still prefer `--json` (or `--machine` for compact
+single-line JSON): the JSON envelope carries the same staged/unstaged/
+untracked partitioning plus upstream tracking and `stash_entries`, and
+is far easier to parse than v2's positional text columns. Use
+`--porcelain v2` only when you specifically need Git-compatible output
+for tooling that already speaks the v2 grammar.
 
 ### Explicit `--exit-code` instead of implicit behavior
 

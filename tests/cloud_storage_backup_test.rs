@@ -276,9 +276,9 @@ async fn mock_remote_search() {
 }
 
 /// Scenario: invoke `libra cloud sync` with D1 env vars present but R2 absent and
-/// confirm the binary exits non-zero with an error mentioning both
-/// "Cloud backup requires D1 + R2 configuration" and the specific missing variable
-/// `LIBRA_STORAGE_ENDPOINT`. Pins the actionable-error contract for partial config.
+/// confirm the binary exits non-zero with the typed auth error contract:
+/// `LBR-AUTH-001`, operation-scoped summary (`missing cloud configuration for sync`),
+/// and the specific missing variable `LIBRA_STORAGE_ENDPOINT`.
 #[test]
 fn cloud_sync_fails_without_r2_env() {
     let dir = init_repo();
@@ -293,13 +293,15 @@ fn cloud_sync_fails_without_r2_env() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Cloud backup requires D1 + R2 configuration"));
+    assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
+    assert!(stderr.contains("missing cloud configuration for sync"));
     assert!(stderr.contains("LIBRA_STORAGE_ENDPOINT"));
 }
 
 /// Scenario: same as the sync variant but for `cloud restore` — when D1 is set and
-/// R2 is missing, the binary surfaces "Cloud backup requires D1 + R2 configuration"
-/// plus `LIBRA_STORAGE_ENDPOINT` so the user knows which variable to set.
+/// R2 is missing, the binary surfaces `LBR-AUTH-001`,
+/// `missing cloud configuration for restore`, and `LIBRA_STORAGE_ENDPOINT` so the
+/// user knows which variable to set.
 #[test]
 fn cloud_restore_fails_without_r2_env() {
     let dir = init_repo();
@@ -314,13 +316,14 @@ fn cloud_restore_fails_without_r2_env() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Cloud backup requires D1 + R2 configuration"));
+    assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
+    assert!(stderr.contains("missing cloud configuration for restore"));
     assert!(stderr.contains("LIBRA_STORAGE_ENDPOINT"));
 }
 
 /// Scenario: invoke `libra cloud sync` with R2 env vars present but D1 absent and
-/// confirm the error mentions both "Cloud backup requires D1 + R2 configuration"
-/// and the specific missing variable `LIBRA_D1_ACCOUNT_ID`.
+/// confirm the auth contract still reports `LBR-AUTH-001` plus
+/// `LIBRA_D1_ACCOUNT_ID` as a missing key.
 #[test]
 fn cloud_sync_fails_without_d1_env() {
     let dir = init_repo();
@@ -336,7 +339,8 @@ fn cloud_sync_fails_without_d1_env() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Cloud backup requires D1 + R2 configuration"));
+    assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
+    assert!(stderr.contains("missing cloud configuration for sync"));
     assert!(stderr.contains("LIBRA_D1_ACCOUNT_ID"));
 }
 

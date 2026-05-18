@@ -358,13 +358,18 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
         let subject = load_commit_summary_or_warn(&target_commit_id);
         let commit = target_commit_id.to_string();
 
+        // Pathspec resets do not move HEAD, so the user-contract JSON schema
+        // (docs/commands/reset.md) promises `previous_commit: null` to signal
+        // "HEAD is unchanged". Drop the captured HEAD here so machine
+        // consumers can tell pathspec resets apart from full resets without
+        // having to compare `commit` against `previous_commit`.
         return Ok(ResetExecution {
             output: ResetOutput {
                 mode: mode.as_str().to_string(),
                 short_commit: short_display_hash(&commit).to_string(),
                 commit,
                 subject,
-                previous_commit,
+                previous_commit: None,
                 files_unstaged: changed_paths.len(),
                 files_restored: 0,
                 pathspecs: changed_paths,

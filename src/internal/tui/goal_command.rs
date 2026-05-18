@@ -366,4 +366,55 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn goal_command_parse_error_display_pins_each_variant() {
+        assert_eq!(
+            GoalCommandParseError::MissingSubcommand.to_string(),
+            "Usage: /goal <start|status|cancel|criteria> …\n  \
+             /goal start <objective>            Create an active Goal\n  \
+             /goal status                       Show the active Goal's snapshot\n  \
+             /goal cancel <reason>              Cancel the active Goal\n  \
+             /goal criteria add <description>   Append an acceptance criterion",
+        );
+        assert_eq!(
+            GoalCommandParseError::UnknownSubcommand {
+                got: "extend".to_string(),
+            }
+            .to_string(),
+            "Unknown `/goal` subcommand `extend`. Expected one of: start, status, cancel, criteria",
+        );
+        assert_eq!(
+            GoalCommandParseError::StartMissingObjective.to_string(),
+            "`/goal start` requires a non-empty objective. Usage: /goal start <objective>",
+        );
+        assert_eq!(
+            GoalCommandParseError::CancelMissingReason.to_string(),
+            "`/goal cancel` requires a non-empty reason for the audit log. \
+             Usage: /goal cancel <reason>",
+        );
+        assert_eq!(
+            GoalCommandParseError::CriteriaUsage.to_string(),
+            "Usage: /goal criteria add <description> — `add` is the only supported \
+             criteria verb in this build",
+        );
+        assert_eq!(
+            GoalCommandParseError::UnexpectedArguments {
+                subcommand: "status",
+                got: "verbose".to_string(),
+            }
+            .to_string(),
+            "`/goal status` does not accept arguments; got `verbose`",
+        );
+        let invalid = GoalCommandParseError::InvalidObjective {
+            source: GoalSpecError::EmptyObjective,
+        };
+        assert_eq!(
+            invalid.to_string(),
+            format!(
+                "`/goal start` objective failed validation: {}",
+                GoalSpecError::EmptyObjective,
+            ),
+        );
+    }
 }

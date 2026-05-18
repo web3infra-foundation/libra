@@ -22,4 +22,4 @@
 
 ## 当前未完成
 
-- `LfsOutput` 仍是命令内 schema；如后续和 `push` 的 LFS upload summary 共享字段，需要再抽公共类型。
+- 暂无（`LfsOutput` 与 `LfsUploadSummary` 已抽取到 `src/command/lfs_schema.rs`，并通过共享类型接入 `push` 的 LFS 摘要输出）。

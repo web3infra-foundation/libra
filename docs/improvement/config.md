@@ -269,8 +269,8 @@ libra config list --ssh-keys
 **remote 名校验规则：** `--remote <name>` 的 `<name>` 必须满足以下约束（同时用于 config key 和文件路径，必须安全）：
 - 只允许 `[a-zA-Z0-9_-]` 字符，长度 1-64
 - 禁止 `.`（会造成 config key `vault.ssh.<remote>.pubkey` 歧义）、`/`、`\`、`..`（路径注入风险）
-- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，exit 1。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
-- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，exit 2
+- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，exit 128（coarse）/ exit 1（fine）——`Fatal` 失败，对应 `tests/command/config_test.rs::test_config_generate_ssh_key_rejects_unknown_remote_with_invalid_target_code`。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
+- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，exit 129（coarse）/ exit 2（fine）——`CommandUsage` 分类，由 `CliError::from_legacy_string` 解析 `error:` 前缀路由到 `command_usage`；测试为 `test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage`。
 
 **存储：**
 - 公钥：`vault.ssh.<remote>.pubkey` in config_kv（明文）

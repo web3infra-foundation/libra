@@ -76,21 +76,24 @@
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum ResetError {
+enum ResetError {
     #[error("not a libra repository")]
     NotInRepo,
 
-    #[error("invalid revision: '{0}'")]
+    #[error("{0}")]
     InvalidRevision(String),
 
-    #[error("HEAD is unborn — no commits in this repository")]
+    #[error("Cannot reset: HEAD is unborn and points to no commit.")]
     HeadUnborn,
 
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    CommitLoad { commit_id: String, detail: String },
+    #[error("failed to resolve HEAD commit: {0}")]
+    HeadRead(String),
 
-    #[error("failed to load tree: {0}")]
-    TreeLoad(String),
+    #[error("stored HEAD reference is corrupt: {0}")]
+    HeadCorrupt(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad { kind: &'static str, object_id: String, detail: String },
 
     #[error("failed to load index: {0}")]
     IndexLoad(String),
@@ -101,8 +104,17 @@ pub enum ResetError {
     #[error("failed to update HEAD: {0}")]
     HeadUpdate(String),
 
+    #[error("failed to read working tree: {0}")]
+    WorktreeRead(String),
+
     #[error("failed to restore working tree: {0}")]
     WorktreeRestore(String),
+
+    #[error("{0}")]
+    RevisionRead(String),
+
+    #[error("{0}")]
+    RevisionCorrupt(String),
 
     #[error("path contains invalid UTF-8: {0}")]
     InvalidPathspecEncoding(String),
@@ -110,13 +122,24 @@ pub enum ResetError {
     #[error("pathspec '{0}' is not compatible with --soft reset")]
     PathspecWithSoft(String),
 
-    #[error("cannot do hard reset with paths")]
+    #[error("Cannot do hard reset with paths.")]
     PathspecWithHard,
 
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
+
+    #[error("refusing to reset to locked branch '{0}'")]
+    LockedTarget(String),
+
+    #[error("{primary}; rollback failed: {rollback}")]
+    Rollback { primary: Box<ResetError>, rollback: Box<ResetError> },
 }
 ```
+
+> Synced with src/command/reset.rs:144-212 (v0.17.417 mapping table).
+> The `kind` field on `ObjectLoad` is `&'static str` ("commit" /
+> "tree" / "blob"), letting one variant cover what the early sketch
+> split into `CommitLoad` + `TreeLoad`.
 
 **`ResetError → CliError` 显式映射：**
 
@@ -125,16 +148,22 @@ pub enum ResetError {
 | `NotInRepo` | `RepoNotFound` | 128 | `run 'libra init' to create a repository` |
 | `InvalidRevision` | `CliInvalidTarget` | 129 | `check the revision name and try again` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first` |
-| `CommitLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
-| `TreeLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
+| `HeadRead` | `IoReadFailed` | 128 | 无（解析 HEAD 时的 SQLite/sea-orm 失败） |
+| `HeadCorrupt` | `RepoCorrupt` | 128 | 无（HEAD ref 行结构损坏） |
+| `ObjectLoad { kind, object_id, detail }` | `RepoCorrupt` | 128 | `the object store may be corrupted`（取代原计划的独立 `CommitLoad` / `TreeLoad`；`kind` 字段携带 commit/tree/blob 三种语义） |
 | `IndexLoad` | `RepoCorrupt` | 128 | `the index file may be corrupted` |
 | `IndexSave` | `IoWriteFailed` | 128 | 无 |
 | `HeadUpdate` | `IoWriteFailed` | 128 | 无 |
+| `WorktreeRead` | `IoReadFailed` | 128 | 无（pathspec 模式枚举工作树失败） |
 | `WorktreeRestore` | `IoWriteFailed` | 128 | 无 |
+| `RevisionRead` | `IoReadFailed` | 128 | 无（解析 revision 字符串时 SQLite 失败） |
+| `RevisionCorrupt` | `RepoCorrupt` | 128 | 无（resolve 出的 ref 行结构损坏） |
 | `InvalidPathspecEncoding` | `CliInvalidArguments` | 129 | `rename the path or invoke libra from a path representable as UTF-8` |
 | `PathspecWithSoft` | `CliInvalidArguments` | 129 | `--soft only moves HEAD; use --mixed to reset index for specific paths` |
 | `PathspecWithHard` | `CliInvalidArguments` | 129 | `--hard updates the working tree; omit pathspecs or use --mixed for specific paths` |
 | `PathspecNotMatched` | `CliInvalidTarget` | 129 | `check the path and try again` |
+| `LockedTarget` | `CliInvalidTarget` | 129 | 无（拒绝 reset 到 `intent` / `agent-traces` 等 Libra 锁定分支） |
+| `Rollback { primary, rollback }` | 继承 `primary` 的 stable code | 128 | 无（rollback 失败时把原错误与 rollback 失败包起来一起传递） |
 
 **与当前代码中 inline 错误的对应关系：**
 
@@ -254,13 +283,15 @@ M       src/lib.rs
     "commit": "abc1234...",
     "short_commit": "abc1234",
     "subject": "feat: add new feature",
-    "previous_commit": "abc1234...",
+    "previous_commit": null,
     "files_unstaged": 2,
     "files_restored": 0,
     "pathspecs": ["src/main.rs", "src/lib.rs"]
   }
 }
 ```
+
+> 注：pathspec reset 不移动 HEAD，因此 `previous_commit` 显式输出 `null`，与 `docs/commands/reset.md` 第 130 行的用户契约一致；机器消费方可借此一字段区分整体 reset 和 pathspec reset。
 
 **错误 JSON：**
 

@@ -2,7 +2,7 @@
 
 > 最后编写时间：2026-03-31
 
-与 [switch.md](switch.md) 联动时，先落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）。第 30 批已继续补上 `CheckoutOutput`、JSON/machine 成功输出、执行/渲染拆分和 checkout-owned stable code；专属 `CheckoutError` typed enum 仍留后续收口。
+与 [switch.md](switch.md) 联动时，先落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）。第 30 批已继续补上 `CheckoutOutput`、JSON/machine 成功输出、执行/渲染拆分和 checkout-owned stable code；专属 `CheckoutError` typed enum 已在 v0.17.372 同批落地（详见下文“当前代码状态”）。
 
 本文是 `checkout` 的**兼容性收口计划**，用于和 [switch.md](switch.md) 同步落地，避免 `switch` 的 typed error 改造把 `checkout` 的现有行为搞坏。
 
@@ -10,8 +10,8 @@
 
 **范围说明：**
 
-- **已落地**：`checkout` 对 `switch::ensure_clean_status()` 新返回类型的适配、`--help` EXAMPLES、相关回归测试补强、`CheckoutOutput`、`run_checkout()` / `render_checkout_output()` 拆分、JSON/machine 成功输出、checkout-owned stable code。
-- **留待后续**：typed `CheckoutError` 统一建模，以及 remote auto-track / pull 代理错误的更细分层。
+- **已落地**：`checkout` 对 `switch::ensure_clean_status()` 新返回类型的适配、`--help` EXAMPLES、相关回归测试补强、`CheckoutOutput`、`run_checkout()` / `render_checkout_output()` 拆分、JSON/machine 成功输出、checkout-owned stable code、完整的 `CheckoutError` typed enum（[src/command/checkout.rs:74-118](../../src/command/checkout.rs)）共 13 个变体加 `From<CheckoutError> for CliError` 全量显式 `StableErrorCode` 映射。
+- **留待后续**：暂无；remote auto-track / pull 代理错误已通过 `RemoteSyncFailed { stage, source }` 收口为单一变体并按 `stage` 字段分层。
 
 因此，本文现在记录两段事实：早期与 `switch` 联动时必须一起收口的最小兼容面，以及第 30 批已补齐的结构化输出增量。
 
@@ -24,15 +24,15 @@
 - `config_kv` 后端已落地
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`checkout.rs:33/42`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`checkout.rs:190/209`）
 - `checkout` 当前支持三种主场景：
   - `libra checkout`：显示当前分支
   - `libra checkout <branch>`：切换到现有本地/远程分支
   - `libra checkout -b <branch>`：创建并切换到新分支
 - **当前分支 no-op 语义已实现**：若目标分支就是当前分支，返回 `action="already-on"`，人类模式输出 `Already on {branch}`，并且不先做脏状态检查
-- **脏工作树检查已委托给 `switch::ensure_clean_status(output)`**（`checkout.rs:69-83`）
-- `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:131-136`）
-- 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:138-148`）
+- **脏工作树检查已委托给 `switch::ensure_clean_status(output)`** / `ensure_clean_status_for_commit()`（`checkout.rs:267-268`）
+- `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:371`）
+- 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:381`），并通过 `CheckoutError::RemoteSyncFailed { stage, source }` 把 `set_upstream` / `pull` 的代理失败分类到具体阶段
 - quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:708-741`）
 - `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:746-766`）
 
@@ -55,7 +55,7 @@
 
 **当前代码仍需改进的部分：**
 
-- **结构化输出已在第 30 批补齐**：`checkout` 当前已有 JSON/machine 成功输出、`CheckoutOutput` 和执行/渲染拆分；仍无专属 `CheckoutError` typed enum
+- **结构化输出已在第 30 批补齐**：`checkout` 当前已有 JSON/machine 成功输出、`CheckoutOutput` 和执行/渲染拆分；v0.17.372 起 `CheckoutError` typed enum 也已全量落地（13 个变体），每个变体在 `From<CheckoutError> for CliError` 中都有显式 `StableErrorCode` 与命令专属 hint
 - **命令文档需持续跟随行为演进**：后续如新增 checkout 语义（detach / tag / restore path 兼容等），需同步更新本文件与命令文档
 
 ### 目标与非目标
@@ -74,7 +74,7 @@
 **本次非目标：**
 
 - **已实现 `checkout --json` / `--machine` 结构化成功输出**。覆盖 show-current / already-on / switch / create / remote-track。
-- **仍不引入完整 `CheckoutError` typed enum**
+- **已落地完整 `CheckoutError` typed enum**（v0.17.372，13 个变体）；下面表格不再保留 “仍不引入” 的非目标项。
 - **不改写 `get_remote()` 的业务语义**。remote auto-track + pull 现有流程保持不变
 - **不统一 `checkout` 和 `switch` 的成功文案**。`checkout` 继续保留自己的兼容语气，例如 `Already on {branch}`（无引号）
 - **不新增 detach / commit / tag checkout 语义**

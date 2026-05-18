@@ -76,34 +76,43 @@ pub enum TagError {
     #[error("tag '{0}' not found")]
     NotFound(String),
 
-    #[error("tag name is required")]
-    MissingName,
+    #[error("{0}")]
+    MissingName(String),
 
-    #[error("cannot create tag: HEAD does not point to a commit")]
+    #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
 
-    #[error("failed to read existing tags before creating '{name}': {detail}")]
-    CheckExistingFailed { name: String, detail: String },
+    #[error("failed to resolve HEAD commit: {0}")]
+    ResolveHead(#[source] branch::BranchStoreError),
+
+    #[error("failed to read existing tags before creating '{name}': {source}")]
+    CheckExistingFailed { name: String, #[source] source: DbErr },
 
     #[error("failed to serialize annotated tag object: {0}")]
-    SerializeAnnotatedTag(String),
+    SerializeAnnotatedTag(#[source] GitError),
 
     #[error("failed to store annotated tag object: {0}")]
-    StoreObjectFailed(String),
+    StoreObjectFailed(#[source] io::Error),
 
-    #[error("failed to persist tag reference '{name}': {detail}")]
-    PersistReferenceFailed { name: String, detail: String },
+    #[error("failed to persist tag reference '{name}': {source}")]
+    PersistReferenceFailed { name: String, #[source] source: DbErr },
 
-    #[error("failed to delete tag '{name}': {detail}")]
-    DeleteFailed { name: String, detail: String },
+    #[error("failed to delete tag '{name}': {source}")]
+    DeleteFailed { name: String, #[source] source: anyhow::Error },
 
-    #[error("failed to load tag '{name}': {detail}")]
-    LoadFailed { name: String, detail: String },
+    #[error("failed to load tag '{name}': {source}")]
+    LoadFailed { name: String, #[source] source: anyhow::Error },
 
     #[error("failed to list tags: {0}")]
-    ListFailed(String),
+    ListFailed(#[source] tag::ListTagError),
 }
 ```
+
+> 实际的源字段使用 `#[source]` 包裹具体类型（`branch::BranchStoreError` / `DbErr` /
+> `GitError` / `io::Error` / `anyhow::Error` / `tag::ListTagError`），而不是仅传 `String`，
+> 让上游错误可以通过 `error.source()` 链式访问，也方便 `classify_tag_load_error()` /
+> `classify_list_tag_error()` 做精确分类。早期草案曾把所有字段统一为 `detail: String`，
+> 现已与 src/command/tag.rs:106-161（`TagError` enum）+ tag.rs:184（`From<TagError>` impl）对齐。
 
 > **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，当前代码通过 `map_create_tag_error()` 完成收口映射：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
 
@@ -116,13 +125,17 @@ pub enum TagError {
 | `NotFound` | `CliInvalidTarget` | 129 | `use 'libra tag -l' to list available tags` |
 | `MissingName` | `CliInvalidArguments` | 129 | `provide a tag name` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first before tagging HEAD` |
-| `CheckExistingFailed` | `RepoCorrupt` | 128 | 无 |
+| `CheckExistingFailed` | `IoReadFailed` | 128 | 无 |
 | `SerializeAnnotatedTag` | `InternalInvariant` | 128 | 附带 Issues URL |
 | `StoreObjectFailed` | `IoWriteFailed` | 128 | 无 |
 | `PersistReferenceFailed` | `IoWriteFailed` | 128 | 无 |
 | `DeleteFailed` | `IoWriteFailed` | 128 | 无 |
-| `LoadFailed` | `RepoCorrupt` | 128 | 无 |
-| `ListFailed` | `RepoCorrupt` | 128 | 无 |
+| `LoadFailed` | `IoReadFailed` / `RepoCorrupt` | 128 | 无 |
+| `ListFailed` | `IoReadFailed` / `RepoCorrupt` | 128 | 无 |
+
+`LoadFailed` 与 `ListFailed` 不是单一 stable code：
+- `LoadFailed` 携带 `anyhow::Error` 源，命令层用 `classify_tag_load_error()` 检查 chain 是否含 `DbErr` —— 是则 `IoReadFailed`，否则 `RepoCorrupt`（结构性损坏）。
+- `ListFailed` 携带 `tag::ListTagError`（v0.17.408 起为 typed enum），命令层 `classify_list_tag_error()` 走精确的变体匹配：`Query(DbErr)` → `IoReadFailed`，`MissingCommit` / `InvalidObjectHash` / `MissingName` / `LoadObject` → `RepoCorrupt`。
 
 **与当前代码中 inline 错误的对应关系：**
 
@@ -145,7 +158,7 @@ pub enum TagError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**已落地部分（保持不变）：** `TagOutput` enum（含 `List`/`Create`/`Delete` 三变体）、`TagListEntry` 结构体均已存在于 `tag.rs:41-63`，JSON schema 已稳定。
+**已落地部分（保持不变）：** `TagOutput` enum（含 `List`/`Create`/`Delete` 三变体）位于 `tag.rs:63`，`TagListEntry` 结构体位于 `tag.rs:78`，JSON schema 已稳定。
 
 **本批变更：统一 `run_tag()` / `render_tag_output()` 分层**
 

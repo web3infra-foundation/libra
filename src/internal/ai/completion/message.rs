@@ -224,3 +224,16 @@ impl From<MessageError> for CompletionError {
         CompletionError::RequestError(error.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MessageError;
+
+    #[test]
+    fn message_error_display_pins_conversion_error_template() {
+        assert_eq!(
+            MessageError::ConversionError("unsupported role".to_string()).to_string(),
+            "Message conversion error: unsupported role",
+        );
+    }
+}

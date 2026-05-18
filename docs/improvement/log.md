@@ -16,12 +16,12 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:313/322`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:453/462`）
 - `Pager` 支持 `Pager::with_config(output)` 自动检测 TTY 与 `--no-pager`
 - `internal/log/formatter.rs`（205 行）提供 Full/Oneline/Custom 三种格式
 - `internal/log/date_parser.rs`（89 行）支持绝对日期、Unix 时间戳和相对日期
-- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:121-197`）
-- `GraphState` 支持 ASCII 图形渲染（`log.rs:805-876`）
+- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:234` 起的 struct + impl）
+- `GraphState` 支持 ASCII 图形渲染（`log.rs:1127` 起的 struct + impl）
 - `--stat` / `--name-only` / `--name-status` / `--patch` 输出模式已实现
 - `--decorate` 支持 no/short/full/auto（从 `log.decorate` 配置读取默认值）
 - `run_log()` + `LogOutput` 已落地，`--json` / `--machine` 已可返回结构化提交列表
@@ -297,17 +297,21 @@ EXAMPLES:
   - `InvalidDecorateOption`：无效 decorate 值返回 exit `129`
 - **（新增）`run_log()` 结构化结果**：验证 `LogOutput.commits` 中 hash/author/subject/files 分类准确
 
-#### `tests/command/log_json_test.rs`（JSON schema 稳定性，新增文件）
+#### JSON schema 稳定性测试（位于 `tests/command/log_test.rs`）
 
-- **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性
-- **`-n 1 --json`**：`commits` 数组恰好 1 个元素
-- **`--author --json`**：过滤后的 commits 仅包含匹配 author
-- **`--since --json`**：过滤后的 commits 日期均在指定范围内
-- **pathspec `--json`**：`files` 数组仅包含匹配路径的变更
-- **empty branch `--json`**：返回 `ok == false` + 错误码
-- **root commit `--json`**：`parents` 为空数组，`files` 全部为 "added"
-- **`--machine log`**：stdout 恰好 1 行非空行，可被 `serde_json::from_str()` 解析
-- **human-only flags in JSON mode**：`--oneline --json`、`--graph --json` 等不影响 JSON 输出内容
+为保持 `tests/command/log_test.rs` 的单文件覆盖率，JSON schema 测试与核心执行
+路径测试共存，未拆出独立的 `log_json_test.rs` 文件。当前已落地的 JSON 用例包括：
+
+- `test_log_json_output_includes_commit_list`（`-n 1 --json`，commits 数组、subject、files 数组形态）
+- `test_log_json_total_reflects_filtered_scope`（`--author --json` 过滤后 `total` 与 `commits` 长度一致）
+- `test_log_json_root_commit_has_empty_parents_and_added_files`（root commit 的 `parents` 空数组、`files` 全部 "added"）
+- `test_log_json_since_filter_restricts_results`（`--since --json` 日期过滤）
+- `test_log_json_oneline_flag_does_not_alter_schema`（`--oneline --json` 不影响 schema）
+- `test_log_machine_output_is_single_line_json`（`--machine log` stdout 恰好 1 行非空 JSON）
+- `test_log_invalid_decorate_uses_command_usage_error`（错误 JSON envelope）
+
+后续新增 JSON 契约用例（pathspec、empty branch error envelope 等）继续写入
+同一文件即可；如行数过大则按 `mod` 拆分而非新文件。
 
 #### CLI 错误码验证
 

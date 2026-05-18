@@ -615,4 +615,54 @@ mod tests {
         assert!(!pid_is_live(0));
         assert!(!pid_is_live(u32::MAX));
     }
+
+    #[test]
+    fn control_lock_error_display_pins_owned_variants() {
+        let with_existing = ControlLockError::AlreadyHeld {
+            existing: Some(LiveInstanceInfo {
+                pid: 4242,
+                base_url: Some("http://127.0.0.1:6788".to_string()),
+                started_at: None,
+            }),
+            info_path: PathBuf::from("/tmp/control.json"),
+            lock_path: PathBuf::from("/tmp/control.lock"),
+        };
+        assert_eq!(
+            with_existing.to_string(),
+            "CONTROL_INSTANCE_CONFLICT: another `libra code --control write` instance is active \
+             (pid: 4242, baseUrl: http://127.0.0.1:6788). info: /tmp/control.json, \
+             lock: /tmp/control.lock. Stop the existing instance (Ctrl-C / kill 4242) or pass \
+             `--control-token-file` and `--control-info-file` to use separate paths.",
+        );
+
+        let with_existing_no_url = ControlLockError::AlreadyHeld {
+            existing: Some(LiveInstanceInfo {
+                pid: 1234,
+                base_url: None,
+                started_at: None,
+            }),
+            info_path: PathBuf::from("/tmp/control.json"),
+            lock_path: PathBuf::from("/tmp/control.lock"),
+        };
+        assert_eq!(
+            with_existing_no_url.to_string(),
+            "CONTROL_INSTANCE_CONFLICT: another `libra code --control write` instance is active \
+             (pid: 1234). info: /tmp/control.json, lock: /tmp/control.lock. \
+             Stop the existing instance (Ctrl-C / kill 1234) or pass `--control-token-file` and \
+             `--control-info-file` to use separate paths.",
+        );
+
+        let without_existing = ControlLockError::AlreadyHeld {
+            existing: None,
+            info_path: PathBuf::from("/tmp/control.json"),
+            lock_path: PathBuf::from("/tmp/control.lock"),
+        };
+        assert_eq!(
+            without_existing.to_string(),
+            "CONTROL_INSTANCE_CONFLICT: another `libra code --control write` instance holds the \
+             control lock. info: /tmp/control.json, lock: /tmp/control.lock. Stop the existing \
+             instance or pass `--control-token-file` and `--control-info-file` to use separate \
+             paths.",
+        );
+    }
 }

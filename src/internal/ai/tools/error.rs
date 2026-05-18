@@ -79,4 +79,44 @@ mod tests {
         assert!(matches!(tool_err, ToolError::Io(_)));
         assert_eq!(tool_err.to_string(), "IO error: file not found");
     }
+
+    #[test]
+    fn tool_error_display_pins_each_variant() {
+        assert_eq!(
+            ToolError::InvalidArguments("missing offset".to_string()).to_string(),
+            "Invalid arguments: missing offset",
+        );
+        assert_eq!(
+            ToolError::PathNotAbsolute(PathBuf::from("relative/file")).to_string(),
+            "Path must be absolute: relative/file",
+        );
+        assert_eq!(
+            ToolError::PathOutsideWorkingDir(PathBuf::from("/etc/passwd")).to_string(),
+            "Path outside working directory: /etc/passwd",
+        );
+        assert_eq!(
+            ToolError::PathReserved(PathBuf::from(".libra/HEAD")).to_string(),
+            "Path reserved for repository metadata: .libra/HEAD",
+        );
+        assert_eq!(
+            ToolError::ParseError("expected object".to_string()).to_string(),
+            "Failed to parse arguments: expected object",
+        );
+        assert_eq!(
+            ToolError::ExecutionFailed("shell exited 1".to_string()).to_string(),
+            "Tool execution failed: shell exited 1",
+        );
+        assert_eq!(
+            ToolError::ToolNotFound("apply_patch".to_string()).to_string(),
+            "Tool not found: apply_patch",
+        );
+        assert_eq!(
+            ToolError::IncompatiblePayload("text".to_string()).to_string(),
+            "Incompatible payload type for tool: text",
+        );
+        assert_eq!(
+            ToolError::Other("unexpected".to_string()).to_string(),
+            "Tool error: unexpected",
+        );
+    }
 }

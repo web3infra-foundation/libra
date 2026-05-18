@@ -17,6 +17,11 @@ use crate::{
     },
 };
 
+/// GitHub Issues URL shown on the `SerializeAnnotatedTag` internal-invariant
+/// error path so users can report the bug; mirrors `push.rs`'s
+/// `ObjectCollection` / `PackEncoding` hint pattern.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 const TAG_EXAMPLES: &str = "\
 EXAMPLES:
     libra tag v1.0                        Create a lightweight tag at HEAD
@@ -152,10 +157,10 @@ enum TagError {
     },
 
     #[error("failed to list tags: {0}")]
-    ListFailed(#[source] anyhow::Error),
+    ListFailed(#[source] tag::ListTagError),
 }
 
-fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
+fn classify_tag_load_error(error: &anyhow::Error) -> StableErrorCode {
     if error
         .chain()
         .any(|cause| cause.downcast_ref::<DbErr>().is_some())
@@ -163,6 +168,16 @@ fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
         StableErrorCode::IoReadFailed
     } else {
         StableErrorCode::RepoCorrupt
+    }
+}
+
+fn classify_list_tag_error(error: &tag::ListTagError) -> StableErrorCode {
+    match error {
+        tag::ListTagError::Query(_) => StableErrorCode::IoReadFailed,
+        tag::ListTagError::MissingCommit { .. }
+        | tag::ListTagError::InvalidObjectHash { .. }
+        | tag::ListTagError::MissingName
+        | tag::ListTagError::LoadObject { .. } => StableErrorCode::RepoCorrupt,
     }
 }
 
@@ -197,9 +212,9 @@ impl From<TagError> for CliError {
             TagError::CheckExistingFailed { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            TagError::SerializeAnnotatedTag(_) => {
-                CliError::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
-            }
+            TagError::SerializeAnnotatedTag(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::InternalInvariant)
+                .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
             TagError::StoreObjectFailed(_) => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -210,10 +225,10 @@ impl From<TagError> for CliError {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
             TagError::LoadFailed { source, .. } => {
-                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+                CliError::fatal(message).with_stable_code(classify_tag_load_error(&source))
             }
             TagError::ListFailed(source) => {
-                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+                CliError::fatal(message).with_stable_code(classify_list_tag_error(&source))
             }
         }
     }
@@ -648,19 +663,72 @@ mod tests {
 
     #[test]
     fn test_tag_list_db_error_maps_as_io_read() {
-        let cli_error = CliError::from(TagError::ListFailed(anyhow::Error::new(DbErr::Custom(
-            "database is locked".to_string(),
-        ))));
+        let cli_error = CliError::from(TagError::ListFailed(tag::ListTagError::Query(
+            DbErr::Custom("database is locked".to_string()),
+        )));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
     }
 
     #[test]
     fn test_tag_list_object_error_maps_as_repo_corrupt() {
-        let cli_error = CliError::from(TagError::ListFailed(anyhow::anyhow!(
-            "Invalid ObjectHash: not-a-valid-hash"
-        )));
+        let cli_error =
+            CliError::from(TagError::ListFailed(tag::ListTagError::InvalidObjectHash {
+                name: "v1.0".to_string(),
+                detail: "not-a-valid-hash".to_string(),
+            }));
 
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    /// Pin the `Display` format for the static-message and direct-
+    /// message variants of [`TagError`]. These strings are used as
+    /// the `CliError` message via `From<TagError> for CliError` and
+    /// surface in both human and `--json` envelopes for the `tag`
+    /// subcommand.
+    ///
+    /// Source-chained variants (ResolveHead, CheckExistingFailed,
+    /// SerializeAnnotatedTag, StoreObjectFailed, …) wrap upstream
+    /// error types (BranchStoreError / DbErr / GitError / io::Error)
+    /// and are intentionally skipped — their {source} slot is owned
+    /// by the wrapped error.
+    #[test]
+    fn tag_error_display_pins_static_message_variants() {
+        assert_eq!(TagError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            TagError::AlreadyExists("v1.0.0".to_string()).to_string(),
+            "tag 'v1.0.0' already exists",
+        );
+        assert_eq!(
+            TagError::NotFound("v9.9.9".to_string()).to_string(),
+            "tag 'v9.9.9' not found",
+        );
+        // MissingName(s) echoes the inner string verbatim.
+        assert_eq!(
+            TagError::MissingName("provide a tag name".to_string()).to_string(),
+            "provide a tag name",
+        );
+        assert_eq!(
+            TagError::HeadUnborn.to_string(),
+            "Cannot create tag: HEAD does not point to a commit",
+        );
+    }
+
+    /// tag.md Cross-Cutting G: `SerializeAnnotatedTag` is the one TagError
+    /// variant that maps to `InternalInvariant` and must surface the
+    /// GitHub Issues URL hint (mirroring push.rs `ObjectCollection` /
+    /// `PackEncoding` pattern).
+    #[test]
+    fn tag_error_to_cli_error_serialize_annotated_tag_has_issue_url() {
+        let err: CliError = TagError::SerializeAnnotatedTag(GitError::InvalidArgument(
+            "synthetic serialize failure".to_string(),
+        ))
+        .into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "SerializeAnnotatedTag must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
+        );
     }
 }

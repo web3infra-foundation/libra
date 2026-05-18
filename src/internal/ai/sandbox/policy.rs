@@ -503,4 +503,19 @@ mod tests {
             .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
             .expect("ordinary workspace roots should be accepted");
     }
+
+    #[test]
+    fn sandbox_policy_error_display_pins_dangerous_writable_root_template() {
+        let err = SandboxPolicyError::DangerousWritableRoot {
+            root: PathBuf::from("/etc"),
+            reason: "is a system configuration directory",
+        };
+        assert_eq!(
+            err.to_string(),
+            "refusing writable_root '/etc' because is a system configuration directory; \
+             choose a non-privileged project directory, expose the tool through a narrow \
+             proxy, or rerun with explicit escalated permissions if host-level access is \
+             intentional",
+        );
+    }
 }

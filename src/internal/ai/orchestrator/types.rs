@@ -881,4 +881,49 @@ mod tests {
         assert_eq!(back.execution_plan_spec.tasks.len(), 1);
         assert_eq!(back.persistence.unwrap().tasks.len(), 1);
     }
+
+    #[test]
+    fn orchestrator_error_display_pins_each_variant() {
+        assert_eq!(
+            OrchestratorError::ValidationFailed("missing intent".to_string()).to_string(),
+            "intent spec validation failed: missing intent",
+        );
+        assert_eq!(
+            OrchestratorError::PlanningFailed("no plan".to_string()).to_string(),
+            "planning failed: no plan",
+        );
+        let task_id = Uuid::nil();
+        assert_eq!(
+            OrchestratorError::TaskFailed {
+                task_id,
+                reason: "exec timeout".to_string(),
+            }
+            .to_string(),
+            format!("task failed: {task_id} — exec timeout"),
+        );
+        assert_eq!(
+            OrchestratorError::AgentError("provider unavailable".to_string()).to_string(),
+            "agent error: provider unavailable",
+        );
+        assert_eq!(
+            OrchestratorError::GateExecutionError("clippy failed".to_string()).to_string(),
+            "gate execution error: clippy failed",
+        );
+        assert_eq!(
+            OrchestratorError::PolicyViolation("destructive op blocked".to_string()).to_string(),
+            "policy violation: destructive op blocked",
+        );
+        assert_eq!(
+            OrchestratorError::ConfigError("missing key".to_string()).to_string(),
+            "config error: missing key",
+        );
+        assert_eq!(
+            OrchestratorError::PersistenceError("db locked".to_string()).to_string(),
+            "persistence error: db locked",
+        );
+        assert_eq!(
+            OrchestratorError::ProjectionError("schema drift".to_string()).to_string(),
+            "projection error: schema drift",
+        );
+    }
 }

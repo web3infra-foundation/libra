@@ -300,6 +300,9 @@ branch 'main' set up to track 'origin/main'
     "objects_pushed": 256,
     "bytes_pushed": 1258291,
     "lfs_files_uploaded": 1,
+    "lfs_upload": {
+      "files_uploaded": 1
+    },
     "dry_run": false,
     "up_to_date": false,
     "upstream_set": "origin/main",
@@ -321,6 +324,9 @@ branch 'main' set up to track 'origin/main'
     "objects_pushed": 0,
     "bytes_pushed": 0,
     "lfs_files_uploaded": 0,
+    "lfs_upload": {
+      "files_uploaded": 0
+    },
     "dry_run": false,
     "up_to_date": true,
     "upstream_set": null,
@@ -350,6 +356,9 @@ branch 'main' set up to track 'origin/main'
     "objects_pushed": 256,
     "bytes_pushed": 0,
     "lfs_files_uploaded": 0,
+    "lfs_upload": {
+      "files_uploaded": 0
+    },
     "dry_run": true,
     "up_to_date": false,
     "upstream_set": null,
@@ -379,6 +388,9 @@ branch 'main' set up to track 'origin/main'
     "objects_pushed": 128,
     "bytes_pushed": 524288,
     "lfs_files_uploaded": 0,
+    "lfs_upload": {
+      "files_uploaded": 0
+    },
     "dry_run": false,
     "up_to_date": false,
     "upstream_set": null,

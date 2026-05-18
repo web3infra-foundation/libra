@@ -219,6 +219,7 @@ Already up to date.
     },
     "merge": {
       "strategy": "fast-forward",
+      "old_commit": "abc1234...",
       "commit": "def5678...",
       "files_changed": 3,
       "up_to_date": false
@@ -226,6 +227,9 @@ Already up to date.
   }
 }
 ```
+
+`merge.old_commit` is the local HEAD before the fast-forward; it is `null`
+on the very first pull into an unborn HEAD.
 
 **already up to date：**
 
@@ -244,6 +248,7 @@ Already up to date.
     },
     "merge": {
       "strategy": "already-up-to-date",
+      "old_commit": "def5678...",
       "commit": null,
       "files_changed": 0,
       "up_to_date": true
@@ -251,6 +256,10 @@ Already up to date.
   }
 }
 ```
+
+In the already-up-to-date case `merge.old_commit` is the current local
+HEAD (equal to the remote tip) and `merge.commit` is `null` because no
+fast-forward happened.
 
 **错误 JSON：no tracking information**
 

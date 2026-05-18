@@ -143,3 +143,32 @@ impl AutomationRunResult {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AutomationError;
+
+    #[test]
+    fn automation_error_display_pins_each_variant() {
+        assert_eq!(
+            AutomationError::ConfigParse("invalid toml".to_string()).to_string(),
+            "failed to parse automation config: invalid toml",
+        );
+        assert_eq!(
+            AutomationError::ConfigValidation("missing action".to_string()).to_string(),
+            "invalid automation config: missing action",
+        );
+        assert_eq!(
+            AutomationError::UnsupportedCron("@hourly".to_string()).to_string(),
+            "unsupported cron schedule `@hourly`",
+        );
+        assert_eq!(
+            AutomationError::Database("connection lost".to_string()).to_string(),
+            "automation database error: connection lost",
+        );
+        assert_eq!(
+            AutomationError::Action("shell exit 1".to_string()).to_string(),
+            "automation action failed: shell exit 1",
+        );
+    }
+}

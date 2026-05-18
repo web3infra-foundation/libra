@@ -24,12 +24,12 @@
 |------|------|------|
 | `HookProvider` trait + Claude/Gemini provider | [src/internal/ai/hooks/provider.rs](../../src/internal/ai/hooks/provider.rs)、[hooks/providers/](../../src/internal/ai/hooks/providers/) | 已能解析 hook envelope → `LifecycleEvent`，并安装 hook 配置 |
 | `LifecycleEvent` / `LifecycleEventKind` / `SessionHookEnvelope` / `make_dedup_key` / `apply_lifecycle_event` / `validate_session_hook_envelope` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) | 完整的事件模型与状态机原语 |
-| `process_hook_event_from_stdin` | [hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
-| `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
-| `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:338](../../src/internal/ai/session/store.rs)（`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
-| 分层存储 | [src/utils/client_storage.rs:336](../../src/utils/client_storage.rs) | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
-| 云同步 | [src/command/cloud.rs:192](../../src/command/cloud.rs) | 增量按 `object_index` 表迭代 |
-| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:499](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 已注册 `2026050301`(`automation_log`) + `2026050302`(`agent_usage_stats`)，inline SQL；`builtin_runner` / `run_builtin_migrations` 公开 API 可用 |
+| `process_hook_event_from_stdin` | [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) | stdin → envelope → dedup → apply → 写 ai_session blob 到 `AI_REF` |
+| `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（`new_with_ref` :176、`resolve_history_head` :459、`create_append_commit` :601、`update_ref_if_matches` :745） | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
+| `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:440](../../src/internal/ai/session/store.rs)（`SessionFileLock` 类型在 store.rs:44；`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
+| 分层存储 | [src/utils/client_storage.rs:347](../../src/utils/client_storage.rs)（`LIBRA_STORAGE_THRESHOLD` 解析）+ `put()`（client_storage.rs:490） | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
+| 云同步 | [src/command/cloud.rs::run_cloud_sync](../../src/command/cloud.rs)（当前位于 cloud.rs:817；`ensure_object_index_table` 在 :838 起 driver query） | 增量按 `object_index` 表迭代 |
+| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:532](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 当前注册表共 6 条迁移（`automation_log` / `agent_usage_stats` / `agent_capture` / `agent_checkpoint_parent_nullable` / `approved_permission` / `agent_usage_stats_agent_name`），全部走 `include_str!` 加载（v0.17.400 起 inline SQL 已抽取到文件）；`run_builtin_migrations`（migration.rs:635）公开 API 可用 |
 | `stash::build_tree_recursive` | [src/command/stash.rs](../../src/command/stash.rs) | 工作目录 → tree，已处理 index 合并、忽略文件、子模块 |
 | `restore` 路径还原 | [src/command/restore.rs](../../src/command/restore.rs) | rewind 复用此路径 |
 | `object_index` 表 | [src/utils/object.rs](../../src/utils/object.rs) + [src/internal/db.rs](../../src/internal/db.rs) | 自动驱动云同步 |
@@ -39,10 +39,10 @@
 | 现状 | 必须修正 |
 |------|---------|
 | `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | 本任务必须新增 `Commands::Hooks(HooksArgs)`（兼容层）与 `Commands::Agent(AgentArgs)`（新顶层） |
-| `builtin_migrations()` 当前**用 inline SQL 字符串**，未走 `include_str!`（[migration.rs:499-540](../../src/internal/db/migration.rs)） | v1 新建 `sql/migrations/2026050303_agent_capture.sql` 并改用 `include_str!` 加载——既符合 [sql/migrations/README.md](../../sql/migrations/README.md) 描述的演进方向，又把 SQL 与 Rust 解耦 |
-| [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | 同步更新为"YYYYMMDDNN 形式 + `include_str!` 加载规则" |
-| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（[branch.rs:45](../../src/internal/branch.rs)） | 扩展为可配清单，加入 `agent-traces`；并在 `restore`/`reset` 也调用 `is_locked_branch`（目前仅 `checkout`/`switch` 调用） |
-| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-48, 53, 985](../../tests/db_migration_test.rs)） | 新增迁移时必须同步把这三处更新到 `2026050303` / `agent_capture` |
+| `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
+| [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
+| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | 部分落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)），`branch`（create / delete）与 `switch`（create）已检查；`restore`/`reset` 命令对锁定分支的拦截属于行为变更，留作独立切片 |
+| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-48, 53, 985](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部六个迁移（`2026050301`..`2026050801`）；新增迁移仍需同步更新这三处断言 |
 
 ---
 
@@ -190,7 +190,7 @@ DROP TABLE IF EXISTS `agent_session`;
 
 ### 4.2 改造 `builtin_migrations()`
 
-[`src/internal/db/migration.rs:499`](../../src/internal/db/migration.rs) 当前用 inline SQL。新增条目改用 `include_str!`：
+[`src/internal/db/migration.rs:532`](../../src/internal/db/migration.rs) 的 `builtin_migrations()` 现在全部走 `include_str!`（v0.17.400 起 inline SQL 已抽取）。新增条目继续沿用 `include_str!`：
 
 ```rust
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -324,7 +324,7 @@ pub trait TranscriptChunker: ObservedAgent {
 
 ### 6.2 摄入函数参数化
 
-把现 [hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) 的 `process_hook_event_from_stdin` 抽离为内部参数化函数：
+把现 [hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) 的 `process_hook_event_from_stdin` 抽离为内部参数化函数：
 
 ```rust
 pub enum HookTarget { AiIntent, AgentTraces }
@@ -428,9 +428,9 @@ async fn process_hook_event_with_target(
 
 ### 7.5 与现有命令交互
 
-- 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：新增匹配 `agent-traces`
-- 在 [`command/restore.rs`](../../src/command/restore.rs) 与 [`command/reset.rs`](../../src/command/reset.rs) 的入口增加 `is_locked_branch(target_branch_name)` 检查并拒绝
-- `git log refs/libra/agent-traces` 直接可用
+- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）与 `switch`（create）均已调用
+- 部分：[`command/restore.rs`](../../src/command/restore.rs) 已通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`；[`command/reset.rs`](../../src/command/reset.rs) 已通过 `ResetError::LockedTarget` 守 `reset --hard <locked-ref>`。但**cwd 当前位于锁定分支时拦截 worktree-modifying commands** 属于行为变更，仍留作独立切片，未在本批落地
+- ✅ `git log refs/libra/agent-traces` 直接可用
 
 ---
 
@@ -560,14 +560,14 @@ HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch().await?;
 
 ### 9.2 分支保护
 
-修改 [`src/internal/branch.rs:45`](../../src/internal/branch.rs)：
+已落地在 [`src/internal/branch.rs:51`](../../src/internal/branch.rs)：
 ```rust
 pub fn is_locked_branch(name: &str) -> bool {
-    name == DEFAULT_BRANCH
-        || name == INTENT_BRANCH
-        || name == "agent-traces"
+    name == DEFAULT_BRANCH || name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
 }
 ```
+
+其中 `AGENT_TRACES_BRANCH` 作为常量在 branch.rs:42 定义为 `"agent-traces"`，避免把 ref 字面值散落在多个调用点。
 
 并在 [`src/command/restore.rs`](../../src/command/restore.rs)、[`src/command/reset.rs`](../../src/command/reset.rs) 入口增加：
 ```rust
@@ -586,7 +586,7 @@ if let Some(branch) = target_branch_name() {
 
 ### 10.1 自动入云
 
-Transcript blob、metadata blob、events blob 都走 `write_git_object` → `object_index` → 现有 [cloud.rs:192](../../src/command/cloud.rs) 增量同步。**新增 `o_type='agent_transcript'`** 仅用于过滤与统计。零代码即得云备份。
+Transcript blob、metadata blob、events blob 都走 `write_git_object` → `object_index` → 现有 [cloud.rs::run_cloud_sync](../../src/command/cloud.rs) 增量同步。**新增 `o_type='agent_transcript'`** 仅用于过滤与统计。零代码即得云备份。
 
 ### 10.2 D1 表同步
 
@@ -617,18 +617,18 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 | 目的 | 复用对象 | 位置 |
 |------|---------|------|
-| 孤儿 ref CAS | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs:176](../../src/internal/ai/history.rs) |
-| Hook 摄入流水线 | `process_hook_event_from_stdin` → 抽离为 `process_hook_event_with_target` + 旧 API 包装 | [src/internal/ai/hooks/runtime.rs:139](../../src/internal/ai/hooks/runtime.rs) |
+| 孤儿 ref CAS | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（:176 / :459 / :601 / :745） |
+| Hook 摄入流水线 | `process_hook_event_from_stdin` → 抽离为 `process_hook_event_with_target` + 旧 API 包装 | [src/internal/ai/hooks/runtime.rs:157](../../src/internal/ai/hooks/runtime.rs) |
 | 事件模型 | `LifecycleEvent` / `LifecycleEventKind` / `make_dedup_key` / `normalize_json_value` / `validate_session_hook_envelope` / `apply_lifecycle_event` / `append_raw_hook_event` | [hooks/lifecycle.rs](../../src/internal/ai/hooks/lifecycle.rs) |
 | Unknown-event-safe envelope 模式 | 借鉴 `AgentRunEvent` / `AgentRunEventEnvelope`（`agent_run/` gated 在 `subagent-scaffold`，**不直接依赖**） | [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) |
 | Migration runner | `MigrationRunner::register` / `run_pending` / `builtin_migrations()` | [migration.rs](../../src/internal/db/migration.rs) |
-| 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:338](../../src/internal/ai/session/store.rs) |
+| 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:440](../../src/internal/ai/session/store.rs) |
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
-| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:45](../../src/internal/branch.rs)、[checkout.rs:71-83](../../src/command/checkout.rs)、[switch.rs:35,265](../../src/command/switch.rs) |
-| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:336](../../src/utils/client_storage.rs) |
+| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/353](../../src/command/checkout.rs)（多个 INTENT_BRANCH match arm 散落在 219/222/226/229/353/355 等）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
+| 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:347/490](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
-| 云同步 | `object_index` 迭代 | [cloud.rs:192](../../src/command/cloud.rs) |
+| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
 | 现 Claude/Gemini provider | 保留 `HookProvider`，新加 `ObservedAgent` wrapper 组合复用 | [hooks/providers/](../../src/internal/ai/hooks/providers/) |
 | Projection 层 | **不直接复用** —— 独立 storage.rs，弱关联 | [projection/](../../src/internal/ai/projection/) |
 
@@ -744,14 +744,14 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 文件 | 改动 |
 |------|------|
 | `src/cli.rs` | `Commands` 枚举加 `Hooks(HooksArgs)` 与 `Agent(AgentArgs)`；`match` 分支加路由 |
-| `src/internal/db/migration.rs:499` `builtin_migrations()` | 加 `2026050303_agent_capture` 条目，`up`/`down` 用 `include_str!("../../../sql/migrations/...")` |
-| `src/internal/branch.rs:45` `is_locked_branch` | 加 `\|\| name == "agent-traces"` |
-| `src/command/restore.rs` | 入口处加 `is_locked_branch` 检查，命中拒绝 |
+| `src/internal/db/migration.rs:532` `builtin_migrations()` | ✅ `2026050303_agent_capture` 条目已加入并使用 `include_str!("../../../sql/migrations/...")`；本表保留作为历史改造记录 |
+| `src/internal/branch.rs::is_locked_branch` | ✅ 已加 `\|\| name == AGENT_TRACES_BRANCH`（branch.rs:51 起的 helper） |
+| `src/command/restore.rs` | 入口处加 `is_locked_branch` 检查，命中拒绝（restore 已通过 `RestoreError::LockedSource` 守 `--source`；reset / restore 命令在 cwd 上的拦截属于行为变更，留作独立切片） |
 | `src/command/reset.rs` | 同上 |
-| `src/internal/ai/hooks/runtime.rs:139` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
+| `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
-| `tests/db_migration_test.rs:47-48,53,985` | `2026050303` / `agent_capture` 加进硬编码断言 |
+| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部六个迁移版本（`2026050301..2026050801`）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
 | `Cargo.toml` | 如需 `regex`、`once_cell`、`fs2` 等新依赖在此声明 |
 

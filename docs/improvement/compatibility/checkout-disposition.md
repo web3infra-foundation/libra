@@ -60,7 +60,7 @@ EXAMPLES:
 ";
 ```
 
-`src/command/checkout.rs` 中 `CheckoutArgs` 已有 `#[command(after_help = CHECKOUT_EXAMPLES)]`（第 33 行），无需改动属性位置；只需替换常量内容。
+`src/command/checkout.rs` 中 `CheckoutArgs` 已有 `#[command(after_help = CHECKOUT_EXAMPLES)]`（第 42 行），无需改动属性位置；只需替换常量内容。
 
 ### 顶层 help 验证
 

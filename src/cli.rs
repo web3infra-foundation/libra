@@ -35,7 +35,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -255,6 +255,8 @@ enum Commands {
     CatFile(command::cat_file::CatFileArgs),
     #[command(about = "Compute Git-compatible object IDs")]
     HashObject(command::hash_object::HashObjectArgs),
+    #[command(about = "Validate pack index files against pack archives")]
+    VerifyPack(command::verify_pack::VerifyPackArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -744,6 +746,14 @@ impl CommandPreflight {
             set_hash_kind: false,
         }
     }
+
+    fn repo_hash_kind_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
 }
 
 fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
@@ -760,6 +770,12 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
+        Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
+            Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            )),
+            Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+        },
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -1053,6 +1069,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
+        }
+        Commands::VerifyPack(cmd_args) => {
+            command::verify_pack::execute_safe(cmd_args, &output).await?
         }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,

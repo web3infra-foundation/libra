@@ -16,7 +16,7 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, _output)` 双入口已存在（`show.rs:57/66`）
+- `execute()` / `execute_safe(args, _output)` 双入口已存在（`show.rs:141/150`）
 - `--no-patch` / `--oneline` / `--name-only` / `--stat` / pathspec 已实现
 - show 支持 commit、tag（annotated + lightweight）、tree、blob 四种对象类型
 - 复用 `log.rs` 的 `generate_diff()` 和 `get_changed_files_for_commit()` 函数

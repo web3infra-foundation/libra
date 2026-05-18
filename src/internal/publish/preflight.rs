@@ -418,4 +418,13 @@ mod tests {
             PreflightDecision::Deny(DenyReason::UserIgnore),
         );
     }
+
+    #[test]
+    fn preflight_policy_error_display_pins_static_message() {
+        assert_eq!(
+            PreflightPolicyError::PublicSensitiveAllowlist.to_string(),
+            "--allow-sensitive-path can only be used with private publish sites; \
+             public sites must not publish sensitive paths",
+        );
+    }
 }

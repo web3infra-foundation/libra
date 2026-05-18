@@ -800,3 +800,82 @@ impl SourceToolHandler {
         matches!(payload, ToolPayload::Function { .. })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ManifestValidationError, SourceEnablement, SourcePoolError, TrustTier};
+
+    #[test]
+    fn manifest_validation_error_display_pins_each_variant() {
+        assert_eq!(
+            ManifestValidationError::InvalidSlug {
+                slug: "Bad-Slug".to_string(),
+            }
+            .to_string(),
+            "source manifest slug `Bad-Slug` is invalid; \
+             use lowercase letters, digits, or underscores",
+        );
+        assert_eq!(
+            ManifestValidationError::InvalidToolName {
+                tool_name: "foo__bar".to_string(),
+            }
+            .to_string(),
+            "source manifest tool name `foo__bar` is invalid; \
+             names must be non-empty and may not contain `__`",
+        );
+        assert_eq!(
+            ManifestValidationError::MissingApprovalScope {
+                tool_name: "shell".to_string(),
+            }
+            .to_string(),
+            "source manifest tool `shell` mutates state but does not declare an approval scope",
+        );
+    }
+
+    #[test]
+    fn source_pool_error_display_pins_each_variant() {
+        assert_eq!(
+            SourcePoolError::Manifest(ManifestValidationError::InvalidSlug {
+                slug: "Bad".to_string(),
+            })
+            .to_string(),
+            "source manifest slug `Bad` is invalid; \
+             use lowercase letters, digits, or underscores",
+        );
+        assert_eq!(
+            SourcePoolError::DuplicateSource {
+                slug: "github".to_string(),
+            }
+            .to_string(),
+            "source `github` is already registered",
+        );
+        assert_eq!(
+            SourcePoolError::SourceNotFound {
+                slug: "missing".to_string(),
+            }
+            .to_string(),
+            "source `missing` is not registered",
+        );
+        assert_eq!(
+            SourcePoolError::ToolNotFound {
+                source_slug: "github".to_string(),
+                tool_name: "fork".to_string(),
+            }
+            .to_string(),
+            "source `github` does not declare tool `fork`",
+        );
+        assert_eq!(
+            SourcePoolError::EnablementNotAllowed {
+                slug: "x".to_string(),
+                trust_tier: TrustTier::Untrusted,
+                enablement: SourceEnablement::SessionExplicit,
+            }
+            .to_string(),
+            "source `x` with trust tier Untrusted cannot be enabled through SessionExplicit",
+        );
+        assert_eq!(
+            SourcePoolError::Internal("config corrupt".to_string()).to_string(),
+            "config corrupt",
+        );
+    }
+}
