@@ -579,7 +579,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 
 - `gc` – garbage-collect unreachable objects and pack files
 - `prune` – remove loose objects that are no longer reachable
-- `fsck` – verify repository integrity
 - `maintenance` – periodic maintenance tasks
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
 - `remote-show` – show detailed remote info
