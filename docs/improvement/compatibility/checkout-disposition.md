@@ -9,7 +9,7 @@ C5（Audit P2）
 ### 已确认落地的基线（2026-05-11 复核）
 - [`src/cli.rs`](../../../src/cli.rs) 中 `Checkout` 已作为顶层可见命令暴露，about 文案明确为 branch compatibility surface，并推荐 `switch` / `restore`。
 - [`src/command/checkout.rs`](../../../src/command/checkout.rs) 已实现 checkout 的分支类基础语义（显示当前分支、切换本地分支、`-b` 新建并切换、远端同名分支 auto-track + pull）。内部使用 `restore` 将工作树 materialize 到目标 commit，但当前 CLI **不支持** `git checkout -- <path>` 形式的文件恢复；文件恢复仍由 `libra restore` 承担。
-- 第 30 批已部分落地：`CheckoutOutput`、JSON/machine 成功输出、执行/渲染拆分和 checkout-owned stable code 已存在；`CheckoutError` typed enum 与更细 remote/pull 代理错误分层仍未落地。
+- 第 30 批已完整落地（v0.17.372）：`CheckoutOutput`、JSON/machine 成功输出、执行/渲染拆分、checkout-owned stable code 全部就绪，并已补齐完整 `CheckoutError` typed enum（[`src/command/checkout.rs:75`](../../../src/command/checkout.rs)）含 `CheckingOutBranchBlocked` / `CreatingBranchBlocked` / `SwitchingToBranchBlocked` / `BranchNotFound` / `PathSpecNotMatched` / `DirtyUnstaged` / `DirtyUncommitted` / `UntrackedOverwrite` / `BranchStoreRead` / `BranchStoreCorrupt` / `RemoteHeadMissing` / `RemoteSyncFailed { stage, source }` / `DelegatedCli` 13 个变体；`get_remote()` 内 `set_upstream` / `pull` 代理调用已通过 `RemoteSyncFailed` 细分层透传底层 `StableErrorCode`。
 - [docs/improvement/checkout.md](../checkout.md) 已记录"第二批兼容收口已落地，完整现代化留第 30 批"。
 - [`docs/commands/checkout.md`](../../commands/checkout.md) 已说明 checkout 是兼容 surface；顶层索引不再标 hidden。
 - [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 已断言顶层 `--help` 包含 checkout，且 `checkout --help` 推荐 `switch` / `restore`。
@@ -17,7 +17,7 @@ C5（Audit P2）
 
 ### 基于当前代码的 Review 结论
 - C5 的可见性与 help banner 已落地；checkout 不再处于"存在但不可发现"状态。
-- 第 30 批的结构化输出目标与本批已落地的"取消 hide + 文案调整"互不冲突：后续继续 typed `CheckoutError` 与更细错误分层时，不应重新隐藏 checkout。
+- 第 30 批的结构化输出目标与本批已落地的"取消 hide + 文案调整"互不冲突：v0.17.372 完整 typed `CheckoutError` 与 `RemoteSyncFailed { stage, source }` 细分层落地时未重新隐藏 checkout。
 - 当前 help 和 docs 已明确 checkout 是分支类兼容入口；新流程推荐 switch，文件恢复推荐 restore。
 
 ## 目标与非目标
@@ -30,7 +30,7 @@ C5（Audit P2）
 - [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 已断言：`libra --help` 顶层文本包含 "checkout"。
 
 **非目标：**
-- C5 本身不改 checkout 内部实现；第 30 批已在后续补充 JSON / render split，剩余 typed `CheckoutError` 继续作为后续范围。
+- C5 本身不改 checkout 内部实现；第 30 批已完整落地 JSON / render split 与 typed `CheckoutError`（v0.17.372 含 13 个变体与 `RemoteSyncFailed` 细分层），无遗留范围。
 - 不 deprecate checkout——它是有意保留的兼容入口，不是过渡性废弃。
 - 不引入 `--no-hint` 或动态隐藏机制；取消 hide 是无条件的。
 - 不修改 switch / restore 的 `--help` 文案——它们已在第二批稳定，本批不动。
@@ -81,7 +81,7 @@ COMMANDS:
 
 ### 与第 30 批的协同时序
 
-- C5 已先落地；第 30 批随后补充了 `CheckoutOutput` / JSON / render split，并保持 `--help` 文案稳定。剩余 typed `CheckoutError` 不需要改 checkout 可见性。
+- C5 已先落地；第 30 批随后补充了 `CheckoutOutput` / JSON / render split，并保持 `--help` 文案稳定。v0.17.372 完整 typed `CheckoutError` 与 `RemoteSyncFailed` 细分层亦未改 checkout 可见性。
 - 若第 30 批先落地：C5 启动时，去 hide 是 trivial 改动；CHECKOUT_EXAMPLES 已存在，本批仅改 banner 文案。
 - 两批互不阻塞，但建议 C5 先于第 30 批，因为可见性是即时收益，typed error 是渐进收益。
 
