@@ -4,7 +4,7 @@ use super::{
 };
 
 #[test]
-fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
+fn publish_sync_without_site_id_returns_invalid_arguments_without_clap_json_panic() {
     let repo = tempfile::tempdir().expect("temp repo");
     init_repo_via_cli(repo.path());
 
@@ -12,19 +12,19 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
         let output = run_libra_command(args, repo.path());
         assert!(
             !output.status.success(),
-            "{args:?} should return the publish unsupported error"
+            "{args:?} should fail when publish.site_id is not configured"
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !stderr.contains("panicked"),
-            "{args:?} must not panic on publish reserved subcommands: {stderr}"
+            "{args:?} must not panic on the JSON envelope path: {stderr}"
         );
 
         let (_, report) = parse_cli_error_stderr(&output.stderr);
-        assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+        assert_eq!(report.error_code, "LBR-CLI-002");
         assert!(
-            report.message.contains("not ready yet"),
-            "{args:?} should explain that publish plumbing is not ready: {stderr}"
+            report.message.contains("publish.site_id"),
+            "{args:?} should explain that publish.site_id is required: {stderr}"
         );
     }
 }

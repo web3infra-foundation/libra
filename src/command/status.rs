@@ -1721,11 +1721,11 @@ fn list_workdir_files_split_force(workdir: &PathBuf) -> io::Result<(Vec<PathBuf>
                 .map_err(|err| io::Error::other(err.to_string()))?
                 .to_path_buf();
             if file_type.is_dir() {
-                // Always recurse into directories, even ignored ones
+                // Always recurse into directories, even ignored ones.
+                // We never push the directory entry itself — only its files
+                // — so `add --force` sees concrete blobs, not a path that
+                // would panic when `Blob::from_file` tries to read it.
                 pending_dirs.push(path.clone());
-                if util::check_gitignore(workdir, &path) {
-                    ignored.push(relative);
-                }
             } else if file_type.is_file() {
                 if util::check_gitignore(workdir, &path) {
                     ignored.push(relative);

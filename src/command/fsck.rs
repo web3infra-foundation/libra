@@ -1138,7 +1138,9 @@ async fn find_and_report_tags() -> CliResult<()> {
             continue;
         }
 
-        let tag_name = ref_name.strip_prefix("refs/tags/").unwrap();
+        let tag_name = ref_name
+            .strip_prefix("refs/tags/")
+            .expect("INVARIANT: ref_name was guarded by starts_with(\"refs/tags/\") above");
         let commit_hash = match &ref_entry.commit {
             Some(hash) => hash,
             None => continue,

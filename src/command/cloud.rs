@@ -656,10 +656,21 @@ impl CloudError {
             CloudError::MissingEnv {
                 detail,
                 missing_keys,
-            } => CliError::auth(detail)
-                .with_stable_code(StableErrorCode::AuthMissingCredentials)
-                .with_detail("missing_keys", missing_keys)
-                .with_hint("set the missing variables in env or vault.env.* before retrying."),
+            } => {
+                let message = if missing_keys.is_empty() {
+                    format!("missing cloud configuration for {operation}")
+                } else {
+                    format!(
+                        "missing cloud configuration for {operation}: {}",
+                        missing_keys.join(", ")
+                    )
+                };
+                CliError::auth(message)
+                    .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                    .with_detail("missing_keys", missing_keys)
+                    .with_detail("raw_detail", detail)
+                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
+            }
             CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
             CloudError::NameNotFound(detail) => {
