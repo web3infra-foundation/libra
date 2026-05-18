@@ -35,7 +35,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -253,6 +253,8 @@ enum Commands {
     Describe(command::describe::DescribeArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(about = "Validate pack index files against pack archives")]
+    VerifyPack(command::verify_pack::VerifyPackArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -719,6 +721,14 @@ impl CommandPreflight {
         }
     }
 
+    fn sha1_without_repo() -> Self {
+        Self {
+            storage: None,
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
+
     fn repo(storage: std::path::PathBuf) -> Self {
         Self {
             storage: Some(storage),
@@ -734,6 +744,14 @@ impl CommandPreflight {
             set_hash_kind: false,
         }
     }
+
+    fn repo_hash_kind_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
 }
 
 fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
@@ -744,6 +762,12 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
+            Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            )),
+            Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+        },
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -950,6 +974,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         if preflight.set_hash_kind {
             set_local_hash_kind_for_storage(storage).await?;
         }
+    } else if preflight.set_hash_kind {
+        set_hash_kind(HashKind::Sha1);
     }
     // Resolve global output flags into a single config before dispatching.
     let color = if args.no_color {
@@ -1033,6 +1059,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::VerifyPack(cmd_args) => {
+            command::verify_pack::execute_safe(cmd_args, &output).await?
+        }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,

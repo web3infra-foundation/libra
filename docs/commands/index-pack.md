@@ -111,13 +111,12 @@ exposes it for three reasons:
    `index-pack` to exist. Providing it means Libra can be a drop-in replacement
    in CI pipelines that call plumbing commands.
 
-### Why no `--verify`?
+### Why a separate `verify-pack` command?
 
-Git's `index-pack --verify` re-reads an existing `.idx` file and checks it
-against the pack for consistency. Libra does not yet implement this because the
-primary use case (generating indices) is covered, and verification can be done
-by regenerating the index and comparing checksums. A dedicated `--verify` flag
-is a natural future addition once there is demand from agent or CI workflows.
+Git exposes verification through both `verify-pack` and some `index-pack`
+workflows. Libra keeps index generation and verification separate:
+`index-pack` writes an index, while [`verify-pack`](verify-pack.md) performs a
+read-only consistency check between an existing `.idx` and its `.pack`.
 
 ### Why limited index versions?
 
@@ -144,7 +143,7 @@ algorithms.
 | Build index from pack | `libra index-pack <file>` | `git index-pack <file>` | N/A (jj uses its own storage) |
 | Custom output path | `-o <path>` | `-o <path>` | N/A |
 | Index version | `--index-version 1\|2` (default 1) | `--index-version <N>[,<offset>]` (default 2) | N/A |
-| Verify existing index | Not implemented | `--verify` | N/A |
+| Verify existing index | `libra verify-pack <idx>` | `verify-pack` / `index-pack --verify` | N/A |
 | `--stdin` (read pack from stdin) | Not implemented | Yes | N/A |
 | `--fix-thin` (add bases for thin packs) | Not implemented | Yes | N/A |
 | `--keep` (create .keep file) | Not implemented | Yes | N/A |

@@ -60,6 +60,7 @@ pub mod show_ref;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;
+pub mod verify_pack;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 #[path = "worktree-fuse.rs"]
 pub mod worktree;
