@@ -356,6 +356,30 @@ pub enum WorkflowPhase {
     Decision,
 }
 
+impl WorkflowPhase {
+    /// Every variant of [`WorkflowPhase`] in declaration order, which is
+    /// also the Code UI Phase Workflow execution order
+    /// (Intent → Planning → Execution → Validation → Decision; see
+    /// `docs/improvement/agent.md` Part B).
+    ///
+    /// Useful for tests and validation loops that need to assert a
+    /// property for every phase, and for ordered traversal of the
+    /// workflow pipeline. The fixed-length array makes the enumeration
+    /// size part of the public API: adding a new phase requires
+    /// extending this list in the same patch, which forces every
+    /// caller that pattern-matches on `WorkflowPhase` to be reviewed
+    /// for the new variant.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Intent,
+            Self::Planning,
+            Self::Execution,
+            Self::Validation,
+            Self::Decision,
+        ]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecutionContext {
     pub thread_id: Uuid,
@@ -479,6 +503,38 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// `WorkflowPhase::all()` must enumerate every variant in the
+    /// declaration order, which is also the Code UI Phase Workflow's
+    /// execution order. Exhaustive cross-check pins the snake_case
+    /// serialisation tag for each variant.
+    #[test]
+    fn workflow_phase_all_enumerates_every_variant_in_pipeline_order() {
+        let phases = WorkflowPhase::all();
+        assert_eq!(phases.len(), 5);
+        assert_eq!(
+            phases,
+            [
+                WorkflowPhase::Intent,
+                WorkflowPhase::Planning,
+                WorkflowPhase::Execution,
+                WorkflowPhase::Validation,
+                WorkflowPhase::Decision,
+            ]
+        );
+
+        for phase in WorkflowPhase::all() {
+            let expected = match phase {
+                WorkflowPhase::Intent => "intent",
+                WorkflowPhase::Planning => "planning",
+                WorkflowPhase::Execution => "execution",
+                WorkflowPhase::Validation => "validation",
+                WorkflowPhase::Decision => "decision",
+            };
+            let serialised = serde_json::to_value(phase).unwrap();
+            assert_eq!(serialised, json!(expected));
+        }
+    }
 
     /// `TaskExecutionStatus::all()` must enumerate every variant in
     /// declaration order and return a fixed-length array. The body
