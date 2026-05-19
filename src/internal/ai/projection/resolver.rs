@@ -86,7 +86,14 @@ impl ProjectionResolver {
     }
 }
 
-fn empty_scheduler(thread_id: Uuid) -> SchedulerState {
+/// Construct a stale-marker `SchedulerState` for a thread whose
+/// projection row is missing from the scheduler table.
+///
+/// The returned state has version 0 (so subsequent CAS writes know
+/// they're starting fresh) and every active/selected field cleared.
+/// Exposed at `pub(crate)` so the empty-shape contract is testable
+/// without exercising the full DB load path.
+pub(crate) fn empty_scheduler(thread_id: Uuid) -> SchedulerState {
     SchedulerState {
         thread_id,
         selected_plan_id: None,
@@ -98,5 +105,90 @@ fn empty_scheduler(thread_id: Uuid) -> SchedulerState {
         metadata: None,
         updated_at: chrono::Utc::now(),
         version: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `empty_scheduler(thread_id)` must produce a fully-cleared
+    /// SchedulerState with version=0. Pin the "stale marker" shape
+    /// so the read-side branch in `load_thread_bundle` (which returns
+    /// this when the scheduler row is missing) keeps its contract.
+    #[test]
+    fn empty_scheduler_produces_fully_cleared_state_with_version_zero() {
+        let thread_id = ThreadId::nil();
+        let state = empty_scheduler(thread_id);
+
+        assert_eq!(state.thread_id, thread_id);
+        assert!(state.selected_plan_id.is_none());
+        assert!(state.selected_plan_ids.is_empty());
+        assert!(state.current_plan_heads.is_empty());
+        assert!(state.active_task_id.is_none());
+        assert!(state.active_run_id.is_none());
+        assert!(state.live_context_window.is_empty());
+        assert!(state.metadata.is_none());
+        assert_eq!(state.version, 0);
+    }
+
+    /// `empty_scheduler` threads through the supplied thread_id —
+    /// callers identify the stale row by this id alone.
+    #[test]
+    fn empty_scheduler_uses_supplied_thread_id() {
+        let nil = ThreadId::nil();
+        let other = Uuid::new_v4();
+        assert_eq!(empty_scheduler(nil).thread_id, nil);
+        assert_eq!(empty_scheduler(other).thread_id, other);
+        assert_ne!(empty_scheduler(nil).thread_id, other);
+    }
+
+    /// `empty_scheduler` must always set `version = 0`, regardless of
+    /// the input thread_id. Subsequent CAS writes use this to
+    /// detect "this is a fresh row, not an update".
+    #[test]
+    fn empty_scheduler_always_sets_version_zero() {
+        for raw in [Uuid::nil(), Uuid::new_v4(), Uuid::new_v4()] {
+            assert_eq!(
+                empty_scheduler(raw).version,
+                0,
+                "version must be 0 for thread {raw}",
+            );
+        }
+    }
+
+    /// `empty_scheduler` `updated_at` must be a non-zero timestamp
+    /// (it reads `Utc::now()` at construction). Without this guard,
+    /// a future refactor that uses `Default::default()` for
+    /// `DateTime<Utc>` could silently emit the Unix epoch.
+    #[test]
+    fn empty_scheduler_updated_at_is_not_epoch() {
+        let state = empty_scheduler(Uuid::nil());
+        let epoch = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("valid epoch");
+        assert_ne!(
+            state.updated_at, epoch,
+            "updated_at must reflect now, not the Unix epoch",
+        );
+    }
+
+    /// `ProjectionResolver` is `Clone` so the runtime can hand
+    /// independent handles to the orchestrator's observer + the read
+    /// path. Verified via static type-system check; constructing a
+    /// real `DatabaseConnection` would require sqlite setup beyond
+    /// the scope of this unit test.
+    #[test]
+    fn projection_resolver_is_clone() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<ProjectionResolver>();
+    }
+
+    /// `ThreadBundle` derives `Clone` + `PartialEq`. Verified via
+    /// type-system check; the struct's `thread` and `scheduler`
+    /// fields wrap heavy types whose construction in tests would
+    /// require DB fixtures.
+    #[test]
+    fn thread_bundle_derives_clone_and_partial_eq() {
+        fn assert_clone_eq<T: Clone + PartialEq>() {}
+        assert_clone_eq::<ThreadBundle>();
     }
 }
