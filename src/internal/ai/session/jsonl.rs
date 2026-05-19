@@ -337,3 +337,179 @@ fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde
 pub fn session_events_path(session_root: &Path) -> PathBuf {
     session_root.join(SESSION_EVENTS_FILE)
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// `session_events_path` + `events_path()` must produce
+    /// `<root>/events.jsonl`. Pin the layout — the migrator and
+    /// `code resume` rely on it.
+    #[test]
+    fn events_path_appends_constant_filename() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let expected = tmp.path().join(SESSION_EVENTS_FILE);
+        assert_eq!(store.events_path(), expected);
+        assert_eq!(session_events_path(tmp.path()), expected);
+        assert_eq!(SESSION_EVENTS_FILE, "events.jsonl");
+    }
+
+    /// `has_events()` returns `false` for a missing JSONL file (no
+    /// directory created yet).
+    #[test]
+    fn has_events_returns_false_for_missing_file() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().join("never-exists"));
+        assert!(!store.has_events().expect("has_events ok"));
+    }
+
+    /// `has_events()` returns `false` for an empty existing file
+    /// (metadata.len() == 0).
+    #[test]
+    fn has_events_returns_false_for_empty_file() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        std::fs::write(store.events_path(), b"").expect("write empty");
+        assert!(!store.has_events().expect("has_events ok"));
+    }
+
+    /// `has_events()` returns `true` after an `append`.
+    #[test]
+    fn append_then_has_events_returns_true() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let state = SessionState::new("/tmp/work");
+        store
+            .append(&SessionEvent::snapshot(state))
+            .expect("append ok");
+        assert!(store.has_events().expect("has_events ok"));
+    }
+
+    /// `append` + `load_events` round-trip: one snapshot in, one
+    /// snapshot out, equal state.
+    #[test]
+    fn append_load_events_roundtrips_single_snapshot() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let state = SessionState::new("/tmp/work");
+        let event = SessionEvent::snapshot(state.clone());
+        store.append(&event).expect("append ok");
+
+        let loaded = store.load_events().expect("load ok");
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0] {
+            SessionEvent::SessionSnapshot(snap) => {
+                assert_eq!(snap.state, state);
+            }
+            other => panic!("expected SessionSnapshot, got {other:?}"),
+        }
+    }
+
+    /// `load_state()` returns the latest snapshot when multiple are
+    /// appended. The replay semantics are last-write-wins for
+    /// snapshot events.
+    #[test]
+    fn load_state_returns_latest_snapshot_after_multiple_appends() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+
+        let first = SessionState::new("/first/work");
+        store
+            .append(&SessionEvent::snapshot(first))
+            .expect("first append");
+
+        let second = SessionState::new("/second/work");
+        store
+            .append(&SessionEvent::snapshot(second.clone()))
+            .expect("second append");
+
+        let loaded = store.load_state().expect("load_state ok").expect("present");
+        assert_eq!(loaded, second);
+    }
+
+    /// `load_state()` returns `None` when the JSONL file is missing.
+    #[test]
+    fn load_state_returns_none_when_no_events_file() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().join("missing-dir"));
+        let loaded = store.load_state().expect("load ok");
+        assert!(loaded.is_none());
+    }
+
+    /// `apply_to`: snapshot variant replaces the current state;
+    /// non-snapshot variants (context_frame / compaction / memory
+    /// anchor / goal) are explicit no-ops in the legacy state replay.
+    #[test]
+    fn apply_to_snapshot_replaces_state_other_variants_are_noops() {
+        let mut state: Option<SessionState> = None;
+        SessionEvent::snapshot(SessionState::new("/tmp/from-snapshot")).apply_to(&mut state);
+        assert!(state.is_some(), "snapshot must populate state");
+        let snapshot_state = state.clone().expect("state populated");
+
+        // A second snapshot must replace.
+        SessionEvent::snapshot(SessionState::new("/tmp/from-snapshot-2")).apply_to(&mut state);
+        let after_second = state.as_ref().expect("present");
+        assert_ne!(after_second, &snapshot_state);
+    }
+
+    /// `parse_session_event_value`: missing `kind` field → Ok(None)
+    /// (the value is silently skipped, not an error).
+    #[test]
+    fn parse_session_event_value_missing_kind_returns_none() {
+        let value: Value = serde_json::json!({"payload": {}});
+        let result = parse_session_event_value(value).expect("call ok");
+        assert!(result.is_none());
+    }
+
+    /// `parse_session_event_value`: unknown `kind` string → Ok(None)
+    /// (forward-compat skip-and-warn rule from the doc).
+    #[test]
+    fn parse_session_event_value_unknown_kind_returns_none() {
+        let value: Value =
+            serde_json::json!({"kind": "future_event_type", "payload": {"any": "shape"}});
+        let result = parse_session_event_value(value).expect("call ok");
+        assert!(result.is_none());
+    }
+
+    /// `parse_session_event_value`: `session_snapshot` round-trips
+    /// through the envelope wire format.
+    #[test]
+    fn parse_session_event_value_session_snapshot_parses_envelope() {
+        let event = SessionEvent::snapshot(SessionState::new("/tmp/work"));
+        let value = serde_json::to_value(&event).expect("serialize");
+        let parsed = parse_session_event_value(value)
+            .expect("parse ok")
+            .expect("Some");
+        assert!(matches!(parsed, SessionEvent::SessionSnapshot(_)));
+    }
+
+    /// `SessionEvent::event_kind` for SessionSnapshot returns the
+    /// canonical `"session_snapshot"` discriminator — pins the
+    /// Event-trait surface used by audit log emitters.
+    #[test]
+    fn session_event_kind_pins_session_snapshot_string() {
+        let event = SessionEvent::snapshot(SessionState::new("/tmp/work"));
+        assert_eq!(event.event_kind(), "session_snapshot");
+    }
+
+    /// `SessionEvent::event_summary` for SessionSnapshot includes the
+    /// session id and message count so audit consumers can correlate.
+    #[test]
+    fn session_event_summary_includes_session_id_and_message_count() {
+        let state = SessionState::new("/tmp/work");
+        let session_id = state.id.clone();
+        let event = SessionEvent::snapshot(state);
+        let summary = event.event_summary();
+        assert!(
+            summary.contains(&session_id),
+            "summary must include session id; got {summary}",
+        );
+        assert!(
+            summary.contains("0 message(s)"),
+            "fresh session has 0 messages; got {summary}",
+        );
+    }
+}
