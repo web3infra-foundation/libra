@@ -170,7 +170,7 @@
 |-------|-----------|---------|----------|
 | Phase 0 Contract Stabilization | 100% | ~60% | `Phase0Input` struct 是否在 contracts.rs 完整定义待核 |
 | Phase 1 Wave 1A（Runtime contract + dagrs 0.8.1） | 100% | **100%** | — |
-| Phase 1 Wave 1B（TaskExecutor impl 收敛） | 100% | **~70%** | `CodexTaskExecutor` / `CompletionTaskExecutor<M>` 的 schema + `impl TaskExecutor` 已在 `runtime/task_executors.rs` 落地（v0.17.579，stub bodies 返回自识别 `TaskExecutionError::Provider` error）；`runtime/phase0.rs` `write_intent` 已落地（v0.17.574，函数体已 wire），`runtime/phase1.rs` / `phase2.rs` / `revision.rs` schema 已落地（v0.17.575..v0.17.577）。剩余 ~30%：Codex WebSocket attempt loop / completion-model + tool-loop / formal-write 函数体的 wiring follow-up |
+| Phase 1 Wave 1B（TaskExecutor impl 收敛） | 100% | **~75%** | `CodexTaskExecutor` / `CompletionTaskExecutor<M>` 的 schema + `impl TaskExecutor` 已在 `runtime/task_executors.rs` 落地（v0.17.579，stub bodies 返回自识别 `TaskExecutionError::Provider` error）；`runtime/phase0.rs::write_intent` 已落地（v0.17.574，函数体 wire 到 `intentspec::persistence::persist_intentspec`）；`runtime/phase1.rs::write_plan_set` 函数体已落地（v0.17.580，通过 `orchestrator::persistence::write_plan_set_with_outcome` 桥接到 `create_plan_set_revision`）；`runtime/phase2.rs` / `revision.rs` schema 已落地（v0.17.576..v0.17.577）。剩余 ~25%：Codex WebSocket attempt loop / completion-model + tool-loop（task_executors body）/ `write_attempt_*` / `handle_modify_request` / `advance_scheduler` 函数体的 wiring follow-up |
 | Phase 1 Wave 1C（claudecode 硬删除） | 100% | **100%** | — |
 | Phase 2 Thread ID + Projection Resolver | 100% | ~70% | execution → barrier → test 两阶段语义、ExecutionReport / ExecutionTerminated 显式消费待核 |
 | Phase 3 Code UI Source Of Truth | 100% | ~40% | `CodeUiCommandAdapter` 已存在；完整 unification（typed delta / gap recovery）仍是后续 |
