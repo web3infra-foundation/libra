@@ -174,6 +174,17 @@ pub enum ObjectiveKind {
     Analysis,
 }
 
+impl ObjectiveKind {
+    /// Stable lowercase identifier matching the `#[serde(rename_all =
+    /// "lowercase")]` tag values.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            ObjectiveKind::Implementation => "implementation",
+            ObjectiveKind::Analysis => "analysis",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TouchHints {
     #[serde(default)]
@@ -239,6 +250,20 @@ pub enum CheckKind {
     Command,
     TestSuite,
     Policy,
+}
+
+impl CheckKind {
+    /// Stable camelCase identifier matching the `#[serde(rename_all =
+    /// "camelCase")]` tag values. Note that `TestSuite` serialises as
+    /// `"testSuite"` (lowercase first letter, camel-cased boundary),
+    /// not `"test_suite"`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            CheckKind::Command => "command",
+            CheckKind::TestSuite => "testSuite",
+            CheckKind::Policy => "policy",
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for CheckKind {
@@ -673,13 +698,40 @@ pub struct Lifecycle {
     pub change_log: Vec<ChangeLogEntry>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LifecycleStatus {
     Draft,
     Active,
     Deprecated,
     Closed,
+}
+
+impl LifecycleStatus {
+    /// Stable lowercase identifier matching the `#[serde(rename_all =
+    /// "lowercase")]` tag values.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            LifecycleStatus::Draft => "draft",
+            LifecycleStatus::Active => "active",
+            LifecycleStatus::Deprecated => "deprecated",
+            LifecycleStatus::Closed => "closed",
+        }
+    }
+
+    /// `true` only for `Active` — the single open-and-in-progress state.
+    /// `Draft` is open but not yet active; `Deprecated` / `Closed` are
+    /// terminal.
+    pub fn is_active(&self) -> bool {
+        matches!(self, LifecycleStatus::Active)
+    }
+
+    /// `true` for `Deprecated` and `Closed` — the terminal states that
+    /// stop the loop. Phase 4 decision routing uses this to gate
+    /// whether a thread can still accept new work.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, LifecycleStatus::Deprecated | LifecycleStatus::Closed)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1202,5 +1254,88 @@ mod tests {
         assert!(RiskLevel::High.is_high());
         assert!(!RiskLevel::Medium.is_high());
         assert!(!RiskLevel::Low.is_high());
+    }
+
+    /// `LifecycleStatus::variant_name` matches serde tag for all 4
+    /// variants; `is_active` flags only `Active`; `is_terminal` flags
+    /// `Deprecated` + `Closed`.
+    #[test]
+    fn lifecycle_status_variant_name_active_and_terminal_predicates() {
+        for (status, expected) in [
+            (LifecycleStatus::Draft, "draft"),
+            (LifecycleStatus::Active, "active"),
+            (LifecycleStatus::Deprecated, "deprecated"),
+            (LifecycleStatus::Closed, "closed"),
+        ] {
+            assert_eq!(status.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+
+        // Active is the only active state.
+        assert!(LifecycleStatus::Active.is_active());
+        for status in [
+            LifecycleStatus::Draft,
+            LifecycleStatus::Deprecated,
+            LifecycleStatus::Closed,
+        ] {
+            assert!(!status.is_active(), "{status:?} must not be active");
+        }
+
+        // Terminal states: Deprecated + Closed.
+        assert!(LifecycleStatus::Deprecated.is_terminal());
+        assert!(LifecycleStatus::Closed.is_terminal());
+        assert!(!LifecycleStatus::Draft.is_terminal());
+        assert!(!LifecycleStatus::Active.is_terminal());
+
+        // active + terminal partition: a state can't be both.
+        for status in [
+            LifecycleStatus::Draft,
+            LifecycleStatus::Active,
+            LifecycleStatus::Deprecated,
+            LifecycleStatus::Closed,
+        ] {
+            assert!(
+                !(status.is_active() && status.is_terminal()),
+                "{status:?} cannot be both active and terminal",
+            );
+        }
+    }
+
+    /// `ObjectiveKind::variant_name` matches the serde tag for both
+    /// variants. Used by audit log emission and the `Intent::
+    /// has_implementation_objectives` filter.
+    #[test]
+    fn objective_kind_variant_name_matches_serde_tag() {
+        for (kind, expected) in [
+            (ObjectiveKind::Implementation, "implementation"),
+            (ObjectiveKind::Analysis, "analysis"),
+        ] {
+            assert_eq!(kind.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `CheckKind::variant_name` matches the camelCase serde tag —
+    /// specifically `TestSuite -> "testSuite"`, not `"test_suite"`.
+    /// This is the only enum in this module using camelCase tags.
+    #[test]
+    fn check_kind_variant_name_matches_camel_case_serde_tag() {
+        for (kind, expected) in [
+            (CheckKind::Command, "command"),
+            (CheckKind::TestSuite, "testSuite"),
+            (CheckKind::Policy, "policy"),
+        ] {
+            assert_eq!(kind.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
     }
 }
