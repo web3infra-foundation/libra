@@ -107,6 +107,8 @@ The resulting operation log contained a succeeded `branch` operation.
 - The B-side command integration requirement is satisfied by `branch create`.
 - The operation tables are now available for both fresh repositories and existing
   repositories opened after this change.
+- `op log --command` now applies filtering before pagination and reports the
+  filtered `total`, so page boundaries remain stable for command-specific views.
 - The earlier compile-shape issues in `op.rs` are resolved: no dependency on
   `util::repo_id`, no `Head::Commit`, and restore graph loading handles the
   service's `Option<OperationGraphRecord>` return shape.
@@ -116,6 +118,3 @@ The resulting operation log contained a succeeded `branch` operation.
 - `op restore` currently restores HEAD and branch refs present in the captured
   operation view. It does not prune refs that exist in the current repository but
   are absent from the target view.
-- `op log --command` filters the current page of operation results in memory.
-  Its JSON `total` reports the number of entries shown after that page-level
-  filter, not a database-level count of all matching operations.
