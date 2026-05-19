@@ -33,7 +33,7 @@ use crate::{
 };
 
 fn is_internal_switch_target(name: &str) -> bool {
-    name == repo_branch::INTENT_BRANCH
+    repo_branch::is_libra_internal_branch(name)
 }
 
 const SWITCH_EXAMPLES: &str = "\

@@ -12,7 +12,7 @@ use crate::{
     },
     info_println,
     internal::{
-        branch::{Branch, BranchStoreError, INTENT_BRANCH},
+        branch::{self as repo_branch, Branch, BranchStoreError},
         head::Head,
     },
     utils::{
@@ -216,17 +216,15 @@ async fn run_checkout(
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
     if let Some(ref branch_name) = args.branch
-        && branch_name == INTENT_BRANCH
+        && repo_branch::is_libra_internal_branch(branch_name)
     {
-        return Err(CheckoutError::CheckingOutBranchBlocked(
-            INTENT_BRANCH.to_string(),
-        ));
+        return Err(CheckoutError::CheckingOutBranchBlocked(branch_name.clone()));
     }
     if let Some(ref new_branch_name) = args.new_branch
-        && new_branch_name == INTENT_BRANCH
+        && repo_branch::is_libra_internal_branch(new_branch_name)
     {
         return Err(CheckoutError::CreatingBranchBlocked(
-            INTENT_BRANCH.to_string(),
+            new_branch_name.clone(),
         ));
     }
 
@@ -350,9 +348,9 @@ async fn switch_branch_with_output(
     branch_name: &str,
     output: &OutputConfig,
 ) -> Result<ObjectHash, CheckoutError> {
-    if branch_name == INTENT_BRANCH {
+    if repo_branch::is_libra_internal_branch(branch_name) {
         return Err(CheckoutError::SwitchingToBranchBlocked(
-            INTENT_BRANCH.to_string(),
+            branch_name.to_string(),
         ));
     }
     let target_branch = Branch::find_branch_result(branch_name, None)
