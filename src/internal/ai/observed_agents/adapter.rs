@@ -267,4 +267,92 @@ mod tests {
             "adapter for 'Gemini' is preview-only and not yet implemented",
         );
     }
+
+    /// `as_db_str` produces stable snake_case identifiers for every
+    /// variant. Pin the 7 strings explicitly — downstream tooling
+    /// joins on the `agent_session.agent_kind` column, so a rename
+    /// would break sessions persisted by older binaries.
+    #[test]
+    fn agent_kind_as_db_str_pins_seven_snake_case_strings() {
+        for (kind, expected) in [
+            (AgentKind::ClaudeCode, "claude_code"),
+            (AgentKind::Cursor, "cursor"),
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Gemini, "gemini"),
+            (AgentKind::OpenCode, "opencode"),
+            (AgentKind::Copilot, "copilot"),
+            (AgentKind::FactoryAi, "factory_ai"),
+        ] {
+            assert_eq!(kind.as_db_str(), expected);
+        }
+    }
+
+    /// `as_cli_slug` produces hyphenated strings (different from DB
+    /// form for the two two-word agents). Pin all 7 so a rename can
+    /// be reviewed at this gate.
+    #[test]
+    fn agent_kind_as_cli_slug_pins_seven_hyphenated_strings() {
+        for (kind, expected) in [
+            (AgentKind::ClaudeCode, "claude-code"),
+            (AgentKind::Cursor, "cursor"),
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Gemini, "gemini"),
+            (AgentKind::OpenCode, "opencode"),
+            (AgentKind::Copilot, "copilot"),
+            (AgentKind::FactoryAi, "factory-ai"),
+        ] {
+            assert_eq!(kind.as_cli_slug(), expected);
+        }
+    }
+
+    /// `from_cli_slug` accepts the documented short-form aliases:
+    /// `"claude"` → ClaudeCode, `"open-code"` → OpenCode,
+    /// `"factory"` → FactoryAi. Pin them all so a refactor that
+    /// tightens the matcher gets caught.
+    #[test]
+    fn agent_kind_from_cli_slug_accepts_short_form_aliases() {
+        assert_eq!(
+            AgentKind::from_cli_slug("claude"),
+            Some(AgentKind::ClaudeCode),
+        );
+        assert_eq!(
+            AgentKind::from_cli_slug("open-code"),
+            Some(AgentKind::OpenCode),
+        );
+        assert_eq!(
+            AgentKind::from_cli_slug("factory"),
+            Some(AgentKind::FactoryAi),
+        );
+    }
+
+    /// `AgentKind::all()` returns exactly the 7 documented variants
+    /// in registration order. Adding an 8th variant must force a
+    /// test update.
+    #[test]
+    fn agent_kind_all_returns_seven_variants_in_registration_order() {
+        let all = AgentKind::all();
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[0], AgentKind::ClaudeCode);
+        assert_eq!(all[6], AgentKind::FactoryAi);
+
+        // All 7 must be distinct via HashSet.
+        use std::collections::HashSet;
+        let set: HashSet<AgentKind> = all.iter().copied().collect();
+        assert_eq!(set.len(), 7);
+    }
+
+    /// `AgentStability` serde-serialises as snake_case — the
+    /// `libra agent doctor --json` public CLI contract depends on
+    /// these strings. Pin both variants.
+    #[test]
+    fn agent_stability_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AgentStability::Stable).unwrap(),
+            "\"stable\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentStability::Preview).unwrap(),
+            "\"preview\"",
+        );
+    }
 }
