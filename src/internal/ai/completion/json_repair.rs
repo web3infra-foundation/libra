@@ -416,15 +416,80 @@ fn normalize_smart_quotes(input: &str) -> Option<String> {
     {
         return None;
     }
-    let normalized = input
-        .chars()
-        .map(|ch| match ch {
-            '“' | '”' | '„' | '‟' => '"',
-            '‘' | '’' | '‚' | '‛' => '\'',
-            other => other,
-        })
-        .collect();
-    Some(normalized)
+
+    // Track which kind of JSON string the cursor is currently inside so smart
+    // quotes nested in legitimate `"…"` string literals stay verbatim while
+    // smart quotes used as the outer delimiters (`{"a": “v”}`) are still
+    // promoted to ASCII `"` and matched as their own terminators. Without
+    // this guard the agent.md 2026-05-04 follow-up (c) bug surfaces: an LLM
+    // emits `"He said “hi”"` and we silently rewrite the literal smart quotes
+    // inside the string, corrupting the persisted text payload.
+    let mut output = String::with_capacity(input.len());
+    let mut in_literal_string = false;
+    let mut in_smart_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for ch in input.chars() {
+        if in_literal_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_literal_string = false;
+            }
+            continue;
+        }
+
+        if in_smart_string {
+            match ch {
+                '“' | '”' | '„' | '‟' => {
+                    output.push('"');
+                    in_smart_string = false;
+                    changed = true;
+                }
+                '‘' | '’' | '‚' | '‛' => {
+                    // Smart single quotes inside a smart-quoted string are
+                    // legitimate content (e.g. apostrophes); preserve them
+                    // verbatim — they do not terminate the string.
+                    output.push(ch);
+                }
+                '"' => {
+                    // An ASCII `"` inside a smart-quote-delimited string
+                    // would have been escaped by the producer if it were
+                    // content; treat it as the intended terminator.
+                    output.push(ch);
+                    in_smart_string = false;
+                }
+                _ => output.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                output.push(ch);
+                in_literal_string = true;
+            }
+            '“' | '”' | '„' | '‟' => {
+                output.push('"');
+                in_smart_string = true;
+                changed = true;
+            }
+            '‘' | '’' | '‚' | '‛' => {
+                // Smart single quotes outside any string become ASCII `'`
+                // so the downstream `single_quoted_strings_to_double` repair
+                // step can recognise them. They do not open a JSON string.
+                output.push('\'');
+                changed = true;
+            }
+            other => output.push(other),
+        }
+    }
+
+    if changed { Some(output) } else { None }
 }
 
 fn strip_json_comments(input: &str) -> Option<String> {
@@ -1059,5 +1124,64 @@ mod tests {
         let json = serde_json::to_string(&outcome).unwrap();
         let back: JsonRepairOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(back, outcome);
+    }
+
+    /// agent.md 2026-05-04 follow-up (c): smart quotes nested inside a
+    /// legitimate `"..."` JSON string must NOT be rewritten — they are
+    /// content, not delimiters. Before the in_string guard the LLM payload
+    /// `{"q": "He said “hi”"}` ended up persisted as
+    /// `{"q": "He said "hi""}` which is unparseable.
+    #[test]
+    fn normalize_smart_quotes_preserves_smart_quotes_inside_literal_string() {
+        // Smart quotes here are entirely inside the literal `"..."` value,
+        // so no normalization is needed; the helper signals "nothing to do"
+        // by returning `None` and the caller keeps the original payload —
+        // crucially, with the smart quotes intact.
+        let input = "{\"q\": \"He said \u{201C}hi\u{201D}\"}";
+        assert!(
+            normalize_smart_quotes(input).is_none(),
+            "smart quotes that only appear inside a literal string must not \
+             trigger a rewrite (the smart quotes are content, not delimiters)",
+        );
+        // The untouched payload still parses and the smart quotes survive
+        // the round-trip.
+        let parsed: serde_json::Value = serde_json::from_str(input).unwrap();
+        assert_eq!(parsed["q"], "He said \u{201C}hi\u{201D}");
+    }
+
+    /// Smart quotes used as the top-level JSON string delimiters (a common
+    /// LLM mistake) must still be promoted to ASCII `"` so the payload
+    /// parses — the in_string guard tracks that the smart-opened string is
+    /// terminated by the matching smart quote.
+    #[test]
+    fn normalize_smart_quotes_promotes_smart_quote_delimiters_to_ascii() {
+        let input = "{\u{201C}a\u{201D}: \u{201C}value\u{201D}}";
+        let normalized =
+            normalize_smart_quotes(input).expect("smart quotes present so a copy is returned");
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(parsed["a"], "value");
+    }
+
+    /// Smart single quotes outside any string become ASCII `'` so the
+    /// downstream single-quote-to-double-quote repair step still triggers.
+    /// Inside a smart-quoted string they are treated as content (apostrophe).
+    #[test]
+    fn normalize_smart_quotes_handles_smart_single_quotes() {
+        // Outside a string: smart single quotes become ASCII so the next
+        // repair step can convert them to double quotes.
+        let bare = "{\u{2018}a\u{2019}: 1}";
+        let normalized = normalize_smart_quotes(bare).expect("changed");
+        assert!(
+            normalized.contains('\''),
+            "expected ASCII single quotes, got `{normalized}`",
+        );
+
+        // Inside a smart-quoted string (the apostrophe in "don\u{2019}t"
+        // is content): the single quote must stay as a smart quote so the
+        // string content is preserved.
+        let with_apostrophe = "{\u{201C}a\u{201D}: \u{201C}don\u{2019}t\u{201D}}";
+        let normalized = normalize_smart_quotes(with_apostrophe).expect("changed");
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(parsed["a"], "don\u{2019}t");
     }
 }
