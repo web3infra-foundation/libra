@@ -58,6 +58,39 @@ pub struct PlanWriteOutcome {
     pub plan_id_by_task_id: std::collections::HashMap<uuid::Uuid, String>,
 }
 
+/// Persist a new plan set as the **formal write** for Phase 1.
+///
+/// Bridges into
+/// [`crate::internal::ai::orchestrator::persistence::write_plan_set_with_outcome`]
+/// so the orchestrator's existing `PersistedPlanRevision` /
+/// `step_id_map` plumbing stays where it lives today, while the public
+/// contract surface (this function + [`PlanWriteOutcome`]) is owned by
+/// the Runtime. Once the orchestrator's persistence layer is folded into
+/// this module, the bridge disappears.
+///
+/// # Errors
+///
+/// Returns the underlying
+/// [`crate::internal::ai::orchestrator::types::OrchestratorError`]
+/// unchanged so callers can route on the existing error variants without
+/// a new typed-error wrapper.
+pub async fn write_plan_set(
+    mcp_server: &std::sync::Arc<crate::internal::ai::mcp::server::LibraMcpServer>,
+    intent_id: &str,
+    parent_execution_plan_id: Option<&str>,
+    parent_test_plan_id: Option<&str>,
+    plan: &crate::internal::ai::orchestrator::types::ExecutionPlanSpec,
+) -> Result<PlanWriteOutcome, crate::internal::ai::orchestrator::types::OrchestratorError> {
+    crate::internal::ai::orchestrator::persistence::write_plan_set_with_outcome(
+        mcp_server,
+        intent_id,
+        parent_execution_plan_id,
+        parent_test_plan_id,
+        plan,
+    )
+    .await
+}
+
 impl PlanWriteOutcome {
     /// Returns the (execution, test) plan id pair as the canonical
     /// scheduler-facing ordering.

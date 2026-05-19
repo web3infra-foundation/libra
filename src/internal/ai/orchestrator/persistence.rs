@@ -3034,6 +3034,40 @@ async fn create_plan_set_revision(
     build_plan_set(plan, execution, test)
 }
 
+/// Wave 1B bridge: persist a new plan set and return the result as
+/// [`crate::internal::ai::runtime::phase1::PlanWriteOutcome`] so the
+/// Runtime's [`phase1::write_plan_set`](crate::internal::ai::runtime::phase1::write_plan_set)
+/// entry point can delegate here without exposing
+/// [`PersistedPlanSet`]'s private fields.
+///
+/// This is the transitional landing pattern documented at
+/// `runtime/phase1.rs`: the Runtime owns the public contract surface
+/// (signature + outcome type); the orchestrator owns the
+/// `PersistedPlanRevision` / `step_id_map` plumbing. Once the orchestrator's
+/// persistence layer is folded into `runtime/phase1.rs`, this bridge
+/// disappears.
+pub(crate) async fn write_plan_set_with_outcome(
+    mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    parent_execution_plan_id: Option<&str>,
+    parent_test_plan_id: Option<&str>,
+    plan: &ExecutionPlanSpec,
+) -> Result<crate::internal::ai::runtime::phase1::PlanWriteOutcome, OrchestratorError> {
+    let plan_set = create_plan_set_revision(
+        mcp_server,
+        intent_id,
+        parent_execution_plan_id,
+        parent_test_plan_id,
+        plan,
+    )
+    .await?;
+    Ok(crate::internal::ai::runtime::phase1::PlanWriteOutcome {
+        execution_plan_id: plan_set.execution.plan_id,
+        test_plan_id: plan_set.test.plan_id,
+        plan_id_by_task_id: plan_set.plan_id_by_task_id,
+    })
+}
+
 async fn create_plan_revision_for_role(
     mcp_server: &Arc<LibraMcpServer>,
     intent_id: &str,
