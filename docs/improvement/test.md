@@ -212,7 +212,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 - **现状 ✅**：tool registry 已按 `--context dev|review|research` / intent 过滤覆盖；approval policy 已在 Code UI fake fixture 矩阵中覆盖 `never` / `on-failure` / `on-request` / `untrusted` / `allow-all`；network deny 由 orchestrator policy 与 `web_search` runtime 单测覆盖。
 - **缺口**：无（5.9 已关闭）。新增 tool 或 policy enum 时必须同步扩展 ACL / approval / network-deny 断言。
 - **优先级**：已完成。
-- **测试位置**：**L1 已覆盖** `tests/code_tool_acl_test.rs`；**L2 已覆盖** `tests/code_ui_remote_approval_matrix.rs`；network deny 由 `src/internal/ai/orchestrator/policy.rs` 的 `test_shell_network_policy_denies_curl_like_commands` / `test_web_search_honors_network_policy` 与 `src/internal/ai/tools/handlers/web_search.rs::web_search_requires_network_enabled_runtime` 覆盖。
+- **测试位置**：**L1 已覆盖** `tests/code_tool_acl_test.rs`；**L2 已覆盖** `tests/code_ui_remote_approval_matrix.rs`；network deny 由 `src/internal/ai/orchestrator/policy.rs` 的 `test_network_policy_rejected`（policy.rs:1001，shell `curl https://example.com` → `network-policy-deny`）/ `test_web_search_honors_network_policy`（policy.rs:1013）/ `test_network_policy_rejects_shell_escalation`（policy.rs:1094）与 `src/internal/ai/tools/handlers/web_search.rs::web_search_requires_network_enabled_runtime`（web_search.rs:595）覆盖。
 
 ### 5.10 Apply-Patch 与文件生成(fake)
 
