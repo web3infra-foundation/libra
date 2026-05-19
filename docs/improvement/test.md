@@ -198,7 +198,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 - **现状 ✅**：`code_ui_scenarios.rs` 9 条 browser 场景，覆盖 attach/submit/detach、同 `clientId` reload 续租、`--browser-control off` attach 的 `BROWSER_CONTROL_DISABLED` 顺序、过期 token 写入后释放 snapshot、oversize、cancel、unknown interaction、TUI reclaim、second-browser conflict。
 - **缺口**：无（5.7 已关闭）。
 - **优先级**：已完成。
-- **测试位置**：**L2 已覆盖** `browser_controller_attach_submit_detach_roundtrip`、`browser_same_client_reconnect_renews_existing_lease`、`browser_attach_rejected_when_control_disabled`、`browser_expired_controller_token_is_rejected_and_releases_snapshot`、`browser_oversized_message_returns_payload_too_large`、`browser_cancel_turn_aborts_in_flight_turn_without_automation_token`、`browser_unknown_interaction_id_is_rejected_without_state_change`、`local_tui_reclaim_invalidates_browser_lease`、`second_browser_attach_with_different_client_returns_conflict`。
+- **测试位置**：**L2 已覆盖**（全部在 `tests/code_ui_scenarios.rs`，`--features test-provider` 下运行）`browser_static_app_loads_and_submit_updates_snapshot`（:192，attach + submit + detach roundtrip 现在的实际入口）、`browser_same_client_reconnect_renews_existing_lease`（:242）、`browser_attach_rejected_when_control_disabled`（:278）、`browser_expired_controller_token_is_rejected_and_releases_snapshot`（:299）、`browser_oversized_message_returns_payload_too_large`（:330）、`browser_cancel_turn_aborts_in_flight_turn_without_automation_token`（:356）、`browser_unknown_interaction_id_is_rejected_without_state_change`（:426）、`local_tui_reclaim_invalidates_browser_lease`（:515）、`second_browser_attach_with_different_client_returns_conflict`（:554）。
 
 ### 5.8 TUI 渲染快照
 
