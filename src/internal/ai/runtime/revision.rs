@@ -107,6 +107,101 @@ impl RevisionChainEntry {
     }
 }
 
+/// User-facing payload for a "modify the current revision" request.
+///
+/// `kind` and `logical_id` identify which chain entry the modify is
+/// against (they must match the chain's existing identity — see
+/// [`handle_modify_request`] for the rule). `reason` is a free-form
+/// human-readable string that gets audited alongside the resulting
+/// formal-write event so downstream review can reconstruct *why* the
+/// modify was requested.
+///
+/// **Why not include the modify *payload* here yet:** the actual
+/// modification (which fields of `IntentSpec` / `ExecutionPlanSpec` change
+/// between revisions) is per-`kind` and not yet uniformly typed. Future
+/// patches will either (a) add `kind`-specific payload variants here, or
+/// (b) keep this type as the audit envelope and pair it with a separate
+/// payload argument at the call site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModifyRequest {
+    /// Which chain this modify targets — must match the input
+    /// [`RevisionChainEntry::kind`] passed to [`handle_modify_request`].
+    pub kind: RevisionKind,
+    /// Stable logical entity id of the chain — must match the input
+    /// [`RevisionChainEntry::logical_id`].
+    pub logical_id: Uuid,
+    /// Free-form human-readable rationale for the modify. Audited
+    /// verbatim (subject to [`SecretRedactor`](crate::internal::ai::runtime::hardening::SecretRedactor)
+    /// at the audit-write boundary, not here).
+    pub reason: String,
+}
+
+/// Errors that prevent [`handle_modify_request`] from producing a valid
+/// next-revision skeleton.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ModifyRequestError {
+    /// The request's `kind` doesn't match the chain's `kind`. Chains
+    /// cannot change kind — a Plan modify request cannot retarget a
+    /// Test-Plan chain, etc.
+    #[error(
+        "modify request kind mismatch: request says {request_kind:?} but chain is {chain_kind:?}"
+    )]
+    KindMismatch {
+        request_kind: RevisionKind,
+        chain_kind: RevisionKind,
+    },
+    /// The request's `logical_id` doesn't match the chain's
+    /// `logical_id`. Each chain corresponds to one logical entity; a
+    /// modify request must target that entity explicitly.
+    #[error(
+        "modify request logical_id mismatch: request {request_logical_id} ≠ chain {chain_logical_id}"
+    )]
+    LogicalIdMismatch {
+        request_logical_id: Uuid,
+        chain_logical_id: Uuid,
+    },
+}
+
+/// Coordinator for the modify path of a revision chain.
+///
+/// Validates that the `request` actually targets the supplied `previous`
+/// chain entry (kind + logical_id must match), then returns the next
+/// revision's skeleton via [`derive_next_revision_skeleton`]. The
+/// caller is responsible for invoking the appropriate Phase 0 / Phase 1
+/// formal-write helper to persist the skeleton; this function does NOT
+/// touch the persistence layer (mirrors the design rule "the formal-write
+/// helper owns persisted-id assignment" called out at
+/// [`derive_next_revision_skeleton`]).
+///
+/// # Errors
+///
+/// Returns [`ModifyRequestError::KindMismatch`] or
+/// [`ModifyRequestError::LogicalIdMismatch`] if the request targets a
+/// different chain than `previous` describes — these are caller bugs and
+/// the function fails-closed to prevent cross-chain id leakage.
+pub fn handle_modify_request(
+    previous: &RevisionChainEntry,
+    previous_persisted_id: String,
+    request: &ModifyRequest,
+) -> Result<RevisionChainEntry, ModifyRequestError> {
+    if request.kind != previous.kind {
+        return Err(ModifyRequestError::KindMismatch {
+            request_kind: request.kind,
+            chain_kind: previous.kind,
+        });
+    }
+    if request.logical_id != previous.logical_id {
+        return Err(ModifyRequestError::LogicalIdMismatch {
+            request_logical_id: request.logical_id,
+            chain_logical_id: previous.logical_id,
+        });
+    }
+    Ok(derive_next_revision_skeleton(
+        previous,
+        previous_persisted_id,
+    ))
+}
+
 /// Derive the metadata for the **next** revision in a chain, given the
 /// previous link's own persisted id.
 ///
@@ -262,5 +357,92 @@ mod tests {
         assert!(head.is_first());
         // The new skeleton is a continuation.
         assert!(next.is_continuation());
+    }
+
+    /// Happy path: request targets the matching chain → returns Ok with
+    /// the derived skeleton. Equivalent to calling
+    /// `derive_next_revision_skeleton` directly.
+    #[test]
+    fn handle_modify_request_matching_chain_derives_next_skeleton() {
+        let logical_id = Uuid::new_v4();
+        let previous = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id,
+        };
+        let request = ModifyRequest {
+            kind: RevisionKind::ExecutionPlan,
+            logical_id,
+            reason: "user requested narrower scope".to_string(),
+        };
+
+        let next = handle_modify_request(&previous, "plan-rev-1".to_string(), &request)
+            .expect("matching request should derive next skeleton");
+
+        assert_eq!(next.revision, 2);
+        assert_eq!(next.previous_id.as_deref(), Some("plan-rev-1"));
+        assert_eq!(next.kind, RevisionKind::ExecutionPlan);
+        assert_eq!(next.logical_id, logical_id);
+    }
+
+    /// Cross-kind modify request: chain is `ExecutionPlan` but the
+    /// request targets `TestPlan`. Must fail-closed with
+    /// `KindMismatch` rather than silently retarget — chains cannot
+    /// change kind across revisions.
+    #[test]
+    fn handle_modify_request_rejects_kind_mismatch() {
+        let logical_id = Uuid::new_v4();
+        let previous = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: Some("plan-rev-1".to_string()),
+            revision: 2,
+            logical_id,
+        };
+        let request = ModifyRequest {
+            kind: RevisionKind::TestPlan,
+            logical_id,
+            reason: "tried to retarget".to_string(),
+        };
+
+        let error = handle_modify_request(&previous, "plan-rev-2".to_string(), &request)
+            .expect_err("kind mismatch must fail-closed");
+        assert_eq!(
+            error,
+            ModifyRequestError::KindMismatch {
+                request_kind: RevisionKind::TestPlan,
+                chain_kind: RevisionKind::ExecutionPlan,
+            }
+        );
+    }
+
+    /// Cross-entity modify request: request targets a different
+    /// `logical_id` than the chain. Must fail-closed with
+    /// `LogicalIdMismatch` to prevent cross-chain id leakage.
+    #[test]
+    fn handle_modify_request_rejects_logical_id_mismatch() {
+        let chain_logical_id = Uuid::new_v4();
+        let stranger_logical_id = Uuid::new_v4();
+        let previous = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id: chain_logical_id,
+        };
+        let request = ModifyRequest {
+            kind: RevisionKind::Intent,
+            logical_id: stranger_logical_id,
+            reason: "tried to modify someone else's chain".to_string(),
+        };
+
+        let error = handle_modify_request(&previous, "intent-rev-1".to_string(), &request)
+            .expect_err("logical_id mismatch must fail-closed");
+        assert_eq!(
+            error,
+            ModifyRequestError::LogicalIdMismatch {
+                request_logical_id: stranger_logical_id,
+                chain_logical_id,
+            }
+        );
     }
 }
