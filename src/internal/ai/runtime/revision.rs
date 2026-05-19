@@ -107,6 +107,47 @@ impl RevisionChainEntry {
     }
 }
 
+/// Derive the metadata for the **next** revision in a chain, given the
+/// previous link's own persisted id.
+///
+/// This is the pure half of [`handle_modify_request`] (still TBD): it
+/// answers the question "if I just persisted revision N as
+/// `previous_persisted_id`, what should the metadata for revision N+1
+/// look like?" without touching the actual persistence layer. The
+/// resulting skeleton:
+///
+/// - inherits `kind` and `logical_id` from `previous` (chain identity is
+///   stable),
+/// - points `previous_id` at the just-persisted id (so the chain stays
+///   linked),
+/// - sets `revision = previous.revision + 1` (1-based ordinal, see the
+///   [`RevisionChainEntry`] docs).
+///
+/// Callers that need the **persisted** version of the next revision can
+/// pass the skeleton into the appropriate Phase 0 / Phase 1 formal-write
+/// helper ([`super::phase0::write_intent`] /
+/// [`super::phase1::write_plan_set`]).
+///
+/// # Why not infer `previous_persisted_id` from `previous.previous_id`
+///
+/// `RevisionChainEntry.previous_id` points at the parent of `previous`,
+/// not at `previous` itself; the persisted id of `previous` is owned by
+/// the formal-write helper that produced it. Requiring the caller to pass
+/// that id explicitly keeps this function pure and side-effect free, and
+/// makes the rule "the formal-write helper owns assignment of persisted
+/// ids" explicit at the type system level.
+pub fn derive_next_revision_skeleton(
+    previous: &RevisionChainEntry,
+    previous_persisted_id: String,
+) -> RevisionChainEntry {
+    RevisionChainEntry {
+        kind: previous.kind,
+        previous_id: Some(previous_persisted_id),
+        revision: previous.revision + 1,
+        logical_id: previous.logical_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +213,54 @@ mod tests {
         };
         let cloned = entry.clone();
         assert_eq!(cloned, entry);
+    }
+
+    /// `derive_next_revision_skeleton` must preserve chain identity
+    /// (`kind` + `logical_id`), increment the 1-based ordinal, and point
+    /// `previous_id` at the just-persisted id of the input.
+    #[test]
+    fn derive_next_revision_skeleton_increments_and_links() {
+        let logical_id = Uuid::new_v4();
+        let previous = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: Some("plan-rev-1".to_string()),
+            revision: 2,
+            logical_id,
+        };
+
+        let next = derive_next_revision_skeleton(&previous, "plan-rev-2".to_string());
+
+        assert_eq!(next.kind, RevisionKind::ExecutionPlan);
+        assert_eq!(next.logical_id, logical_id);
+        assert_eq!(next.revision, 3);
+        assert_eq!(next.previous_id.as_deref(), Some("plan-rev-2"));
+        // The skeleton is itself a continuation now (rev > 1 + parent set).
+        assert!(!next.is_first());
+        assert!(next.is_continuation());
+    }
+
+    /// Deriving the next skeleton from a `is_first()` head must still set
+    /// `previous_id` (to the persisted id of the head) and produce a
+    /// `revision == 2` continuation, with the original first head's
+    /// `previous_id: None` left intact.
+    #[test]
+    fn derive_next_revision_skeleton_from_first_link_promotes_to_continuation() {
+        let logical_id = Uuid::new_v4();
+        let head = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id,
+        };
+
+        let next = derive_next_revision_skeleton(&head, "intent-rev-1".to_string());
+
+        assert_eq!(next.revision, 2);
+        assert_eq!(next.previous_id.as_deref(), Some("intent-rev-1"));
+        // The original head must still flag as `is_first` — derivation is
+        // a pure function.
+        assert!(head.is_first());
+        // The new skeleton is a continuation.
+        assert!(next.is_continuation());
     }
 }
