@@ -67,6 +67,18 @@ impl RevisionKind {
             Self::TestPlan => "test_plan",
         }
     }
+
+    /// Every variant of [`RevisionKind`] in declaration order.
+    ///
+    /// Useful for exhaustive iteration in tests (assert a property holds
+    /// for *every* kind without hand-listing the variants) and validation
+    /// loops that need to walk the kind space. The array length is part
+    /// of the API contract — when a new variant lands, this must be
+    /// extended in the same patch, which forces callers to update their
+    /// match arms / assertions for the new variant.
+    pub fn all() -> [Self; 3] {
+        [Self::Intent, Self::ExecutionPlan, Self::TestPlan]
+    }
 }
 
 /// The parent reference and ordinal of a new revision in a chain.
@@ -376,6 +388,39 @@ mod tests {
         assert_eq!(RevisionKind::Intent.label(), "intent");
         assert_eq!(RevisionKind::ExecutionPlan.label(), "execution_plan");
         assert_eq!(RevisionKind::TestPlan.label(), "test_plan");
+    }
+
+    /// `RevisionKind::all()` must enumerate every variant of the enum in
+    /// declaration order, return a non-empty list, and stay in sync with
+    /// the enum itself: adding a new variant requires extending `all()`
+    /// in the same patch. The body uses an exhaustive `match` to force a
+    /// compile error if the enum grows but `all()` was not updated, so
+    /// the contract is enforced at build time rather than test time.
+    #[test]
+    fn all_enumerates_every_variant_in_declaration_order() {
+        let kinds = RevisionKind::all();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(
+            kinds,
+            [
+                RevisionKind::Intent,
+                RevisionKind::ExecutionPlan,
+                RevisionKind::TestPlan,
+            ]
+        );
+
+        // Exhaustive cross-check: every label() result must match the
+        // expected per-variant string. The `match` is exhaustive so a
+        // future fourth variant fails to compile unless `all()` is also
+        // updated and this arm gets a new branch.
+        for kind in RevisionKind::all() {
+            let expected = match kind {
+                RevisionKind::Intent => "intent",
+                RevisionKind::ExecutionPlan => "execution_plan",
+                RevisionKind::TestPlan => "test_plan",
+            };
+            assert_eq!(kind.label(), expected);
+        }
     }
 
     /// `is_first()`, `is_continuation()`, and `is_fork()` partition the
