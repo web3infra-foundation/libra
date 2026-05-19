@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// `AgentRunEvent::BudgetExceeded`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BudgetDimension {
     Token,
     ToolCall,

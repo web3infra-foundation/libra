@@ -45,6 +45,7 @@ use super::{AgentRunId, ApprovalRequestId, BudgetDimension, PackageId, Sha256, T
 /// Phase of the hook dispatch lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookPhase {
     PreToolUse,
     PostToolUse,
@@ -54,6 +55,7 @@ pub enum HookPhase {
 /// for CEX-S2-17 capability packages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookKind {
     Builtin,
     ProjectLocal,
@@ -83,6 +85,7 @@ pub struct HookInvocationPayload {
 /// values match the table at "Step 2.2 Hook exit-code 权威映射表" verbatim.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HookFailureReason {
     /// Exit code was not 0/2/3; treated as deny per fail-closed default.
     UnknownExitCode { exit_code: i32 },
@@ -117,6 +120,7 @@ pub enum HookFailureReason {
 /// completeness with `HookFailureReason`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PostToolReason {
     /// PostToolUse-only: hook returned exit 2 after dispatch.
     HookDeny,
@@ -147,6 +151,7 @@ pub enum PostToolReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WorkspaceStrategy {
     /// `.git` < 1GB and worktree files < 100K (default).
     Worktree,
@@ -205,6 +210,7 @@ pub type FailureReason = String;
 /// Reason payload for `AgentRunEvent::Cancelled`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CancellationReason {
     UserRequested,
     LayerOneTimeout,

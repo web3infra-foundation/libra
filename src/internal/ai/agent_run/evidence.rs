@@ -31,6 +31,7 @@ use super::{AgentRunId, AnchorScope, Confidence, EventId, EvidenceId, SourceCall
 /// coverage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentType {
     Explorer,
     Worker,

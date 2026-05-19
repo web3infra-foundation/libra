@@ -11,6 +11,7 @@ use super::{AgentRunId, AgentTaskId};
 /// CEX-S2-16 TUI agent pane requirements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentRunStatus {
     Queued,
     Running,
