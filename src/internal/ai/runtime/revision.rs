@@ -105,6 +105,40 @@ impl RevisionChainEntry {
     pub fn is_continuation(&self) -> bool {
         self.revision > 1 && self.previous_id.is_some()
     }
+
+    /// Stable single-line audit label for this entry, suitable for
+    /// `tracing` field values or grep pipelines that join revision events
+    /// across phases.
+    ///
+    /// Format (positional, stable):
+    ///
+    /// ```text
+    /// <kind_label> rev <n> (head) for logical_id <uuid>
+    /// <kind_label> rev <n> (continuation from <previous_id>) for logical_id <uuid>
+    /// <kind_label> rev <n> (forked from <previous_id>) for logical_id <uuid>
+    /// ```
+    ///
+    /// The three forms correspond to `is_first()` (head), `is_continuation()`
+    /// (rev>1 with parent), and the degenerate "revision 1 with a parent"
+    /// case ([`first_and_continuation_flag_chain_position_correctly`] test
+    /// describes when this happens) which represents a forced re-derive.
+    pub fn audit_label(&self) -> String {
+        let kind = self.kind.label();
+        match (&self.previous_id, self.revision) {
+            (None, _) => format!(
+                "{kind} rev {} (head) for logical_id {}",
+                self.revision, self.logical_id
+            ),
+            (Some(prev), rev) if rev > 1 => format!(
+                "{kind} rev {} (continuation from {}) for logical_id {}",
+                self.revision, prev, self.logical_id
+            ),
+            (Some(prev), _) => format!(
+                "{kind} rev {} (forked from {}) for logical_id {}",
+                self.revision, prev, self.logical_id
+            ),
+        }
+    }
 }
 
 /// User-facing payload for a "modify the current revision" request.
@@ -639,6 +673,75 @@ mod tests {
                 kind: RevisionKind::Intent,
             }
         );
+    }
+
+    /// `audit_label()` happy paths: head, continuation, forked.
+    ///
+    /// The exact format is part of the public contract (audit consumers
+    /// grep on it), so this test pins the expected strings verbatim.
+    #[test]
+    fn audit_label_format_per_chain_position() {
+        // Pinned logical_id so the assertion strings are deterministic.
+        let logical_id = "0192345f-1c12-7e8a-9abc-d0c0c0c0c0c0"
+            .parse::<Uuid>()
+            .expect("valid UUID literal");
+
+        let head = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id,
+        };
+        assert_eq!(
+            head.audit_label(),
+            "intent rev 1 (head) for logical_id 0192345f-1c12-7e8a-9abc-d0c0c0c0c0c0",
+        );
+
+        let continuation = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: Some("plan-rev-2".to_string()),
+            revision: 3,
+            logical_id,
+        };
+        assert_eq!(
+            continuation.audit_label(),
+            "execution_plan rev 3 (continuation from plan-rev-2) for logical_id 0192345f-1c12-7e8a-9abc-d0c0c0c0c0c0",
+        );
+
+        let forked = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: Some("plan-prev".to_string()),
+            revision: 1,
+            logical_id,
+        };
+        assert_eq!(
+            forked.audit_label(),
+            "test_plan rev 1 (forked from plan-prev) for logical_id 0192345f-1c12-7e8a-9abc-d0c0c0c0c0c0",
+        );
+    }
+
+    /// `audit_label()` must carry the kind label so audit consumers can
+    /// grep by phase. The format pins the kind label as the first token.
+    #[test]
+    fn audit_label_starts_with_kind_label() {
+        let logical_id = Uuid::new_v4();
+        for (kind, expected_prefix) in [
+            (RevisionKind::Intent, "intent rev "),
+            (RevisionKind::ExecutionPlan, "execution_plan rev "),
+            (RevisionKind::TestPlan, "test_plan rev "),
+        ] {
+            let entry = RevisionChainEntry {
+                kind,
+                previous_id: None,
+                revision: 7,
+                logical_id,
+            };
+            assert!(
+                entry.audit_label().starts_with(expected_prefix),
+                "expected audit_label to start with {expected_prefix:?}, got {}",
+                entry.audit_label(),
+            );
+        }
     }
 
     /// `PairingError` must derive `Clone` + `PartialEq` so callers can
