@@ -243,6 +243,78 @@ pub fn derive_next_revision_skeleton(
     }
 }
 
+/// Errors that prevent [`validate_paired_plan_revisions`] from succeeding.
+///
+/// The execution plan and test plan are sibling chains that must always
+/// move in lockstep (rule 3 of the revision-chain design — see the module
+/// docstring). When the rule is violated, this enum's variants distinguish
+/// the three failure shapes so callers can surface a precise error message
+/// rather than a generic "not paired".
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PairingError {
+    /// The supposed-execution-plan argument actually carries a different
+    /// `kind`. Caught first because the rest of the checks assume the
+    /// argument really is an execution plan.
+    #[error("expected execution-plan entry, got {kind:?}")]
+    NotExecutionPlan { kind: RevisionKind },
+    /// The supposed-test-plan argument actually carries a different
+    /// `kind`.
+    #[error("expected test-plan entry, got {kind:?}")]
+    NotTestPlan { kind: RevisionKind },
+    /// The two entries carry different `revision` ordinals. Revision
+    /// numbers must match exactly — never (n−1) or (n+1).
+    #[error(
+        "execution-plan revision {execution_revision} does not pair with test-plan revision {test_revision}"
+    )]
+    RevisionMismatch {
+        execution_revision: u32,
+        test_revision: u32,
+    },
+}
+
+/// Enforce the "plans and test-plans always rev together" rule across a
+/// sibling pair of [`RevisionChainEntry`] values.
+///
+/// Per rule 3 of the revision-chain design, the (n)-th execution-plan
+/// revision must pair with the (n)-th test-plan revision — never (n−1) or
+/// (n+1). This helper validates that constraint as a pure check so call
+/// sites like [`super::phase1::write_plan_set`] can fail-closed before
+/// persisting a desynchronised pair.
+///
+/// # Errors
+///
+/// * [`PairingError::NotExecutionPlan`] if `execution.kind` is not
+///   [`RevisionKind::ExecutionPlan`].
+/// * [`PairingError::NotTestPlan`] if `test.kind` is not
+///   [`RevisionKind::TestPlan`].
+/// * [`PairingError::RevisionMismatch`] if the two entries carry different
+///   `revision` ordinals.
+///
+/// Kind errors are returned in priority order: execution-plan kind is
+/// checked first, then test-plan kind, then revision parity. Callers that
+/// pass two malformed inputs will see the execution-side error first; this
+/// is deterministic so audit logs stay stable.
+pub fn validate_paired_plan_revisions(
+    execution: &RevisionChainEntry,
+    test: &RevisionChainEntry,
+) -> Result<(), PairingError> {
+    if execution.kind != RevisionKind::ExecutionPlan {
+        return Err(PairingError::NotExecutionPlan {
+            kind: execution.kind,
+        });
+    }
+    if test.kind != RevisionKind::TestPlan {
+        return Err(PairingError::NotTestPlan { kind: test.kind });
+    }
+    if execution.revision != test.revision {
+        return Err(PairingError::RevisionMismatch {
+            execution_revision: execution.revision,
+            test_revision: test.revision,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +486,171 @@ mod tests {
                 chain_kind: RevisionKind::ExecutionPlan,
             }
         );
+    }
+
+    /// `validate_paired_plan_revisions` happy path: an execution-plan
+    /// revision N and a test-plan revision N pair cleanly.
+    #[test]
+    fn validate_paired_plan_revisions_matching_revisions_succeeds() {
+        let execution_logical = Uuid::new_v4();
+        let test_logical = Uuid::new_v4();
+        let execution = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: Some("exec-rev-2".to_string()),
+            revision: 3,
+            logical_id: execution_logical,
+        };
+        let test = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: Some("test-rev-2".to_string()),
+            revision: 3,
+            logical_id: test_logical,
+        };
+
+        assert!(validate_paired_plan_revisions(&execution, &test).is_ok());
+    }
+
+    /// First-link pair (rev 1 / rev 1) is the canonical "plan compiled
+    /// the first time" case — must pair without error.
+    #[test]
+    fn validate_paired_plan_revisions_accepts_first_link_pair() {
+        let execution = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        let test = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        assert!(validate_paired_plan_revisions(&execution, &test).is_ok());
+    }
+
+    /// Off-by-one drift in either direction must fail-closed with
+    /// `RevisionMismatch`.
+    #[test]
+    fn validate_paired_plan_revisions_rejects_drift_by_one() {
+        let execution = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: None,
+            revision: 2,
+            logical_id: Uuid::new_v4(),
+        };
+        let test_behind = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        let test_ahead = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: None,
+            revision: 3,
+            logical_id: Uuid::new_v4(),
+        };
+
+        assert_eq!(
+            validate_paired_plan_revisions(&execution, &test_behind).unwrap_err(),
+            PairingError::RevisionMismatch {
+                execution_revision: 2,
+                test_revision: 1,
+            }
+        );
+        assert_eq!(
+            validate_paired_plan_revisions(&execution, &test_ahead).unwrap_err(),
+            PairingError::RevisionMismatch {
+                execution_revision: 2,
+                test_revision: 3,
+            }
+        );
+    }
+
+    /// A non-execution-plan kind in the first argument must fail-closed
+    /// with `NotExecutionPlan` regardless of the second argument.
+    #[test]
+    fn validate_paired_plan_revisions_rejects_non_execution_plan_first() {
+        let intent_as_first = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        let test = RevisionChainEntry {
+            kind: RevisionKind::TestPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        assert_eq!(
+            validate_paired_plan_revisions(&intent_as_first, &test).unwrap_err(),
+            PairingError::NotExecutionPlan {
+                kind: RevisionKind::Intent,
+            }
+        );
+    }
+
+    /// A non-test-plan kind in the second argument must fail-closed with
+    /// `NotTestPlan` (provided the first argument is a valid execution
+    /// plan — execution-side errors take priority).
+    #[test]
+    fn validate_paired_plan_revisions_rejects_non_test_plan_second() {
+        let execution = RevisionChainEntry {
+            kind: RevisionKind::ExecutionPlan,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        let intent_as_second = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        assert_eq!(
+            validate_paired_plan_revisions(&execution, &intent_as_second).unwrap_err(),
+            PairingError::NotTestPlan {
+                kind: RevisionKind::Intent,
+            }
+        );
+    }
+
+    /// Priority rule: when both kinds are wrong, the execution-side error
+    /// must surface first so audit logs stay deterministic.
+    #[test]
+    fn validate_paired_plan_revisions_execution_kind_error_takes_priority() {
+        let intent_as_first = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        let intent_as_second = RevisionChainEntry {
+            kind: RevisionKind::Intent,
+            previous_id: None,
+            revision: 1,
+            logical_id: Uuid::new_v4(),
+        };
+        assert_eq!(
+            validate_paired_plan_revisions(&intent_as_first, &intent_as_second).unwrap_err(),
+            PairingError::NotExecutionPlan {
+                kind: RevisionKind::Intent,
+            }
+        );
+    }
+
+    /// `PairingError` must derive `Clone` + `PartialEq` so callers can
+    /// match-and-compare without re-deriving the error from text.
+    #[test]
+    fn pairing_error_is_clone_and_eq() {
+        let err = PairingError::RevisionMismatch {
+            execution_revision: 3,
+            test_revision: 4,
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned, err);
     }
 
     /// Cross-entity modify request: request targets a different
