@@ -5,9 +5,14 @@
 //! scheduler's current selection, active work, and live context window without
 //! rewriting the underlying snapshot or event objects.
 //!
-//! TODO(test): add CRUD and round-trip persistence coverage once the
-//! `SchedulerState` store lands. The domain types are defined before the
-//! projector / repository implementation to keep the schema work isolated.
+//! CRUD and round-trip persistence coverage for `SchedulerStateRepository`
+//! lives in [`tests/ai_projection_resolver_test.rs`](../../../../../tests/ai_projection_resolver_test.rs)
+//! and exercises `insert_initial` → `load` → `compare_and_swap` round-trips
+//! plus the `SchedulerStateCasError::{VersionConflict, Missing}` failure
+//! branches against a real SQLite connection. The in-module `#[cfg(test)]`
+//! suite continues to cover the pure-function helpers
+//! (`execution_head`/`test_head`/`is_idle`/`is_seeded`) and the
+//! `SchedulerStateCasError` display contract.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeZone, Utc};
