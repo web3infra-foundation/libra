@@ -127,6 +127,10 @@ pub fn apply_scheduler_mutation(
     next.version = current.version + 1;
     next.updated_at = chrono::Utc::now();
 
+    use serde_json::json;
+
+    use crate::internal::ai::projection::scheduler::PlanHeadRef;
+
     match mutation {
         SchedulerMutation::MarkTaskActive {
             task_id, run_id, ..
@@ -137,34 +141,113 @@ pub fn apply_scheduler_mutation(
         SchedulerMutation::ClearActiveRun { .. } => {
             next.active_run_id = None;
         }
+        SchedulerMutation::SetCurrentPlanHeads {
+            execution_plan_id,
+            test_plan_id,
+            ..
+        } => {
+            // Execution plan is ordinal 0 (primary), test plan is ordinal
+            // 1. `selected_plan_id` keeps the legacy single-plan field
+            // pointing at the execution head so older readers don't break.
+            next.current_plan_heads = vec![
+                PlanHeadRef {
+                    plan_id: execution_plan_id,
+                    ordinal: 0,
+                },
+                PlanHeadRef {
+                    plan_id: test_plan_id,
+                    ordinal: 1,
+                },
+            ];
+            next.selected_plan_id = Some(execution_plan_id);
+        }
+        SchedulerMutation::SelectPlanSet { selected, .. } => {
+            let ordered = selected.ordered_ids();
+            next.selected_plan_ids = ordered
+                .iter()
+                .enumerate()
+                .map(|(ordinal, plan_id)| PlanHeadRef {
+                    plan_id: *plan_id,
+                    ordinal: ordinal as i64,
+                })
+                .collect();
+            // Keep `selected_plan_id` in sync with the execution head
+            // (the first ordered id, per `SelectedPlanSet::ordered_ids`).
+            next.selected_plan_id = Some(selected.execution_plan_id);
+        }
+        SchedulerMutation::StartStage { stage, .. } => {
+            // The stage is scheduler metadata, not a structural field.
+            // Merge it into `metadata` under a stable "stage" key so
+            // downstream readers (TUI, MCP observability) can pick it up
+            // without needing to introduce a new SchedulerState column.
+            let stage_label = match stage {
+                crate::internal::ai::runtime::contracts::DagStage::Execution => "execution",
+                crate::internal::ai::runtime::contracts::DagStage::Test => "test",
+            };
+            let mut metadata = next.metadata.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("stage".to_string(), json!(stage_label));
+                obj.remove("stale_reason");
+            }
+            next.metadata = Some(metadata);
+        }
+        SchedulerMutation::MarkProjectionStale { reason, .. } => {
+            // Mark the projection as stale by writing the reason into
+            // `metadata.stale_reason`. The next `ApplyRebuild` will
+            // remove this key; ad-hoc readers SHOULD treat the presence
+            // of `stale_reason` as "consult ProjectionResolver before
+            // trusting this state".
+            let reason_label = match reason {
+                crate::internal::ai::runtime::contracts::ProjectionStaleReason::RebuildRequired => {
+                    "rebuild_required"
+                }
+                crate::internal::ai::runtime::contracts::ProjectionStaleReason::DerivedRecordStale => {
+                    "derived_record_stale"
+                }
+                crate::internal::ai::runtime::contracts::ProjectionStaleReason::CasConflict => {
+                    "cas_conflict"
+                }
+                crate::internal::ai::runtime::contracts::ProjectionStaleReason::Backpressure => {
+                    "backpressure"
+                }
+                crate::internal::ai::runtime::contracts::ProjectionStaleReason::ManualRepair => {
+                    "manual_repair"
+                }
+            };
+            let mut metadata = next.metadata.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("stale_reason".to_string(), json!(reason_label));
+            }
+            next.metadata = Some(metadata);
+        }
+        SchedulerMutation::ApplyRebuild { materialized, .. } => {
+            // A rebuild replaces the projection with a freshly
+            // materialized snapshot. The `materialized.summary` field
+            // is intentionally an opaque `serde_json::Value` here (its
+            // exact shape is owned by `ProjectionResolver`); we adopt
+            // its versions and clear the `stale_reason` marker so
+            // subsequent readers know the rebuild has landed. Caller-
+            // managed structural fields (`active_task_id`,
+            // `active_run_id`, plan heads, etc.) are left to the
+            // caller — `ApplyRebuild` is about projection freshness,
+            // not about per-task scheduling.
+            let mut metadata = next.metadata.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.remove("stale_reason");
+                obj.insert(
+                    "rebuild_versions".to_string(),
+                    json!({
+                        "thread": materialized.versions.thread,
+                        "scheduler": materialized.versions.scheduler,
+                        "live_context_window": materialized.versions.live_context_window,
+                    }),
+                );
+            }
+            next.metadata = Some(metadata);
+        }
         SchedulerMutation::SeedThread { .. } => {
             return Err(ApplySchedulerMutationError::VariantNotWired {
                 variant: "SeedThread",
-            });
-        }
-        SchedulerMutation::SetCurrentPlanHeads { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "SetCurrentPlanHeads",
-            });
-        }
-        SchedulerMutation::SelectPlanSet { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "SelectPlanSet",
-            });
-        }
-        SchedulerMutation::StartStage { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "StartStage",
-            });
-        }
-        SchedulerMutation::MarkProjectionStale { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "MarkProjectionStale",
-            });
-        }
-        SchedulerMutation::ApplyRebuild { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "ApplyRebuild",
             });
         }
     }
@@ -361,28 +444,199 @@ mod tests {
         );
     }
 
-    /// Unwired variants must surface `VariantNotWired { variant }` with
-    /// the variant name so callers can detect when a follow-up has
-    /// landed (the error variant string is the discriminator).
+    /// `SeedThread` is the one remaining unwired variant; must surface
+    /// `VariantNotWired { variant: "SeedThread" }` so callers can
+    /// detect when a follow-up has landed.
     #[test]
-    fn apply_scheduler_mutation_unwired_variant_surfaces_variant_name() {
+    fn apply_scheduler_mutation_seed_thread_remains_unwired() {
         let current = dummy_scheduler_state(1);
-        let mutation = SchedulerMutation::StartStage {
+        let mutation = SchedulerMutation::SeedThread {
             expected: ProjectionVersions {
                 thread: 0,
                 scheduler: 1,
                 live_context_window: 0,
             },
-            stage: crate::internal::ai::runtime::contracts::DagStage::Execution,
+            bundle: crate::internal::ai::runtime::contracts::Phase0Bundle {
+                thread_id: Uuid::new_v4(),
+                intent_id: Uuid::new_v4(),
+                context_snapshot_id: None,
+            },
         };
 
         let error =
-            apply_scheduler_mutation(&current, mutation).expect_err("StartStage is not yet wired");
+            apply_scheduler_mutation(&current, mutation).expect_err("SeedThread is not yet wired");
         assert_eq!(
             error,
             ApplySchedulerMutationError::VariantNotWired {
-                variant: "StartStage"
+                variant: "SeedThread"
             }
         );
+    }
+
+    /// `SetCurrentPlanHeads` must populate `current_plan_heads` with
+    /// execution at ordinal 0 and test at ordinal 1, plus set
+    /// `selected_plan_id` to the execution head for legacy single-plan
+    /// readers.
+    #[test]
+    fn apply_scheduler_mutation_set_current_plan_heads_populates_both_heads() {
+        let current = dummy_scheduler_state(1);
+        let execution_plan_id = Uuid::new_v4();
+        let test_plan_id = Uuid::new_v4();
+        let mutation = SchedulerMutation::SetCurrentPlanHeads {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 1,
+                live_context_window: 0,
+            },
+            execution_plan_id,
+            test_plan_id,
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("should apply");
+
+        assert_eq!(next.current_plan_heads.len(), 2);
+        assert_eq!(next.current_plan_heads[0].plan_id, execution_plan_id);
+        assert_eq!(next.current_plan_heads[0].ordinal, 0);
+        assert_eq!(next.current_plan_heads[1].plan_id, test_plan_id);
+        assert_eq!(next.current_plan_heads[1].ordinal, 1);
+        assert_eq!(next.selected_plan_id, Some(execution_plan_id));
+        assert_eq!(next.version, 2);
+    }
+
+    /// `SelectPlanSet` must populate `selected_plan_ids` from
+    /// `SelectedPlanSet::ordered_ids` (execution, test) and update
+    /// `selected_plan_id` to the execution head.
+    #[test]
+    fn apply_scheduler_mutation_select_plan_set_populates_ordered_ids() {
+        use crate::internal::ai::runtime::contracts::SelectedPlanSet;
+
+        let current = dummy_scheduler_state(2);
+        let execution_plan_id = Uuid::new_v4();
+        let test_plan_id = Uuid::new_v4();
+        let mutation = SchedulerMutation::SelectPlanSet {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 2,
+                live_context_window: 0,
+            },
+            selected: SelectedPlanSet {
+                execution_plan_id,
+                test_plan_id,
+            },
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("should apply");
+
+        assert_eq!(next.selected_plan_ids.len(), 2);
+        assert_eq!(next.selected_plan_ids[0].plan_id, execution_plan_id);
+        assert_eq!(next.selected_plan_ids[0].ordinal, 0);
+        assert_eq!(next.selected_plan_ids[1].plan_id, test_plan_id);
+        assert_eq!(next.selected_plan_ids[1].ordinal, 1);
+        assert_eq!(next.selected_plan_id, Some(execution_plan_id));
+    }
+
+    /// `StartStage` must write a stable lower-snake-case `stage` key into
+    /// `metadata` and clear any prior `stale_reason` marker (the stage
+    /// transition is itself a freshness signal).
+    #[test]
+    fn apply_scheduler_mutation_start_stage_writes_stage_metadata() {
+        use serde_json::json;
+
+        use crate::internal::ai::runtime::contracts::DagStage;
+
+        let mut current = dummy_scheduler_state(4);
+        current.metadata = Some(json!({ "stale_reason": "rebuild_required" }));
+        let mutation = SchedulerMutation::StartStage {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 4,
+                live_context_window: 0,
+            },
+            stage: DagStage::Test,
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("should apply");
+
+        let metadata = next.metadata.expect("metadata should be set");
+        assert_eq!(metadata["stage"], json!("test"));
+        // Prior stale_reason must be cleared on stage transition.
+        assert!(
+            metadata.get("stale_reason").is_none(),
+            "stale_reason should be cleared on stage transition, got {metadata:?}"
+        );
+    }
+
+    /// `MarkProjectionStale` must persist the reason as a stable
+    /// lower-snake-case `stale_reason` key in metadata so a future
+    /// `ApplyRebuild` can remove it.
+    #[test]
+    fn apply_scheduler_mutation_mark_projection_stale_writes_reason() {
+        use serde_json::json;
+
+        use crate::internal::ai::runtime::contracts::ProjectionStaleReason;
+
+        let current = dummy_scheduler_state(6);
+        let mutation = SchedulerMutation::MarkProjectionStale {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 6,
+                live_context_window: 0,
+            },
+            reason: ProjectionStaleReason::CasConflict,
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("should apply");
+
+        let metadata = next.metadata.expect("metadata should be set");
+        assert_eq!(metadata["stale_reason"], json!("cas_conflict"));
+    }
+
+    /// `ApplyRebuild` must clear the `stale_reason` marker and record
+    /// the freshly materialized `versions` in metadata so downstream
+    /// observers can correlate rebuild events with their version
+    /// triple.
+    #[test]
+    fn apply_scheduler_mutation_apply_rebuild_clears_stale_and_records_versions() {
+        use serde_json::json;
+
+        use crate::internal::ai::runtime::contracts::{
+            MaterializedProjection, ProjectionFreshness,
+        };
+
+        let mut current = dummy_scheduler_state(9);
+        current.metadata = Some(json!({ "stale_reason": "rebuild_required" }));
+        let thread_id = Uuid::new_v4();
+        let materialized_versions = ProjectionVersions {
+            thread: 5,
+            scheduler: 9,
+            live_context_window: 7,
+        };
+        let mutation = SchedulerMutation::ApplyRebuild {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 9,
+                live_context_window: 0,
+            },
+            materialized: MaterializedProjection {
+                thread_id,
+                versions: materialized_versions,
+                freshness: ProjectionFreshness::Fresh,
+                summary: json!({}),
+            },
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("should apply");
+
+        let metadata = next.metadata.expect("metadata should be set");
+        assert!(
+            metadata.get("stale_reason").is_none(),
+            "stale_reason must be cleared after rebuild"
+        );
+        let rebuild_versions = metadata
+            .get("rebuild_versions")
+            .expect("rebuild_versions key should be written");
+        assert_eq!(rebuild_versions["thread"], json!(5));
+        assert_eq!(rebuild_versions["scheduler"], json!(9));
+        assert_eq!(rebuild_versions["live_context_window"], json!(7));
     }
 }
