@@ -68,6 +68,39 @@ pub enum DecisionProposalRoute {
     Abandon,
 }
 
+impl DecisionProposalRoute {
+    /// `true` only for [`AutoAccept`](Self::AutoAccept) — the path that
+    /// bypasses human review entirely.
+    pub fn is_auto_accept(self) -> bool {
+        matches!(self, DecisionProposalRoute::AutoAccept)
+    }
+
+    /// `true` when the route requires human review before the verdict
+    /// is committed. `RequestChanges` is also included here because a
+    /// rejection must surface to a human before the loop continues.
+    pub fn requires_human_review(self) -> bool {
+        matches!(
+            self,
+            DecisionProposalRoute::HumanReview
+                | DecisionProposalRoute::RequestChanges
+                | DecisionProposalRoute::Abandon
+        )
+    }
+
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values, so audit
+    /// pipelines can stringify a `DecisionProposalRoute` without
+    /// reaching for `serde_json::to_value`.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            DecisionProposalRoute::AutoAccept => "auto_accept",
+            DecisionProposalRoute::HumanReview => "human_review",
+            DecisionProposalRoute::RequestChanges => "request_changes",
+            DecisionProposalRoute::Abandon => "abandon",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionProposalSummary {
     pub route: DecisionProposalRoute,
@@ -90,6 +123,16 @@ pub struct DecisionProposal {
     pub summary: DecisionProposalSummary,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl DecisionProposal {
+    /// Convenience: `true` when this proposal recommends the
+    /// [`AutoAccept`](DecisionProposalRoute::AutoAccept) route — i.e.
+    /// the loop can commit without a human gate. Delegates to
+    /// [`DecisionProposalRoute::is_auto_accept`].
+    pub fn is_auto_accept(&self) -> bool {
+        self.summary.route.is_auto_accept()
+    }
 }
 
 pub fn aggregate_risk_score(
@@ -359,4 +402,180 @@ fn proposal_from_model(row: ai_decision_proposal::Model) -> Result<DecisionPropo
         created_at: timestamp_from_row(row.created_at, "decision created_at")?,
         updated_at: timestamp_from_row(row.updated_at, "decision updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::runtime::phase3::{
+        ValidationReportSummary, ValidationStage, ValidationStageResult, ValidatorEngine,
+    };
+
+    fn sample_report(status: ValidationStatus) -> ValidationReport {
+        let engine = ValidatorEngine::new("test:phase4");
+        let outcome_stage = ValidationStageResult {
+            stage: ValidationStage::Integration,
+            outcome: match status {
+                ValidationStatus::Passed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::Passed
+                }
+                ValidationStatus::BlockingFailed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::BlockingFailed
+                }
+                ValidationStatus::InfrastructureFailed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::InfrastructureFailed
+                }
+            },
+            evidence: vec![],
+            summary: None,
+        };
+        let mut report = engine.build_report(Uuid::new_v4(), None, vec![outcome_stage]);
+        // The engine always rolls up correctly, but pin the status here
+        // for clarity in the tests.
+        assert_eq!(report.summary.status, status);
+        // Touch summary just to ensure compile reaches `summary`.
+        let _ = &report.summary as *const ValidationReportSummary;
+        report.policy_version = "test:phase4".to_string();
+        report
+    }
+
+    /// `DecisionPolicy::default` must pin to the
+    /// `DEFAULT_DECISION_POLICY_VERSION` constant and the well-known
+    /// 30-score auto-accept threshold, so policy drift across versions
+    /// is detected at compile time.
+    #[test]
+    fn decision_policy_default_pins_version_and_threshold() {
+        let policy = DecisionPolicy::default();
+        assert_eq!(policy.policy_version, DEFAULT_DECISION_POLICY_VERSION);
+        assert_eq!(policy.policy_version, "decision:v1");
+        assert_eq!(policy.auto_accept_max_score, 30);
+    }
+
+    /// `aggregate_risk_score` must produce the canonical score table:
+    /// Passed=20, BlockingFailed=75, InfrastructureFailed=90.
+    /// Pinning these values means a re-tune to the score weights breaks
+    /// the test deliberately rather than silently shifting the
+    /// auto-accept gate.
+    #[test]
+    fn aggregate_risk_score_pins_canonical_score_table() {
+        let policy = DecisionPolicy::default();
+
+        let passed = aggregate_risk_score(&sample_report(ValidationStatus::Passed), &policy);
+        assert_eq!(passed.summary.score, 20);
+        assert!(passed.summary.score <= policy.auto_accept_max_score);
+        assert_eq!(passed.summary.validation_status, ValidationStatus::Passed);
+
+        let blocking =
+            aggregate_risk_score(&sample_report(ValidationStatus::BlockingFailed), &policy);
+        assert_eq!(blocking.summary.score, 75);
+
+        let infra = aggregate_risk_score(
+            &sample_report(ValidationStatus::InfrastructureFailed),
+            &policy,
+        );
+        assert_eq!(infra.summary.score, 90);
+    }
+
+    /// `build_decision_proposal` route table:
+    /// - Passed + score ≤ threshold → AutoAccept (Accepted, no human review)
+    /// - BlockingFailed → RequestChanges (Rejected, human review)
+    /// - InfrastructureFailed → HumanReview (Abandon, human review)
+    #[test]
+    fn build_decision_proposal_routes_per_validation_status() {
+        let policy = DecisionPolicy::default();
+
+        let passed_report = sample_report(ValidationStatus::Passed);
+        let passed_risk = aggregate_risk_score(&passed_report, &policy);
+        let passed_proposal = build_decision_proposal(&passed_report, &passed_risk, &policy);
+        assert_eq!(
+            passed_proposal.summary.route,
+            DecisionProposalRoute::AutoAccept
+        );
+        assert_eq!(
+            passed_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(!passed_proposal.summary.requires_human_review);
+        assert!(passed_proposal.is_auto_accept());
+
+        let blocking_report = sample_report(ValidationStatus::BlockingFailed);
+        let blocking_risk = aggregate_risk_score(&blocking_report, &policy);
+        let blocking_proposal = build_decision_proposal(&blocking_report, &blocking_risk, &policy);
+        assert_eq!(
+            blocking_proposal.summary.route,
+            DecisionProposalRoute::RequestChanges
+        );
+        assert_eq!(
+            blocking_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Rejected
+        );
+        assert!(blocking_proposal.summary.requires_human_review);
+        assert!(!blocking_proposal.is_auto_accept());
+
+        let infra_report = sample_report(ValidationStatus::InfrastructureFailed);
+        let infra_risk = aggregate_risk_score(&infra_report, &policy);
+        let infra_proposal = build_decision_proposal(&infra_report, &infra_risk, &policy);
+        assert_eq!(
+            infra_proposal.summary.route,
+            DecisionProposalRoute::HumanReview
+        );
+        assert_eq!(
+            infra_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Abandon
+        );
+        assert!(infra_proposal.summary.requires_human_review);
+        assert!(!infra_proposal.is_auto_accept());
+    }
+
+    /// When validation passes but the risk score crosses the
+    /// `auto_accept_max_score` threshold, the proposal must escalate to
+    /// `HumanReview` (still proposes Accepted but requires review).
+    #[test]
+    fn build_decision_proposal_passed_above_threshold_routes_to_human_review() {
+        let policy = DecisionPolicy {
+            policy_version: "test:phase4".to_string(),
+            auto_accept_max_score: 10, // force the Passed=20 score to exceed
+        };
+        let report = sample_report(ValidationStatus::Passed);
+        let risk = aggregate_risk_score(&report, &policy);
+        assert!(risk.summary.score > policy.auto_accept_max_score);
+
+        let proposal = build_decision_proposal(&report, &risk, &policy);
+        assert_eq!(proposal.summary.route, DecisionProposalRoute::HumanReview);
+        assert_eq!(
+            proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(proposal.summary.requires_human_review);
+    }
+
+    /// `DecisionProposalRoute::variant_name` must match the
+    /// `#[serde(rename_all = "snake_case")]` tag values for all four
+    /// variants. Failure means audit logs (which use variant_name) and
+    /// serialised payloads (which use the serde tag) drift apart.
+    #[test]
+    fn decision_proposal_route_variant_names_match_serde_tags() {
+        for (route, expected) in [
+            (DecisionProposalRoute::AutoAccept, "auto_accept"),
+            (DecisionProposalRoute::HumanReview, "human_review"),
+            (DecisionProposalRoute::RequestChanges, "request_changes"),
+            (DecisionProposalRoute::Abandon, "abandon"),
+        ] {
+            assert_eq!(route.variant_name(), expected);
+            let json = serde_json::to_string(&route).unwrap();
+            // Serde writes it as a JSON string literal: "auto_accept".
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    /// `requires_human_review` must include every non-AutoAccept route
+    /// (HumanReview, RequestChanges, Abandon). AutoAccept alone bypasses
+    /// the human gate.
+    #[test]
+    fn decision_proposal_route_requires_human_review_excludes_auto_accept() {
+        assert!(!DecisionProposalRoute::AutoAccept.requires_human_review());
+        assert!(DecisionProposalRoute::HumanReview.requires_human_review());
+        assert!(DecisionProposalRoute::RequestChanges.requires_human_review());
+        assert!(DecisionProposalRoute::Abandon.requires_human_review());
+    }
 }
