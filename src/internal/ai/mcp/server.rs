@@ -24,7 +24,12 @@ use rmcp::{
 };
 
 use crate::{
-    internal::ai::{history::HistoryManager, web::code_ui::CodeUiSession},
+    internal::ai::{
+        history::HistoryManager,
+        mcp::authz::{AuthzDecision, McpAuthorizer, McpOperation},
+        runtime::hardening::PrincipalContext,
+        web::code_ui::CodeUiSession,
+    },
     utils::{storage::Storage, storage_ext::StorageExt},
 };
 
@@ -34,6 +39,12 @@ pub struct LibraMcpServer {
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
     pub working_dir: Option<PathBuf>,
     code_ui_session: Arc<Mutex<Option<Arc<CodeUiSession>>>>,
+    /// Optional Phase 5 authorization gate. When `None` (the default), every
+    /// MCP operation runs unauthenticated as it always has; when `Some`, the
+    /// configured [`McpAuthorizer`] gates the operation via
+    /// [`authorize_or_error`](Self::authorize_or_error) before the impl
+    /// proceeds.
+    authz: Arc<Mutex<Option<Arc<dyn McpAuthorizer>>>>,
     // pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
 }
@@ -48,6 +59,7 @@ impl LibraMcpServer {
             storage,
             working_dir: None,
             code_ui_session: Arc::new(Mutex::new(None)),
+            authz: Arc::new(Mutex::new(None)),
             tool_router: Self::build_tool_router(),
         }
     }
@@ -62,7 +74,67 @@ impl LibraMcpServer {
             storage,
             working_dir: Some(working_dir),
             code_ui_session: Arc::new(Mutex::new(None)),
+            authz: Arc::new(Mutex::new(None)),
             tool_router: Self::build_tool_router(),
+        }
+    }
+
+    /// Install an authorization gate. Call before serving any requests; once
+    /// set, every authorized impl method (currently only
+    /// [`list_resources_impl`](Self::list_resources_impl) — Phase 5 will
+    /// extend this) calls [`Self::authorize_or_error`] before proceeding.
+    ///
+    /// Replacing the authz handler is allowed (mirrors the lock-and-swap
+    /// behavior of [`set_code_ui_session`](Self::set_code_ui_session)). The
+    /// mutex is poison-tolerant — a poisoned lock just gets recovered into
+    /// the new state rather than propagating the panic.
+    pub fn set_authz(&self, authz: Arc<dyn McpAuthorizer>) {
+        match self.authz.lock() {
+            Ok(mut guard) => *guard = Some(authz),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = Some(authz);
+            }
+        }
+    }
+
+    /// Snapshot of the currently-installed authz handler, if any.
+    fn current_authz(&self) -> Option<Arc<dyn McpAuthorizer>> {
+        match self.authz.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Phase 5 gate: returns `Ok(())` when no authz handler is installed
+    /// (preserves pre-Phase-5 unconditional-allow semantics), or when the
+    /// installed handler returns [`AuthzDecision::Allow`]. Otherwise
+    /// converts `Deny` / `NeedsHuman` decisions and any `AuthzError` from
+    /// the backend into an [`ErrorData`] so the MCP transport layer can
+    /// return a structured error to the client.
+    ///
+    /// All authz checks run as the system principal today
+    /// ([`PrincipalContext::system()`]); per-request principal threading
+    /// (caller token → principal) is queued for a follow-up patch.
+    async fn authorize_or_error(&self, op: McpOperation<'_>) -> Result<(), ErrorData> {
+        let Some(authz) = self.current_authz() else {
+            return Ok(());
+        };
+        let principal = PrincipalContext::system();
+        match authz.authorize(&principal, op).await {
+            Ok(AuthzDecision::Allow) => Ok(()),
+            Ok(AuthzDecision::Deny { reason }) => Err(ErrorData::invalid_request(
+                format!("MCP authorization denied: {reason}"),
+                None,
+            )),
+            Ok(AuthzDecision::NeedsHuman { reason }) => Err(ErrorData::invalid_request(
+                format!("MCP authorization requires human approval: {reason}"),
+                None,
+            )),
+            Err(error) => Err(ErrorData::internal_error(
+                format!("MCP authorization backend error: {error}"),
+                None,
+            )),
         }
     }
 
@@ -88,6 +160,7 @@ impl LibraMcpServer {
 
 impl LibraMcpServer {
     pub async fn list_resources_impl(&self) -> Result<Vec<Annotated<RawResource>>, ErrorData> {
+        self.authorize_or_error(McpOperation::ListResources).await?;
         Ok(vec![
             RawResource::new("libra://history/latest", "Latest History Head").no_annotation(),
             RawResource::new("libra://context/active", "Active Context").no_annotation(),

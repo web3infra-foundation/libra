@@ -77,3 +77,72 @@ async fn test_create_task_tool() {
         _ => panic!("Expected text content"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5 authz wiring
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+
+use crate::internal::ai::{
+    mcp::authz::{AuthzDecision, AuthzError, McpAuthorizer, McpOperation},
+    runtime::hardening::PrincipalContext,
+};
+
+/// Test fixture: always returns `Deny { reason }` so a wired-in authz
+/// gate flips a previously-OK impl call into an error.
+struct DenyAllAuthz {
+    reason: &'static str,
+}
+
+#[async_trait]
+impl McpAuthorizer for DenyAllAuthz {
+    async fn authorize(
+        &self,
+        _principal: &PrincipalContext,
+        _operation: McpOperation<'_>,
+    ) -> Result<AuthzDecision, AuthzError> {
+        Ok(AuthzDecision::Deny {
+            reason: self.reason.to_string(),
+        })
+    }
+}
+
+/// `list_resources_impl` without an authz handler installed must continue
+/// to return its standard two-resource list (pre-Phase-5 behavior).
+#[tokio::test]
+async fn list_resources_impl_succeeds_without_authz() {
+    let server = LibraMcpServer::new(None, None);
+
+    let resources = server
+        .list_resources_impl()
+        .await
+        .expect("list_resources_impl must succeed when no authz handler is installed");
+
+    assert_eq!(resources.len(), 2);
+}
+
+/// With a `DenyAllAuthz` installed via [`LibraMcpServer::set_authz`], the
+/// `list_resources_impl` call must surface the Deny reason as an
+/// `invalid_request` error rather than returning the resource list.
+#[tokio::test]
+async fn list_resources_impl_is_blocked_by_deny_authz() {
+    let server = LibraMcpServer::new(None, None);
+    server.set_authz(Arc::new(DenyAllAuthz {
+        reason: "test fixture denies everything",
+    }));
+
+    let err = server
+        .list_resources_impl()
+        .await
+        .expect_err("list_resources_impl must propagate the deny decision");
+    let message = err.message.to_string();
+    assert!(
+        message.contains("MCP authorization denied"),
+        "error message should self-identify (got {message:?})"
+    );
+    assert!(
+        message.contains("test fixture denies everything"),
+        "deny reason should be preserved in the error message (got {message:?})"
+    );
+}
