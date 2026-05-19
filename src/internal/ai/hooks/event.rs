@@ -140,3 +140,120 @@ pub struct HookOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `HookEvent::Display` and serde round-trip both produce
+    /// snake_case strings. Pin all 4 variants since they're the
+    /// wire-format strings every language client greps on.
+    #[test]
+    fn hook_event_display_and_serde_use_snake_case_for_all_variants() {
+        for (event, expected) in [
+            (HookEvent::PreToolUse, "pre_tool_use"),
+            (HookEvent::PostToolUse, "post_tool_use"),
+            (HookEvent::SessionStart, "session_start"),
+            (HookEvent::SessionEnd, "session_end"),
+        ] {
+            assert_eq!(event.to_string(), expected);
+            assert_eq!(
+                serde_json::to_string(&event).unwrap(),
+                format!("\"{expected}\""),
+            );
+            let back: HookEvent =
+                serde_json::from_str(&format!("\"{expected}\"")).expect("round-trips");
+            assert_eq!(back, event);
+        }
+    }
+
+    /// `HookAction::is_blocked` returns `true` only for `Block(_)`.
+    /// Pin so a future "is_blocked returns true for explicit Deny
+    /// variants" refactor breaks here.
+    #[test]
+    fn hook_action_is_blocked_only_for_block_variant() {
+        assert!(!HookAction::Allow.is_blocked());
+        assert!(HookAction::Block("reason".to_string()).is_blocked());
+        // Empty-reason block is still blocked.
+        assert!(HookAction::Block(String::new()).is_blocked());
+    }
+
+    /// `HookInput::pre_tool_use` populates `tool_name` + `tool_input` +
+    /// `working_dir`, leaves `tool_output` as `None` (tool hasn't run yet).
+    #[test]
+    fn hook_input_pre_tool_use_omits_output_field() {
+        let input = HookInput::pre_tool_use("shell", serde_json::json!({"cmd": "ls"}), "/tmp");
+        assert_eq!(input.event, HookEvent::PreToolUse);
+        assert_eq!(input.tool_name.as_deref(), Some("shell"));
+        assert_eq!(
+            input.tool_input.as_ref().unwrap(),
+            &serde_json::json!({"cmd": "ls"}),
+        );
+        assert!(input.tool_output.is_none(), "PreToolUse has no output yet",);
+        assert_eq!(input.working_dir.as_deref(), Some("/tmp"));
+
+        // Serde shape: tool_output must NOT appear in the JSON.
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(!json.contains("tool_output"), "got {json}");
+    }
+
+    /// `HookInput::post_tool_use` populates both `tool_input` AND
+    /// `tool_output` so observer hooks see the full request/response.
+    #[test]
+    fn hook_input_post_tool_use_populates_both_input_and_output() {
+        let input = HookInput::post_tool_use(
+            "shell",
+            serde_json::json!({"cmd": "ls"}),
+            serde_json::json!({"exit": 0, "stdout": ""}),
+            "/tmp",
+        );
+        assert_eq!(input.event, HookEvent::PostToolUse);
+        assert!(input.tool_input.is_some());
+        assert!(input.tool_output.is_some());
+        // Both must appear in the serialised JSON.
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("tool_input"));
+        assert!(json.contains("tool_output"));
+    }
+
+    /// `HookInput::session_event` leaves all tool fields empty —
+    /// only `event` + `working_dir` are populated. Pin the minimal
+    /// envelope for SessionStart / SessionEnd.
+    #[test]
+    fn hook_input_session_event_leaves_tool_fields_none() {
+        let input = HookInput::session_event(HookEvent::SessionStart, "/work");
+        assert_eq!(input.event, HookEvent::SessionStart);
+        assert!(input.tool_name.is_none());
+        assert!(input.tool_input.is_none());
+        assert!(input.tool_output.is_none());
+        assert_eq!(input.working_dir.as_deref(), Some("/work"));
+
+        // Serde shape: only `event` + `working_dir` remain.
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("\"event\":\"session_start\""));
+        assert!(json.contains("\"working_dir\":\"/work\""));
+        assert!(!json.contains("tool_name"));
+        assert!(!json.contains("tool_input"));
+        assert!(!json.contains("tool_output"));
+    }
+
+    /// `HookOutput::default` carries `message: None`; the serialised
+    /// form must be `{}` (empty object) because of the
+    /// `skip_serializing_if`.
+    #[test]
+    fn hook_output_default_serializes_as_empty_object() {
+        let output = HookOutput::default();
+        let json = serde_json::to_string(&output).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    /// `HookOutput` with `message: Some(...)` serialises the field.
+    #[test]
+    fn hook_output_with_message_serializes_field() {
+        let output = HookOutput {
+            message: Some("blocked by policy".to_string()),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"message\":\"blocked by policy\""));
+    }
+}
