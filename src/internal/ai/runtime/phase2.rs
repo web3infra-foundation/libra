@@ -64,11 +64,41 @@ pub struct AttemptWriteOutcome {
 }
 
 impl AttemptWriteOutcome {
-    /// `true` when the attempt ended in a terminal-failure status (i.e.
-    /// not `Completed`). Used by Phase 3 validation routing to decide
-    /// whether to escalate to a retry or open a `MergeCandidate`.
+    /// `true` when the attempt ended in a non-`Completed` status. Used by
+    /// Phase 3 validation routing to decide whether to escalate to a retry
+    /// or open a `MergeCandidate`.
+    ///
+    /// **Note:** this returns `true` for the start-state marker
+    /// `Interrupted` as well as the truly-terminal failure statuses; if the
+    /// caller needs to distinguish "still in flight" from "finished with
+    /// failure", combine this with [`is_terminal`](Self::is_terminal):
+    ///
+    /// ```text
+    /// is_failure() && is_terminal()   => Failed | Cancelled | TimedOut
+    /// is_failure() && !is_terminal()  => Interrupted (still in flight)
+    /// !is_failure() && is_terminal()  => Completed
+    /// ```
     pub fn is_failure(&self) -> bool {
         !matches!(self.status, TaskExecutionStatus::Completed)
+    }
+
+    /// `true` when the attempt has reached a **terminal** status —
+    /// `Completed`, `Failed`, `Cancelled`, or `TimedOut`. `Interrupted`
+    /// (the in-flight marker written by [`write_attempt_start`]) is
+    /// explicitly NOT terminal: it signals "the run row exists but hasn't
+    /// reached a clean terminal state yet".
+    ///
+    /// Phase 3 routing uses this to decide whether the attempt is ready
+    /// for validation; non-terminal attempts must keep waiting on the
+    /// executor.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            TaskExecutionStatus::Completed
+                | TaskExecutionStatus::Failed
+                | TaskExecutionStatus::Cancelled
+                | TaskExecutionStatus::TimedOut
+        )
     }
 }
 
@@ -180,6 +210,94 @@ pub fn write_attempt_finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `is_terminal()` must return `true` for the four terminal statuses
+    /// and `false` for `Interrupted` (the in-flight marker). Combined with
+    /// `is_failure()`, this lets Phase 3 routing distinguish:
+    ///   - `is_failure() && is_terminal()`  → Failed | Cancelled | TimedOut
+    ///   - `is_failure() && !is_terminal()` → Interrupted (still in flight)
+    ///   - `!is_failure() && is_terminal()` → Completed
+    #[test]
+    fn is_terminal_excludes_interrupted_only() {
+        let task_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+
+        for terminal in [
+            TaskExecutionStatus::Completed,
+            TaskExecutionStatus::Failed,
+            TaskExecutionStatus::Cancelled,
+            TaskExecutionStatus::TimedOut,
+        ] {
+            let label = format!("{terminal:?}");
+            let outcome = AttemptWriteOutcome {
+                task_id,
+                run_id,
+                status: terminal,
+                summary: None,
+            };
+            assert!(outcome.is_terminal(), "expected {label} to be terminal",);
+        }
+
+        let in_flight = AttemptWriteOutcome {
+            task_id,
+            run_id,
+            status: TaskExecutionStatus::Interrupted,
+            summary: None,
+        };
+        assert!(
+            !in_flight.is_terminal(),
+            "Interrupted is the in-flight marker; must not be terminal",
+        );
+    }
+
+    /// `is_failure() && is_terminal()` must hold for all three real
+    /// failure statuses, distinguishing them from the in-flight
+    /// `Interrupted` marker (`is_failure() && !is_terminal()`).
+    #[test]
+    fn is_failure_and_is_terminal_together_partition_statuses() {
+        let task_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+
+        for failure in [
+            TaskExecutionStatus::Failed,
+            TaskExecutionStatus::Cancelled,
+            TaskExecutionStatus::TimedOut,
+        ] {
+            let label = format!("{failure:?}");
+            let outcome = AttemptWriteOutcome {
+                task_id,
+                run_id,
+                status: failure,
+                summary: None,
+            };
+            assert!(
+                outcome.is_failure() && outcome.is_terminal(),
+                "expected {label} to be both failure and terminal",
+            );
+        }
+
+        let in_flight = AttemptWriteOutcome {
+            task_id,
+            run_id,
+            status: TaskExecutionStatus::Interrupted,
+            summary: None,
+        };
+        assert!(
+            in_flight.is_failure() && !in_flight.is_terminal(),
+            "Interrupted must be failure but NOT terminal",
+        );
+
+        let success = AttemptWriteOutcome {
+            task_id,
+            run_id,
+            status: TaskExecutionStatus::Completed,
+            summary: None,
+        };
+        assert!(
+            !success.is_failure() && success.is_terminal(),
+            "Completed must be NOT failure AND terminal",
+        );
+    }
 
     /// `is_failure()` must return `false` for `Completed` and `true` for
     /// every other variant so Phase 3 routing logic can fail-closed on
