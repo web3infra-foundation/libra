@@ -150,7 +150,7 @@
 
 本节补齐"代码基线核对"表未显式列出的具体模块缺口与各 Phase 落地进度，作为 Codex 任务排期与 review checklist 使用。
 
-**已落地的 runtime 子模块**：`mod.rs` / `contracts.rs` / `event.rs` / `snapshot.rs` / `hardening.rs` / `phase0.rs`（v0.17.574 起，`write_intent` formal-write 入口）/ `phase1.rs`（v0.17.575 起，`PlanWriteOutcome` schema + `ordered_plan_ids` helper；`write_plan_set` 函数体仍待 Wave 1B 接入）/ `phase3.rs` / `phase4.rs` / `prompt_builders.rs` / `environment.rs` / `derived_records.rs`
+**已落地的 runtime 子模块**：`mod.rs` / `contracts.rs` / `event.rs` / `snapshot.rs` / `hardening.rs` / `phase0.rs`（v0.17.574 起，`write_intent` formal-write 入口）/ `phase1.rs`（v0.17.575 起，`PlanWriteOutcome` schema + `ordered_plan_ids` helper；`write_plan_set` 函数体仍待 Wave 1B 接入）/ `phase2.rs`（v0.17.576 起，`AttemptWriteOutcome` schema + `is_failure` helper；`write_attempt_start` / `write_attempt_finish` 函数体仍待 Wave 1B 接入）/ `phase3.rs` / `phase4.rs` / `prompt_builders.rs` / `environment.rs` / `derived_records.rs`
 
 **Part B Affected Modules 表中声明应新建但当前不存在**（按合并优先级）：
 
@@ -158,7 +158,7 @@
 |---------|---------------|----------|--------|
 | `src/internal/ai/runtime/phase0.rs` | Phase 0 Intent 的 formal write helper（`write_intent` / `write_context_snapshot_if_needed`） | **`write_intent` 已落地（v0.17.574）**：模块存在，提供 `pub async fn write_intent(spec, mcp_server) -> Result<IntentWriteOutcome>` 作为 Phase 0 的 formal-write 入口，当前内部委托给 `intentspec::persistence::persist_intentspec`；2 个单测覆盖 `IntentWriteOutcome` clone / 字段保留。`write_context_snapshot_if_needed` 仍待 Wave 1B context-snapshot 路径接入后补齐 | 高（Wave 1B 阻塞项） |
 | `src/internal/ai/runtime/phase1.rs` | Phase 1 Plan 的 formal write helper（`write_plan_set` / `advance_scheduler`） | **Schema 已落地（v0.17.575）**：模块存在，提供 `PlanWriteOutcome { execution_plan_id, test_plan_id, plan_id_by_task_id }` 类型 + `ordered_plan_ids()` helper 配合 `SelectedPlanSet::ordered_ids` 顺序；`write_plan_set` 函数体仍待 Wave 1B 把 `orchestrator::persistence::create_plan_set_revision` 的 `pub(crate)` 化或 `ExecutionAuditSession::record_plan_compiled` lift 到本模块；2 个单测覆盖 outcome 字段保留 + execution/test 顺序合同 | 高（Wave 1B 阻塞项） |
-| `src/internal/ai/runtime/phase2.rs` | Phase 2 Execution 的 formal write helper（attempt 生命周期 + formal writes） | 缺失；逻辑分散在 `orchestrator/executor.rs` | 高（Wave 1B 阻塞项） |
+| `src/internal/ai/runtime/phase2.rs` | Phase 2 Execution 的 formal write helper（attempt 生命周期 + formal writes） | **Schema 已落地（v0.17.576）**：模块存在，提供 `AttemptWriteOutcome { task_id, run_id, status, summary }` 类型 + `is_failure()` helper（`status != Completed`）配合 Phase 3 routing；`write_attempt_start` / `write_attempt_finish` 函数体仍待 Wave 1B 把 `orchestrator::persistence::ExecutionAuditSession` 的 channel-based runtime audit lift 到本模块；2 个单测覆盖 outcome clone + Completed-only 失败判断 | 高（Wave 1B 阻塞项） |
 | `src/internal/ai/runtime/revision.rs` | 跨 phase 的 revision chain helper | 缺失 | 中 |
 | `src/internal/ai/mcp/authz.rs` | Phase 5 安全层 `McpAuthorizer` | **Schema 已落地（v0.17.573）**：trait + `McpOperation` / `AuthzDecision` / `AuthzError` 类型已声明并通过 4 个单测覆盖；trait 是 dyn-compatible 的 `Arc<dyn McpAuthorizer>` 形态；尚未 wire 入 `mcp/server.rs` 请求路径——Phase 5 hardening 收尾时只需在 server.rs 注入 authz 字段并调用 `authorize(...)` | 中（Phase 5 收尾项） |
 | `impl TaskExecutor for CodexTaskExecutor` 块 | Wave 1B Definition of Done #1 | 缺失（trait 已定义，未实装） | **高（Wave 1B 阻塞项）** |
