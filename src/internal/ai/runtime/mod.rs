@@ -16,6 +16,7 @@ pub mod phase4;
 pub mod prompt_builders;
 pub mod revision;
 pub mod snapshot;
+pub mod task_executors;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
 pub use event::{Event, audit_action_for};
