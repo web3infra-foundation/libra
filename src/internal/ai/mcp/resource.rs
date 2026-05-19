@@ -1450,9 +1450,12 @@ impl LibraMcpServer {
         params: CreateIntentParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        self.authorize_or_error(McpOperation::CallTool {
-            tool_name: "create_intent",
-        })
+        self.authorize_or_error_with_actor(
+            McpOperation::CallTool {
+                tool_name: "create_intent",
+            },
+            &actor,
+        )
         .await?;
         let mut parent_ids = parse_uuid_vec(params.parent_ids, "parent_ids")?;
         if let Some(parent_id) = parse_optional_uuid(params.parent_id, "parent_id")? {
@@ -1714,9 +1717,12 @@ impl LibraMcpServer {
         params: CreateTaskParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        self.authorize_or_error(McpOperation::CallTool {
-            tool_name: "create_task",
-        })
+        self.authorize_or_error_with_actor(
+            McpOperation::CallTool {
+                tool_name: "create_task",
+            },
+            &actor,
+        )
         .await?;
         let goal_type = if let Some(gt) = params.goal_type {
             use std::str::FromStr;
@@ -1934,9 +1940,12 @@ impl LibraMcpServer {
         params: CreateRunParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        self.authorize_or_error(McpOperation::CallTool {
-            tool_name: "create_run",
-        })
+        self.authorize_or_error_with_actor(
+            McpOperation::CallTool {
+                tool_name: "create_run",
+            },
+            &actor,
+        )
         .await?;
         let task_id = parse_uuid(&params.task_id, "task_id")?;
         let task_for_checks = self
@@ -2089,9 +2098,12 @@ impl LibraMcpServer {
         params: CreateContextSnapshotParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        self.authorize_or_error(McpOperation::CallTool {
-            tool_name: "create_context_snapshot",
-        })
+        self.authorize_or_error_with_actor(
+            McpOperation::CallTool {
+                tool_name: "create_context_snapshot",
+            },
+            &actor,
+        )
         .await?;
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
@@ -2214,9 +2226,12 @@ impl LibraMcpServer {
         params: CreatePlanParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        self.authorize_or_error(McpOperation::CallTool {
-            tool_name: "create_plan",
-        })
+        self.authorize_or_error_with_actor(
+            McpOperation::CallTool {
+                tool_name: "create_plan",
+            },
+            &actor,
+        )
         .await?;
         let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
         self.ensure_object_exists("intent", intent_id, "intent_id")

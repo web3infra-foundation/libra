@@ -31,6 +31,38 @@ impl PrincipalContext {
             role: PrincipalRole::System,
         }
     }
+
+    /// Map a git-internal [`ActorRef`](git_internal::internal::object::types::ActorRef)
+    /// onto a [`PrincipalContext`].
+    ///
+    /// Mapping policy (one-way, lossy — `ActorKind` carries more granularity
+    /// than `PrincipalRole`):
+    ///
+    /// - `ActorKind::System` → `PrincipalRole::System`
+    /// - `ActorKind::Human` / `ActorKind::Agent` / `ActorKind::McpClient`
+    ///   → `PrincipalRole::Contributor` (all act on behalf of the
+    ///   workspace owner, distinct from platform-level System)
+    /// - `ActorKind::Other(_)` → `PrincipalRole::Observer` (fail-closed
+    ///   to least-privilege for unknown actor categories)
+    ///
+    /// The `principal_id` is the verbatim
+    /// [`ActorRef::id`](git_internal::internal::object::types::ActorRef::id),
+    /// so audit pipelines can correlate `PrincipalContext.principal_id`
+    /// with the on-object actor identifier without a side table.
+    pub fn from_actor(actor: &git_internal::internal::object::types::ActorRef) -> Self {
+        use git_internal::internal::object::types::ActorKind;
+        let role = match actor.kind() {
+            ActorKind::System => PrincipalRole::System,
+            ActorKind::Human | ActorKind::Agent | ActorKind::McpClient => {
+                PrincipalRole::Contributor
+            }
+            ActorKind::Other(_) => PrincipalRole::Observer,
+        };
+        Self {
+            principal_id: actor.id().to_string(),
+            role,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -572,5 +604,58 @@ mod tests {
         assert!(!output.contains(" raw"));
         assert!(output.contains("X-Libra-Control-Token: [REDACTED]"));
         assert!(output.contains("X-Code-Controller-Token=[REDACTED]"));
+    }
+
+    /// `PrincipalContext::from_actor` must map every `ActorKind` variant
+    /// to the right `PrincipalRole`. Human / Agent / McpClient all
+    /// collapse to `Contributor` (they act on behalf of the workspace
+    /// owner); System maps to `System`; the open-ended `Other(_)` variant
+    /// is fail-closed to `Observer` (least privilege) so a malformed
+    /// actor on disk can't accidentally route as System.
+    #[test]
+    fn principal_context_from_actor_maps_actor_kinds_to_roles() {
+        use git_internal::internal::object::types::{ActorKind, ActorRef};
+
+        let human = ActorRef::new(ActorKind::Human, "user@example").unwrap();
+        let agent = ActorRef::new(ActorKind::Agent, "libra-coder").unwrap();
+        let system = ActorRef::new(ActorKind::System, "libra-orchestrator").unwrap();
+        let mcp_client = ActorRef::new(ActorKind::McpClient, "mcp-user").unwrap();
+        let other = ActorRef::new(ActorKind::Other("custom".to_string()), "unknown").unwrap();
+
+        assert_eq!(
+            PrincipalContext::from_actor(&human),
+            PrincipalContext {
+                principal_id: "user@example".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&agent),
+            PrincipalContext {
+                principal_id: "libra-coder".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&system),
+            PrincipalContext {
+                principal_id: "libra-orchestrator".to_string(),
+                role: PrincipalRole::System,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&mcp_client),
+            PrincipalContext {
+                principal_id: "mcp-user".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&other),
+            PrincipalContext {
+                principal_id: "unknown".to_string(),
+                role: PrincipalRole::Observer,
+            }
+        );
     }
 }

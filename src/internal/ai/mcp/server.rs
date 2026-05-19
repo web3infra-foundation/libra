@@ -117,10 +117,33 @@ impl LibraMcpServer {
     /// ([`PrincipalContext::system()`]); per-request principal threading
     /// (caller token → principal) is queued for a follow-up patch.
     pub(crate) async fn authorize_or_error(&self, op: McpOperation<'_>) -> Result<(), ErrorData> {
+        self.authorize_with_principal_or_error(op, PrincipalContext::system())
+            .await
+    }
+
+    /// Per-request authz variant: derive a [`PrincipalContext`] from the
+    /// caller's [`git_internal::internal::object::types::ActorRef`] (via
+    /// [`PrincipalContext::from_actor`]) and route through the same
+    /// decision plumbing as [`authorize_or_error`]. Wired into the
+    /// `create_*_impl` family in `mcp/resource.rs`, which threads an
+    /// `actor: ActorRef` parameter from the MCP transport.
+    pub(crate) async fn authorize_or_error_with_actor(
+        &self,
+        op: McpOperation<'_>,
+        actor: &git_internal::internal::object::types::ActorRef,
+    ) -> Result<(), ErrorData> {
+        self.authorize_with_principal_or_error(op, PrincipalContext::from_actor(actor))
+            .await
+    }
+
+    async fn authorize_with_principal_or_error(
+        &self,
+        op: McpOperation<'_>,
+        principal: PrincipalContext,
+    ) -> Result<(), ErrorData> {
         let Some(authz) = self.current_authz() else {
             return Ok(());
         };
-        let principal = PrincipalContext::system();
         match authz.authorize(&principal, op).await {
             Ok(AuthzDecision::Allow) => Ok(()),
             Ok(AuthzDecision::Deny { reason }) => Err(ErrorData::invalid_request(

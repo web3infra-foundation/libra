@@ -248,3 +248,89 @@ async fn create_task_impl_is_blocked_by_deny_authz() {
         "deny reason should be preserved (got {message:?})"
     );
 }
+
+/// Records every call's (op, principal) pair so a test can assert that
+/// per-request principal threading actually delivers the caller's
+/// `ActorRef` identity to the authz layer rather than collapsing to
+/// `PrincipalContext::system()`.
+struct RecordingAllowAuthz {
+    last_principal: tokio::sync::Mutex<Option<PrincipalContext>>,
+}
+
+#[async_trait]
+impl McpAuthorizer for RecordingAllowAuthz {
+    async fn authorize(
+        &self,
+        principal: &PrincipalContext,
+        _operation: McpOperation<'_>,
+    ) -> Result<AuthzDecision, AuthzError> {
+        *self.last_principal.lock().await = Some(principal.clone());
+        Ok(AuthzDecision::Allow)
+    }
+}
+
+/// `create_task_impl` must thread its `actor: ActorRef` parameter through
+/// to the authz layer as a `PrincipalContext` derived via
+/// [`PrincipalContext::from_actor`]. The `default_actor()` helper builds
+/// an `ActorKind::McpClient` actor, which maps to
+/// `PrincipalRole::Contributor` + `principal_id = "mcp-user"`.
+#[tokio::test]
+async fn create_task_impl_threads_actor_into_authz_principal() {
+    use crate::internal::ai::runtime::hardening::PrincipalRole;
+
+    let temp_dir = tempdir().unwrap();
+    let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        temp_dir.path().to_path_buf(),
+        db_conn,
+    ));
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    let recorder = Arc::new(RecordingAllowAuthz {
+        last_principal: tokio::sync::Mutex::new(None),
+    });
+    server.set_authz(recorder.clone());
+
+    let params = CreateTaskParams {
+        title: "Test Task".to_string(),
+        intent_id: None,
+        description: Some("Description".to_string()),
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
+        status: None,
+        reason: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: None,
+        actor_id: None,
+    };
+
+    let actor = server.default_actor().unwrap();
+    server
+        .create_task_impl(params, actor)
+        .await
+        .expect("Allow authz must permit the create_task call");
+
+    let recorded = recorder
+        .last_principal
+        .lock()
+        .await
+        .clone()
+        .expect("authz must have been invoked with a principal");
+    assert_eq!(
+        recorded.principal_id, "mcp-user",
+        "principal id should equal the ActorRef id from default_actor()"
+    );
+    assert_eq!(
+        recorded.role,
+        PrincipalRole::Contributor,
+        "default_actor() builds an McpClient ActorRef which maps to Contributor"
+    );
+}
