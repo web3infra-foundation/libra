@@ -367,6 +367,65 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
 }
 
 #[tokio::test]
+async fn persist_failure_rolls_back_all_writes() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+    create_tx_probe_table(&db).await;
+
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TABLE operation_view".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let error = with_operation_log_with_conn(
+        &db,
+        valid_meta_with_digest("sha256:persist-failure"),
+        OperationScope::default(),
+        |txn| {
+            Box::pin(async move {
+                txn.execute(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "INSERT INTO tx_probe(id) VALUES(5)".to_string(),
+                ))
+                .await?;
+                Ok::<_, DbErr>(())
+            })
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, OperationError::Persist(_) | OperationError::Rollback(_)));
+
+    let tx_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM tx_probe WHERE id = 5".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+    let op_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM operation".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+
+    assert_eq!(tx_count, 0);
+    assert_eq!(op_count, 0);
+}
+
+#[tokio::test]
 async fn serial_duplicate_submission_is_rejected_within_window() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;

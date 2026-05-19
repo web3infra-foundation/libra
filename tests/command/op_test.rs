@@ -5,9 +5,10 @@
 use std::path::Path;
 
 use libra::{
-    internal::{branch::Branch, head::Head},
+    internal::{branch::Branch, db::get_db_conn_instance, head::Head, model::config_kv},
     utils::test::ChangeDirGuard,
 };
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::Value;
 
 use super::*;
@@ -87,6 +88,32 @@ fn test_op_log_verbose_includes_core_fields() {
     );
     assert!(stdout.contains("actor: Test User"), "unexpected stdout: {stdout}");
     assert!(stdout.contains("status: succeeded"), "unexpected stdout: {stdout}");
+}
+
+#[test]
+fn test_op_log_quiet_suppresses_stdout() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let output = run_libra_command(&["--quiet", "op", "log", "-n", "1"], repo.path());
+    assert_cli_success(&output, "quiet op log");
+    assert!(output.stdout.is_empty(), "unexpected stdout: {:?}", output.stdout);
+}
+
+#[test]
+fn test_op_log_zero_inputs_normalize_to_default_page_shape() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let json = run_json_op(repo.path(), &["log", "-n", "0", "--page", "0"]);
+    assert_eq!(json["data"]["page"], Value::from(1));
+    assert_eq!(json["data"]["per_page"], Value::from(50));
+    assert_eq!(json["data"]["total"], Value::from(1));
+    assert_eq!(json["data"]["operations"].as_array().expect("operations").len(), 1);
 }
 
 #[test]
@@ -186,6 +213,37 @@ fn test_op_log_json_command_filter_preserves_filtered_total_across_pages() {
 }
 
 #[test]
+fn test_op_log_json_command_filter_with_no_matches_returns_empty_page() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let json = run_json_op(repo.path(), &["log", "-n", "10", "--command", "merge"]);
+    assert_eq!(json["data"]["page"], Value::from(1));
+    assert_eq!(json["data"]["per_page"], Value::from(10));
+    assert_eq!(json["data"]["total"], Value::from(0));
+    assert!(json["data"]["operations"]
+        .as_array()
+        .expect("operations")
+        .is_empty());
+}
+
+#[test]
+fn test_op_log_json_whitespace_command_filter_is_treated_as_unfiltered() {
+    let repo = create_committed_repo_via_cli();
+
+    for branch_name in ["feature", "topic"] {
+        let output = run_libra_command(&["branch", branch_name], repo.path());
+        assert_cli_success(&output, branch_name);
+    }
+
+    let json = run_json_op(repo.path(), &["log", "-n", "10", "--command", "   "]);
+    assert_eq!(json["data"]["total"], Value::from(2));
+    assert_eq!(json["data"]["operations"].as_array().expect("operations").len(), 2);
+}
+
+#[test]
 fn test_op_log_human_page_two_uses_filtered_global_index() {
     let repo = create_committed_repo_via_cli();
 
@@ -274,6 +332,50 @@ fn test_op_show_out_of_range_index_reports_invalid_target() {
 }
 
 #[test]
+fn test_op_show_invalid_index_format_reports_invalid_arguments() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let output = run_libra_command(&["op", "show", "@{abc}"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        human.contains("fatal: invalid operation index: @{abc}"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+}
+
+#[test]
+fn test_op_show_unknown_operation_id_reports_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let output = run_libra_command(&["op", "show", "missing-op-id"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        human.contains("fatal: operation 'missing-op-id' not found"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(
+        report.hints,
+        vec!["use 'libra op log' to list available operations"]
+    );
+}
+
+#[test]
 fn test_op_restore_dry_run_does_not_record_new_operation() {
     let repo = create_committed_repo_via_cli();
 
@@ -323,6 +425,119 @@ fn test_op_restore_dirty_worktree_is_rejected_without_recording_new_operation() 
 
     let after = listed_operation_count(repo.path());
     assert_eq!(after, before, "rejected restore must not record a new operation");
+}
+
+#[test]
+fn test_op_restore_unknown_operation_id_reports_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let output = run_libra_command(&["op", "restore", "missing-op-id"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        human.contains("fatal: operation 'missing-op-id' not found"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+}
+
+#[test]
+fn test_op_restore_force_allows_dirty_worktree_and_records_new_operation() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\ndirty change\n")
+        .expect("failed to dirty tracked file");
+
+    let before = listed_operation_count(repo.path());
+    let output = run_libra_command(&["op", "restore", "@{0}", "--force"], repo.path());
+    assert_cli_success(&output, "op restore --force");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Restored to operation"), "unexpected stdout: {stdout}");
+    assert!(stdout.contains("New operation recorded:"), "unexpected stdout: {stdout}");
+
+    let after = listed_operation_count(repo.path());
+    assert_eq!(after, before + 1, "forced restore should record a new operation");
+    assert_eq!(run_json_op(repo.path(), &["log", "-n", "1"])["data"]["operations"][0]["command_name"], "op restore");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_op_restore_uses_default_actor_when_user_name_is_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    let feature = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&feature, "branch feature");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    config_kv::Entity::delete_many()
+        .filter(config_kv::Column::Key.eq("user.name"))
+        .exec(&db)
+        .await
+        .expect("failed to delete user.name");
+
+    let restore = run_json_op(repo.path(), &["restore", "@{0}"]);
+    assert_eq!(restore["data"]["action"], Value::String("restore".to_string()));
+
+    let latest = run_json_op(repo.path(), &["log", "-n", "1"]);
+    assert_eq!(latest["data"]["operations"][0]["actor"], "libra-user");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_op_log_missing_repo_id_reports_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    config_kv::Entity::delete_many()
+        .filter(config_kv::Column::Key.eq("libra.repoid"))
+        .exec(&db)
+        .await
+        .expect("failed to delete libra.repoid");
+
+    let output = run_libra_command(&["op", "log"], repo.path());
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        human.contains("fatal: repository id is missing"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert_eq!(report.category, "repo");
+    assert_eq!(report.exit_code, 128);
+    assert_eq!(
+        report.hints,
+        vec!["run 'libra init' to initialize repository metadata"]
+    );
+}
+
+#[test]
+fn test_op_command_smoke_sequence_passes() {
+    let repo = create_committed_repo_via_cli();
+
+    let branch = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&branch, "branch feature");
+
+    let log = run_libra_command(&["op", "log", "-n", "5"], repo.path());
+    assert_cli_success(&log, "op log");
+
+    let show = run_libra_command(&["op", "show", "@{0}"], repo.path());
+    assert_cli_success(&show, "op show");
+
+    let dry_run = run_libra_command(&["op", "restore", "@{0}", "--dry-run"], repo.path());
+    assert_cli_success(&dry_run, "op restore --dry-run");
 }
 
 #[tokio::test]
