@@ -174,3 +174,255 @@ impl Event for CompactionEvent {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::context_budget::frame::{
+        ContextFrameEvent, ContextFrameKind, ContextFrameOmission, ContextFrameSegment,
+        ContextFrameSource, ContextTrustLevel,
+    };
+
+    fn frame_segment(
+        id: &str,
+        segment: ContextSegmentKind,
+        non_compressible: bool,
+        attachment: Option<ContextAttachmentRef>,
+    ) -> ContextFrameSegment {
+        ContextFrameSegment {
+            id: id.to_string(),
+            segment,
+            source: ContextFrameSource::runtime("test"),
+            trust: ContextTrustLevel::Trusted,
+            token_estimate: 10,
+            content: Some("body".to_string()),
+            summary: None,
+            attachment,
+            non_compressible,
+        }
+    }
+
+    fn attachment_ref(label: &str) -> ContextAttachmentRef {
+        ContextAttachmentRef {
+            sha256: format!("{label}-sha"),
+            bytes: 42,
+            line_count: 3,
+            relative_path: format!("{label}.txt"),
+            read_hint: "noop".to_string(),
+        }
+    }
+
+    fn sample_frame() -> ContextFrameEvent {
+        ContextFrameEvent {
+            event_id: Uuid::nil(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::nil(),
+            kind: ContextFrameKind::PromptBuild,
+            prompt_id: None,
+            segments: vec![
+                frame_segment("rules", ContextSegmentKind::SystemRules, false, None),
+                frame_segment(
+                    "nc",
+                    ContextSegmentKind::ToolResults,
+                    true,
+                    Some(attachment_ref("att-nc")),
+                ),
+                frame_segment(
+                    "plain",
+                    ContextSegmentKind::RecentMessages,
+                    false,
+                    Some(attachment_ref("att-plain")),
+                ),
+            ],
+            omissions: vec![ContextFrameOmission {
+                id: "dropped".to_string(),
+                segment: ContextSegmentKind::SourceContext,
+                token_estimate: 20,
+                reason: super::super::allocator::AllocationOmissionReason::TotalBudgetExceeded,
+            }],
+            total_candidate_tokens: 100,
+            total_selected_tokens: 60,
+            budget_exceeded_by: 0,
+        }
+    }
+
+    #[test]
+    fn prune_constants_pin_compaction_thresholds() {
+        // INVARIANT: these mirror opencode `session/compaction.ts` and
+        // double as the contract the prune projection in
+        // `super::projection` and the budget calculator in
+        // `super::budget` rely on. A silent drift would diverge from
+        // the upstream behaviour the doc says we replicate.
+        assert_eq!(PRUNE_MINIMUM, 20_000);
+        assert_eq!(PRUNE_PROTECT, 40_000);
+        assert_eq!(TOOL_OUTPUT_MAX_CHARS, 2_000);
+        assert_eq!(DEFAULT_TAIL_TURNS, 2);
+        assert_eq!(MIN_PRESERVE_RECENT_TOKENS, 2_000);
+        assert_eq!(MAX_PRESERVE_RECENT_TOKENS, 8_000);
+    }
+
+    #[test]
+    fn prune_protected_tools_pins_the_three_member_allowlist() {
+        // INVARIANT: prune must never drop output for these three
+        // tools — `skill` (mirrors upstream) plus the two intent /
+        // plan draft submission tools that carry the only durable
+        // user-intent record. Re-ordering or shortening the list is
+        // a behaviour change.
+        assert_eq!(
+            PRUNE_PROTECTED_TOOLS,
+            &["skill", "submit_intent_draft", "submit_plan_draft"]
+        );
+    }
+
+    #[test]
+    fn preserve_recent_budget_matches_opencode_formula() {
+        // INVARIANT: `min(MAX, max(MIN, floor(usable * 0.25)))`.
+        // The constants are 2_000 / 8_000 — the boundary tests pin
+        // both clamps and the divider math.
+        assert_eq!(preserve_recent_budget(0), MIN_PRESERVE_RECENT_TOKENS);
+        // Just below the lower clamp: 4 * MIN - 1 = 7999, /4 = 1999,
+        // clamped up to MIN.
+        assert_eq!(preserve_recent_budget(7_999), MIN_PRESERVE_RECENT_TOKENS);
+        // Exact lower boundary: usable / 4 == MIN.
+        assert_eq!(
+            preserve_recent_budget(8_000),
+            MIN_PRESERVE_RECENT_TOKENS,
+            "8_000 / 4 lands at the MIN clamp"
+        );
+        // Mid-range value passes through unmodified.
+        assert_eq!(preserve_recent_budget(20_000), 5_000);
+        // Just below the upper clamp.
+        assert_eq!(
+            preserve_recent_budget(31_999),
+            7_999,
+            "31_999 / 4 = 7_999, still within [MIN, MAX]"
+        );
+        // Exact upper boundary: usable / 4 == MAX.
+        assert_eq!(
+            preserve_recent_budget(32_000),
+            MAX_PRESERVE_RECENT_TOKENS,
+            "32_000 / 4 lands exactly at MAX clamp"
+        );
+        // Saturating: large usable counts must clamp at MAX rather
+        // than overflow or panic.
+        assert_eq!(preserve_recent_budget(u64::MAX), MAX_PRESERVE_RECENT_TOKENS);
+    }
+
+    #[test]
+    fn compaction_reason_as_str_pins_wire_strings() {
+        // INVARIANT: these strings are persisted in JSONL alongside
+        // every compaction event. Renaming would orphan history.
+        assert_eq!(CompactionReason::BudgetPressure.as_str(), "budget_pressure");
+        assert_eq!(CompactionReason::ResumeReplay.as_str(), "resume_replay");
+        assert_eq!(CompactionReason::Manual.as_str(), "manual");
+        assert_eq!(CompactionReason::Maintenance.as_str(), "maintenance");
+    }
+
+    #[test]
+    fn from_frame_collects_omitted_ids_from_omissions_list() {
+        let frame = sample_frame();
+        let event =
+            CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "summarised");
+        assert_eq!(event.omitted_segment_ids, vec!["dropped"]);
+    }
+
+    #[test]
+    fn from_frame_records_token_counts_from_frame() {
+        let frame = sample_frame();
+        let event = CompactionEvent::from_frame(&frame, CompactionReason::Manual, "manual run");
+        assert_eq!(event.tokens_before, frame.total_candidate_tokens);
+        assert_eq!(event.tokens_after, frame.total_selected_tokens);
+        assert_eq!(event.frame_id, frame.frame_id);
+        assert_eq!(event.summary, "manual run");
+        assert_eq!(event.reason, CompactionReason::Manual);
+        assert!(
+            event.tail_start_id.is_none(),
+            "from_frame must default tail_start_id to None"
+        );
+    }
+
+    #[test]
+    fn from_frame_protects_system_rules_and_non_compressible_segments() {
+        // INVARIANT: protected_segment_ids is the union of
+        // (non_compressible == true) and (segment ==
+        // ContextSegmentKind::SystemRules). A silent narrowing
+        // would let compaction drop SystemRules.
+        let frame = sample_frame();
+        let event =
+            CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "summarised");
+        // Order of `protected_segment_ids` follows iteration order
+        // over `frame.segments`, so `rules` comes before `nc`.
+        assert_eq!(event.protected_segment_ids, vec!["rules", "nc"]);
+        assert!(!event.protected_segment_ids.contains(&"plain".to_string()));
+    }
+
+    #[test]
+    fn from_frame_propagates_attachment_refs_in_segment_order() {
+        // INVARIANT: `attachment_refs` filters `segments` for
+        // `Some(attachment)` in input order. Reordering would change
+        // how replay tooling correlates attachments with summaries.
+        let frame = sample_frame();
+        let event =
+            CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "summarised");
+        let labels: Vec<&str> = event
+            .attachment_refs
+            .iter()
+            .map(|attachment| attachment.relative_path.as_str())
+            .collect();
+        assert_eq!(labels, vec!["att-nc.txt", "att-plain.txt"]);
+    }
+
+    #[test]
+    fn from_frame_generates_a_fresh_event_id() {
+        let frame = sample_frame();
+        let a = CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "first");
+        let b = CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "second");
+        assert_ne!(
+            a.event_id, b.event_id,
+            "each compaction must get a new uuid"
+        );
+    }
+
+    #[test]
+    fn with_tail_start_id_replaces_only_the_tail_field() {
+        let frame = sample_frame();
+        let event = CompactionEvent::from_frame(&frame, CompactionReason::ResumeReplay, "resume");
+        let original_event_id = event.event_id;
+        let updated = event.clone().with_tail_start_id("seg_42");
+        assert_eq!(updated.tail_start_id.as_deref(), Some("seg_42"));
+        // The builder must not regenerate the event id or change any
+        // other field; replay relies on stable correlation.
+        assert_eq!(updated.event_id, original_event_id);
+        assert_eq!(updated.tokens_before, event.tokens_before);
+        assert_eq!(updated.tokens_after, event.tokens_after);
+        assert_eq!(updated.reason, event.reason);
+        assert_eq!(updated.summary, event.summary);
+    }
+
+    #[test]
+    fn event_trait_kind_string_pins_compaction_event() {
+        let frame = sample_frame();
+        let event = CompactionEvent::from_frame(&frame, CompactionReason::Manual, "summary");
+        // INVARIANT: the JSONL discriminator string is
+        // `compaction_event` — renaming would break every replay
+        // consumer that filters by event_kind.
+        assert_eq!(event.event_kind(), "compaction_event");
+        assert_eq!(event.event_id(), event.event_id);
+    }
+
+    #[test]
+    fn event_trait_summary_includes_reason_and_token_delta() {
+        let frame = sample_frame();
+        let event =
+            CompactionEvent::from_frame(&frame, CompactionReason::BudgetPressure, "summary");
+        let summary = event.event_summary();
+        assert!(
+            summary.starts_with("budget_pressure compaction for frame "),
+            "summary must lead with the reason string: {summary}"
+        );
+        assert!(
+            summary.ends_with("100 -> 60 token(s)"),
+            "summary must show the token-count delta: {summary}"
+        );
+    }
+}
