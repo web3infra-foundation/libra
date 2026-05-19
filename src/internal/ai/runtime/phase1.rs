@@ -66,6 +66,18 @@ pub enum ApplySchedulerMutationError {
     /// state's current version. Caller should reload state and retry.
     #[error("scheduler version mismatch: mutation expected {expected}, state at {actual}")]
     VersionMismatch { expected: i64, actual: i64 },
+    /// `SeedThread` was applied to a state whose `thread_id` doesn't
+    /// match the seed bundle's `thread_id`. Cross-thread seeding would
+    /// silently corrupt projection state, so the helper fails-closed
+    /// and forces the caller to load the correct state first.
+    #[error(
+        "SeedThread bundle thread_id {bundle_thread_id} does not match scheduler state \
+         thread_id {state_thread_id}; seeding cross-thread is not allowed"
+    )]
+    SeedThreadMismatch {
+        bundle_thread_id: uuid::Uuid,
+        state_thread_id: uuid::Uuid,
+    },
     /// The mutation variant doesn't yet have a wired implementation in
     /// this helper. Wave 1B follow-up will fold the orchestrator's
     /// existing scheduler updates into this function; until then,
@@ -88,26 +100,51 @@ pub enum ApplySchedulerMutationError {
 /// and persisting the returned state via
 /// [`SchedulerStateRepository::compare_and_swap`](crate::internal::ai::projection::scheduler::SchedulerStateRepository::compare_and_swap).
 ///
-/// # Wired variants (v0.17.588)
+/// # Wired variants (all 8 SchedulerMutation kinds, v0.17.590)
 ///
-/// - [`SchedulerMutation::MarkTaskActive`](crate::internal::ai::runtime::contracts::SchedulerMutation::MarkTaskActive)
-///   — sets `active_task_id` to `Some(task_id)` and `active_run_id` to
-///   the mutation's `run_id` (which may itself be `None`); bumps
-///   `version` by 1 and refreshes `updated_at`.
-/// - [`SchedulerMutation::ClearActiveRun`](crate::internal::ai::runtime::contracts::SchedulerMutation::ClearActiveRun)
-///   — clears `active_run_id` to `None` while preserving the
-///   `active_task_id` (the task remains the scheduler's current focus
-///   even when no run is in flight); bumps `version` by 1.
+/// - `SeedThread { bundle }` (v0.17.590) — initializes a fresh thread:
+///   clears active task / run / plan heads, records the seed bundle
+///   (`intent_id` + optional `context_snapshot_id`) under
+///   `metadata.seed_bundle`, and removes any prior `stale_reason` /
+///   `stage` markers. Fails-closed with `SeedThreadMismatch` when the
+///   bundle's `thread_id` doesn't match the state's.
+/// - `SetCurrentPlanHeads { execution_plan_id, test_plan_id }`
+///   (v0.17.589) — sets `current_plan_heads` to `[execution(ordinal 0),
+///   test(ordinal 1)]`; mirrors `selected_plan_id` to the execution
+///   head.
+/// - `SelectPlanSet { selected }` (v0.17.589) — populates
+///   `selected_plan_ids` from `SelectedPlanSet::ordered_ids()`;
+///   mirrors `selected_plan_id` to the execution head.
+/// - `StartStage { stage }` (v0.17.589) — writes a stable
+///   lower-snake-case `stage` ("execution" / "test") into `metadata`
+///   and clears any prior `stale_reason` marker.
+/// - `MarkTaskActive { task_id, run_id }` (v0.17.588) — sets
+///   `active_task_id = Some(task_id)` and `active_run_id = run_id`.
+/// - `ClearActiveRun { .. }` (v0.17.588) — clears `active_run_id` to
+///   `None` while preserving `active_task_id`.
+/// - `MarkProjectionStale { reason }` (v0.17.589) — persists the
+///   reason as a stable lower-snake-case `stale_reason` key in
+///   metadata; future `ApplyRebuild` removes it.
+/// - `ApplyRebuild { materialized }` (v0.17.589) — clears
+///   `metadata.stale_reason` and records `metadata.rebuild_versions`
+///   (`{thread, scheduler, live_context_window}`) so observers can
+///   correlate rebuild events with their version triple.
 ///
-/// # Unwired variants
+/// All variants bump `version` by 1 and refresh `updated_at`.
 ///
-/// `SeedThread` / `SetCurrentPlanHeads` / `SelectPlanSet` / `StartStage`
-/// / `MarkProjectionStale` / `ApplyRebuild` return
-/// [`ApplySchedulerMutationError::VariantNotWired`]. These variants
-/// involve `Phase0Bundle` decomposition, plan-head list management, or
-/// full projection rebuilds that today are owned by
-/// `orchestrator::persistence::ExecutionAuditSession`; lifting them
-/// into this pure function is queued for a future Wave 1B patch.
+/// # Errors
+///
+/// - [`ApplySchedulerMutationError::VersionMismatch`] when the
+///   mutation's `expected.scheduler` doesn't match `current.version`.
+///   The caller should reload state and retry.
+/// - [`ApplySchedulerMutationError::SeedThreadMismatch`] only on
+///   `SeedThread` when the bundle's `thread_id` differs from the
+///   state's `thread_id` — fail-closed to prevent cross-thread
+///   seeding.
+/// - [`ApplySchedulerMutationError::VariantNotWired`] retained for
+///   forward compatibility (future `SchedulerMutation` variants land
+///   here first as `VariantNotWired` before being wired); currently
+///   unreachable on the 8 existing variants.
 pub fn apply_scheduler_mutation(
     current: &crate::internal::ai::projection::scheduler::SchedulerState,
     mutation: crate::internal::ai::runtime::contracts::SchedulerMutation,
@@ -245,10 +282,47 @@ pub fn apply_scheduler_mutation(
             }
             next.metadata = Some(metadata);
         }
-        SchedulerMutation::SeedThread { .. } => {
-            return Err(ApplySchedulerMutationError::VariantNotWired {
-                variant: "SeedThread",
-            });
+        SchedulerMutation::SeedThread { bundle, .. } => {
+            // SeedThread is the per-thread initialization step: a fresh
+            // SchedulerState has no active task / run, no plan heads,
+            // no selected plan set — the subsequent mutations
+            // (SelectPlanSet → SetCurrentPlanHeads → MarkTaskActive)
+            // fill those in.
+            //
+            // We do require the seed bundle's `thread_id` to match the
+            // state's `thread_id` — seeding a state for a different
+            // thread would be a cross-thread write and should fail-
+            // closed.
+            if bundle.thread_id != current.thread_id {
+                return Err(ApplySchedulerMutationError::SeedThreadMismatch {
+                    bundle_thread_id: bundle.thread_id,
+                    state_thread_id: current.thread_id,
+                });
+            }
+            next.active_task_id = None;
+            next.active_run_id = None;
+            next.selected_plan_id = None;
+            next.selected_plan_ids = Vec::new();
+            next.current_plan_heads = Vec::new();
+            // Record the seed bundle in metadata so observers can
+            // correlate the seed event with the originating Intent /
+            // ContextSnapshot identifiers without re-reading the
+            // append-only event log.
+            let mut metadata = next.metadata.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "seed_bundle".to_string(),
+                    json!({
+                        "intent_id": bundle.intent_id,
+                        "context_snapshot_id": bundle.context_snapshot_id,
+                    }),
+                );
+                // Seeding a fresh thread invalidates any prior
+                // freshness signals.
+                obj.remove("stale_reason");
+                obj.remove("stage");
+            }
+            next.metadata = Some(metadata);
         }
     }
 
@@ -444,31 +518,107 @@ mod tests {
         );
     }
 
-    /// `SeedThread` is the one remaining unwired variant; must surface
-    /// `VariantNotWired { variant: "SeedThread" }` so callers can
-    /// detect when a follow-up has landed.
+    /// `SeedThread` with a matching bundle must clear active/scheduling
+    /// state (no active task / run / plan heads), record the
+    /// `intent_id` + `context_snapshot_id` in `metadata.seed_bundle`,
+    /// and clear any prior `stale_reason` / `stage` markers since
+    /// seeding invalidates them. Unrelated metadata keys must be
+    /// preserved.
     #[test]
-    fn apply_scheduler_mutation_seed_thread_remains_unwired() {
-        let current = dummy_scheduler_state(1);
+    fn apply_scheduler_mutation_seed_thread_initialises_clean_state() {
+        use serde_json::json;
+
+        use crate::internal::ai::runtime::contracts::Phase0Bundle;
+
+        let mut current = dummy_scheduler_state(1);
+        // Pretend the state had leftover task / run / metadata from a
+        // previous incarnation — seeding must wipe them all.
+        current.active_task_id = Some(Uuid::new_v4());
+        current.active_run_id = Some(Uuid::new_v4());
+        current.selected_plan_id = Some(Uuid::new_v4());
+        current.metadata = Some(json!({
+            "stage": "execution",
+            "stale_reason": "rebuild_required",
+            "previous_marker": "should be preserved"
+        }));
+        let intent_id = Uuid::new_v4();
+        let context_snapshot_id = Uuid::new_v4();
         let mutation = SchedulerMutation::SeedThread {
             expected: ProjectionVersions {
                 thread: 0,
                 scheduler: 1,
                 live_context_window: 0,
             },
-            bundle: crate::internal::ai::runtime::contracts::Phase0Bundle {
-                thread_id: Uuid::new_v4(),
+            bundle: Phase0Bundle {
+                thread_id: current.thread_id,
+                intent_id,
+                context_snapshot_id: Some(context_snapshot_id),
+            },
+        };
+
+        let next = apply_scheduler_mutation(&current, mutation).expect("seed should apply");
+
+        // Active / scheduling state wiped.
+        assert_eq!(next.active_task_id, None);
+        assert_eq!(next.active_run_id, None);
+        assert_eq!(next.selected_plan_id, None);
+        assert!(next.selected_plan_ids.is_empty());
+        assert!(next.current_plan_heads.is_empty());
+
+        // Seed bundle recorded; stale_reason / stage cleared; other
+        // metadata preserved.
+        let metadata = next.metadata.expect("metadata must be set");
+        let seed = metadata
+            .get("seed_bundle")
+            .expect("seed_bundle key should be written");
+        assert_eq!(seed["intent_id"], json!(intent_id));
+        assert_eq!(seed["context_snapshot_id"], json!(context_snapshot_id));
+        assert!(metadata.get("stale_reason").is_none());
+        assert!(metadata.get("stage").is_none());
+        assert_eq!(
+            metadata["previous_marker"],
+            json!("should be preserved"),
+            "unrelated metadata keys must be preserved"
+        );
+
+        // Version bumped.
+        assert_eq!(next.version, 2);
+    }
+
+    /// `SeedThread` with a bundle targeting a different `thread_id`
+    /// must fail-closed with `SeedThreadMismatch` rather than silently
+    /// seed across threads. Cross-thread seeding would corrupt
+    /// projection state.
+    #[test]
+    fn apply_scheduler_mutation_seed_thread_rejects_cross_thread_seed() {
+        use crate::internal::ai::runtime::contracts::Phase0Bundle;
+
+        let current = dummy_scheduler_state(1);
+        let stranger_thread_id = Uuid::new_v4();
+        assert_ne!(
+            stranger_thread_id, current.thread_id,
+            "test sanity: stranger must differ from state thread"
+        );
+        let mutation = SchedulerMutation::SeedThread {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 1,
+                live_context_window: 0,
+            },
+            bundle: Phase0Bundle {
+                thread_id: stranger_thread_id,
                 intent_id: Uuid::new_v4(),
                 context_snapshot_id: None,
             },
         };
 
-        let error =
-            apply_scheduler_mutation(&current, mutation).expect_err("SeedThread is not yet wired");
+        let error = apply_scheduler_mutation(&current, mutation)
+            .expect_err("cross-thread seed must fail-closed");
         assert_eq!(
             error,
-            ApplySchedulerMutationError::VariantNotWired {
-                variant: "SeedThread"
+            ApplySchedulerMutationError::SeedThreadMismatch {
+                bundle_thread_id: stranger_thread_id,
+                state_thread_id: current.thread_id,
             }
         );
     }
