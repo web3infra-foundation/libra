@@ -116,7 +116,7 @@ impl LibraMcpServer {
     /// All authz checks run as the system principal today
     /// ([`PrincipalContext::system()`]); per-request principal threading
     /// (caller token → principal) is queued for a follow-up patch.
-    async fn authorize_or_error(&self, op: McpOperation<'_>) -> Result<(), ErrorData> {
+    pub(crate) async fn authorize_or_error(&self, op: McpOperation<'_>) -> Result<(), ErrorData> {
         let Some(authz) = self.current_authz() else {
             return Ok(());
         };

@@ -193,3 +193,58 @@ async fn read_resource_impl_without_authz_uses_existing_error_path() {
          (got {message:?})"
     );
 }
+
+/// `create_task_impl` with `DenyAllAuthz` installed must surface the
+/// deny reason before any task creation logic runs. Validates that
+/// `McpOperation::CallTool { tool_name: "create_task" }` flows through
+/// the same gate as resource-side operations.
+#[tokio::test]
+async fn create_task_impl_is_blocked_by_deny_authz() {
+    let temp_dir = tempdir().unwrap();
+    let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        temp_dir.path().to_path_buf(),
+        db_conn,
+    ));
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    server.set_authz(Arc::new(DenyAllAuthz {
+        reason: "deny create_task",
+    }));
+
+    let params = CreateTaskParams {
+        title: "Should not be created".to_string(),
+        intent_id: None,
+        description: Some("Authz denies this".to_string()),
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
+        status: None,
+        reason: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: None,
+        actor_id: None,
+    };
+
+    let actor = server.default_actor().unwrap();
+    let err = server
+        .create_task_impl(params, actor)
+        .await
+        .expect_err("create_task_impl must surface the deny decision");
+    let message = err.message.to_string();
+    assert!(
+        message.contains("MCP authorization denied"),
+        "error message should self-identify (got {message:?})"
+    );
+    assert!(
+        message.contains("deny create_task"),
+        "deny reason should be preserved (got {message:?})"
+    );
+}
