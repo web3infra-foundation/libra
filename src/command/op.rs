@@ -29,12 +29,15 @@ use crate::{
 
 #[derive(Parser, Debug)]
 #[command(about = "View and restore command-level operation history")]
+/// Parsed arguments for the `libra op` command group.
 pub struct OpArgs {
+    /// Selected `libra op` subcommand.
     #[command(subcommand)]
     pub command: OpCommand,
 }
 
 #[derive(Subcommand, Debug)]
+/// Supported `libra op` subcommands.
 pub enum OpCommand {
     /// List operation history with pagination
     Log {
@@ -84,49 +87,74 @@ pub enum OpCommand {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
+/// Structured output payload emitted by `libra op`.
 pub enum OpOutput {
     #[serde(rename = "log")]
     Log {
+        /// Operation entries returned for the requested page.
         operations: Vec<OpLogEntry>,
+        /// 1-based page number after normalization.
         page: u64,
+        /// Effective page size after normalization.
         per_page: u64,
+        /// Total number of matching operations.
         total: u64,
     },
     #[serde(rename = "show")]
     Show {
+        /// Resolved operation identifier.
         op_id: String,
+        /// Command name recorded for the operation.
         command_name: String,
+        /// Human-readable operation description.
         description: String,
+        /// Actor recorded on the operation.
         actor: String,
+        /// Stable text label for the operation status.
         status: String,
+        /// Operation start timestamp in unix seconds.
         start_ts: i64,
+        /// Operation end timestamp in unix seconds, when present.
         end_ts: Option<i64>,
+        /// View identifier associated with the operation.
         view_id: String,
     },
     #[serde(rename = "restore")]
     Restore {
+        /// Operation id that the restore targeted.
         target_op_id: String,
+        /// Newly recorded `op restore` operation id.
         new_op_id: String,
+        /// Human-readable restore confirmation.
         message: String,
     },
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// One entry rendered by `op log`.
 pub struct OpLogEntry {
+    /// Operation identifier.
     pub op_id: String,
+    /// Recorded command name.
     pub command_name: String,
+    /// Human-readable operation description.
     pub description: String,
+    /// Actor recorded for the operation.
     pub actor: String,
+    /// Stable text label for the operation status.
     pub status: String,
+    /// Completion timestamp in unix seconds, if the operation finished.
     pub end_ts: Option<i64>,
 }
 
+/// Execute `libra op` using default CLI output settings.
 pub async fn execute(args: OpArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
+/// Execute `libra op` and emit results through the caller-provided output mode.
 pub async fn execute_safe(args: OpArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
@@ -146,6 +174,7 @@ pub async fn execute_safe(args: OpArgs, output: &OutputConfig) -> CliResult<()> 
     }
 }
 
+/// Render one `op log` request, including optional command filtering and paging.
 async fn handle_op_log(
     number: Option<u64>,
     page: Option<u64>,
@@ -214,6 +243,7 @@ async fn handle_op_log(
     Ok(())
 }
 
+/// Query one operation-log page, applying the optional command filter before pagination.
 async fn query_operation_log_page<C: sea_orm::ConnectionTrait>(
     db: &C,
     repo_id: &str,
@@ -274,6 +304,7 @@ async fn query_operation_log_page<C: sea_orm::ConnectionTrait>(
         .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))
 }
 
+/// Render one `op show` request after resolving the supplied operation reference.
 async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) -> CliResult<()> {
     let db = get_db_conn_instance().await;
     let repo_id = current_repo_id().await?;
@@ -337,6 +368,7 @@ async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) 
     Ok(())
 }
 
+/// Restore the repository view referenced by one prior operation.
 async fn handle_op_restore(
     op_ref: String,
     force: bool,
@@ -444,6 +476,7 @@ async fn handle_op_restore(
     Ok(())
 }
 
+/// Read the current repository id from config and validate that it is non-empty.
 async fn current_repo_id() -> CliResult<String> {
     ConfigKv::get("libra.repoid")
         .await
@@ -457,6 +490,7 @@ async fn current_repo_id() -> CliResult<String> {
         })
 }
 
+/// Resolve the actor name recorded for newly created operation entries.
 async fn operation_actor() -> String {
     ConfigKv::get("user.name")
         .await
@@ -467,6 +501,7 @@ async fn operation_actor() -> String {
         .unwrap_or_else(|| "libra-user".to_string())
 }
 
+/// Load the full restore graph for a resolved operation id.
 async fn load_operation_graph<C: sea_orm::ConnectionTrait>(
     db: &C,
     op_id: &str,
@@ -481,6 +516,7 @@ async fn load_operation_graph<C: sea_orm::ConnectionTrait>(
         })
 }
 
+/// Resolve an operation reference that may be either a raw id or an indexed `@{n}` entry.
 async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
     db: &C,
     repo_id: &str,
@@ -517,6 +553,7 @@ async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
     Ok(op_ref.to_string())
 }
 
+/// Convert one service log item into the command-layer output shape.
 fn log_entry_from_item(op: &OperationLogListItem) -> OpLogEntry {
     OpLogEntry {
         op_id: op.op_id.clone(),
@@ -528,6 +565,7 @@ fn log_entry_from_item(op: &OperationLogListItem) -> OpLogEntry {
     }
 }
 
+/// Convert an operation status enum into its stable CLI label.
 fn status_label(status: OperationStatus) -> &'static str {
     match status {
         OperationStatus::Running => "running",
@@ -537,6 +575,7 @@ fn status_label(status: OperationStatus) -> &'static str {
     }
 }
 
+/// Format a unix timestamp for human-readable CLI output.
 fn format_timestamp(ts: i64) -> String {
     use chrono::{TimeZone, Utc};
     Utc.timestamp_opt(ts, 0)

@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use super::*;
 
+/// Run `libra op` in JSON mode and parse the command output.
 fn run_json_op(repo: &Path, args: &[&str]) -> Value {
     let mut full_args = vec!["--json", "op"];
     full_args.extend_from_slice(args);
@@ -21,6 +22,7 @@ fn run_json_op(repo: &Path, args: &[&str]) -> Value {
     parse_json_stdout(&output)
 }
 
+/// Return the newest operation id recorded in the repository.
 fn latest_operation_id(repo: &Path) -> String {
     run_json_op(repo, &["log", "-n", "1"])["data"]["operations"][0]["op_id"]
         .as_str()
@@ -28,12 +30,14 @@ fn latest_operation_id(repo: &Path) -> String {
         .to_string()
 }
 
+/// Return the total number of operations visible in the repository log.
 fn listed_operation_count(repo: &Path) -> u64 {
     run_json_op(repo, &["log", "-n", "20"])["data"]["total"]
         .as_u64()
         .expect("expected operation count")
 }
 
+/// Assert the stable invalid-target CLI error contract for `op show`/`op restore`.
 fn assert_invalid_target_error(output: &std::process::Output, expected_message: &str) {
     let (human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(output.status.code(), Some(129));
@@ -47,6 +51,7 @@ fn assert_invalid_target_error(output: &std::process::Output, expected_message: 
 }
 
 #[test]
+/// Verifies that JSON `op log` output is ordered newest-first and reports totals.
 fn test_op_log_json_lists_latest_operations_newest_first() {
     let repo = create_committed_repo_via_cli();
 
@@ -82,6 +87,7 @@ fn test_op_log_json_lists_latest_operations_newest_first() {
 }
 
 #[test]
+/// Verifies that verbose log rendering includes the core metadata fields.
 fn test_op_log_verbose_includes_core_fields() {
     let repo = create_committed_repo_via_cli();
 
@@ -102,6 +108,7 @@ fn test_op_log_verbose_includes_core_fields() {
 }
 
 #[test]
+/// Verifies that page-two JSON log output returns the next older operation.
 fn test_op_log_json_page_two_returns_older_operation() {
     let repo = create_committed_repo_via_cli();
 
@@ -134,6 +141,7 @@ fn test_op_log_json_page_two_returns_older_operation() {
 }
 
 #[test]
+/// Verifies that command filtering happens before pagination and preserves totals.
 fn test_op_log_json_command_filter_preserves_filtered_total_across_pages() {
     let repo = create_committed_repo_via_cli();
 
@@ -198,6 +206,7 @@ fn test_op_log_json_command_filter_preserves_filtered_total_across_pages() {
 }
 
 #[test]
+/// Verifies that human log output keeps the global `@{n}` index across filtered pages.
 fn test_op_log_human_page_two_uses_filtered_global_index() {
     let repo = create_committed_repo_via_cli();
 
@@ -219,6 +228,7 @@ fn test_op_log_human_page_two_uses_filtered_global_index() {
 }
 
 #[test]
+/// Verifies that a command filter with no matches returns an empty JSON page.
 fn test_op_log_json_no_match_filter_returns_empty_page() {
     let repo = create_committed_repo_via_cli();
 
@@ -239,6 +249,7 @@ fn test_op_log_json_no_match_filter_returns_empty_page() {
 }
 
 #[test]
+/// Verifies that page `0` and page-size `0` are normalized to safe defaults.
 fn test_op_log_normalizes_zero_page_and_page_size() {
     let repo = create_committed_repo_via_cli();
 
@@ -259,6 +270,7 @@ fn test_op_log_normalizes_zero_page_and_page_size() {
 }
 
 #[test]
+/// Verifies that `op show @{0}` resolves to the newest recorded operation.
 fn test_op_show_json_latest_index_resolves_to_branch_operation() {
     let repo = create_committed_repo_via_cli();
 
@@ -282,6 +294,7 @@ fn test_op_show_json_latest_index_resolves_to_branch_operation() {
 }
 
 #[test]
+/// Verifies that `op show --view` prints the captured snapshot refs and HEAD.
 fn test_op_show_view_human_includes_snapshot_refs() {
     let repo = create_committed_repo_via_cli();
 
@@ -302,6 +315,7 @@ fn test_op_show_view_human_includes_snapshot_refs() {
 }
 
 #[test]
+/// Verifies that out-of-range indexed references map to the invalid-target error contract.
 fn test_op_show_out_of_range_index_reports_invalid_target() {
     let repo = create_committed_repo_via_cli();
 
@@ -316,6 +330,7 @@ fn test_op_show_out_of_range_index_reports_invalid_target() {
 }
 
 #[test]
+/// Verifies that malformed indexed references return the invalid-arguments contract.
 fn test_op_show_invalid_index_format_reports_invalid_arguments() {
     let repo = create_committed_repo_via_cli();
 
@@ -337,6 +352,7 @@ fn test_op_show_invalid_index_format_reports_invalid_arguments() {
 }
 
 #[test]
+/// Verifies that a missing direct operation id returns the invalid-target contract.
 fn test_op_show_unknown_operation_id_reports_invalid_target() {
     let repo = create_committed_repo_via_cli();
 
@@ -352,6 +368,7 @@ fn test_op_show_unknown_operation_id_reports_invalid_target() {
 }
 
 #[test]
+/// Verifies that `op restore --dry-run` previews work without recording a new operation.
 fn test_op_restore_dry_run_does_not_record_new_operation() {
     let repo = create_committed_repo_via_cli();
 
@@ -373,6 +390,7 @@ fn test_op_restore_dry_run_does_not_record_new_operation() {
 }
 
 #[test]
+/// Verifies that an out-of-range restore target fails without appending history.
 fn test_op_restore_out_of_range_index_reports_invalid_target() {
     let repo = create_committed_repo_via_cli();
 
@@ -389,6 +407,7 @@ fn test_op_restore_out_of_range_index_reports_invalid_target() {
 }
 
 #[test]
+/// Verifies that restore rejects a dirty worktree unless `--force` is supplied.
 fn test_op_restore_dirty_worktree_is_rejected_without_recording_new_operation() {
     let repo = create_committed_repo_via_cli();
 
@@ -421,6 +440,7 @@ fn test_op_restore_dirty_worktree_is_rejected_without_recording_new_operation() 
 
 #[tokio::test]
 #[serial]
+/// Verifies that `op restore --force` proceeds on a dirty worktree and records history.
 async fn test_op_restore_force_allows_dirty_worktree_and_emits_confirmation() {
     let repo = create_committed_repo_via_cli();
 
@@ -473,6 +493,7 @@ async fn test_op_restore_force_allows_dirty_worktree_and_emits_confirmation() {
 }
 
 #[test]
+/// Verifies the first-batch happy path across `op log`, `op show`, and `op restore --dry-run`.
 fn test_op_command_smoke_flow_covers_first_batch_chain() {
     let repo = create_committed_repo_via_cli();
 
@@ -497,6 +518,7 @@ fn test_op_command_smoke_flow_covers_first_batch_chain() {
 
 #[tokio::test]
 #[serial]
+/// Verifies that JSON restore updates HEAD and refs while recording a new restore operation.
 async fn test_op_restore_json_records_new_operation_and_restores_head_and_branch_ref() {
     let repo = create_committed_repo_via_cli();
 

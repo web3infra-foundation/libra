@@ -1,3 +1,5 @@
+//! Wrapper-layer tests for transaction orchestration, rollback, dedup, and parent resolution.
+
 use std::collections::HashSet;
 
 use libra::internal::operation::{
@@ -10,10 +12,12 @@ use libra::internal::operation_wrapper::{
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 use uuid::Uuid;
 
+/// Build valid operation metadata with a unique digest for dedup-sensitive tests.
 fn valid_meta() -> OperationMeta {
     valid_meta_with_digest(&format!("sha256:{}", Uuid::now_v7()))
 }
 
+/// Build valid operation metadata with a caller-provided digest.
 fn valid_meta_with_digest(digest: &str) -> OperationMeta {
     OperationMeta {
         command_name: "commit".to_string(),
@@ -24,6 +28,7 @@ fn valid_meta_with_digest(digest: &str) -> OperationMeta {
     }
 }
 
+/// Build a deterministic seed operation record for parent-resolution tests.
 fn sample_record(op_id: &str, status: OperationStatus, end_ts: i64) -> OperationRecord {
     OperationRecord {
         op_id: op_id.to_string(),
@@ -39,6 +44,7 @@ fn sample_record(op_id: &str, status: OperationStatus, end_ts: i64) -> Operation
     }
 }
 
+/// Create the full operation-layer schema required by wrapper tests.
 async fn create_operation_schema(db: &DatabaseConnection) {
     let ddl = [
         "CREATE TABLE operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
@@ -54,6 +60,7 @@ async fn create_operation_schema(db: &DatabaseConnection) {
     }
 }
 
+/// Create a schema that is missing `operation_view` so persist failure paths can be exercised.
 async fn create_operation_schema_missing_view(db: &DatabaseConnection) {
     let ddl = [
         "CREATE TABLE operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
@@ -68,6 +75,7 @@ async fn create_operation_schema_missing_view(db: &DatabaseConnection) {
     }
 }
 
+/// Create the reference table with both HEAD and main branch rows.
 async fn create_reference_table_with_head(db: &DatabaseConnection) {
     db.execute(Statement::from_string(
         DbBackend::Sqlite,
@@ -89,6 +97,7 @@ async fn create_reference_table_with_head(db: &DatabaseConnection) {
     .unwrap();
 }
 
+/// Create the reference table without a HEAD row to force snapshot failure.
 async fn create_reference_table_without_head(db: &DatabaseConnection) {
     db.execute(Statement::from_string(
         DbBackend::Sqlite,
@@ -98,6 +107,7 @@ async fn create_reference_table_without_head(db: &DatabaseConnection) {
     .unwrap();
 }
 
+/// Create a probe table used to assert rollback behavior.
 async fn create_tx_probe_table(db: &DatabaseConnection) {
     db.execute(Statement::from_string(
         DbBackend::Sqlite,
@@ -108,6 +118,7 @@ async fn create_tx_probe_table(db: &DatabaseConnection) {
 }
 
 #[tokio::test]
+/// Verifies that parent resolution returns the expected mode and scan counters.
 async fn resolve_parent_selection_returns_mode_and_scan_stats() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -147,6 +158,7 @@ async fn resolve_parent_selection_returns_mode_and_scan_stats() {
 }
 
 #[tokio::test]
+/// Verifies that successful wrapper execution reports parent-selection metrics.
 async fn success_path_exposes_parent_selection_metrics() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -182,6 +194,7 @@ async fn success_path_exposes_parent_selection_metrics() {
 }
 
 #[tokio::test]
+/// Verifies that invalid parent-policy combinations are rejected before execution.
 async fn invalid_parent_policy_is_rejected() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -208,6 +221,7 @@ async fn invalid_parent_policy_is_rejected() {
 }
 
 #[tokio::test]
+/// Verifies that multi-parent scope still persists only the supported single parent today.
 async fn success_path_still_persists_single_parent_when_multi_parent_reserved() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -246,6 +260,7 @@ async fn success_path_still_persists_single_parent_when_multi_parent_reserved() 
 }
 
 #[tokio::test]
+/// Verifies that a successful wrapper call persists the captured view and parent edge.
 async fn success_path_persists_operation_view_and_parent() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -279,6 +294,7 @@ async fn success_path_persists_operation_view_and_parent() {
 }
 
 #[tokio::test]
+/// Verifies that business-step failure rolls back both probe writes and operation rows.
 async fn business_failure_rolls_back_all_writes() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -330,6 +346,7 @@ async fn business_failure_rolls_back_all_writes() {
 }
 
 #[tokio::test]
+/// Verifies that snapshot failure leaves no persisted probe rows or operation graph data.
 async fn snapshot_failure_rolls_back_and_persists_nothing() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -381,6 +398,7 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
 }
 
 #[tokio::test]
+/// Verifies that persist failure rolls back business writes and operation rows.
 async fn persist_failure_rolls_back_business_writes() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema_missing_view(&db).await;
@@ -432,6 +450,7 @@ async fn persist_failure_rolls_back_business_writes() {
 }
 
 #[tokio::test]
+/// Verifies that serial duplicate submissions are rejected inside the dedup window.
 async fn serial_duplicate_submission_is_rejected_within_window() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -465,6 +484,7 @@ async fn serial_duplicate_submission_is_rejected_within_window() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Verifies that concurrent duplicate submissions collapse to exactly one success.
 async fn concurrent_duplicate_submission_allows_only_one_success() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -499,6 +519,7 @@ async fn concurrent_duplicate_submission_allows_only_one_success() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Verifies that concurrent successful writes never create orphan parent links.
 async fn concurrent_writes_keep_parent_links_non_orphaned() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -550,6 +571,7 @@ async fn concurrent_writes_keep_parent_links_non_orphaned() {
 }
 
 #[tokio::test]
+/// Verifies that successive wrapper writes build a stable one-parent restore chain.
 async fn parent_chain_restore_view_consistency() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;

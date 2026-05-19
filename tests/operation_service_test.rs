@@ -1,3 +1,5 @@
+//! Service-layer tests for operation graph persistence, lookup, and pagination.
+
 use libra::internal::operation::{
     OperationGraphRecord, OperationParentRecord, OperationQueryPage, OperationRecord,
     OperationService, OperationServiceError, OperationStatus, OperationViewRecord,
@@ -5,6 +7,7 @@ use libra::internal::operation::{
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 
+/// Create the operation-layer SQLite schema used by the service tests.
 async fn create_operation_schema(db: &DatabaseConnection) {
     let ddl = [
         "CREATE TABLE IF NOT EXISTS operation(\
@@ -57,6 +60,7 @@ async fn create_operation_schema(db: &DatabaseConnection) {
     }
 }
 
+/// Build a minimal operation record for deterministic service-layer tests.
 fn sample_operation(op_id: &str, repo_id: &str, view_id: &str, end_ts: i64) -> OperationRecord {
     OperationRecord {
         op_id: op_id.to_string(),
@@ -73,6 +77,7 @@ fn sample_operation(op_id: &str, repo_id: &str, view_id: &str, end_ts: i64) -> O
 }
 
 #[tokio::test]
+/// Verifies that invalid service arguments are rejected before storage access.
 async fn invalid_arguments_are_rejected() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
 
@@ -117,6 +122,7 @@ async fn invalid_arguments_are_rejected() {
 }
 
 #[tokio::test]
+/// Verifies that unique constraints are enforced for duplicated refs and workspace pointers.
 async fn duplicate_constraints_are_enforced_for_view_refs_and_workspace() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -145,6 +151,7 @@ async fn duplicate_constraints_are_enforced_for_view_refs_and_workspace() {
 }
 
 #[tokio::test]
+/// Verifies the load path for both a missing operation and a missing snapshot view.
 async fn graph_load_handles_missing_operation_and_missing_view() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -166,6 +173,7 @@ async fn graph_load_handles_missing_operation_and_missing_view() {
 }
 
 #[tokio::test]
+/// Verifies round-trip persistence for main operation records and ordered listing.
 async fn operation_main_record_write_read_roundtrip() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -197,6 +205,7 @@ async fn operation_main_record_write_read_roundtrip() {
 }
 
 #[tokio::test]
+/// Verifies parent-edge validation, insertion, readback, and duplicate failure handling.
 async fn parent_relation_write_read_and_failure_cases() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -240,6 +249,7 @@ async fn parent_relation_write_read_and_failure_cases() {
 }
 
 #[tokio::test]
+/// Verifies round-trip persistence for snapshot views, refs, and workspace pointers.
 async fn view_refs_workspace_snapshot_write_read_roundtrip() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -330,6 +340,7 @@ async fn view_refs_workspace_snapshot_write_read_roundtrip() {
 }
 
 #[tokio::test]
+/// Verifies ordered pagination, out-of-range pages, and normalization behavior.
 async fn paginated_log_query_order_and_boundary() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -422,6 +433,7 @@ async fn paginated_log_query_order_and_boundary() {
 }
 
 #[tokio::test]
+/// Verifies stable ordering when multiple operations share identical timestamps.
 async fn paginated_log_query_is_deterministic_when_timestamps_tie() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
@@ -453,6 +465,7 @@ async fn paginated_log_query_is_deterministic_when_timestamps_tie() {
 }
 
 #[tokio::test]
+/// Verifies full graph round-trip persistence and duplicate graph rejection.
 async fn graph_roundtrip_and_duplicate_constraint_failure() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
