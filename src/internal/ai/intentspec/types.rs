@@ -140,6 +140,26 @@ pub enum ChangeType {
     Unknown,
 }
 
+impl ChangeType {
+    /// Stable lowercase identifier matching the `#[serde(rename_all =
+    /// "lowercase")]` tag values. Used by audit logs and prompt builders
+    /// so the same string flows through both human-readable and
+    /// serialised channels.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ChangeType::Bugfix => "bugfix",
+            ChangeType::Feature => "feature",
+            ChangeType::Test => "test",
+            ChangeType::Refactor => "refactor",
+            ChangeType::Performance => "performance",
+            ChangeType::Security => "security",
+            ChangeType::Docs => "docs",
+            ChangeType::Chore => "chore",
+            ChangeType::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Objective {
     pub title: String,
@@ -379,6 +399,24 @@ pub enum RiskLevel {
     Low,
     Medium,
     High,
+}
+
+impl RiskLevel {
+    /// Stable lowercase identifier matching the `#[serde(rename_all =
+    /// "lowercase")]` tag values.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            RiskLevel::Low => "low",
+            RiskLevel::Medium => "medium",
+            RiskLevel::High => "high",
+        }
+    }
+
+    /// `true` only for `High` — the level that gates human-review
+    /// requirements in downstream decision policy.
+    pub fn is_high(&self) -> bool {
+        matches!(self, RiskLevel::High)
+    }
 }
 
 impl<'de> Deserialize<'de> for RiskLevel {
@@ -1055,5 +1093,114 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let back: DecisionPolicyConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, back);
+    }
+
+    fn intent_with_objectives(kinds: &[ObjectiveKind]) -> Intent {
+        Intent {
+            summary: "test intent".into(),
+            problem_statement: "test problem".into(),
+            change_type: ChangeType::Chore,
+            objectives: kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| Objective {
+                    title: format!("obj-{i}"),
+                    kind: *kind,
+                })
+                .collect(),
+            in_scope: vec![],
+            out_of_scope: vec![],
+            touch_hints: None,
+        }
+    }
+
+    /// `has_implementation_objectives` must be `true` iff at least one
+    /// objective has `kind == Implementation`. Empty objectives → false.
+    #[test]
+    fn intent_has_implementation_objectives_requires_implementation_kind() {
+        // Empty objectives → false.
+        assert!(!intent_with_objectives(&[]).has_implementation_objectives());
+
+        // All Analysis → false.
+        let analysis_only =
+            intent_with_objectives(&[ObjectiveKind::Analysis, ObjectiveKind::Analysis]);
+        assert!(!analysis_only.has_implementation_objectives());
+
+        // Mixed → true.
+        let mixed =
+            intent_with_objectives(&[ObjectiveKind::Analysis, ObjectiveKind::Implementation]);
+        assert!(mixed.has_implementation_objectives());
+
+        // All Implementation → true.
+        let all_impl =
+            intent_with_objectives(&[ObjectiveKind::Implementation, ObjectiveKind::Implementation]);
+        assert!(all_impl.has_implementation_objectives());
+    }
+
+    /// `is_analysis_only` must be `true` iff objectives is non-empty AND
+    /// every objective is Analysis. The empty-objectives case returns
+    /// `false` because "no objectives" is not the same as
+    /// "analysis-only".
+    #[test]
+    fn intent_is_analysis_only_rejects_empty_and_mixed() {
+        // Empty objectives → false (not "analysis-only", just "no objectives").
+        assert!(!intent_with_objectives(&[]).is_analysis_only());
+
+        // All Analysis → true.
+        let analysis_only =
+            intent_with_objectives(&[ObjectiveKind::Analysis, ObjectiveKind::Analysis]);
+        assert!(analysis_only.is_analysis_only());
+
+        // Mixed → false.
+        let mixed =
+            intent_with_objectives(&[ObjectiveKind::Analysis, ObjectiveKind::Implementation]);
+        assert!(!mixed.is_analysis_only());
+
+        // All Implementation → false.
+        let all_impl = intent_with_objectives(&[ObjectiveKind::Implementation]);
+        assert!(!all_impl.is_analysis_only());
+    }
+
+    /// `ChangeType::variant_name` must match serde tag for all 9
+    /// variants. Drift fails compile-time-equivalent at test time.
+    #[test]
+    fn change_type_variant_name_matches_serde_tag() {
+        for (kind, expected) in [
+            (ChangeType::Bugfix, "bugfix"),
+            (ChangeType::Feature, "feature"),
+            (ChangeType::Test, "test"),
+            (ChangeType::Refactor, "refactor"),
+            (ChangeType::Performance, "performance"),
+            (ChangeType::Security, "security"),
+            (ChangeType::Docs, "docs"),
+            (ChangeType::Chore, "chore"),
+            (ChangeType::Unknown, "unknown"),
+        ] {
+            assert_eq!(kind.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `RiskLevel::variant_name` matches serde tag for all 3 variants.
+    /// `is_high` flags only `High`.
+    #[test]
+    fn risk_level_variant_name_and_high_predicate() {
+        for (level, expected) in [
+            (RiskLevel::Low, "low"),
+            (RiskLevel::Medium, "medium"),
+            (RiskLevel::High, "high"),
+        ] {
+            assert_eq!(level.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&level).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+        assert!(RiskLevel::High.is_high());
+        assert!(!RiskLevel::Medium.is_high());
+        assert!(!RiskLevel::Low.is_high());
     }
 }
