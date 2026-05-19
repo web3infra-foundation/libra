@@ -486,32 +486,32 @@ async fn resolve_op_ref<C: sea_orm::ConnectionTrait>(
     repo_id: &str,
     op_ref: &str,
 ) -> CliResult<String> {
-    if let Some(index_str) = op_ref.strip_prefix("@{") {
-        if let Some(index_end) = index_str.find('}') {
-            let index: usize = index_str[..index_end].parse().map_err(|_| {
-                CliError::fatal(format!("invalid operation index: {op_ref}"))
-                    .with_stable_code(StableErrorCode::CliInvalidArguments)
-            })?;
-            let page = OperationQueryPage {
-                page: 1,
-                per_page: (index + 1) as u64,
-            };
-            let result =
-                OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
-                    .await
-                    .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+    if let Some(index_str) = op_ref.strip_prefix("@{")
+        && let Some(index_end) = index_str.find('}')
+    {
+        let index: usize = index_str[..index_end].parse().map_err(|_| {
+            CliError::fatal(format!("invalid operation index: {op_ref}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+        let page = OperationQueryPage {
+            page: 1,
+            per_page: (index + 1) as u64,
+        };
+        let result =
+            OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, page)
+                .await
+                .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
 
-            return result
-                .items
-                .into_iter()
-                .nth(index)
-                .map(|op| op.op_id)
-                .ok_or_else(|| {
-                    CliError::fatal(format!("operation index {index} out of range"))
-                        .with_stable_code(StableErrorCode::CliInvalidTarget)
-                        .with_hint("use 'libra op log' to see available operations")
-                });
-        }
+        return result
+            .items
+            .into_iter()
+            .nth(index)
+            .map(|op| op.op_id)
+            .ok_or_else(|| {
+                CliError::fatal(format!("operation index {index} out of range"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra op log' to see available operations")
+            });
     }
 
     Ok(op_ref.to_string())

@@ -54,6 +54,20 @@ async fn create_operation_schema(db: &DatabaseConnection) {
     }
 }
 
+async fn create_operation_schema_missing_view(db: &DatabaseConnection) {
+    let ddl = [
+        "CREATE TABLE operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
+        "CREATE TABLE operation_parent(op_id TEXT NOT NULL,parent_op_id TEXT NOT NULL,PRIMARY KEY (op_id,parent_op_id));",
+        "CREATE TABLE operation_view_ref(view_id TEXT NOT NULL,ref_kind TEXT NOT NULL,ref_name TEXT NOT NULL,ref_remote TEXT NOT NULL,target_oid TEXT NOT NULL,PRIMARY KEY (view_id,ref_kind,ref_name,ref_remote));",
+        "CREATE TABLE operation_view_workspace(view_id TEXT NOT NULL,pointer_kind TEXT NOT NULL,pointer_value TEXT NOT NULL,PRIMARY KEY (view_id,pointer_kind));",
+    ];
+    for sql in ddl {
+        db.execute(Statement::from_string(DbBackend::Sqlite, sql.to_string()))
+            .await
+            .unwrap();
+    }
+}
+
 async fn create_reference_table_with_head(db: &DatabaseConnection) {
     db.execute(Statement::from_string(
         DbBackend::Sqlite,
@@ -165,10 +179,6 @@ async fn success_path_exposes_parent_selection_metrics() {
     assert_eq!(result.parent_metrics.scanned_items, 2);
     assert_eq!(result.parent_metrics.success_candidates, 1);
     assert_eq!(result.parent_metrics.selected_parent_count, 1);
-    assert!(result
-        .parent_metrics
-        .selection_latency_us
-        <= u64::MAX);
 }
 
 #[tokio::test]
@@ -177,10 +187,12 @@ async fn invalid_parent_policy_is_rejected() {
     create_operation_schema(&db).await;
     create_reference_table_with_head(&db).await;
 
-    let mut scope = OperationScope::default();
-    scope.parent_policy = OperationParentPolicy {
-        allow_multi_parent: false,
-        max_parents: 2,
+    let scope = OperationScope {
+        parent_policy: OperationParentPolicy {
+            allow_multi_parent: false,
+            max_parents: 2,
+        },
+        ..OperationScope::default()
     };
 
     let error = with_operation_log_with_conn(
@@ -208,10 +220,12 @@ async fn success_path_still_persists_single_parent_when_multi_parent_reserved() 
     .await
     .unwrap();
 
-    let mut scope = OperationScope::default();
-    scope.parent_policy = OperationParentPolicy {
-        allow_multi_parent: true,
-        max_parents: 2,
+    let scope = OperationScope {
+        parent_policy: OperationParentPolicy {
+            allow_multi_parent: true,
+            max_parents: 2,
+        },
+        ..OperationScope::default()
     };
 
     let result = with_operation_log_with_conn(
@@ -367,28 +381,21 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
 }
 
 #[tokio::test]
-async fn persist_failure_rolls_back_all_writes() {
+async fn persist_failure_rolls_back_business_writes() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    create_operation_schema(&db).await;
+    create_operation_schema_missing_view(&db).await;
     create_reference_table_with_head(&db).await;
     create_tx_probe_table(&db).await;
 
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "DROP TABLE operation_view".to_string(),
-    ))
-    .await
-    .unwrap();
-
     let error = with_operation_log_with_conn(
         &db,
-        valid_meta_with_digest("sha256:persist-failure"),
+        valid_meta(),
         OperationScope::default(),
         |txn| {
             Box::pin(async move {
                 txn.execute(Statement::from_string(
                     DbBackend::Sqlite,
-                    "INSERT INTO tx_probe(id) VALUES(5)".to_string(),
+                    "INSERT INTO tx_probe(id) VALUES(2)".to_string(),
                 ))
                 .await?;
                 Ok::<_, DbErr>(())
@@ -403,7 +410,7 @@ async fn persist_failure_rolls_back_all_writes() {
     let tx_count = db
         .query_one(Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT COUNT(*) FROM tx_probe WHERE id = 5".to_string(),
+            "SELECT COUNT(*) FROM tx_probe WHERE id = 2".to_string(),
         ))
         .await
         .unwrap()
@@ -420,7 +427,6 @@ async fn persist_failure_rolls_back_all_writes() {
         .unwrap()
         .try_get_by_index::<i64>(0)
         .unwrap_or_default();
-
     assert_eq!(tx_count, 0);
     assert_eq!(op_count, 0);
 }

@@ -337,32 +337,6 @@ async fn inspect_database_schema_for_connection(
     }
 }
 
-async fn ensure_database_schema_is_compatible(conn: &DatabaseConnection) -> io::Result<()> {
-    match inspect_database_schema_for_connection(conn).await? {
-        SchemaCompatibility::Compatible { .. } => Ok(()),
-        SchemaCompatibility::UpgradeRequired {
-            current_version,
-            latest_version,
-        } => Err(IOError::other(format!(
-            "Repository database schema is out of date (current: {}, required: {latest_version}). Run 'libra db upgrade' in this repository.",
-            format_schema_version(current_version)
-        ))),
-        SchemaCompatibility::UnsupportedFuture {
-            current_version,
-            latest_version,
-        } => Err(IOError::other(format!(
-            "Repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {}). Install a newer Libra binary.",
-            format_schema_version(latest_version)
-        ))),
-    }
-}
-
-fn format_schema_version(version: Option<i64>) -> String {
-    version
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "none".to_string())
-}
-
 /// Embedded canonical SQLite schema. Compiled into the binary via `include_str!`.
 const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
 /// Phase 0 AI runtime contract migration; safe to run repeatedly.
