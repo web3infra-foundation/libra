@@ -15,8 +15,8 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         operation::{
-            OperationGraphRecord, OperationLogListItem, OperationQueryPage, OperationService,
-            OperationStatus,
+            OperationGraphRecord, OperationLogListItem, OperationPage, OperationQueryPage,
+            OperationService, OperationStatus,
         },
         operation_wrapper::{OperationMeta, OperationScope, with_operation_log},
     },
@@ -160,25 +160,15 @@ async fn handle_op_log(
         per_page: number.unwrap_or(OperationQueryPage::DEFAULT_PER_PAGE),
     };
 
-    let result =
-        OperationService::list_operations_by_repo_paginated_with_conn(&db, &repo_id, query_page)
-            .await
-            .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+    let result = query_operation_log_page(&db, &repo_id, query_page, command_filter.as_deref())
+        .await?;
 
-    let mut items = result.items;
-    if let Some(filter) = command_filter
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        items.retain(|op| op.command_name == filter);
-    }
-
-    let entries: Vec<OpLogEntry> = items.iter().map(log_entry_from_item).collect();
+    let entries: Vec<OpLogEntry> = result.items.iter().map(log_entry_from_item).collect();
     let op_output = OpOutput::Log {
         operations: entries.clone(),
         page: result.page,
         per_page: result.per_page,
-        total: entries.len() as u64,
+        total: result.total,
     };
 
     if output.is_json() {
@@ -196,7 +186,9 @@ async fn handle_op_log(
     );
     println!();
 
-    for (idx, op) in entries.iter().enumerate() {
+    let page_start = result.page.saturating_sub(1).saturating_mul(result.per_page) as usize;
+    for (page_offset, op) in entries.iter().enumerate() {
+        let idx = page_start + page_offset;
         let short_id = &op.op_id[..8.min(op.op_id.len())];
         let timestamp = op
             .end_ts
@@ -220,6 +212,66 @@ async fn handle_op_log(
     }
 
     Ok(())
+}
+
+async fn query_operation_log_page<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    repo_id: &str,
+    query_page: OperationQueryPage,
+    command_filter: Option<&str>,
+) -> CliResult<OperationPage<OperationLogListItem>> {
+    let command_filter = command_filter.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(filter) = command_filter {
+        let mut matching = Vec::new();
+        let mut fetch_page = 1;
+
+        loop {
+            let batch = OperationService::list_operations_by_repo_paginated_with_conn(
+                db,
+                repo_id,
+                OperationQueryPage {
+                    page: fetch_page,
+                    per_page: OperationQueryPage::MAX_PER_PAGE,
+                },
+            )
+            .await
+            .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))?;
+
+            matching.extend(
+                batch
+                    .items
+                    .into_iter()
+                    .filter(|item| item.command_name == filter),
+            );
+
+            if batch.page.saturating_mul(batch.per_page) >= batch.total {
+                break;
+            }
+
+            fetch_page += 1;
+        }
+
+        let normalized = query_page.normalized();
+        let start = normalized.offset() as usize;
+        let end = start
+            .saturating_add(normalized.per_page as usize)
+            .min(matching.len());
+        let page_items = if start >= matching.len() {
+            Vec::new()
+        } else {
+            matching[start..end].to_vec()
+        };
+
+        return Ok(OperationService::new_page(
+            page_items,
+            normalized,
+            matching.len() as u64,
+        ));
+    }
+
+    OperationService::list_operations_by_repo_paginated_with_conn(db, repo_id, query_page)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to query operations: {e}")))
 }
 
 async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) -> CliResult<()> {
