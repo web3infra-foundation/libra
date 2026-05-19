@@ -106,3 +106,216 @@ pub struct IntentContextFrameIndexRow {
     /// Time at which Libra materialized this reverse index row.
     pub created_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_ts() -> DateTime<Utc> {
+        // Deterministic timestamp so serde round-trip assertions are pinnable.
+        DateTime::<Utc>::from_timestamp(1_710_000_000, 0).expect("valid epoch")
+    }
+
+    /// `IntentPlanIndexRow` round-trips through serde with all fields
+    /// preserved. The projection rebuild path serialises these rows
+    /// into SeaORM JSON columns; pin the shape so wire-level
+    /// compatibility doesn't drift silently.
+    #[test]
+    fn intent_plan_index_row_serde_round_trip() {
+        let row = IntentPlanIndexRow {
+            intent_id: Uuid::nil(),
+            plan_id: Uuid::nil(),
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: IntentPlanIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+    }
+
+    /// `IntentTaskIndexRow` Option fields (`parent_task_id`,
+    /// `origin_step_id`) must round-trip in both Some and None states.
+    /// Pin both branches so a future `skip_serializing_if` addition
+    /// can be reviewed at this gate.
+    #[test]
+    fn intent_task_index_row_serde_round_trip_optional_fields() {
+        let task_id = Uuid::nil();
+        let parent_id = Uuid::nil();
+        let step_id = Uuid::nil();
+
+        // None branch.
+        let none_row = IntentTaskIndexRow {
+            intent_id: Uuid::nil(),
+            task_id,
+            parent_task_id: None,
+            origin_step_id: None,
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&none_row).unwrap();
+        let back: IntentTaskIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, none_row);
+
+        // Some branch.
+        let some_row = IntentTaskIndexRow {
+            intent_id: Uuid::nil(),
+            task_id,
+            parent_task_id: Some(parent_id),
+            origin_step_id: Some(step_id),
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&some_row).unwrap();
+        let back: IntentTaskIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, some_row);
+    }
+
+    /// `PlanStepTaskIndexRow` round-trip pins the plan/step/task triple.
+    #[test]
+    fn plan_step_task_index_row_serde_round_trip() {
+        let row = PlanStepTaskIndexRow {
+            plan_id: Uuid::nil(),
+            step_id: Uuid::nil(),
+            task_id: Uuid::nil(),
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: PlanStepTaskIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+    }
+
+    /// `TaskRunIndexRow` round-trip pins both `is_latest` boolean
+    /// states.
+    #[test]
+    fn task_run_index_row_serde_round_trip_both_is_latest_states() {
+        for is_latest in [true, false] {
+            let row = TaskRunIndexRow {
+                task_id: Uuid::nil(),
+                run_id: Uuid::nil(),
+                is_latest,
+                created_at: fixed_ts(),
+            };
+            let json = serde_json::to_string(&row).unwrap();
+            let back: TaskRunIndexRow = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, row);
+        }
+    }
+
+    /// `RunEventIndexRow` round-trips and preserves `event_kind` as
+    /// a free-form string discriminator.
+    #[test]
+    fn run_event_index_row_serde_preserves_event_kind() {
+        let row = RunEventIndexRow {
+            run_id: Uuid::nil(),
+            event_id: Uuid::nil(),
+            event_kind: "patch_applied".to_string(),
+            is_latest: true,
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: RunEventIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+        assert_eq!(back.event_kind, "patch_applied");
+    }
+
+    /// `RunPatchSetIndexRow` round-trips and preserves the `sequence`
+    /// monotonic ordering value (including negative values, which the
+    /// SeaORM i64 column allows but the projection produces only
+    /// non-negative; pinning the round-trip protects against silent
+    /// truncation if the type ever changes).
+    #[test]
+    fn run_patchset_index_row_serde_preserves_sequence() {
+        for sequence in [0_i64, 1, 100, i64::MAX] {
+            let row = RunPatchSetIndexRow {
+                run_id: Uuid::nil(),
+                patchset_id: Uuid::nil(),
+                sequence,
+                is_latest: true,
+                created_at: fixed_ts(),
+            };
+            let json = serde_json::to_string(&row).unwrap();
+            let back: RunPatchSetIndexRow = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, row, "sequence={sequence}");
+        }
+    }
+
+    /// `IntentContextFrameIndexRow` round-trip pins the
+    /// `relation_kind` free-form string label.
+    #[test]
+    fn intent_context_frame_index_row_serde_preserves_relation_kind() {
+        let row = IntentContextFrameIndexRow {
+            intent_id: Uuid::nil(),
+            context_frame_id: Uuid::nil(),
+            relation_kind: "analysis_seed".to_string(),
+            created_at: fixed_ts(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: IntentContextFrameIndexRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+    }
+
+    /// All 7 index row types must derive `Clone` so the projection
+    /// rebuild path can fan a single materialised row to multiple
+    /// observers without consuming the original. Exhaustive sweep so
+    /// adding a new row type forces a test update too.
+    #[test]
+    fn all_index_row_types_derive_clone_and_eq() {
+        let ts = fixed_ts();
+        let id = Uuid::nil();
+
+        let plan = IntentPlanIndexRow {
+            intent_id: id,
+            plan_id: id,
+            created_at: ts,
+        };
+        assert_eq!(plan.clone(), plan);
+
+        let task = IntentTaskIndexRow {
+            intent_id: id,
+            task_id: id,
+            parent_task_id: Some(id),
+            origin_step_id: Some(id),
+            created_at: ts,
+        };
+        assert_eq!(task.clone(), task);
+
+        let step_task = PlanStepTaskIndexRow {
+            plan_id: id,
+            step_id: id,
+            task_id: id,
+            created_at: ts,
+        };
+        assert_eq!(step_task.clone(), step_task);
+
+        let task_run = TaskRunIndexRow {
+            task_id: id,
+            run_id: id,
+            is_latest: true,
+            created_at: ts,
+        };
+        assert_eq!(task_run.clone(), task_run);
+
+        let run_event = RunEventIndexRow {
+            run_id: id,
+            event_id: id,
+            event_kind: "k".to_string(),
+            is_latest: true,
+            created_at: ts,
+        };
+        assert_eq!(run_event.clone(), run_event);
+
+        let run_patchset = RunPatchSetIndexRow {
+            run_id: id,
+            patchset_id: id,
+            sequence: 0,
+            is_latest: true,
+            created_at: ts,
+        };
+        assert_eq!(run_patchset.clone(), run_patchset);
+
+        let ctx_frame = IntentContextFrameIndexRow {
+            intent_id: id,
+            context_frame_id: id,
+            relation_kind: "r".to_string(),
+            created_at: ts,
+        };
+        assert_eq!(ctx_frame.clone(), ctx_frame);
+    }
+}
