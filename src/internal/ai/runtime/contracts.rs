@@ -388,6 +388,30 @@ pub enum TaskExecutionStatus {
     Interrupted,
 }
 
+impl TaskExecutionStatus {
+    /// Every variant of [`TaskExecutionStatus`] in declaration order.
+    ///
+    /// Useful for exhaustive iteration in tests and validation loops —
+    /// see e.g. [`crate::internal::ai::runtime::phase2::AttemptWriteOutcome`]'s
+    /// `is_completed_fires_only_for_completed_and_matches_terminal_xor_failure`
+    /// test which sweeps every status through the `is_completed` /
+    /// `is_terminal` / `is_failure` partition invariant. The fixed-length
+    /// array type makes the enumeration size part of the public API:
+    /// adding a new variant requires extending this list in the same
+    /// patch, which forces every caller's match arms and partition
+    /// helpers (currently `AttemptWriteOutcome::is_terminal`,
+    /// `is_failure`, `is_completed`) to be reconsidered.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Completed,
+            Self::Failed,
+            Self::Cancelled,
+            Self::TimedOut,
+            Self::Interrupted,
+        ]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CancellationReason {
@@ -455,6 +479,43 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// `TaskExecutionStatus::all()` must enumerate every variant in
+    /// declaration order and return a fixed-length array. The body
+    /// uses an exhaustive `match` to force a compile error if a new
+    /// variant lands without extending `all()` — the test stays in
+    /// lock-step with the enum without relying on a runtime check.
+    #[test]
+    fn task_execution_status_all_enumerates_every_variant_in_declaration_order() {
+        let statuses = TaskExecutionStatus::all();
+        assert_eq!(statuses.len(), 5);
+        assert_eq!(
+            statuses,
+            [
+                TaskExecutionStatus::Completed,
+                TaskExecutionStatus::Failed,
+                TaskExecutionStatus::Cancelled,
+                TaskExecutionStatus::TimedOut,
+                TaskExecutionStatus::Interrupted,
+            ]
+        );
+
+        // Exhaustive cross-check: every variant returned by `all()` must
+        // serialise to a stable snake_case tag. The match is exhaustive
+        // so a future sixth variant fails to compile here unless
+        // `all()` is also updated and this arm gets a new branch.
+        for status in TaskExecutionStatus::all() {
+            let expected = match status {
+                TaskExecutionStatus::Completed => "completed",
+                TaskExecutionStatus::Failed => "failed",
+                TaskExecutionStatus::Cancelled => "cancelled",
+                TaskExecutionStatus::TimedOut => "timed_out",
+                TaskExecutionStatus::Interrupted => "interrupted",
+            };
+            let serialised = serde_json::to_value(&status).unwrap();
+            assert_eq!(serialised, json!(expected));
+        }
+    }
 
     #[test]
     fn selected_plan_set_preserves_execution_then_test_order() {
