@@ -18,6 +18,35 @@ pub enum PrincipalRole {
     System,
 }
 
+impl PrincipalRole {
+    /// `true` for roles that may execute state-mutating operations.
+    /// Observers are read-only and fail-closed against mutation; every
+    /// other role passes this gate (the mutating-vs-approval decision
+    /// lives downstream in [`is_privileged`](Self::is_privileged)).
+    ///
+    /// Used by [`ToolBoundaryPolicy::decide`] in place of the inline
+    /// `role == Observer && mutates` check so capability rules stay
+    /// in one place.
+    pub fn can_mutate(self) -> bool {
+        !matches!(self, PrincipalRole::Observer)
+    }
+}
+
+impl PrincipalRole {
+    /// `true` for roles that can execute mutating tools **without
+    /// runtime-mediated approval**. Today only `System` qualifies —
+    /// platform code running on Libra's behalf doesn't go through the
+    /// approval pipeline. Owners and Contributors still need approval
+    /// for mutations even though they pass [`can_mutate`](Self::can_mutate).
+    ///
+    /// Used by [`ToolBoundaryPolicy::decide`] in place of the inline
+    /// `role != System` check so the privileged-skip rule stays in one
+    /// place.
+    pub fn is_privileged(self) -> bool {
+        matches!(self, PrincipalRole::System)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalContext {
     pub principal_id: String,
@@ -250,7 +279,7 @@ impl ToolBoundaryPolicy {
             };
         }
 
-        if principal.role == PrincipalRole::Observer && operation.mutates_state {
+        if !principal.role.can_mutate() && operation.mutates_state {
             return BoundaryDecision {
                 allowed: false,
                 approval_required: false,
@@ -275,7 +304,7 @@ impl ToolBoundaryPolicy {
         if known_mutating || operation.mutates_state {
             return BoundaryDecision {
                 allowed: true,
-                approval_required: principal.role != PrincipalRole::System,
+                approval_required: !principal.role.is_privileged(),
                 reason: "mutating tool requires runtime-mediated approval".to_string(),
             };
         }
@@ -657,5 +686,67 @@ mod tests {
                 role: PrincipalRole::Observer,
             }
         );
+    }
+
+    /// `can_mutate()` must return `false` only for `Observer` so the
+    /// rule "observers are read-only" stays in one place. Every other
+    /// role passes the gate.
+    #[test]
+    fn principal_role_can_mutate_rejects_only_observer() {
+        assert!(!PrincipalRole::Observer.can_mutate());
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::System,
+        ] {
+            assert!(role.can_mutate(), "{role:?} must be allowed to mutate",);
+        }
+    }
+
+    /// `is_privileged()` must return `true` only for `System` — Owners
+    /// and Contributors still need approval for mutations even though
+    /// they pass `can_mutate()`.
+    #[test]
+    fn principal_role_is_privileged_only_for_system() {
+        assert!(PrincipalRole::System.is_privileged());
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::Observer,
+        ] {
+            assert!(
+                !role.is_privileged(),
+                "{role:?} must NOT be privileged (still needs approval)",
+            );
+        }
+    }
+
+    /// `can_mutate()` and `is_privileged()` are not equivalent — every
+    /// privileged role also passes `can_mutate()`, but `can_mutate()`
+    /// alone is not sufficient to skip approval. This test pins that
+    /// asymmetry so a future "simplify the predicates" refactor can't
+    /// silently collapse the two.
+    #[test]
+    fn principal_role_privileged_implies_can_mutate_but_not_vice_versa() {
+        // Forward: privileged ⇒ can_mutate.
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::Observer,
+            PrincipalRole::System,
+        ] {
+            if role.is_privileged() {
+                assert!(
+                    role.can_mutate(),
+                    "{role:?} is privileged but failed can_mutate",
+                );
+            }
+        }
+        // Reverse must NOT hold: Contributor + Owner are can_mutate but
+        // NOT privileged.
+        assert!(
+            PrincipalRole::Contributor.can_mutate() && !PrincipalRole::Contributor.is_privileged(),
+        );
+        assert!(PrincipalRole::Owner.can_mutate() && !PrincipalRole::Owner.is_privileged());
     }
 }
