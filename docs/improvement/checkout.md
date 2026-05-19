@@ -33,8 +33,8 @@
 - **脏工作树检查已委托给 `switch::ensure_clean_status(output)`** / `ensure_clean_status_for_commit()`（`checkout.rs:267-268`）
 - `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:371`）
 - 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:381`），并通过 `CheckoutError::RemoteSyncFailed { stage, source }` 把 `set_upstream` / `pull` 的代理失败分类到具体阶段
-- quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:708-741`）
-- `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:746-766`）
+- quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:773`/`:792`/`:817`/`:852`，分别覆盖 `quiet_checkout_existing_branch_suppresses_output` / `machine_checkout_existing_branch_suppresses_human_output` / `quiet_checkout_dirty_repo_suppresses_status_summary` / `machine_checkout_dirty_repo_returns_only_json_error`）
+- `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:892`）
 
 **当前代码中已确认的跨命令依赖：**
 
