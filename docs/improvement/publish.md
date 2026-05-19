@@ -959,7 +959,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [x] (v0.17.147) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 后复用本次 live gate 创建的 slug 执行已部署 Worker refs/tree/file API smoke；`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 和 `LIBRA_PUBLISH_LIVE_SLUG` 仅作为覆盖项使用；该入口不启动 MCP Server。
 - [x] (v0.17.146) live cloud gate 在真实 D1/R2 环境中能完成唯一 test repo/site 的 `cloud sync` Git object baseline + all-refs `publish sync` -> `libra clone libra+cloud://<clone-domain>/<slug>` restore，并验证恢复后的文件和 tag ref；该入口不启动 MCP Server。
-- [ ] live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke。
+- [x] (v0.17.147) live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke：`tests/publish_live_test.rs::smoke_deployed_worker_api` 在 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 提供时依次调用 `/api/sites/<slug>/refs` / `/tree` / `/file` 并断言返回的 `data.refs` / `data.entries` / `data.path` 与本次 live gate 同步内容一致，缺失变量时打印 `skipped Worker deploy/API smoke` 而非伪通过。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
 
