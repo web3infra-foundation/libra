@@ -83,6 +83,72 @@ fn test_branch_create_outputs_confirmation() {
     );
 }
 
+/// Scenario: `branch <locked>` must reject every member of the locked-
+/// branch set (`main`, `intent`, `agent-traces`) with the `LBR-CONFLICT-002`
+/// "branch is locked" error rather than silently creating a duplicate
+/// or shadowing the Libra-managed ref. Pins the create-side guard.
+///
+/// docs/improvement/entire.md Risk #5 ("分支保护遗漏") lists
+/// `branch (create / delete)` as already protected; the
+/// `is_locked_branch` helper at `src/internal/branch.rs:51` is called
+/// from `branch.rs:620` (create), `:688` (delete), and `:760`/`:763`
+/// (rename). Until this patch the guards had no CLI-level regression,
+/// so a refactor that lost the `is_locked_branch` call would have
+/// shipped silently. Cover the three locked literals on the
+/// destructive ops so the protection cannot regress unnoticed.
+#[test]
+fn test_branch_create_rejects_locked_branch_names() {
+    for locked in ["main", "intent", "agent-traces"] {
+        let repo = create_committed_repo_via_cli();
+        let output = run_libra_command(&["branch", locked], repo.path());
+
+        assert!(
+            !output.status.success(),
+            "branch create for locked '{locked}' must fail; got stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("the '{locked}' branch is locked")),
+            "unexpected stderr for branch '{locked}': {stderr}",
+        );
+        assert!(
+            stderr.contains("Error-Code: LBR-CONFLICT-002"),
+            "expected LBR-CONFLICT-002 stable code for branch '{locked}', got: {stderr}",
+        );
+    }
+}
+
+/// Scenario: `branch -d <locked>` must reject the same three names.
+/// Pins the delete-side guard at `branch.rs:688` so the same regression
+/// class as the create test above is covered for destructive deletion.
+/// (`branch -D <locked>` follows the same code path; the force flag
+/// only bypasses the merged-check, not the locked-name check.)
+#[test]
+fn test_branch_delete_rejects_locked_branch_names() {
+    for locked in ["main", "intent", "agent-traces"] {
+        let repo = create_committed_repo_via_cli();
+        let output = run_libra_command(&["branch", "-d", locked], repo.path());
+
+        assert!(
+            !output.status.success(),
+            "branch delete for locked '{locked}' must fail; got stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("the '{locked}' branch is locked")),
+            "unexpected stderr for delete '{locked}': {stderr}",
+        );
+        assert!(
+            stderr.contains("Error-Code: LBR-CONFLICT-002"),
+            "expected LBR-CONFLICT-002 stable code for delete '{locked}', got: {stderr}",
+        );
+    }
+}
+
 /// Scenario: in a freshly initialised repo with no commits but registered
 /// remote refs, `branch -a` must still display the unborn HEAD (`* main`)
 /// plus the remote ref. Regression guard against treating "unborn" as
