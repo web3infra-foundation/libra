@@ -258,4 +258,207 @@ mod tests {
             "got: {rendered}",
         );
     }
+
+    /// `UsagePrice::new` initialises both required fields and leaves
+    /// cached/reasoning overrides at `None` (so they default to the
+    /// input/output rates respectively at estimation time).
+    #[test]
+    fn usage_price_new_constructor_leaves_overrides_none() {
+        let price = UsagePrice::new(10, 20);
+        assert_eq!(price.input_micro_dollars_per_mtok, 10);
+        assert_eq!(price.output_micro_dollars_per_mtok, 20);
+        assert!(price.cached_micro_dollars_per_mtok.is_none());
+        assert!(price.reasoning_micro_dollars_per_mtok.is_none());
+    }
+
+    /// Builder methods set the respective override fields.
+    #[test]
+    fn usage_price_builders_set_override_fields() {
+        let price = UsagePrice::new(10, 20)
+            .with_cached_micro_dollars_per_mtok(2)
+            .with_reasoning_micro_dollars_per_mtok(30);
+        assert_eq!(price.cached_micro_dollars_per_mtok, Some(2));
+        assert_eq!(price.reasoning_micro_dollars_per_mtok, Some(30));
+    }
+
+    /// All-zero summary must estimate as 0 micro-dollars. No overflow,
+    /// no division-by-zero, no panic.
+    #[test]
+    fn estimate_micro_dollars_zero_summary_yields_zero() {
+        let price = UsagePrice::new(10, 20);
+        let summary = CompletionUsageSummary::default();
+        assert_eq!(price.estimate_micro_dollars(&summary), Some(0));
+    }
+
+    /// When `cached_micro_dollars_per_mtok` is `None`, cached tokens
+    /// must be billed at the *input* rate, NOT the output rate. Pin
+    /// this default so a future refactor that flips the fallback
+    /// (e.g. to output rate) breaks here.
+    #[test]
+    fn estimate_micro_dollars_cached_defaults_to_input_rate() {
+        // No cached override: cached tokens should be billed at the
+        // input rate (10). With 1M input tokens of which 0.5M are
+        // cached: uncached_input = 0.5M (billed at 10) + cached =
+        // 0.5M (billed at 10) = 10 micro-dollars total.
+        let price = UsagePrice::new(10, 20);
+        let summary = CompletionUsageSummary {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cached_tokens: Some(500_000),
+            reasoning_tokens: None,
+            total_tokens: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.estimate_micro_dollars(&summary), Some(10));
+    }
+
+    /// When `reasoning_micro_dollars_per_mtok` is `None`, reasoning
+    /// tokens must be billed at the *output* rate. Pin the default
+    /// fallback.
+    #[test]
+    fn estimate_micro_dollars_reasoning_defaults_to_output_rate() {
+        // No reasoning override: 1M reasoning tokens billed at the
+        // output rate (20).
+        let price = UsagePrice::new(10, 20);
+        let summary = CompletionUsageSummary {
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: None,
+            reasoning_tokens: Some(1_000_000),
+            total_tokens: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.estimate_micro_dollars(&summary), Some(20));
+    }
+
+    /// `cached_tokens` must be clamped to `input_tokens` to prevent
+    /// double-counting. If a provider returns cached > input (a bug),
+    /// the billing math must not credit phantom cached tokens.
+    #[test]
+    fn estimate_micro_dollars_cached_clamped_to_input_tokens() {
+        let price = UsagePrice::new(10, 20).with_cached_micro_dollars_per_mtok(2);
+        // input=100k, but provider claims 500k cached → clamp to 100k.
+        // uncached_input = 0; cached = 100k at rate 2 = 0.2 micro.
+        // Rounded to nearest = 0.
+        let summary = CompletionUsageSummary {
+            input_tokens: 100_000,
+            output_tokens: 0,
+            cached_tokens: Some(500_000),
+            reasoning_tokens: None,
+            total_tokens: None,
+            cost_usd: None,
+        };
+        // 100k * 2 / 1M with banker's rounding = 0.
+        assert_eq!(price.estimate_micro_dollars(&summary), Some(0));
+    }
+
+    /// `UsagePriceTable::with_override` takes precedence over the
+    /// built-in capability-price lookup. Pin so a future "merge"
+    /// refactor doesn't accidentally fall back when an override exists.
+    #[test]
+    fn price_table_override_takes_precedence_over_capability_default() {
+        let summary = CompletionUsageSummary {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            cost_usd: None,
+        };
+        let table = UsagePriceTable::new().with_override(
+            "openai",
+            "fake-model-not-in-capability",
+            UsagePrice::new(7, 11),
+        );
+        // 1M * 7 + 1M * 11 = 18 micro-dollars.
+        assert_eq!(
+            table.estimate_micro_dollars("openai", "fake-model-not-in-capability", &summary),
+            Some(18),
+        );
+    }
+
+    /// `UsagePriceTable::is_empty` returns true on a fresh table and
+    /// false after at least one override is added.
+    #[test]
+    fn price_table_is_empty_tracks_overrides() {
+        let mut table = UsagePriceTable::new();
+        assert!(table.is_empty());
+        table = table.with_override("p", "m", UsagePrice::new(1, 2));
+        assert!(!table.is_empty());
+    }
+
+    /// `usd_per_mtok_to_micro_dollars` rejects invalid inputs and
+    /// converts valid USD-per-million-tokens to micro-dollars via
+    /// `* 1e6` rounded half-away-from-zero.
+    #[test]
+    fn usd_per_mtok_to_micro_dollars_validity_and_rounding() {
+        // Happy path: 0.001 USD/M = 1_000 micro/M.
+        assert_eq!(usd_per_mtok_to_micro_dollars(0.001), Some(1_000));
+        // Zero is valid.
+        assert_eq!(usd_per_mtok_to_micro_dollars(0.0), Some(0));
+        // Rounding half-away-from-zero.
+        assert_eq!(usd_per_mtok_to_micro_dollars(0.0000015), Some(2));
+
+        // Rejection cases.
+        assert_eq!(usd_per_mtok_to_micro_dollars(-1.0), None);
+        assert_eq!(usd_per_mtok_to_micro_dollars(f64::NAN), None);
+        assert_eq!(usd_per_mtok_to_micro_dollars(f64::INFINITY), None);
+        assert_eq!(usd_per_mtok_to_micro_dollars(f64::NEG_INFINITY), None);
+        // u64 overflow.
+        let huge = (u64::MAX as f64) / 1_000_000.0 * 10.0;
+        assert_eq!(usd_per_mtok_to_micro_dollars(huge), None);
+    }
+
+    /// `price_tokens` applies banker's-style half-add rounding via
+    /// the `+ TOKENS_PER_MILLION/2` adjustment before division. Pin
+    /// the rounding direction with a deliberate half-boundary value.
+    #[test]
+    fn price_tokens_rounds_via_half_adjustment() {
+        // 500_000 tokens at 1 micro/M = 0.5 micro → rounds to 1.
+        assert_eq!(price_tokens(500_000, 1), 1);
+        // 499_999 tokens at 1 micro/M = 0.499... → rounds to 0.
+        assert_eq!(price_tokens(499_999, 1), 0);
+        // Exact integer: 1M tokens at 7 micro = 7.
+        assert_eq!(price_tokens(1_000_000, 7), 7);
+        // Zero tokens or zero rate → 0.
+        assert_eq!(price_tokens(0, 100), 0);
+        assert_eq!(price_tokens(1_000_000, 0), 0);
+    }
+
+    /// A `UsagePriceConfig` missing the required `input` field must
+    /// surface `MissingField("input_micro_dollars_per_mtok")`.
+    #[test]
+    fn usage_price_config_missing_input_field_fails_with_named_error() {
+        let err = UsagePriceTable::from_project_config_toml(
+            r#"
+            [usage.pricing.openai."gpt-test"]
+            output_micro_dollars_per_mtok = 20
+            "#,
+        )
+        .expect_err("missing input field must fail");
+        match err {
+            UsagePricingConfigError::MissingField(name) => {
+                assert_eq!(name, "input_micro_dollars_per_mtok");
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
+
+    /// Same as above for the `output` field.
+    #[test]
+    fn usage_price_config_missing_output_field_fails_with_named_error() {
+        let err = UsagePriceTable::from_project_config_toml(
+            r#"
+            [usage.pricing.openai."gpt-test"]
+            input_micro_dollars_per_mtok = 10
+            "#,
+        )
+        .expect_err("missing output field must fail");
+        match err {
+            UsagePricingConfigError::MissingField(name) => {
+                assert_eq!(name, "output_micro_dollars_per_mtok");
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
 }
