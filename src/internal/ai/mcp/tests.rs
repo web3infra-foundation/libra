@@ -146,3 +146,50 @@ async fn list_resources_impl_is_blocked_by_deny_authz() {
         "deny reason should be preserved in the error message (got {message:?})"
     );
 }
+
+/// `read_resource_impl` with a `DenyAllAuthz` installed must surface the
+/// deny reason before any history / context lookup happens. The fixture
+/// uses a fake `uri` that wouldn't otherwise be recognized by the impl —
+/// authz must intercept before the URI dispatch can return a "not found"
+/// error.
+#[tokio::test]
+async fn read_resource_impl_is_blocked_by_deny_authz() {
+    let server = LibraMcpServer::new(None, None);
+    server.set_authz(Arc::new(DenyAllAuthz {
+        reason: "deny reads",
+    }));
+
+    let err = server
+        .read_resource_impl("libra://history/latest")
+        .await
+        .expect_err("read_resource_impl must surface the deny decision");
+    let message = err.message.to_string();
+    assert!(
+        message.contains("MCP authorization denied"),
+        "error message should self-identify (got {message:?})"
+    );
+    assert!(
+        message.contains("deny reads"),
+        "deny reason should be preserved (got {message:?})"
+    );
+}
+
+/// `read_resource_impl` without an authz handler must continue to surface
+/// its own internal errors (here: missing `intent_history_manager`)
+/// instead of an authz error — proves the `Ok` fast-path doesn't mask
+/// downstream failures.
+#[tokio::test]
+async fn read_resource_impl_without_authz_uses_existing_error_path() {
+    let server = LibraMcpServer::new(None, None);
+
+    let err = server
+        .read_resource_impl("libra://history/latest")
+        .await
+        .expect_err("missing intent_history_manager must still error");
+    let message = err.message.to_string();
+    assert!(
+        message.contains("History not available"),
+        "without authz the existing 'History not available' path must run \
+         (got {message:?})"
+    );
+}

@@ -168,6 +168,8 @@ impl LibraMcpServer {
     }
 
     pub async fn read_resource_impl(&self, uri: &str) -> Result<Vec<ResourceContents>, ErrorData> {
+        self.authorize_or_error(McpOperation::ReadResource { uri })
+            .await?;
         if uri == "libra://history/latest" {
             let history = self
                 .intent_history_manager
@@ -451,6 +453,8 @@ impl ServerHandler for LibraMcpServer {
         _request: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        self.authorize_or_error(McpOperation::ListResourceTemplates)
+            .await?;
         Ok(ListResourceTemplatesResult::with_all_items(vec![
             ResourceTemplate::new(
                 RawResourceTemplate {
