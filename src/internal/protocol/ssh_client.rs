@@ -22,7 +22,7 @@ const DEFAULT_SSH_PORT: u16 = 22;
 /// Idle timeout for SSH I/O operations. Triggers when a single read/write or
 /// process-wait call makes no progress for this duration. As long as data keeps
 /// flowing the timer resets — large transfers are not penalized.
-const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct SshClient {
     user: String,
@@ -149,6 +149,12 @@ impl SshClient {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // The local `ssh` process can outlive the remote service (GitHub in
+            // particular keeps the channel open briefly, and ControlMaster
+            // setups can keep the client process alive even longer). Killing
+            // on drop ensures `fetch_objects`'s background task cannot leave
+            // an orphaned subprocess blocking shutdown.
+            .kill_on_drop(true)
             .spawn()
     }
 
@@ -243,6 +249,7 @@ impl SshClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         let mut child = self.spawn_service(ServiceType::UploadPack).await?;
@@ -266,7 +273,7 @@ impl SshClient {
         }
 
         // Send the upload-pack request
-        let body = generate_upload_pack_content(have, want, depth);
+        let body = generate_upload_pack_content(have, want, shallow, depth);
         let mut stdin = child
             .stdin
             .take()
@@ -292,6 +299,7 @@ impl SshClient {
             });
 
             let mut buf = [0u8; 16 * 1024];
+            let mut forward_err: Option<IoError> = None;
             loop {
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
@@ -301,41 +309,49 @@ impl SshClient {
                             .await
                             .is_err()
                         {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                            let _ = stderr_task.await;
+                            // Consumer dropped the stream; rely on
+                            // `kill_on_drop` (set in `spawn_service`) to take
+                            // down the ssh subprocess when `child` is dropped.
+                            stderr_task.abort();
                             return;
                         }
                     }
                     Err(err) => {
-                        let _ = tx
-                            .send(Err(IoError::other(format!(
-                                "failed to read SSH upload-pack stdout: {err}"
-                            ))))
-                            .await;
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        let _ = stderr_task.await;
-                        return;
+                        forward_err = Some(IoError::other(format!(
+                            "failed to read SSH upload-pack stdout: {err}"
+                        )));
+                        break;
                     }
                 }
             }
 
-            let status = match child.wait().await {
-                Ok(status) => status,
-                Err(err) => {
-                    let _ = tx
-                        .send(Err(IoError::other(format!(
-                            "failed to wait for SSH upload-pack process: {err}"
-                        ))))
-                        .await;
-                    let _ = stderr_task.await;
-                    return;
+            // After stdout EOF the upload-pack service is finished. The local
+            // `ssh` process can still take a while to exit (control sockets,
+            // late exit-status, server-side keepalive), so don't block the
+            // consumer's stream on a clean exit — wait briefly, then kill.
+            let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => Some(status),
+                Ok(Err(_)) => None,
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                    None
                 }
             };
-            let stderr_buf = stderr_task.await.unwrap_or_default();
 
-            if !status.success() {
+            // Stderr stays open until the ssh process actually exits; if we
+            // had to kill it above the read may already be unblocked, but cap
+            // the join anyway so a stuck pipe can't keep the channel alive.
+            let stderr_buf = match tokio::time::timeout(Duration::from_secs(1), stderr_task).await {
+                Ok(Ok(buf)) => buf,
+                _ => Vec::new(),
+            };
+
+            if let Some(err) = forward_err {
+                let _ = tx.send(Err(err)).await;
+            } else if let Some(status) = status
+                && !status.success()
+            {
                 let _ = tx
                     .send(Err(IoError::other(format!(
                         "SSH upload-pack failed: {}",

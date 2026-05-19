@@ -34,6 +34,87 @@ fn test_remove_cli_missing_pathspec_returns_cli_exit_code() {
     );
 }
 
+#[test]
+fn test_remove_json_reports_successful_file_removal() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "rm", "tracked.txt"], repo.path());
+
+    assert_cli_success(&output, "json rm tracked file");
+    assert!(
+        output.stderr.is_empty(),
+        "json rm should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "rm");
+    assert_eq!(
+        parsed["data"]["pathspecs"],
+        serde_json::json!(["tracked.txt"])
+    );
+    assert_eq!(parsed["data"]["cached"], false);
+    assert_eq!(parsed["data"]["recursive"], false);
+    assert_eq!(parsed["data"]["forced"], false);
+    assert_eq!(parsed["data"]["dry_run"], false);
+    let paths = parsed["data"]["paths"]
+        .as_array()
+        .expect("paths should be an array");
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0]["path"], "tracked.txt");
+    assert_eq!(paths[0]["removed_from_index"], true);
+    assert_eq!(paths[0]["removed_from_disk"], true);
+    assert!(
+        parsed["data"]["directories"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "file removal should not report directories: {parsed}",
+    );
+    assert!(
+        !repo.path().join("tracked.txt").exists(),
+        "rm without --cached should remove the tracked file from disk"
+    );
+}
+
+#[test]
+fn test_remove_machine_dry_run_reports_single_json_line_without_side_effects() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["--machine", "rm", "--dry-run", "tracked.txt"],
+        repo.path(),
+    );
+
+    assert_cli_success(&output, "machine rm dry-run");
+    assert!(
+        output.stderr.is_empty(),
+        "machine rm should keep stderr clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "machine output should be one JSON line");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("expected machine JSON line, got: {}\nerror: {e}", lines[0]));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "rm");
+    assert_eq!(parsed["data"]["dry_run"], true);
+    let paths = parsed["data"]["paths"]
+        .as_array()
+        .expect("paths should be an array");
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0]["path"], "tracked.txt");
+    assert_eq!(paths[0]["removed_from_index"], false);
+    assert_eq!(paths[0]["removed_from_disk"], false);
+    assert!(
+        repo.path().join("tracked.txt").exists(),
+        "rm --dry-run must keep the tracked file on disk"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests the basic remove functionality by removing a single file

@@ -24,7 +24,7 @@ cargo test --all
    ```bash
    cp .env.test.example .env.test
    ```
-2. Fill in your credentials in `.env.test`.
+2. Fill in your credentials in `.env.test`. **Each line must keep the `export` prefix** — without it `source .env.test` only sets shell-local variables that the cargo subprocess cannot see, and L2/L3 tests skip silently.
 3. Run:
    ```bash
    source .env.test && cargo test --all
@@ -37,7 +37,7 @@ cargo test --all
 LIBRA_TEST_GITHUB_TOKEN=ghp_xxx cargo test --all
 
 # L3 only — AI tests
-GEMINI_API_KEY=xxx cargo test --all
+DEEPSEEK_API_KEY=sk-xxx cargo test --all
 
 # L3 only — S3 storage tests (local MinIO)
 docker run -d -p 9000:9000 minio/minio server /data
@@ -64,7 +64,9 @@ A single temporary repo named `libra-test-<4-6 random letters>` is created under
 
 | Variable | Purpose | How to obtain |
 |----------|---------|---------------|
-| `GEMINI_API_KEY` | Gemini LLM API calls | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| `DEEPSEEK_API_KEY` | DeepSeek LLM API calls (`deepseek-v4-flash` model) | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) |
+
+The L3 AI tests live in `tests/ai_agent_test.rs` and `tests/ai_chat_agent_test.rs` and exercise the agent runtime against the live DeepSeek API. The flash tier is chosen because it's the cheapest model that still supports tool-use; tests must not silently switch to a costlier tier without an explicit per-test override. Setting `DEEPSEEK_API_KEY` alone activates the gate — no separate `LIBRA_AI_LIVE_*` opt-in is needed.
 
 ### L3 — Cloud Feature Tests (D1 + R2)
 

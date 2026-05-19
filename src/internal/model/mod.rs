@@ -28,6 +28,7 @@ pub mod operation_view_ref;
 pub mod operation_view_workspace;
 pub mod reference;
 pub mod reflog;
+pub mod schema_version;
 
 #[cfg(test)]
 mod reference_test;

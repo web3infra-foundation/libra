@@ -29,10 +29,11 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::{branch, fetch::RemoteClient},
+    command::{branch, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
+        ai::automation::{VCS_EVENT_POST_PUSH, dispatch_current_repo_vcs_event_to_history},
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
         db::get_db_conn_instance,
@@ -54,7 +55,7 @@ use crate::{
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
 /// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -280,6 +281,7 @@ pub struct PushOutput {
     pub bytes_pushed: u64,
     /// Number of LFS files uploaded
     pub lfs_files_uploaded: usize,
+    pub lfs_upload: LfsUploadSummary,
     /// Whether this was a dry-run
     pub dry_run: bool,
     /// Whether everything was already up-to-date
@@ -346,8 +348,18 @@ pub async fn execute(args: PushArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates arguments, reads remote configuration,
-/// negotiates with the server, and sends local refs and pack data.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads current branch and remote configuration.
+/// - Negotiates with the remote server and uploads pack data/ref updates.
+/// - May update upstream tracking configuration when `--set-upstream` is used.
+/// - Renders push status in human or JSON form.
+///
+/// # Errors
+/// Returns [`CliError`] when arguments are incomplete, HEAD is detached, remote
+/// configuration is missing, authentication/network negotiation fails, pack data
+/// cannot be read, or upstream config cannot be written.
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         return Err(CliError::command_usage(
@@ -361,7 +373,11 @@ pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()
     }
 
     let result = run_push(args, output).await.map_err(CliError::from)?;
-    render_push_output(&result, output)
+    render_push_output(&result, output)?;
+    if !result.dry_run && !result.up_to_date && !result.updates.is_empty() {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +515,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: 0,
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: args.dry_run,
             up_to_date: true,
             upstream_set: None,
@@ -560,6 +577,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             objects_pushed: result.objs.len(),
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
+            lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: true,
             up_to_date: false,
             upstream_set: None,
@@ -653,7 +671,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     data.extend_from_slice(&pack_data);
 
     // Send pack via the appropriate transport.
-    // Idle timeouts (10s) are enforced at the transport layer: SSH wraps each
+    // Idle timeouts (60s) are enforced at the transport layer: SSH wraps each
     // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
@@ -743,6 +761,9 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         objects_pushed: obj_count,
         bytes_pushed,
         lfs_files_uploaded,
+        lfs_upload: LfsUploadSummary {
+            files_uploaded: lfs_files_uploaded,
+        },
         dry_run: false,
         up_to_date: false,
         upstream_set,
@@ -1325,6 +1346,115 @@ mod test {
 
     use super::*;
 
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`PushError`]. These strings are used as the
+    /// `CliError` message via `From<PushError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    ///
+    /// Source-chained variants (ObjectCollection, PackEncoding, Network,
+    /// TrackingRefUpdate, RepoState) wrap upstream error strings via `{0}`
+    /// and are intentionally skipped — their content is owned by the
+    /// wrapped error type.
+    #[test]
+    fn push_error_display_pins_static_message_variants() {
+        assert_eq!(
+            PushError::DetachedHead.to_string(),
+            "HEAD is detached; cannot determine what to push",
+        );
+        assert_eq!(
+            PushError::NoRemoteConfigured.to_string(),
+            "no configured push destination",
+        );
+        assert_eq!(
+            PushError::RemoteNotFound {
+                name: "upstream".to_string(),
+                suggestion: None,
+            }
+            .to_string(),
+            "remote 'upstream' not found",
+        );
+        assert_eq!(
+            PushError::InvalidRefspec("@invalid".to_string()).to_string(),
+            "invalid refspec '@invalid'",
+        );
+        assert_eq!(
+            PushError::SourceRefNotFound("topic/x".to_string()).to_string(),
+            "source ref 'topic/x' not found",
+        );
+        assert_eq!(
+            PushError::UnsupportedLocalFileRemote.to_string(),
+            "pushing to local file repositories is not supported",
+        );
+        assert_eq!(
+            PushError::InvalidRemoteUrl {
+                url: "ftp://example.com/repo".to_string(),
+                detail: "unsupported scheme".to_string(),
+            }
+            .to_string(),
+            "invalid remote URL 'ftp://example.com/repo': unsupported scheme",
+        );
+        assert_eq!(
+            PushError::AuthenticationFailed {
+                url: "https://example.com/repo".to_string(),
+            }
+            .to_string(),
+            "authentication failed for 'https://example.com/repo'",
+        );
+        assert_eq!(
+            PushError::DiscoveryFailed {
+                url: "https://example.com/repo".to_string(),
+                detail: "timed out".to_string(),
+            }
+            .to_string(),
+            "failed to discover references from 'https://example.com/repo': timed out",
+        );
+        assert_eq!(
+            PushError::Timeout {
+                phase: "fetch-refs".to_string(),
+                seconds: 30,
+            }
+            .to_string(),
+            "network timeout during fetch-refs after 30s",
+        );
+        assert_eq!(
+            PushError::NonFastForward {
+                local_ref: "refs/heads/main".to_string(),
+                remote_ref: "refs/heads/main".to_string(),
+            }
+            .to_string(),
+            "cannot push to 'refs/heads/main': non-fast-forward update",
+        );
+        assert_eq!(
+            PushError::HashKindMismatch {
+                remote: "sha1".to_string(),
+                local: "sha256".to_string(),
+            }
+            .to_string(),
+            "remote object format 'sha1' does not match local 'sha256'",
+        );
+        assert_eq!(
+            PushError::RemoteUnpackFailed.to_string(),
+            "remote rejected push: unpack failed",
+        );
+        assert_eq!(
+            PushError::RemoteRefUpdateFailed {
+                refname: "refs/heads/main".to_string(),
+                reason: "non-fast-forward".to_string(),
+            }
+            .to_string(),
+            "remote rejected ref update for 'refs/heads/main': non-fast-forward",
+        );
+        assert_eq!(
+            PushError::LfsUploadFailed {
+                path: "src/big.bin".to_string(),
+                oid: "abc123".to_string(),
+                detail: "remote did not provide an upload action".to_string(),
+            }
+            .to_string(),
+            "LFS upload failed for 'src/big.bin': remote did not provide an upload action",
+        );
+    }
+
     #[test]
     /// Tests successful parsing of push command arguments with different parameter combinations.
     fn test_parse_args_success() {
@@ -1506,7 +1636,7 @@ mod test {
     fn test_push_error_to_cli_error_timeout() {
         let err: CliError = PushError::Timeout {
             phase: "discovery".to_string(),
-            seconds: 10,
+            seconds: PUSH_TIMEOUT.as_secs(),
         }
         .into();
         assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);

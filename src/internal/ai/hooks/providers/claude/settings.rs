@@ -1,3 +1,9 @@
+//! Claude settings manipulation for installing and removing Libra hook entries.
+//!
+//! Boundary: only Libra-owned hook matchers are inserted or removed; unrelated Claude
+//! user configuration must be preserved. Tests cover idempotent upsert, partial config,
+//! and cleanup of obsolete hook commands.
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

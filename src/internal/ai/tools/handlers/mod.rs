@@ -1,4 +1,10 @@
 //! Tool handler implementations.
+//!
+//! AI user story: handlers in this module are the concrete tools a coding agent
+//! uses to understand the workspace, ask for missing human intent, make
+//! reviewable edits, run validation, and persist Libra workflow state. When
+//! adding a handler, keep its schema description task-oriented for the model and
+//! keep its Rust comments explicit about side effects and failure behavior.
 
 pub mod apply_patch;
 pub mod grep_files;
@@ -7,8 +13,14 @@ pub mod mcp_bridge;
 pub mod plan;
 pub mod read_file;
 pub mod request_user_input;
+pub mod semantic;
 pub mod shell;
+pub mod submit_goal_complete;
 pub mod submit_intent_draft;
+pub mod submit_plan_draft;
+pub mod submit_task_complete;
+pub mod update_goal_progress;
+pub mod web_search;
 
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::{GrepFilesHandler, SearchFilesHandler};
@@ -17,9 +29,18 @@ pub use mcp_bridge::McpBridgeHandler;
 pub use plan::PlanHandler;
 pub use read_file::ReadFileHandler;
 pub use request_user_input::RequestUserInputHandler;
+pub use semantic::{
+    FindReferencesHandler, ListSymbolsHandler, ReadSymbolHandler, TraceCallersHandler,
+    register_semantic_handlers,
+};
 use serde_json::Value;
 pub use shell::ShellHandler;
+pub use submit_goal_complete::SubmitGoalCompleteHandler;
 pub use submit_intent_draft::SubmitIntentDraftHandler;
+pub use submit_plan_draft::SubmitPlanDraftHandler;
+pub use submit_task_complete::SubmitTaskCompleteHandler;
+pub use update_goal_progress::UpdateGoalProgressHandler;
+pub use web_search::WebSearchHandler;
 
 use crate::internal::ai::tools::{ToolResult, error::ToolError};
 

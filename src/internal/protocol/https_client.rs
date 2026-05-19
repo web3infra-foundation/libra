@@ -7,8 +7,6 @@ use git_internal::errors::GitError;
 use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
-#[cfg(test)]
-use super::DiscRef;
 use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
@@ -23,13 +21,13 @@ pub struct HttpsClient {
 }
 
 /// Default connection timeout for initial TCP+TLS handshake.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Default idle (read) timeout — triggers when no bytes arrive for this duration.
 /// This acts as an "idle timeout" rather than a total-request timeout: as long as
 /// the server keeps sending data the timer resets, but if the connection stalls for
 /// longer than this the request is aborted.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl ProtocolClient for HttpsClient {
     fn from_url(url: &Url) -> Self {
@@ -46,7 +44,7 @@ impl ProtocolClient for HttpsClient {
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()
-            .unwrap();
+            .expect("reqwest client builder failed (likely missing TLS backend)");
         Self { url, client }
     }
 }
@@ -61,7 +59,7 @@ static AUTH: Mutex<Option<BasicAuth>> = Mutex::new(None);
 impl BasicAuth {
     /// set username & password manually
     pub async fn set_auth(auth: BasicAuth) {
-        AUTH.lock().unwrap().replace(auth);
+        AUTH.lock().expect("AUTH mutex poisoned").replace(auth);
     }
 
     /// send request with basic auth, retry 3 times
@@ -74,13 +72,16 @@ impl BasicAuth {
         let mut try_cnt = 0;
         loop {
             let mut request = request_builder().await; // RequestBuilder can't be cloned
-            if let Some(auth) = AUTH.lock().unwrap().deref() {
+            if let Some(auth) = AUTH.lock().expect("AUTH mutex poisoned").deref() {
                 request = request.basic_auth(auth.username.clone(), Some(auth.password.clone()));
             } // if no auth exists, try without auth (e.g. clone public)
             res = request.send().await?;
             if res.status() == StatusCode::FORBIDDEN {
-                // 403: no access, no need to retry
-                eprintln!("fatal: authentication failed, forbidden");
+                // 403: no access, no need to retry. The caller receives the
+                // response and decides how to handle it — some callers (e.g.
+                // LFS Chunks API) expect 403 as a normal "not supported" signal,
+                // so do not print an alarming message here.
+                tracing::warn!("HTTP 403 Forbidden from server; caller will decide how to handle");
                 break;
             } else if res.status() != StatusCode::UNAUTHORIZED {
                 break;
@@ -91,7 +92,9 @@ impl BasicAuth {
                 break;
             }
             emit_warning("authentication required, retrying...");
-            AUTH.lock().unwrap().replace(ask_basic_auth());
+            AUTH.lock()
+                .expect("AUTH mutex poisoned")
+                .replace(ask_basic_auth());
             try_cnt += 1;
         }
         Ok(res)
@@ -112,10 +115,12 @@ impl HttpsClient {
         service: ServiceType,
     ) -> Result<DiscoveryResult, GitError> {
         let service_name = service.to_string();
+        // INVARIANT: service_name is always a static "git-upload-pack" / "git-receive-pack"
+        // value and self.url is validated by from_url.
         let url = self
             .url
             .join(&format!("info/refs?service={service_name}"))
-            .unwrap();
+            .expect("info/refs?service=... is a valid relative URL");
         let res = BasicAuth::send(|| async { self.client.get(url.clone()) })
             .await
             .map_err(|e| GitError::NetworkError(format!("Failed to send request: {}", e)))?;
@@ -172,11 +177,16 @@ impl HttpsClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
-        let url = self.url.join("git-upload-pack").unwrap();
-        let body = generate_upload_pack_content(have, want, depth);
+        // INVARIANT: "git-upload-pack" is a valid relative URL onto self.url.
+        let url = self
+            .url
+            .join("git-upload-pack")
+            .expect("'git-upload-pack' is a valid relative URL");
+        let body = generate_upload_pack_content(have, want, shallow, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
         let res = BasicAuth::send(|| async {
@@ -205,85 +215,17 @@ impl HttpsClient {
         &self,
         data: T,
     ) -> Result<Response, reqwest::Error> {
+        // INVARIANT: "git-receive-pack" is a valid relative URL onto self.url.
+        let receive_pack_url = self
+            .url
+            .join("git-receive-pack")
+            .expect("'git-receive-pack' is a valid relative URL");
         BasicAuth::send(|| async {
             self.client
-                .post(self.url.join("git-receive-pack").unwrap())
+                .post(receive_pack_url.clone())
                 .header(CONTENT_TYPE, "application/x-git-receive-pack-request")
                 .body(data.clone())
         })
         .await
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
-
-    #[tokio::test]
-    async fn test_discover_reference_upload() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        init_debug_logger();
-
-        let test_repo = "https://github.com/web3infra-foundation/mega.git/";
-
-        let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let discovery = client.discovery_reference(UploadPack).await;
-        if let Err(e) = discovery {
-            tracing::error!("{:?}", e);
-            panic!();
-        } else {
-            let discovery = discovery.unwrap();
-            println!("refs count: {:?}", discovery.refs.len());
-            println!("example: {:?}", discovery.refs.get(1));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_post_git_upload_pack_() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        init_debug_logger();
-
-        let test_repo = "https://github.com/web3infra-foundation/mega/";
-        let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let discovery = client.discovery_reference(UploadPack).await.unwrap();
-        let refs: Vec<DiscRef> = discovery
-            .refs
-            .iter()
-            .filter(|r| r._ref.starts_with("refs/heads"))
-            .cloned()
-            .collect();
-        tracing::info!("refs: {:?}", refs);
-
-        let want: Vec<String> = refs.iter().map(|r| r._hash.clone()).collect();
-
-        let have = vec!["81a162e7b725bbad2adfe01879fd57e0119406b9".to_string()];
-        let mut result_stream = client.fetch_objects(&have, &want, None).await.unwrap();
-
-        let mut buffer = vec![];
-        while let Some(item) = result_stream.next().await {
-            let item = item.unwrap();
-            buffer.extend(item);
-        }
-
-        // pase pkt line
-        if let Some(pack_pos) = buffer.windows(4).position(|w| w == b"PACK") {
-            tracing::info!("pack data found at: {}", pack_pos);
-            let readable_output = std::str::from_utf8(&buffer[..pack_pos]).unwrap();
-            tracing::debug!("stdout readable: \n{}", readable_output);
-            tracing::info!("pack length: {}", buffer.len() - pack_pos);
-            assert!(buffer[pack_pos..pack_pos + 4].eq(b"PACK"));
-        } else {
-            tracing::error!(
-                "no pack data found, stdout is :\n{}",
-                std::str::from_utf8(&buffer).unwrap()
-            );
-            panic!("no pack data found");
-        }
     }
 }

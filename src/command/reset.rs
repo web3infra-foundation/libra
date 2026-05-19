@@ -120,8 +120,18 @@ pub async fn execute(args: ResetArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
-/// target commit using soft, mixed, or hard mode.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Moves HEAD/current branch to the resolved target commit.
+/// - In mixed mode, rewrites the index from the target tree or pathspecs.
+/// - In hard mode, rewrites both the index and working tree.
+/// - Emits warnings for recoverable filesystem cleanup issues.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing, the revision or
+/// pathspecs cannot be resolved, object reads fail, or HEAD/index/worktree
+/// updates fail.
 pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_reset(args).await.map_err(CliError::from)?;
     render_reset_output(&result.output, output)?;
@@ -188,6 +198,12 @@ enum ResetError {
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
 
+    /// Refused to reset onto a Libra-managed locked branch (`intent`,
+    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// should not be able to overwrite by `reset`.
+    #[error("refusing to reset to locked branch '{0}'")]
+    LockedTarget(String),
+
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback {
         primary: Box<ResetError>,
@@ -215,6 +231,7 @@ impl ResetError {
             Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
             Self::Rollback { primary, .. } => primary.stable_code(),
         }
     }
@@ -240,6 +257,9 @@ impl ResetError {
                 "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
             ),
             Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::LockedTarget(_) => Some(
+                "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
+            ),
             Self::RevisionRead(_) => {
                 Some("check whether the repository references and object storage are readable.")
             }
@@ -309,6 +329,13 @@ fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
 
+    // Refuse to reset onto a Libra-managed locked branch. `is_locked_revision`
+    // strips `~` / `^` / `@` suffixes so attempts like `agent-traces~1` or
+    // `intent^` are still rejected.
+    if branch::is_locked_revision(&args.target) {
+        return Err(ResetError::LockedTarget(args.target.clone()));
+    }
+
     let mode = if args.soft {
         ResetMode::Soft
     } else if args.hard {
@@ -331,13 +358,18 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
         let subject = load_commit_summary_or_warn(&target_commit_id);
         let commit = target_commit_id.to_string();
 
+        // Pathspec resets do not move HEAD, so the user-contract JSON schema
+        // (docs/commands/reset.md) promises `previous_commit: null` to signal
+        // "HEAD is unchanged". Drop the captured HEAD here so machine
+        // consumers can tell pathspec resets apart from full resets without
+        // having to compare `commit` against `previous_commit`.
         return Ok(ResetExecution {
             output: ResetOutput {
                 mode: mode.as_str().to_string(),
                 short_commit: short_display_hash(&commit).to_string(),
                 commit,
                 subject,
-                previous_commit,
+                previous_commit: None,
                 files_unstaged: changed_paths.len(),
                 files_restored: 0,
                 pathspecs: changed_paths,
@@ -445,6 +477,9 @@ async fn perform_reset(
     } else {
         HashSet::new()
     };
+    // INVARIANT: apply index/worktree changes before moving HEAD. If a
+    // filesystem write fails, rollback can still restore the old index/worktree
+    // while refs continue to point at the previous commit.
     let stats =
         match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
             Ok(stats) => stats,
@@ -463,6 +498,9 @@ async fn perform_reset(
         )
         .await
     {
+        // INVARIANT: if the final ref move fails after side effects, restore the
+        // index/worktree to match the old commit so the visible checkout does
+        // not diverge from HEAD.
         let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
         return Err(merge_reset_failure(error, rollback));
     }
@@ -996,6 +1034,62 @@ mod tests {
         let args = ResetArgs::try_parse_from(["reset", "--hard", "HEAD~1"]).unwrap();
         assert!(args.hard);
         assert_eq!(args.target, "HEAD~1");
+    }
+
+    /// Pin the `Display` format contract for static-message and
+    /// `{0}`-prefixed variants of [`ResetError`]. These strings are
+    /// used directly as the CliError message in the `From<ResetError>
+    /// for CliError` mapping, so they form part of the human +
+    /// --json error envelope contract.
+    ///
+    /// Source-chained / wrapper variants whose Display body forwards
+    /// to upstream error strings (HeadRead, HeadCorrupt, ObjectLoad,
+    /// IndexLoad, IndexSave, HeadUpdate, WorktreeRead, WorktreeRestore)
+    /// are intentionally skipped — their `{0}` slot is owned by the
+    /// wrapped error type.
+    #[test]
+    fn reset_error_display_pins_static_message_variants() {
+        assert_eq!(ResetError::NotInRepo.to_string(), "not a libra repository");
+        assert_eq!(
+            ResetError::HeadUnborn.to_string(),
+            "Cannot reset: HEAD is unborn and points to no commit.",
+        );
+        assert_eq!(
+            ResetError::PathspecWithHard.to_string(),
+            "Cannot do hard reset with paths.",
+        );
+        // {0}-prefixed variants where the inner string IS the message.
+        assert_eq!(
+            ResetError::InvalidRevision("ambiguous revision 'a'".to_string()).to_string(),
+            "ambiguous revision 'a'",
+        );
+        assert_eq!(
+            ResetError::RevisionRead("io error".to_string()).to_string(),
+            "io error",
+        );
+        // {0}-suffixed variants where the prefix is the user message.
+        assert_eq!(
+            ResetError::InvalidPathspecEncoding("src/\\xff".to_string()).to_string(),
+            "path contains invalid UTF-8: src/\\xff",
+        );
+        assert_eq!(
+            ResetError::PathspecWithSoft("src/foo.rs".to_string()).to_string(),
+            "pathspec 'src/foo.rs' is not compatible with --soft reset",
+        );
+        assert_eq!(
+            ResetError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
+            "pathspec 'src/missing.rs' did not match any file(s) known to libra",
+        );
+        // ObjectLoad — three structured fields.
+        assert_eq!(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "deadbeef".to_string(),
+                detail: "object not found".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'deadbeef': object not found",
+        );
     }
 
     #[test]

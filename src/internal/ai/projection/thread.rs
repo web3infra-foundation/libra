@@ -1011,6 +1011,19 @@ fn thread_intent_link_reason_from_row(
     }
 }
 
+impl crate::internal::ai::runtime::snapshot::Snapshot for ThreadProjection {
+    fn snapshot_kind(&self) -> &'static str {
+        "thread_projection"
+    }
+
+    fn snapshot_id(&self) -> Uuid {
+        // Projection identity is the thread; multiple projection versions for
+        // the same thread share the same snapshot id and are distinguished
+        // by `version` on the concrete type (CEX-00.5).
+        self.thread_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{Database, Statement, TransactionTrait};
@@ -1089,6 +1102,15 @@ mod tests {
             updated_at: ts(1_700_000_050),
             version: 1,
         }
+    }
+
+    #[test]
+    fn thread_projection_implements_snapshot_trait_with_stable_kind() {
+        use crate::internal::ai::runtime::snapshot::Snapshot;
+        let projection = sample_projection();
+        let snapshot: &dyn Snapshot = &projection;
+        assert_eq!(snapshot.snapshot_kind(), "thread_projection");
+        assert_eq!(snapshot.snapshot_id(), projection.thread_id);
     }
 
     #[tokio::test]

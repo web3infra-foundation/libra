@@ -15,6 +15,7 @@ use super::{
 use crate::{
     command::{branch, load_object, status::StatusArgs},
     internal::{
+        ai::automation::{VCS_EVENT_POST_SWITCH, dispatch_current_repo_vcs_event_to_history},
         branch::{self as repo_branch, Branch},
         db::get_db_conn_instance,
         head::Head,
@@ -510,7 +511,11 @@ pub async fn execute(args: SwitchArgs) {
 /// No-op "already on" cases return before the cleanliness check.
 pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_switch(args, output).await.map_err(CliError::from)?;
-    render_switch_output(&result, output)
+    render_switch_output(&result, output)?;
+    if !result.already_on {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_SWITCH).await;
+    }
+    Ok(())
 }
 
 async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOutput, SwitchError> {
@@ -885,6 +890,75 @@ mod tests {
 
     use super::*;
     use crate::command::restore::RestoreArgs;
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`SwitchError`]. These strings are used directly as
+    /// the `CliError` message via `From<SwitchError> for CliError` and
+    /// surface in both human and `--json` envelopes.
+    ///
+    /// Source-chained variants (StatusCheck, CommitResolve, BranchCreate,
+    /// HeadUpdate, DelegatedCli) wrap upstream error messages and are
+    /// intentionally skipped — their `{0}` slot is owned by the wrapped
+    /// type.
+    #[test]
+    fn switch_error_display_pins_static_message_variants() {
+        assert_eq!(
+            SwitchError::MissingTrackTarget.to_string(),
+            "remote branch name is required",
+        );
+        assert_eq!(
+            SwitchError::MissingDetachTarget.to_string(),
+            "branch name is required when using --detach",
+        );
+        assert_eq!(
+            SwitchError::MissingBranchName.to_string(),
+            "branch name is required",
+        );
+        assert_eq!(
+            SwitchError::BranchNotFound {
+                name: "topic/x".to_string(),
+                similar: vec![],
+            }
+            .to_string(),
+            "branch 'topic/x' not found",
+        );
+        assert_eq!(
+            SwitchError::GotRemoteBranch("origin/main".to_string()).to_string(),
+            "a branch is expected, got remote branch 'origin/main'",
+        );
+        assert_eq!(
+            SwitchError::RemoteBranchNotFound {
+                remote: "origin".to_string(),
+                branch: "feature".to_string(),
+            }
+            .to_string(),
+            "remote branch 'origin/feature' not found",
+        );
+        assert_eq!(
+            SwitchError::InvalidRemoteBranch("garbage".to_string()).to_string(),
+            "invalid remote branch 'garbage'",
+        );
+        assert_eq!(
+            SwitchError::BranchAlreadyExists("main".to_string()).to_string(),
+            "a branch named 'main' already exists",
+        );
+        assert_eq!(
+            SwitchError::InternalBranchBlocked("intent".to_string()).to_string(),
+            "'intent' is a reserved branch name",
+        );
+        assert_eq!(
+            SwitchError::DirtyUnstaged.to_string(),
+            "unstaged changes, can't switch branch",
+        );
+        assert_eq!(
+            SwitchError::DirtyUncommitted.to_string(),
+            "uncommitted changes, can't switch branch",
+        );
+        assert_eq!(
+            SwitchError::UntrackedOverwrite("scratch.txt".to_string()).to_string(),
+            "untracked working tree file would be overwritten by switch: scratch.txt",
+        );
+    }
 
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments

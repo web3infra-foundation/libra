@@ -1,8 +1,13 @@
+//! `libra worktree` command implementation for mounting worktree overlays.
+//!
+//! Boundary: this command is Unix-only and focuses on FUSE mount lifecycle; generic
+//! worktree management remains in `command::worktree`. Worktree-fuse command tests
+//! cover argument parsing and unsupported-platform behavior.
+
 use std::{
     collections::HashMap,
     fs, io,
-    path::{Component, Path, PathBuf},
-    process::Command,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -15,6 +20,12 @@ use uuid::Uuid;
 #[path = "worktree.rs"]
 mod legacy;
 
+// Re-export the shared `--help` examples constant so the cli definition can
+// reference `command::worktree::WORKTREE_EXAMPLES` regardless of whether the
+// `worktree-fuse` feature routed compilation through this file or directly
+// through `worktree.rs`.
+pub use legacy::WORKTREE_EXAMPLES;
+
 use crate::{
     command::{
         branch,
@@ -22,8 +33,9 @@ use crate::{
     },
     internal::head::Head,
     utils::{
-        error::{CliError, CliResult},
-        output::OutputConfig,
+        error::{CliError, CliResult, StableErrorCode},
+        fuse as fuse_utils,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -75,6 +87,17 @@ pub enum WorktreeSubcommand {
     Prune,
     Remove {
         path: String,
+        #[clap(long, help = "Also delete the worktree directory on disk")]
+        delete_dir: bool,
+    },
+    #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
+    Umount {
+        path: String,
+        #[clap(
+            long,
+            help = "Remove the Libra task worktree root after unmounting its workspace mountpoint"
+        )]
+        cleanup: bool,
     },
     Repair,
 }
@@ -95,6 +118,48 @@ struct FuseWorktreeEntry {
 struct FuseWorktreeState {
     worktrees: Vec<FuseWorktreeEntry>,
 }
+
+#[derive(Debug, Serialize)]
+struct WorktreeUmountOutput {
+    mountpoint: String,
+    unmounted: bool,
+    cleanup_requested: bool,
+    cleanup_root: Option<String>,
+    cleanup_root_removed: bool,
+}
+
+#[derive(Debug)]
+enum FuseUmountError {
+    InvalidTarget(String),
+    IoRead(String),
+    IoWrite(String),
+}
+
+impl FuseUmountError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::InvalidTarget(_) => StableErrorCode::CliInvalidTarget,
+            Self::IoRead(_) => StableErrorCode::IoReadFailed,
+            Self::IoWrite(_) => StableErrorCode::IoWriteFailed,
+        }
+    }
+
+    fn into_cli_error(self) -> CliError {
+        CliError::fatal(self.to_string()).with_stable_code(self.stable_code())
+    }
+}
+
+impl std::fmt::Display for FuseUmountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTarget(message) | Self::IoRead(message) | Self::IoWrite(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for FuseUmountError {}
 
 trait IntoMountHandleResult {
     fn into_mount_handle_result(self) -> io::Result<MountHandle>;
@@ -150,9 +215,12 @@ pub async fn execute(args: WorktreeArgs) {
 /// Returns [`CliResult<()>`] so callers can decide whether to bubble up,
 /// map, or render failures.
 pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let command = args.command;
+    if !matches!(&command, WorktreeSubcommand::Umount { .. }) {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
 
-    match args.command {
+    match command {
         WorktreeSubcommand::Add {
             path,
             fuse,
@@ -210,7 +278,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Remove { path } => {
+        WorktreeSubcommand::Remove { path, delete_dir } => {
             if remove_fuse_worktree(&path)
                 .await
                 .map_err(|e| CliError::fatal(e.to_string()))?
@@ -219,11 +287,17 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Remove { path },
+                    command: legacy::WorktreeSubcommand::Remove { path, delete_dir },
                 },
                 output,
             )
             .await
+        }
+        WorktreeSubcommand::Umount { path, cleanup } => {
+            let result = umount_fuse_path(path, cleanup)
+                .await
+                .map_err(FuseUmountError::into_cli_error)?;
+            render_umount_fuse_path(&result, output)
         }
         WorktreeSubcommand::Move { src, dest } => {
             legacy::execute_safe(
@@ -257,24 +331,6 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
     }
 }
 
-fn normalize_abs_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            Component::RootDir => out.push(Path::new(comp.as_os_str())),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
-                    out.pop();
-                }
-            }
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    out
-}
-
 fn canonicalize_like_worktree<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     let p = path.as_ref();
     let joined = if p.is_absolute() {
@@ -282,7 +338,7 @@ fn canonicalize_like_worktree<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     } else {
         util::cur_dir().join(p)
     };
-    let normalized = normalize_abs_path(&joined);
+    let normalized = fuse_utils::normalize_abs_path(&joined);
     if normalized.exists() {
         fs::canonicalize(normalized)
     } else {
@@ -327,32 +383,6 @@ fn save_fuse_state(state: &FuseWorktreeState) -> io::Result<()> {
         }
     }
     fs::rename(tmp, path)
-}
-
-fn decode_mount_escaped(value: &str) -> String {
-    value
-        .replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-        .replace("\\134", "\\")
-}
-
-fn is_mount_active(mountpoint: &Path) -> bool {
-    let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    let target = mountpoint.to_string_lossy();
-    content.lines().any(|line| {
-        let mut parts = line.split_whitespace();
-        let _ = parts.next();
-        let _ = parts.next();
-        let _ = parts.next();
-        let _ = parts.next();
-        match parts.next() {
-            Some(m) => decode_mount_escaped(m) == target,
-            None => false,
-        }
-    })
 }
 
 fn verify_mount_health(mountpoint: &Path) -> io::Result<()> {
@@ -519,7 +549,7 @@ async fn list_all_worktrees(output: &OutputConfig) -> io::Result<()> {
 
     let state = load_fuse_state()?;
     for entry in state.worktrees {
-        let mounted = if is_mount_active(Path::new(&entry.path)) {
+        let mounted = if fuse_utils::is_mount_active(Path::new(&entry.path)) {
             "mounted"
         } else {
             "unmounted"
@@ -617,7 +647,7 @@ async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
     }
 
     if let Err(err) = unmount_path(&target).await
-        && is_mount_active(&target)
+        && fuse_utils::is_mount_active(&target)
     {
         return Err(err);
     }
@@ -675,6 +705,7 @@ fn repair_fuse_worktrees() -> io::Result<()> {
 }
 
 async fn unmount_path(path: &Path) -> io::Result<()> {
+    let path = fuse_utils::normalize_abs_path(path);
     let handle = active_mounts()
         .lock()
         .ok()
@@ -688,7 +719,7 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
                     ioe.raw_os_error(),
                     Some(libc::ENOTCONN | libc::EINVAL | libc::ENOENT | libc::EPERM)
                 ) {
-                    if !is_mount_active(path) {
+                    if !fuse_utils::is_mount_active(&path) {
                         return Ok(());
                     }
                 } else {
@@ -700,27 +731,67 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
         }
     }
 
-    if !is_mount_active(path) {
-        return Ok(());
-    }
+    fuse_utils::force_unmount_path(&path)
+}
 
-    let try_cmd = |program: &str, args: &[&str]| -> io::Result<()> {
-        let status = Command::new(program).args(args).status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "{program} exited with status {status}"
-            )))
+async fn umount_fuse_path(
+    path: String,
+    cleanup: bool,
+) -> Result<WorktreeUmountOutput, FuseUmountError> {
+    let target = canonicalize_like_worktree(&path).map_err(|source| {
+        FuseUmountError::IoRead(format!(
+            "failed to resolve FUSE worktree path '{}': {source}",
+            path
+        ))
+    })?;
+    let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    unmount_path(&mountpoint).await.map_err(|source| {
+        FuseUmountError::IoWrite(format!(
+            "failed to unmount FUSE path {}: {source}",
+            mountpoint.display()
+        ))
+    })?;
+
+    let mut cleanup_root = None;
+    let mut cleanup_root_removed = false;
+    if cleanup {
+        let root = fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+            FuseUmountError::InvalidTarget(format!(
+                "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
+                mountpoint.display()
+            ))
+        })?;
+        if root.exists() {
+            fs::remove_dir_all(&root).map_err(|source| {
+                FuseUmountError::IoWrite(format!(
+                    "failed to remove FUSE worktree root '{}': {source}",
+                    root.display()
+                ))
+            })?;
+            cleanup_root_removed = true;
         }
-    };
+        cleanup_root = Some(root.to_string_lossy().to_string());
+    }
 
-    let target = path.to_string_lossy().to_string();
-    if try_cmd("fusermount3", &["-u", &target]).is_ok() {
+    Ok(WorktreeUmountOutput {
+        mountpoint: mountpoint.to_string_lossy().to_string(),
+        unmounted: true,
+        cleanup_requested: cleanup,
+        cleanup_root,
+        cleanup_root_removed,
+    })
+}
+
+fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("worktree.umount", result, output);
+    }
+    if output.quiet {
         return Ok(());
     }
-    if try_cmd("fusermount", &["-u", &target]).is_ok() {
-        return Ok(());
+    println!("unmounted {}", result.mountpoint);
+    if let Some(cleanup_root) = &result.cleanup_root {
+        println!("removed {}", cleanup_root);
     }
-    try_cmd("umount", &[&target])
+    Ok(())
 }

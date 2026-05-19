@@ -1,3 +1,10 @@
+//! Formal runtime contracts shared by prompt builders, execution phases, validators,
+//! and persistence.
+//!
+//! Boundary: these structs are stable internal APIs. Additive fields need defaults and
+//! tests because persisted runs and projection rebuilds deserialize older records.
+//! Runtime contract tests cover phase transitions and required evidence fields.
+
 use std::{collections::HashSet, path::PathBuf};
 
 use async_trait::async_trait;
@@ -93,6 +100,19 @@ pub struct MaterializedProjection {
     pub freshness: ProjectionFreshness,
     #[serde(default)]
     pub summary: serde_json::Value,
+}
+
+impl super::snapshot::Snapshot for MaterializedProjection {
+    fn snapshot_kind(&self) -> &'static str {
+        "materialized_projection"
+    }
+
+    fn snapshot_id(&self) -> Uuid {
+        // Projection identity is the owning thread; multiple projection
+        // versions for the same thread share the same snapshot id and are
+        // distinguished by `versions`.
+        self.thread_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +425,47 @@ mod tests {
                 task_id,
                 dependency_id: external_dependency
             }
+        );
+    }
+
+    #[test]
+    fn task_execution_error_display_pins_each_variant() {
+        assert_eq!(
+            TaskExecutionError::Cancelled(CancellationReason::UserCancelled).to_string(),
+            "task execution was cancelled: UserCancelled",
+        );
+        assert_eq!(
+            TaskExecutionError::Provider("rate limited".to_string()).to_string(),
+            "provider failed during task execution: rate limited",
+        );
+        assert_eq!(
+            TaskExecutionError::ToolPolicy("apply_patch denied".to_string()).to_string(),
+            "tool boundary rejected task execution: apply_patch denied",
+        );
+        assert_eq!(
+            TaskExecutionError::Environment("workspace locked".to_string()).to_string(),
+            "execution environment failed: workspace locked",
+        );
+    }
+
+    #[test]
+    fn task_dependency_error_display_pins_each_variant() {
+        let task_id = Uuid::nil();
+        let dependency_id = Uuid::nil();
+        assert_eq!(
+            TaskDependencyError::DuplicateTask { task_id }.to_string(),
+            format!("duplicate task id in stage plan: {task_id}"),
+        );
+        assert_eq!(
+            TaskDependencyError::CrossPlanDependency {
+                task_id,
+                dependency_id,
+            }
+            .to_string(),
+            format!(
+                "task {task_id} depends on {dependency_id}, \
+                 which is outside the current stage plan",
+            ),
         );
     }
 }

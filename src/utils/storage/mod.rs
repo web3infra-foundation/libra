@@ -1,5 +1,12 @@
 //! Storage trait and implementations for Git object storage.
+//!
+//! `publish_storage` is the publish-specific arbitrary-object
+//! wrapper (Phase 2 of `docs/improvement/publish.md`); it does NOT
+//! implement the Git-only `Storage` trait below so callers cannot
+//! accidentally route publish JSON / bytes through Git zlib/header
+//! packing.
 pub mod local;
+pub mod publish_storage;
 pub mod remote;
 pub mod tiered;
 

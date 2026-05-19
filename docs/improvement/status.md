@@ -1,5 +1,7 @@
 ## Status 命令改进详细计划
 
+> **实施状态：✅ 已落地** — `StatusData` 共享数据层、显式 `StatusError → CliError`、upstream tracking、`--exit-code`、JSON/porcelain v2 upstream 字段和全局颜色控制均已在当前代码库完成。
+
 > 最后编写时间：2026-03-26
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
@@ -12,8 +14,8 @@
 
 - `config_kv` 后端已落地；`status` 已通过 `ConfigKv::get("core.bare")` 读取配置
 - `OutputConfig` + `emit_json_data()` 输出框架已可用
-- `execute_safe(args, output)` 入口已存在（`status.rs:837`），已区分 JSON / quiet / human 三种路径
-- **JSON 输出已实现**（`status.rs:850-938`）：`collect_status_json()` 构建 `serde_json::Value`，`emit_status_json()` 通过 `emit_json_data("status", ...)` 输出
+- `execute_safe(args, output)` 入口已区分 JSON / quiet / human / porcelain / short 路径，并从 `collect_status_data()` 共享数据层读取
+- **JSON 输出已实现**：`build_status_json()` 从 `StatusData` 构建 `serde_json::Value`，通过 `emit_json_data("status", ...)` 输出
 - 当前 JSON schema 包含：`head`、`has_commits`、`staged`（`new`/`modified`/`deleted`）、`unstaged`（`modified`/`deleted`）、`untracked`、`ignored`、`is_clean`、可选 `stash_entries`
 - `--porcelain` v1/v2 已实现，与 Git 格式兼容
 - `--short` 格式已实现，含颜色支持
@@ -21,26 +23,21 @@
 - `--show-stash` 标志已实现（标准模式）
 - `--ignored` 标志已实现（所有模式）
 - `--untracked-files` 标志已实现（`normal`/`all`/`no`）
-- `StatusError` 枚举已定义 5 个变体（`status.rs:101-113`）
+- `StatusError` 枚举已定义 5 个变体（`status.rs:171-182`）
 - human 模式已有"下一步命令建议"（`use "libra add ..."` / `use "libra restore ..."` 等）
-- `StatusError` 未实现 `From<StatusError> for CliError`——`execute_to()` 内部通过闭包 `status_error()` 手动包装为 `CliError::fatal()`
+- `StatusError` 已实现 `From<StatusError> for CliError`，每个变体都有显式 `StableErrorCode`
 
-**基于当前代码的 Review 结论（status 仍需改进的部分）：**
+**基于当前代码的 Review 结论（2026-05-11 复核）：**
 
-- **无 `StableErrorCode`**：所有 `StatusError` 都被 `status_error()` 闭包包装为通用 `CliError::fatal()`，无显式错误码
-- **bare repository 检测无错误码**：`is_bare_repository()` 判定后返回通用 `CliError::fatal("this operation must be run in a work tree")`
-- **human 模式缺少 upstream tracking 信息**：标准模式 `On branch main` 后不显示 `Your branch is up to date with 'origin/main'`（审计报告要求补齐 ahead/behind 计数）
-- **JSON schema 缺少 upstream 信息**：没有 `upstream` / `ahead` / `behind` 字段
-- **porcelain v2 `--branch` 缺少 upstream 信息**：当前只输出 `branch.head` 和 `branch.oid`，没有 `branch.upstream` / `branch.ab`
-- **`execute_to()` 和 `collect_status_json()` 有大量重复逻辑**：两个函数各自独立调用 `changes_to_be_committed_safe()`、`changes_to_be_staged()`、`collapse_untracked_directories()` 等，违反 DRY
-- **共享数据层设计尚未覆盖 porcelain v2 元数据**：`output_porcelain_v2()` 目前仍会自己读取 index / HEAD tree 并拼装 mode/hash；如果 `StatusData` 只承载基础 `Changes`，那只是把重复从 human/JSON 移走，仍没解决 v2 的分叉逻辑
-- **各种 `unwrap()` 残留**（如 `status.rs:967`、`977`、`983` 等）：`Index::load(path::index()).unwrap()` 在索引损坏时会 panic；`head_commit.unwrap()` 以及 `item_path.to_str().unwrap()` 也有 panic 风险。必须改成带错误处理的安全版本（已有的 `_safe` 变体中）。
-- **颜色控制未统一**：`should_use_colors()` 函数独立读取 `color.status.short` / `color.ui` 配置，未与全局 `--color` / `--no-color` / `NO_COLOR` 标志协调
-- **缺少 dirty 检测退出码**：当前 `--quiet` 调用 `collect_status_json()` 后丢弃结果（`let _ = ...`），clean 和 dirty 都返回 exit `0`。脚本和 CI/CD 需要一种类似 `git diff --quiet` 的方式来通过退出码检测工作树状态（注：`git status` 本身没有 `--quiet` 选项）
+- `StatusData` 已作为共享数据层，human / JSON / short / porcelain v1/v2 渲染都从同一状态快照读取。
+- upstream tracking 已覆盖 human、JSON 与 porcelain v2 `branch.upstream` / `branch.ab`。
+- `--exit-code` 已提供 dirty → exit `1` 语义，并与全局 `--quiet` 正交。
+- `Index::load`、path encoding、workdir 读取等失败路径已通过 `StatusError` 返回，不再依赖生产路径 `unwrap()`。
+- 颜色控制已与全局 `OutputConfig.color` 对齐。
 
 ### 目标与非目标
 
-**本批目标：**
+**已完成目标：**
 - 为所有 `StatusError` 补齐显式 `StableErrorCode` 映射
 - 补齐 upstream tracking 信息（human / JSON / porcelain v2）：ahead/behind 计数
 - 消除 `execute_to()` 与 `collect_status_json()` 的逻辑重复
@@ -65,7 +62,7 @@
 
 ### 特性 1：消除逻辑重复——StatusData 共享数据层
 
-**当前问题：** `execute_to()` 和 `collect_status_json()` 各自独立调用相同的状态计算函数。新增任何功能（如 upstream）需要在两处同步维护。
+**历史问题（已修复）：** `execute_to()` 和 `collect_status_json()` 曾各自独立调用相同的状态计算函数。新增任何功能（如 upstream）需要在两处同步维护。
 
 **修正后的方案：**
 
@@ -119,7 +116,7 @@ struct UpstreamInfo {
 
 ### 特性 2：Upstream Tracking 信息
 
-**当前问题：** 审计报告指出 `libra status` 不显示当前分支与远端分支的同步状态。这是 Git `status` 的标准功能：
+**历史问题（已修复）：** 审计报告指出 `libra status` 不显示当前分支与远端分支的同步状态。这是 Git `status` 的标准功能：
 
 ```text
 On branch main
@@ -261,11 +258,11 @@ Your branch is based on 'origin/main', but the upstream is gone.
 
 ### 特性 4：`--exit-code` 专用标志——dirty 工作树的机器可检测信号
 
-**当前问题：** 脚本和 CI/CD 需要一种方式来检测工作树是否 dirty 并获得非零退出码。当前 `--quiet` 模式（全局 flag）无论工作树状态都返回 exit `0`。
+**历史问题（已修复）：** 脚本和 CI/CD 需要一种方式来检测工作树是否 dirty 并获得非零退出码。早期 `--quiet` 模式（全局 flag）无论工作树状态都返回 exit `0`。
 
 **设计决策：为什么不复用 `--quiet`？**
 
-- `--quiet` 是全局 flag（`src/cli.rs:118-122`），文档契约是 *”Suppress standard stdout output; keep warnings/errors on stderr”*——它是输出抑制，不携带控制流语义
+- `--quiet` 是全局 flag（`src/cli.rs:156-160`），文档契约是 *”Suppress standard stdout output; keep warnings/errors on stderr”*——它是输出抑制，不携带控制流语义
 - `git status` 本身没有 `--quiet` 选项。`git diff --quiet` 才是 Git 中提供 “dirty → exit 1” 的机制
 - 在全局 `--quiet` 上为单个命令附加 exit code 语义会违反最小惊讶原则——用户在其他命令上使用 `--quiet` 时不会期待退出码变化
 
@@ -317,7 +314,7 @@ if args.exit_code && data.is_dirty_for_requested_view() {
 
 ### 特性 5：颜色控制统一
 
-**当前问题：** `should_use_colors()` 函数独立读取 `color.status.short` / `color.ui` 配置，未与全局 `OutputConfig.color` 标志（`--color` / `--no-color`）协调。
+**历史问题（已修复）：** `should_use_colors()` 函数曾独立读取 `color.status.short` / `color.ui` 配置，未与全局 `OutputConfig.color` 标志（`--color` / `--no-color`）协调。
 
 **修正后的方案：**
 
@@ -548,16 +545,16 @@ Stash entries: 3
 #### `tests/command/status_test.rs`（核心路径扩展）
 
 - **（已有）** 基础测试：outside repository、ignored outputs、bare repository、porcelain v1/v2、short format、untracked files
-- **（新增）`StableErrorCode` 验证**：bare repository 错误返回 `LBR-REPO-003`
-- **（新增）`--exit-code` 退出码**：dirty 工作树 → exit `1`；clean 工作树 → exit `0`
-- **（新增）`--exit-code --quiet` 组合**：dirty → exit `1` 且 stdout/stderr 均为空；clean → exit `0` 且 stdout/stderr 均为空
-- **（新增）`--exit-code` 与过滤参数联动**：仅有 untracked 文件时，`--untracked-files=no --exit-code` 返回 exit `0`
-- **（新增）纯 `--quiet` 不改变退出码**：dirty 工作树 + `--quiet`（无 `--exit-code`）仍返回 exit `0`
-- **（新增）颜色控制验证**：`--color=always` 强制着色，`--color=never` 禁用着色，`NO_COLOR=1` 环境变量禁用着色
-- **（新增）upstream tracking human 输出**：覆盖 up-to-date / ahead / behind / diverged / gone 五种文案
-- **（新增）short / porcelain v1 `--branch` upstream**：输出包含 `[ahead N]` / `[behind N]` / `[gone]`
-- **（新增）upstream ahead/behind 准确性**：创建本地和远端 commit 后，ahead / behind / diverged 计数都准确
-- **（新增）porcelain v2 `--branch` upstream**：输出包含 `# branch.upstream`；仅在 `gone == false` 时包含 `# branch.ab`
+- **已覆盖`StableErrorCode` 验证**：bare repository 错误返回 `LBR-REPO-003`
+- **已覆盖`--exit-code` 退出码**：dirty 工作树 → exit `1`；clean 工作树 → exit `0`
+- **已覆盖`--exit-code --quiet` 组合**：dirty → exit `1` 且 stdout/stderr 均为空；clean → exit `0` 且 stdout/stderr 均为空
+- **已覆盖`--exit-code` 与过滤参数联动**：仅有 untracked 文件时，`--untracked-files=no --exit-code` 返回 exit `0`
+- **已覆盖纯 `--quiet` 不改变退出码**：dirty 工作树 + `--quiet`（无 `--exit-code`）仍返回 exit `0`
+- **已覆盖颜色控制验证**：`--color=always` 强制着色，`--color=never` 禁用着色，`NO_COLOR=1` 环境变量禁用着色
+- **已覆盖upstream tracking human 输出**：覆盖 up-to-date / ahead / behind / diverged / gone 五种文案
+- **已覆盖short / porcelain v1 `--branch` upstream**：输出包含 `[ahead N]` / `[behind N]` / `[gone]`
+- **已覆盖upstream ahead/behind 准确性**：创建本地和远端 commit 后，ahead / behind / diverged 计数都准确
+- **已覆盖porcelain v2 `--branch` upstream**：输出包含 `# branch.upstream`；仅在 `gone == false` 时包含 `# branch.ab`
 
 #### `tests/command/status_json_test.rs`（JSON schema 稳定性，新增文件）
 
@@ -582,7 +579,7 @@ Stash entries: 3
 - **路径向后兼容验证**：从仓库子目录执行 `libra status --json` 时，已有路径字段继续按“当前工作目录相对路径”返回
 - **`--machine status`**：stdout 按 `\n` 分割后恰好 1 行非空行，可被 `serde_json::from_str()` 解析为与 `--json` 相同的 schema
 - **向后兼容验证**：已有字段（`head`、`staged`、`unstaged`、`untracked`、`ignored`、`is_clean`）的类型和语义不变
-- **（新增）`porcelain=v2` 完整行格式**：验证 XY 字段、模式位、hash 值的格式符合 Git porcelain v2 规范
+- **已覆盖`porcelain=v2` 完整行格式**：验证 XY 字段、模式位、hash 值的格式符合 Git porcelain v2 规范
 
 #### `tests/command/status_error_test.rs`（错误码验证，新增文件）
 

@@ -75,6 +75,7 @@ Human mode preserves the existing presentation:
 - Tree: list of tree entries
 - Blob: text content or a binary summary
 - `--quiet`: validates the object reference but suppresses human output
+- Human output uses the shared pager policy; pass global `--no-pager` to force direct stdout
 
 ## Structured Output (JSON examples)
 
@@ -162,7 +163,7 @@ Human mode preserves the existing presentation:
 Notes:
 
 - Commit JSON `refs` are best-effort decoration metadata; unrelated branch/tag rows no longer block `show`
-- Human `--quiet` still validates the target object but suppresses stdout
+- Human `--quiet` still validates the target object but suppresses stdout and does not initialize the pager
 - Commit patch / stat paths stay strict: corrupt historical blobs fail with `LBR-REPO-002` instead of falling back to working tree contents
 
 ## Design Rationale

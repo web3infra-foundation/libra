@@ -50,7 +50,14 @@ pub fn write_git_object(
         .join(&hash_str[2..]);
 
     if !object_path.exists() {
-        fs::create_dir_all(object_path.parent().unwrap())?;
+        // INVARIANT: `object_path` is built by joining `git_dir` with three
+        // additional components ("objects", first-2-of-hash, rest-of-hash),
+        // so `.parent()` always returns the directory holding the loose
+        // object file.
+        let parent = object_path
+            .parent()
+            .expect("loose-object path always has a parent directory");
+        fs::create_dir_all(parent)?;
         let file = fs::File::create(object_path)?;
         let mut encoder = flate2::write::ZlibEncoder::new(file, flate2::Compression::default());
         encoder.write_all(&content)?;

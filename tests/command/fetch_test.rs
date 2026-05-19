@@ -2,11 +2,9 @@
 //!
 //! **Layer:** L1 (most tests). `test_fetch_invalid_remote` is L2 — requires `LIBRA_TEST_GITHUB_TOKEN`.
 
-#[cfg(unix)]
-use std::path::PathBuf;
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -460,11 +458,14 @@ async fn test_fetch_local_repository() {
     )
     .await;
 
-    let tracked_branch = Branch::find_branch(
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "remote-tracking branch not found".
+    let tracked_branch = Branch::find_branch_result(
         &format!("refs/remotes/origin/{current_branch}"),
         Some("origin"),
     )
     .await
+    .expect("failed to query remote-tracking branch")
     .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
 }
@@ -667,11 +668,14 @@ async fn test_fetch_ssh_remote_via_fake_ssh() {
         String::from_utf8_lossy(&fetch_out.stderr)
     );
 
-    let tracked_branch = Branch::find_branch(
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md —
+    // storage errors no longer collapse into "remote-tracking branch not found".
+    let tracked_branch = Branch::find_branch_result(
         &format!("refs/remotes/origin/{current_branch}"),
         Some("origin"),
     )
     .await
+    .expect("failed to query remote-tracking branch")
     .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
 
@@ -911,4 +915,136 @@ async fn test_fetch_ssh_invalid_vault_key_fails_without_fallback() {
         !log_path.exists(),
         "fetch should fail before invoking SSH when vault key is invalid"
     );
+}
+
+// ---- C3: shallow-fetch contract (`libra fetch --depth N`) ---------------------------------
+//
+// The internal `fetch_repository(..., depth)` plumbing has supported shallow fetch for some
+// time; C3 (compat plan) surfaces it as a public, stable CLI flag. These tests verify the
+// public surface contract — not the wire-level shallow protocol semantics, which are owned
+// by `git_internal` and exercised through its own test suites.
+
+#[test]
+fn test_fetch_help_lists_depth_flag_without_experimental() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["fetch", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "fetch --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--depth"),
+        "fetch --help must surface --depth flag (C3 contract), stdout: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("experimental"),
+        "fetch --depth is a stable public flag; --help must not mark it experimental, stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_with_depth_one_against_local_remote() {
+    // Smoke: `libra fetch origin --depth 1` succeeds against a local file remote
+    // and reports the same JSON envelope shape as a non-shallow fetch.
+    let (_temp_root, repo_dir, current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&output, "fetch --json origin --depth 1");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "fetch");
+    assert_eq!(json["data"]["all"], false);
+    assert_eq!(json["data"]["requested_remote"], "origin");
+    assert_eq!(json["data"]["remotes"][0]["remote"], "origin");
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["remote_ref"],
+        format!("refs/remotes/origin/{current_branch}")
+    );
+    assert_eq!(
+        json["data"]["remotes"][0]["refs_updated"][0]["new_oid"],
+        pushed_commit
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_all_with_depth_runs_across_remotes() {
+    // `libra fetch --all --depth N` must accept both flags together and pass `depth`
+    // through to every configured remote; conflicts_with("repository") on `--all`
+    // already prevents the bad combination.
+    let (_temp_root, repo_dir, current_branch, _pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let output = run_libra_command(&["--json", "fetch", "--all", "--depth", "3"], &repo_dir);
+    assert_cli_success(&output, "fetch --json --all --depth 3");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "fetch");
+    assert_eq!(json["data"]["all"], true);
+    let remotes = json["data"]["remotes"]
+        .as_array()
+        .expect("remotes should be an array");
+    assert!(
+        !remotes.is_empty(),
+        "fetch --all should report at least one remote"
+    );
+    let origin_seen = remotes.iter().any(|r| r["remote"] == "origin");
+    assert!(origin_seen, "fetch --all should include 'origin' remote");
+    let _ = current_branch;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_full_then_shallow_is_idempotent() {
+    // After a full (non-shallow) fetch has already populated origin's tracking
+    // refs, re-running with `--depth 1` must not error. This exercises the
+    // common workflow where a developer first does a regular fetch and then
+    // wants to refresh just the tip.
+    //
+    // Note: the converse case (shallow → shallow re-fetch) currently has known
+    // plumbing limitations on file:// transport when the local commit graph
+    // contains a shallow boundary; that scenario is tracked separately and is
+    // not part of the C3 public-flag contract.
+    let (_temp_root, repo_dir, _current_branch, _pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let first = run_libra_command(&["fetch", "origin"], &repo_dir);
+    assert_cli_success(&first, "first fetch (full)");
+
+    let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&second, "second fetch --depth 1 after full");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_shallow_then_shallow_is_idempotent() {
+    // C3 follow-up: once a shallow boundary has been created locally,
+    // re-running the same shallow fetch should still negotiate cleanly.
+    let (_temp_root, repo_dir, _current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let first = run_libra_command(&["--json", "fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&first, "first fetch --depth 1");
+    let first_json = parse_json_stdout(&first);
+    assert!(
+        first_json["data"]["remotes"][0]["objects_fetched"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "first shallow fetch must materialize at least one object: {first_json:?}"
+    );
+
+    let shallow_path = repo_dir.join(".libra").join("shallow");
+    let shallow = fs::read_to_string(&shallow_path)
+        .expect("first shallow fetch must persist .libra/shallow metadata");
+    assert!(
+        shallow.lines().any(|line| line.trim() == pushed_commit),
+        "shallow metadata must contain the fetched boundary {pushed_commit}; got {shallow:?}"
+    );
+
+    let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&second, "second fetch --depth 1 after shallow");
 }

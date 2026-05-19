@@ -562,7 +562,7 @@ place as legacy names until an explicit migration is introduced.
       "properties": {
         "tool": {
           "type": "string", "minLength": 1, "maxLength": 128,
-          "description": "Tool name, matching Libra ToolInvocation.tool_name. Common tools: workspace.fs, workspace.command, workspace.lsp, workspace.search."
+          "description": "Tool name, matching Libra ToolInvocation.tool_name. Common tools: workspace.fs, workspace.command, workspace.lsp, workspace.search, web.search."
         },
         "actions": {
           "type": "array", "minItems": 1,

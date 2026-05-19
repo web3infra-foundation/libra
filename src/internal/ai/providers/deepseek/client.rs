@@ -7,7 +7,12 @@
 //! The default base URL is `https://api.deepseek.com`; a custom URL can be
 //! supplied via [`Client::with_base_url`].
 
-use crate::internal::ai::client::{Client as GenericClient, Provider};
+use anyhow::Result;
+
+use crate::internal::{
+    ai::client::{Client as GenericClient, Provider},
+    config::{LocalIdentityTarget, resolve_env_for_target},
+};
 
 /// DeepSeek API provider.
 ///
@@ -29,8 +34,15 @@ impl std::fmt::Debug for DeepSeekProvider {
 
 impl DeepSeekProvider {
     /// Creates a new DeepSeek provider with the given API key.
+    ///
+    /// Functional scope: stores the API key after passing it through
+    /// [`normalize_api_key`] so that pasted shell-quoted values
+    /// (`'...'`, `"..."`) and a leading `Bearer ` prefix are stripped before
+    /// the key reaches `Authorization`.
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self {
+            api_key: normalize_api_key(&api_key),
+        }
     }
 
     /// Returns the API key.
@@ -42,14 +54,44 @@ impl DeepSeekProvider {
 /// Attaches the `Authorization: Bearer <api_key>` header to every outgoing
 /// request, which is the authentication scheme required by the DeepSeek API.
 impl Provider for DeepSeekProvider {
-    fn on_request(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        // DeepSeek uses Bearer token authentication
-        request = request.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.api_key),
-        );
-        request
+    fn on_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // DeepSeek uses standard HTTP bearer authentication.
+        request.bearer_auth(&self.api_key)
     }
+}
+
+/// Strip common pasting artefacts from a DeepSeek API key.
+///
+/// Functional scope:
+/// - Trims surrounding whitespace.
+/// - Removes a `Bearer ` / `bearer ` prefix copied from documentation.
+/// - Removes a balanced pair of single or double quotes from a shell-style paste
+///   (`'sk-...'`, `"sk-..."`).
+///
+/// Boundary conditions:
+/// - Quoting is only stripped when both ends match; mismatched quotes are left in
+///   place so the user sees the auth failure rather than silently mangling the key.
+/// - Empty strings are returned untouched; callers handle the missing-key case.
+fn normalize_api_key(api_key: &str) -> String {
+    let trimmed = api_key.trim();
+    let without_scheme = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_scheme.len() >= 2 {
+        let bytes = without_scheme.as_bytes();
+        let is_single_quoted = bytes.first() == Some(&b'\'') && bytes.last() == Some(&b'\'');
+        let is_double_quoted = bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"');
+        if is_single_quoted || is_double_quoted {
+            return without_scheme[1..without_scheme.len() - 1]
+                .trim()
+                .to_string();
+        }
+    }
+
+    without_scheme.to_string()
 }
 
 /// DeepSeek client type.
@@ -70,12 +112,34 @@ impl Client {
     /// # Errors
     ///
     /// Returns [`std::env::VarError`] if `DEEPSEEK_API_KEY` is not set.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
+    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
         let api_key = std::env::var("DEEPSEEK_API_KEY")?;
         let base_url = "https://api.deepseek.com".to_string();
 
         let provider = DeepSeekProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
+    }
+
+    /// Vault-aware async constructor: resolves `DEEPSEEK_API_KEY` via
+    /// [`resolve_env_for_target`], so callers can store the key in repo-local
+    /// or global `vault.env.DEEPSEEK_API_KEY` config without exporting it to
+    /// the process environment.
+    ///
+    /// Priority order:
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 3. Global config
+    ///
+    /// DeepSeek does not expose a base-URL env override. Tests that need a
+    /// stub endpoint should keep using [`Client::with_base_url`].
+    pub async fn from_resolved_env(local_target: LocalIdentityTarget<'_>) -> Result<Self> {
+        let api_key = resolve_env_for_target("DEEPSEEK_API_KEY", local_target)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("DEEPSEEK_API_KEY is not set in env, repo vault, or global config")
+            })?;
+        let provider = DeepSeekProvider::new(api_key);
+        Ok(Self::new("https://api.deepseek.com", provider))
     }
 
     /// Creates a DeepSeek client with the given API key and the default
@@ -97,8 +161,12 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
+    /// Scenario: Debug formatting must mask the secret so it cannot leak into
+    /// `tracing` output or panic backtraces.
     #[test]
     fn test_deepseek_provider_debug() {
         let provider = DeepSeekProvider::new("test-key".to_string());
@@ -107,9 +175,99 @@ mod tests {
         assert!(debug_str.contains("***"));
     }
 
+    /// Scenario: a clean key must round-trip through the constructor unchanged.
     #[test]
     fn test_deepseek_provider_api_key() {
         let provider = DeepSeekProvider::new("test-key".to_string());
         assert_eq!(provider.api_key(), "test-key");
+    }
+
+    /// Scenario: keys pasted from shell scripts often arrive with surrounding
+    /// quotes and trailing whitespace. The normaliser must strip both before
+    /// the value reaches the `Authorization` header.
+    #[test]
+    fn test_deepseek_provider_normalizes_shell_quoted_api_key() {
+        let provider = DeepSeekProvider::new(" 'test-key' \n".to_string());
+        assert_eq!(provider.api_key(), "test-key");
+    }
+
+    /// Scenario: documentation samples sometimes embed `Bearer ` in the key;
+    /// the normaliser strips it so users do not produce a header with two
+    /// `Bearer` tokens.
+    #[test]
+    fn test_deepseek_provider_normalizes_bearer_prefixed_api_key() {
+        let provider = DeepSeekProvider::new("Bearer test-key".to_string());
+        assert_eq!(provider.api_key(), "test-key");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_reads_deepseek_api_key_from_process_env() {
+        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", Some("ds-test-resolved"));
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/deepseek-from-resolved-env-test.db"),
+        );
+
+        let client = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect("from_resolved_env should succeed when DEEPSEEK_API_KEY is set");
+        assert_eq!(client.provider.api_key(), "ds-test-resolved");
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {
+        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/deepseek-from-resolved-env-test.db"),
+        );
+
+        let err = Client::from_resolved_env(LocalIdentityTarget::None)
+            .await
+            .expect_err("from_resolved_env must fail without an API key");
+        assert!(
+            err.to_string().contains("DEEPSEEK_API_KEY"),
+            "error should name the missing key, got: {err}"
+        );
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial]`, and the guard
+            // restores the previous value on drop.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }

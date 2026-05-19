@@ -1,4 +1,15 @@
 //! Phase D validation and decision derived-record tests.
+//!
+//! Verifies the read/write contract for the two latest-derived runtime tables:
+//! - `ai_validation_report` — the `ValidationReportStore` keeps exactly one
+//!   `is_latest = 1` row per thread, replacing any prior latest report.
+//! - `ai_decision_proposal` — `DecisionProposalStore` writes proposals derived
+//!   from a validator report and a risk score, and routes/verdicts respect
+//!   blocking-failure semantics.
+//! - When neither a thread row nor a runtime anchor exists, the stores create the
+//!   anchor (`owner_kind = "system"`, `owner_id = "libra-runtime"`) on demand.
+//!
+//! **Layer:** L1 — uses in-memory SQLite, no external dependencies.
 
 use libra::internal::{
     ai::runtime::{
@@ -18,6 +29,8 @@ use uuid::Uuid;
 
 const BOOTSTRAP_SQL: &str = include_str!("../sql/sqlite_20260309_init.sql");
 
+/// Spin up an in-memory SQLite and run the canonical bootstrap SQL. Returns the
+/// connection ready for tests that only need schema (no on-disk Libra repo).
 async fn setup_db() -> sea_orm::DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.execute(Statement::from_string(
@@ -29,6 +42,16 @@ async fn setup_db() -> sea_orm::DatabaseConnection {
     db
 }
 
+/// Scenario: sequence two validation outcomes for the same thread (a Passed run that
+/// auto-accepts, then a BlockingFailed run that requests changes). Asserts:
+/// - The first proposal routes to `AutoAccept` with verdict `Accepted` and no human
+///   review required.
+/// - The second proposal routes to `RequestChanges` with verdict `Rejected` and
+///   `requires_human_review = true`.
+/// - The second write supersedes the first: only one row remains marked
+///   `is_latest = 1` for the thread, and `load_latest_proposal` returns the new one.
+///
+/// Pins the latest-derived semantics that downstream UIs and webhooks rely on.
 #[tokio::test]
 async fn validation_reports_and_decision_proposals_are_latest_derived_records() {
     let db = setup_db().await;
@@ -157,6 +180,10 @@ async fn validation_reports_and_decision_proposals_are_latest_derived_records() 
     assert_eq!(latest_rows.len(), 1);
 }
 
+/// Scenario: write derived records for a thread_id that has no `ai_thread` row yet
+/// and confirm the stores create a runtime-owned anchor (`owner_kind = "system"`,
+/// `owner_id = "libra-runtime"`). This is the auto-bootstrap path the runtime uses
+/// when a validation/decision arrives before a thread is otherwise materialized.
 #[tokio::test]
 async fn derived_records_create_missing_runtime_thread_anchor() {
     let db = setup_db().await;

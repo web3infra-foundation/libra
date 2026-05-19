@@ -168,6 +168,47 @@ a1b2c3d4e5 * assets/logo.png
 f6g7h8i9j0 - docs/spec.pdf
 ```
 
+## JSON / Machine Output
+
+`--json` and `--machine` are supported for successful `track`, `untrack`, `locks`, `lock`, `unlock`, and `ls-files` operations. `--json` writes one command envelope to stdout, and `--machine` emits the same envelope as a compact single JSON line.
+
+Tracking patterns:
+
+```json
+{
+  "ok": true,
+  "command": "lfs",
+  "data": {
+    "action": "track",
+    "patterns": ["*.png"]
+  }
+}
+```
+
+Listing LFS files:
+
+```json
+{
+  "ok": true,
+  "command": "lfs",
+  "data": {
+    "action": "ls-files",
+    "show_size": true,
+    "files": [
+      {
+        "path": "assets/logo.png",
+        "oid": "a1b2c3d4e5",
+        "marker": "-",
+        "size": 1024,
+        "display_size": " (1.00 KiB)"
+      }
+    ]
+  }
+}
+```
+
+Lock operations include `path`, `id` when available, `refspec`, or a `locks` array for `lfs locks`.
+
 ## Common Commands
 
 ```bash

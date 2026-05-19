@@ -23,10 +23,20 @@ impl PathExt for PathBuf {
         util::to_workdir_path(self)
     }
 
-    /// `PathBuf` to `String`, may panic
-    /// - aka: `into_os_string().into_string().unwrap()`
+    /// `PathBuf` to `String`, panics on non-UTF-8 paths.
+    /// - aka: `into_os_string().into_string().expect("non-UTF-8 path")`
+    ///
+    /// Callers that may encounter non-UTF-8 paths should use
+    /// `Path::to_string_lossy()` or `try_working_dir_string()` in
+    /// `src/utils/util.rs` instead.
     fn to_string_or_panic(&self) -> String {
-        self.clone().into_os_string().into_string().unwrap()
+        // INVARIANT: the function's name documents that the input must be
+        // UTF-8. Callers that pass non-UTF-8 OsString contents are violating
+        // the API contract.
+        self.clone()
+            .into_os_string()
+            .into_string()
+            .expect("PathExt::to_string_or_panic called on non-UTF-8 path")
     }
 
     fn workdir_to_absolute(&self) -> PathBuf {

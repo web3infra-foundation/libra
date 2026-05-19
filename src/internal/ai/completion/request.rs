@@ -1,3 +1,9 @@
+//! Provider-neutral completion request envelope.
+//!
+//! Boundary: requests carry normalized model, message, tool, and reasoning settings
+//! but avoid provider-specific HTTP payload details. Provider tests cover optional
+//! reasoning fields, absent tools, and streaming flags.
+
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -8,6 +14,10 @@ use crate::internal::ai::tools::ToolDefinition;
 #[derive(Debug, Clone)]
 pub enum CompletionStreamEvent {
     TextDelta {
+        request_id: Option<String>,
+        delta: String,
+    },
+    ThinkingDelta {
         request_id: Option<String>,
         delta: String,
     },
@@ -30,6 +40,15 @@ pub enum CompletionThinking {
     High,
 }
 
+/// Provider-neutral reasoning effort for models that expose a separate depth knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 /// Represents a request for AI completion, including chat history and optional parameters.
 #[derive(Debug, Clone, Default)]
 pub struct CompletionRequest {
@@ -42,6 +61,10 @@ pub struct CompletionRequest {
     pub documents: Vec<Value>, // Placeholder for Document
     /// Optional thinking/reasoning mode for providers that support it.
     pub thinking: Option<CompletionThinking>,
+    /// Optional reasoning effort for providers that expose a separate effort field.
+    pub reasoning_effort: Option<CompletionReasoningEffort>,
+    /// Optional provider request streaming flag.
+    pub stream: Option<bool>,
     /// Optional sink for providers that can stream partial response events.
     pub stream_events: Option<UnboundedSender<CompletionStreamEvent>>,
 }
@@ -50,7 +73,10 @@ pub struct CompletionRequest {
 #[derive(Debug)]
 pub struct CompletionResponse<T> {
     pub content: Vec<AssistantContent>, // The content of the response (text, tool calls, etc.)
-    pub raw_response: T,                // Raw response from the AI service
+    /// Provider-specific reasoning text that must be preserved while continuing
+    /// the same assistant tool-call turn.
+    pub reasoning_content: Option<String>,
+    pub raw_response: T, // Raw response from the AI service
 }
 
 impl CompletionRequest {

@@ -314,11 +314,14 @@ async fn test_diff_after_init() {
     let args = DiffArgs::parse_from(["diff", "--output", output_str]);
     diff::execute(args).await;
 
-    // Empty repo should produce no diff output (or an empty file)
     let content = fs::read_to_string(&output_file).unwrap_or_default();
     assert!(
-        content.is_empty(),
-        "Expected no diff output after init, got: {content}"
+        content.contains("diff --git a/.libraignore b/.libraignore"),
+        "Expected init-created .libraignore to be visible in diff, got: {content}"
+    );
+    assert!(
+        content.contains("# Libra ignore file"),
+        "Expected default .libraignore contents in diff, got: {content}"
     );
 }
 

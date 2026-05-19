@@ -2,10 +2,11 @@
 //! remote-tracking refs, and honor prune/depth options.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs,
     io::{self, Error as IoError, Write},
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -55,6 +56,8 @@ EXAMPLES:
     libra fetch origin                     Fetch from a specific remote
     libra fetch origin main                Fetch only one branch from a remote
     libra fetch --all                      Fetch every configured remote
+    libra fetch origin --depth 1           Shallow fetch (latest commit only)
+    libra fetch --all --depth 3            Shallow fetch across all remotes
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
@@ -132,13 +135,14 @@ impl RemoteClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         match self {
-            RemoteClient::Http(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Local(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Git(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Ssh(client) => client.fetch_objects(have, want, depth).await,
+            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, depth).await,
         }
     }
 }
@@ -479,6 +483,10 @@ pub struct FetchArgs {
     /// Fetch all remotes.
     #[clap(long, short, conflicts_with("repository"))]
     pub all: bool,
+
+    /// Limit fetching to the specified number of commits from the tip of each remote branch
+    #[clap(long, value_name = "N")]
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -652,19 +660,69 @@ fn map_fetch_io_error(
 pub(crate) fn redact_url_credentials(raw: &str) -> String {
     match Url::parse(raw) {
         Ok(mut url) => {
-            let has_password = url.password().is_some();
+            let raw_userinfo = url_userinfo(raw);
+            let has_password = url.password().is_some()
+                || raw_userinfo.is_some_and(|userinfo| userinfo.contains(':'));
             let is_http = matches!(url.scheme(), "http" | "https");
+            let has_http_username =
+                is_http && (!url.username().is_empty() || raw_userinfo.is_some());
             // Redact when there is a password (always sensitive) or when the
             // scheme is HTTP(S) and a username is present (likely a token).
             // For SSH, a bare username like "git" is conventional and harmless.
-            if has_password || (is_http && !url.username().is_empty()) {
+            if has_password || has_http_username {
                 let _ = url.set_username("");
                 let _ = url.set_password(None);
+                return strip_url_userinfo(url.as_str()).unwrap_or_else(|| url.to_string());
             }
             url.to_string()
         }
-        Err(_) => raw.to_string(),
+        Err(_) => {
+            let raw_userinfo = url_userinfo(raw);
+            let is_http = url_scheme(raw).is_some_and(|scheme| {
+                scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+            });
+            if raw_userinfo.is_some_and(|userinfo| userinfo.contains(':'))
+                || (is_http && raw_userinfo.is_some())
+            {
+                strip_url_userinfo(raw).unwrap_or_else(|| raw.to_string())
+            } else {
+                raw.to_string()
+            }
+        }
     }
+}
+
+fn url_scheme(url: &str) -> Option<&str> {
+    url.find("://").map(|scheme_end| &url[..scheme_end])
+}
+
+fn url_userinfo(url: &str) -> Option<&str> {
+    let authority_start = url.find("://")? + 3;
+    let authority_len = url[authority_start..]
+        .find(['/', '?', '#'])
+        .unwrap_or(url.len() - authority_start);
+    let authority_end = authority_start + authority_len;
+    let userinfo_end = url[authority_start..authority_end].rfind('@')?;
+
+    Some(&url[authority_start..authority_start + userinfo_end])
+}
+
+fn strip_url_userinfo(url: &str) -> Option<String> {
+    let authority_start = url.find("://")? + 3;
+    let authority_len = url[authority_start..]
+        .find(['/', '?', '#'])
+        .unwrap_or(url.len() - authority_start);
+    let authority_end = authority_start + authority_len;
+    let userinfo_end = url[authority_start..authority_end].rfind('@')?;
+    let host_start = authority_start + userinfo_end + 1;
+    if host_start == authority_end {
+        return None;
+    }
+
+    let mut redacted = String::with_capacity(url.len());
+    redacted.push_str(&url[..authority_start]);
+    redacted.push_str(&url[host_start..]);
+    Some(redacted)
 }
 
 fn is_timeout_io_error(error: &std::io::Error) -> bool {
@@ -682,8 +740,18 @@ pub async fn execute(args: FetchArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Negotiates with remotes, downloads pack data, and
-/// updates remote-tracking refs.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads remote configuration and negotiates refs with one or more remotes.
+/// - Downloads pack data and writes received objects into local storage.
+/// - Updates remote-tracking refs for fetched branches.
+/// - Renders fetch status in the requested output format.
+///
+/// # Errors
+/// Returns [`CliError`] when remote configuration is invalid or missing,
+/// authentication/network/pack negotiation fails, object writes fail, or
+/// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_fetch(args, output).await?;
     render_fetch_output(&result, output)
@@ -696,6 +764,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         repository,
         refspec,
         all,
+        depth,
     } = args;
 
     if all {
@@ -707,7 +776,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
             results.push(
-                fetch_repository_with_result(remote, None, false, None, output)
+                fetch_repository_with_result(remote, None, false, depth, output)
                     .await
                     .map_err(CliError::from)?,
             );
@@ -752,7 +821,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, None, output)
+    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, depth, output)
         .await
         .map_err(CliError::from)?;
 
@@ -998,6 +1067,15 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
+    // Only request refs we will actually persist as remote-tracking refs.
+    // `update_references` saves `refs/heads/*` and `refs/mr/*`; asking for
+    // anything else (HEAD symref, `refs/pull/*`, `refs/tags/*`) makes the
+    // server include unreachable objects that the next fetch's `have` cannot
+    // cover, which forces the same pack to be re-downloaded every time.
+    refs.retain(|reference| {
+        reference._ref.starts_with("refs/heads/") || reference._ref.starts_with("refs/mr/")
+    });
+
     if let Some(branch_name) = &branch
         && single_branch
     {
@@ -1005,13 +1083,17 @@ pub(crate) async fn fetch_repository_with_result(
         refs.retain(|reference| reference._ref == normalized);
     }
 
-    let want = refs
+    let mut want = refs
         .iter()
         .map(|reference| reference._hash.clone())
         .collect::<Vec<_>>();
+    want.sort();
+    want.dedup();
     let have = current_have_safe().await?;
+    let shallow_boundaries = read_shallow_boundaries()?;
+    let shallow = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
     let mut result_stream = remote_client
-        .fetch_objects(&have, &want, depth)
+        .fetch_objects(&have, &want, &shallow, depth)
         .await
         .map_err(|source| FetchError::FetchObjects {
             remote: remote_config.url.clone(),
@@ -1019,9 +1101,9 @@ pub(crate) async fn fetch_repository_with_result(
         })?;
 
     let task = format!("fetch {}", remote_config.name);
-    let pack_data = read_fetch_stream(&mut result_stream, output, &task).await?;
-    let objects_fetched = pack_object_count(&pack_data);
-    let pack_file = write_pack_and_index(&pack_data)?;
+    let fetch_data = read_fetch_stream(&mut result_stream, output, &task).await?;
+    let objects_fetched = pack_object_count(&fetch_data.pack_data);
+    let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
             HashKind::Sha1 => None,
@@ -1040,6 +1122,7 @@ pub(crate) async fn fetch_repository_with_result(
                 })?,
         }
     }
+    apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
 
     let refs_updated =
         update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
@@ -1051,14 +1134,22 @@ pub(crate) async fn fetch_repository_with_result(
     })
 }
 
+#[derive(Default)]
+struct FetchStreamData {
+    pack_data: Vec<u8>,
+    shallow: Vec<String>,
+    unshallow: Vec<String>,
+}
+
 async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
     task: &str,
-) -> Result<Vec<u8>, FetchError> {
+) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
-    let mut pack_data = Vec::new();
+    let mut data_out = FetchStreamData::default();
     let mut reach_pack = false;
+    let mut saw_shallow_response = false;
     let render_progress = matches!(output.progress, ProgressMode::Text);
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
@@ -1070,7 +1161,31 @@ async fn read_fetch_stream(
             .await
             .map_err(|source| FetchError::PacketRead { source })?;
         if len == 0 {
+            if !reach_pack && saw_shallow_response {
+                saw_shallow_response = false;
+                continue;
+            }
             break;
+        }
+        if !reach_pack {
+            if let Some(oid) = parse_shallow_packet(&data, b"shallow ") {
+                data_out.shallow.push(oid);
+                saw_shallow_response = true;
+                continue;
+            }
+            if let Some(oid) = parse_shallow_packet(&data, b"unshallow ") {
+                data_out.unshallow.push(oid);
+                saw_shallow_response = true;
+                continue;
+            }
+            if data.starts_with(b"PACK") {
+                reach_pack = true;
+                data_out.pack_data.extend(&data);
+                if let Some(progress) = &progress {
+                    progress.tick(data_out.pack_data.len() as u64);
+                }
+                continue;
+            }
         }
         if data.len() >= 5 && data[0] == 1 && &data[1..5] == b"PACK" {
             reach_pack = true;
@@ -1080,16 +1195,17 @@ async fn read_fetch_stream(
             if let Some((&code, payload)) = data.split_first() {
                 match code {
                     1 => {
-                        let bytes_per_sec = pack_data.len() as f64 / time.elapsed().as_secs_f64();
-                        let total = util::auto_unit_bytes(pack_data.len() as u64);
+                        let bytes_per_sec =
+                            data_out.pack_data.len() as f64 / time.elapsed().as_secs_f64();
+                        let total = util::auto_unit_bytes(data_out.pack_data.len() as u64);
                         let bps = util::auto_unit_bytes(bytes_per_sec as u64);
                         if let Some(bar) = &bar {
                             bar.set_message(format!("Receiving objects: {total:.2} | {bps:.2}/s"));
                             bar.tick();
                         }
-                        pack_data.extend(payload);
+                        data_out.pack_data.extend(payload);
                         if let Some(progress) = &progress {
-                            progress.tick(pack_data.len() as u64);
+                            progress.tick(data_out.pack_data.len() as u64);
                         }
                     }
                     2 => print_remote_progress(payload, render_progress, bar.as_ref()),
@@ -1107,6 +1223,9 @@ async fn read_fetch_stream(
                 }
             }
         } else if data != b"NAK\n"
+            && !data.starts_with(b"ACK ")
+            && !data.starts_with(b"shallow ")
+            && !data.starts_with(b"unshallow ")
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
@@ -1120,9 +1239,10 @@ async fn read_fetch_stream(
                     });
                 }
                 _ => {
-                    // Preserve unknown/non-side-band frames as-is: the leading byte may be
-                    // payload data rather than a channel discriminator.
-                    print_remote_progress(&data, render_progress, bar.as_ref());
+                    tracing::debug!(
+                        "ignoring pre-pack frame: {:?}",
+                        String::from_utf8_lossy(&data)
+                    );
                 }
             }
         }
@@ -1134,7 +1254,13 @@ async fn read_fetch_stream(
         progress.finish();
     }
 
-    Ok(pack_data)
+    Ok(data_out)
+}
+
+fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
+    let raw = data.strip_prefix(prefix)?;
+    let text = std::str::from_utf8(raw).ok()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
@@ -1216,6 +1342,99 @@ fn write_pack_and_index(pack_data: &[u8]) -> Result<Option<String>, FetchError> 
         })?;
 
     Ok(Some(pack_file.to_string_lossy().into_owned()))
+}
+
+fn shallow_file_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("shallow"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for shallow metadata: {source}"),
+        })
+}
+
+fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
+    let path = shallow_file_path()?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(source) => {
+            return Err(FetchError::LocalState {
+                message: format!(
+                    "failed to read shallow metadata '{}': {source}",
+                    path.display()
+                ),
+            });
+        }
+    };
+
+    let mut boundaries = BTreeSet::new();
+    for (line_no, line) in content.lines().enumerate() {
+        let oid = line.trim();
+        if oid.is_empty() {
+            continue;
+        }
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!(
+                "invalid shallow metadata entry at '{}:{}': {source}",
+                path.display(),
+                line_no + 1
+            ),
+        })?;
+        boundaries.insert(oid.to_string());
+    }
+    Ok(boundaries)
+}
+
+fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchError> {
+    let path = shallow_file_path()?;
+    if boundaries.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FetchError::LocalState {
+                    message: format!(
+                        "failed to remove shallow metadata '{}': {source}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        return Ok(());
+    }
+
+    let mut content = String::new();
+    for oid in boundaries {
+        content.push_str(oid);
+        content.push('\n');
+    }
+    fs::write(&path, content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write shallow metadata '{}': {source}",
+            path.display()
+        ),
+    })
+}
+
+fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
+    if shallow.is_empty() && unshallow.is_empty() {
+        return Ok(());
+    }
+
+    let mut boundaries = read_shallow_boundaries()?;
+    for oid in shallow {
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!("remote sent invalid shallow boundary '{oid}': {source}"),
+        })?;
+        boundaries.insert(oid.clone());
+    }
+    for oid in unshallow {
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!("remote sent invalid unshallow boundary '{oid}': {source}"),
+        })?;
+        boundaries.remove(oid);
+    }
+    write_shallow_boundaries(&boundaries)
 }
 
 async fn update_references(
@@ -1343,6 +1562,13 @@ async fn update_references(
     })
 }
 
+/// Soft cap on the number of commits we walk back from each branch tip when
+/// constructing the `have` list. Each `have` line is small, but we still want
+/// to keep the request bounded for repos with deep history. Tips themselves
+/// always go into `have` regardless of this limit so that the server can
+/// recognise every local/remote-tracking branch as a potential common ancestor.
+const HAVE_HISTORY_LIMIT: usize = 256;
+
 async fn current_have_safe() -> Result<Vec<String>, FetchError> {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
     struct QueueItem {
@@ -1376,7 +1602,17 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
         .collect::<Vec<_>>();
     remotes.push(None);
 
-    for remote in remotes {
+    let mut have = Vec::new();
+    let mut have_set: HashSet<String> = HashSet::new();
+    let shallow_boundaries = read_shallow_boundaries()?;
+
+    // Phase 1: every local + remote-tracking branch tip becomes a `have`,
+    // unconditionally. These are the commits the server is most likely to
+    // recognise as a common ancestor; dropping any of them forces the server
+    // to re-send the pack regions reachable from those tips on every fetch
+    // (the bug that made `libra pull` re-download the same pack repeatedly
+    // on repos with more active branches than the previous traversal limit).
+    for remote in &remotes {
         let branches = Branch::list_branches_result(remote.as_deref())
             .await
             .map_err(|source| FetchError::LocalState {
@@ -1391,15 +1627,28 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
                     ),
                 })?;
             check_and_insert(&commit, &mut inserted, &mut c_pending);
+            let oid = branch.commit.to_string();
+            if have_set.insert(oid.clone()) {
+                have.push(oid);
+            }
         }
     }
 
-    let mut have = Vec::new();
-    while have.len() < 32 && !c_pending.is_empty() {
+    // Phase 2: walk parents in newest-first order to provide additional
+    // common-ancestor candidates for divergent histories, bounded by
+    // `HAVE_HISTORY_LIMIT` so very deep repos don't produce an unbounded
+    // request body.
+    while have.len() < HAVE_HISTORY_LIMIT && !c_pending.is_empty() {
         let Some(item) = c_pending.pop() else {
             break;
         };
-        have.push(item.commit.to_string());
+        let oid = item.commit.to_string();
+        if have_set.insert(oid.clone()) {
+            have.push(oid);
+        }
+        if shallow_boundaries.contains(&item.commit.to_string()) {
+            continue;
+        }
 
         let commit: Commit =
             load_object(&item.commit).map_err(|source| FetchError::LocalState {
@@ -1461,10 +1710,83 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FetchError, SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
-        emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        FetchError, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
+        cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        redact_url_credentials,
     };
     use crate::utils::test::ScopedEnvVar;
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`FetchError`]. These strings are used as the
+    /// `CliError` message via `From<FetchError> for CliError` and
+    /// surface in both human and `--json` envelopes for `fetch`, `clone`,
+    /// and `pull`.
+    ///
+    /// Source-chained variants (Discovery, FetchObjects, PacketRead,
+    /// ObjectsDirNotFound, PackDirCreate, PackWrite, IndexPack) wrap
+    /// upstream io::Error / GitError types and are intentionally
+    /// skipped — their `{source}` slot is owned by the wrapped type.
+    #[test]
+    fn fetch_error_display_pins_static_message_variants() {
+        // InvalidRemoteSpec echoes the `reason` field verbatim.
+        assert_eq!(
+            FetchError::InvalidRemoteSpec {
+                spec: "/missing/repo".to_string(),
+                kind: RemoteSpecErrorKind::MissingLocalRepo,
+                reason: "local path does not exist".to_string(),
+            }
+            .to_string(),
+            "local path does not exist",
+        );
+        assert_eq!(
+            FetchError::ObjectFormatMismatch {
+                remote: git_internal::hash::HashKind::Sha1,
+                local: git_internal::hash::HashKind::Sha256,
+            }
+            .to_string(),
+            "remote object format 'sha1' does not match local 'sha256'",
+        );
+        assert_eq!(
+            FetchError::RemoteBranchNotFound {
+                branch: "feature".to_string(),
+                remote: "origin".to_string(),
+            }
+            .to_string(),
+            "remote branch feature not found in upstream origin",
+        );
+        assert_eq!(
+            FetchError::InvalidPktHeader {
+                header: "zzzz".to_string(),
+            }
+            .to_string(),
+            "invalid packet line header 'zzzz'",
+        );
+        assert_eq!(
+            FetchError::RemoteSideband {
+                message: "access denied".to_string(),
+            }
+            .to_string(),
+            "remote reported an error: access denied",
+        );
+        assert_eq!(
+            FetchError::ChecksumMismatch.to_string(),
+            "pack checksum mismatch",
+        );
+        assert_eq!(
+            FetchError::UpdateRefs {
+                message: "ref database is read-only".to_string(),
+            }
+            .to_string(),
+            "failed to update references after fetch: ref database is read-only",
+        );
+        assert_eq!(
+            FetchError::LocalState {
+                message: "missing object directory".to_string(),
+            }
+            .to_string(),
+            "failed to inspect local repository state: missing object directory",
+        );
+    }
 
     fn capture_remote_progress(
         payload: &[u8],
@@ -1499,6 +1821,13 @@ mod tests {
         let captured = capture_remote_progress(b"\rReceiving objects: 42%", false, None);
 
         assert!(captured.is_empty());
+    }
+
+    #[test]
+    fn redact_url_credentials_strips_file_url_userinfo() {
+        let redacted = redact_url_credentials("file://user:secret@example.com/repo.git");
+
+        assert_eq!(redacted, "file://example.com/repo.git");
     }
 
     #[test]

@@ -1,3 +1,9 @@
+//! Provider-neutral completion abstractions used by AI clients and runtime phases.
+//!
+//! Boundary: this module defines request/response/retry/throttle contracts only;
+//! provider-specific authentication and HTTP details live under `providers`.
+
+pub mod json_repair;
 pub mod message;
 pub mod request;
 pub mod retry;
@@ -5,12 +11,17 @@ pub mod throttle;
 
 use std::future::Future;
 
+pub use json_repair::{
+    JsonRepairError, JsonRepairErrorKind, JsonRepairFix, JsonRepairFixKind, JsonRepairOutcome,
+    parse_json_repaired, parse_tool_call_arguments_with_repair,
+};
 pub use message::{
     AssistantContent, Function, Message, MessageError, OneOrMany, Text, ToolCall, ToolResult,
     UserContent,
 };
 pub use request::{
-    CompletionRequest, CompletionResponse, CompletionStreamEvent, CompletionThinking,
+    CompletionReasoningEffort, CompletionRequest, CompletionResponse, CompletionStreamEvent,
+    CompletionThinking,
 };
 pub use retry::{
     CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,
@@ -45,6 +56,12 @@ pub struct CompletionUsageSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }
 
@@ -52,6 +69,9 @@ impl CompletionUsageSummary {
     pub fn merge(&mut self, other: &Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cached_tokens = merge_optional_u64(self.cached_tokens, other.cached_tokens);
+        self.reasoning_tokens = merge_optional_u64(self.reasoning_tokens, other.reasoning_tokens);
+        self.total_tokens = merge_optional_u64(self.total_tokens, other.total_tokens);
         self.cost_usd = match (self.cost_usd, other.cost_usd) {
             (Some(left), Some(right)) => Some(left + right),
             (Some(left), None) => Some(left),
@@ -61,8 +81,26 @@ impl CompletionUsageSummary {
     }
 
     pub fn is_zero(&self) -> bool {
-        self.input_tokens == 0 && self.output_tokens == 0 && self.cost_usd.is_none()
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && optional_u64_is_zero(self.cached_tokens)
+            && optional_u64_is_zero(self.reasoning_tokens)
+            && optional_u64_is_zero(self.total_tokens)
+            && self.cost_usd.is_none()
     }
+}
+
+fn merge_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn optional_u64_is_zero(value: Option<u64>) -> bool {
+    value.is_none_or(|value| value == 0)
 }
 
 pub trait CompletionUsage: Send + Sync {

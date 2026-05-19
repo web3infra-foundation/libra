@@ -350,6 +350,6 @@ trigger a fuzzy match suggestion via edit distance.
 
 ### Timeout Policy
 
-- Discovery / connection: 10s connection timeout
-- Upload / receive-pack: 10s idle timeout (no data progress triggers timeout)
+- Discovery / connection: 60s connection timeout
+- Upload / receive-pack: 60s idle timeout (no data progress triggers timeout)
 - Timeouts are mapped to `NetworkUnavailable` with `phase` detail

@@ -1,3 +1,22 @@
+//! Client-side object storage gateway.
+//!
+//! This module is the synchronous facade that the rest of the codebase uses to read,
+//! write, and search Git objects. It hides three orthogonal concerns:
+//!
+//! 1. **Storage backend selection** — local-only, or local cache plus a remote
+//!    object_store-backed bucket (S3/R2). Backend is chosen at construction time from
+//!    `LIBRA_STORAGE_*` environment variables and `vault.env.*` config entries.
+//! 2. **Sync/async bridging** — most of the codebase is synchronous CLI logic, while
+//!    every storage backend is async. A dedicated multi-thread Tokio runtime owned by
+//!    this module runs the async work and the CLI thread blocks on a `mpsc::channel`,
+//!    avoiding nested-runtime panics that would occur if we drove the storage from the
+//!    main runtime.
+//! 3. **Background object indexing** — every successful `put` enqueues an index-update
+//!    message for the cloud-backup object index. The consumer runs serially on the
+//!    background runtime so concurrent writers cannot deadlock on the SQLite database.
+//!
+//! Search supports Git's revision navigation suffixes (`HEAD`, `~`, `^`).
+
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -9,6 +28,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use futures::FutureExt; // Import for catch_unwind
 use git_internal::{
@@ -41,15 +61,25 @@ use crate::{
     },
 };
 
-// Dedicated runtime for storage operations to avoid blocking/deadlocks in the main runtime
+// Dedicated runtime for storage operations to avoid blocking/deadlocks in the main runtime.
+// We never `await` storage from the calling tokio runtime; instead we hand the work to
+// this private runtime and block on an mpsc receiver. This avoids `block_on within
+// runtime` panics and decouples storage IO from the caller's executor.
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    // INVARIANT: `Builder::build()` only fails on platform resource
+    // exhaustion (cannot spawn the I/O reactor or worker threads). If
+    // that happens the process cannot make progress regardless, so
+    // surfacing the panic immediately is the right behavior. The
+    // panic message identifies that this is the storage runtime so
+    // the failure is distinguishable from caller-runtime issues.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
+        .expect("failed to build dedicated tokio runtime for ClientStorage IO")
 });
 
-// Index update message
+// Message describing a single object_index update queued by `ClientStorage::put`.
+// Carries enough state for the consumer to run independently of the calling thread.
 struct IndexUpdateMsg {
     hash: String,
     obj_type: String,
@@ -57,7 +87,9 @@ struct IndexUpdateMsg {
     db_path: PathBuf,
 }
 
-// Helper guard to ensure PENDING_TASKS is decremented even if task panics
+// RAII guard that decrements PENDING_TASKS exactly once even if the consumer task panics.
+// Drop runs on both the success path and during unwinding, so the pending counter
+// observed by `wait_for_background_tasks` cannot drift on errors.
 struct TaskGuard;
 impl Drop for TaskGuard {
     fn drop(&mut self) {
@@ -65,9 +97,10 @@ impl Drop for TaskGuard {
     }
 }
 
-// Global channel for index updates
-// Using Bounded channel to apply backpressure
-// The consumer will process updates sequentially to avoid DB lock contention.
+// Global channel for index updates.
+// Bounded (1000) so a runaway producer cannot exhaust memory; producers fall back to
+// the runtime-spawned `send` path when `try_send` reports `Full`. The consumer runs
+// serially on RUNTIME to avoid SQLite write contention on `.libra/libra.db`.
 static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
     let (tx, mut rx) = channel::<IndexUpdateMsg>(1000);
 
@@ -76,8 +109,10 @@ static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
             // Guard ensures decrement happens on drop (scope exit or panic)
             let _guard = TaskGuard;
 
-            // Wrap in AssertUnwindSafe to catch panics from DB operations
-            // This prevents the consumer loop from dying if one update fails hard
+            // Wrap in AssertUnwindSafe to catch panics from DB operations.
+            // This prevents the consumer loop from dying if one update fails hard —
+            // a panic here would otherwise stall every subsequent index update for the
+            // process lifetime.
             let future = async {
                 if let Err(e) =
                     update_object_index(&msg.db_path, &msg.hash, &msg.obj_type, msg.size).await
@@ -96,17 +131,43 @@ static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
     tx
 });
 
-// Counter for active background tasks
+// Counter for active background tasks. Read by `wait_for_background_tasks` so the CLI
+// can drain pending index updates before exiting.
 static PENDING_TASKS: AtomicUsize = AtomicUsize::new(0);
 
+// Object-index updates run behind foreground repository writes. SQLite can keep
+// the repository database locked for longer than a single short busy timeout, so
+// cloud backup correctness depends on retrying instead of silently dropping rows.
+const INDEX_UPDATE_MAX_ATTEMPTS: usize = 12;
+
+/// Synchronous facade for the configured object backend.
+///
+/// Wraps a `dyn Storage` (local, remote, or tiered) and adapts every operation to a
+/// blocking call by routing through the dedicated [`RUNTIME`]. Cheap to clone —
+/// internally it is an `Arc` plus a `PathBuf`.
 #[derive(Clone)]
 pub struct ClientStorage {
     storage: Arc<dyn Storage>,
-    #[allow(dead_code)]
     base_path: PathBuf, // Keep base_path for legacy access if needed
 }
 
 impl ClientStorage {
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+
+    /// Construct a `ClientStorage` rooted at `base_path` (typically `.libra/objects`).
+    ///
+    /// Functional scope:
+    /// - Picks the storage backend based on env / vault config (see
+    ///   [`Self::create_storage_backend`]). Local-only when `LIBRA_STORAGE_TYPE` is
+    ///   absent.
+    ///
+    /// Boundary conditions:
+    /// - Never panics on misconfiguration: any unrecoverable env error degrades to
+    ///   `LocalStorage` with a one-line error written to stderr. This means a broken
+    ///   `LIBRA_STORAGE_*` setting silently disables remote backup instead of stopping
+    ///   the CLI.
     pub fn init(base_path: PathBuf) -> ClientStorage {
         let storage = Self::create_storage_backend(base_path.clone());
         ClientStorage { storage, base_path }
@@ -123,6 +184,21 @@ impl ClientStorage {
     /// If found, it uses `repo_id` as a key prefix (`<repo_id>/objects/...`) for isolation.
     /// If not found (e.g., during init before config exists), it defaults to no prefix (root of bucket),
     /// which might be risky for multi-tenant buckets but acceptable for single-repo buckets.
+    ///
+    /// Boundary conditions:
+    /// - Any env-var resolution error degrades to `LocalStorage` (see
+    ///   [`Self::storage_config_resolution_fallback`]); the user sees the failure on
+    ///   stderr but the CLI continues.
+    /// - An empty bucket / access key / secret key, or a non-URL endpoint, also
+    ///   triggers a degrade-to-local with an error message.
+    /// - Unknown `LIBRA_STORAGE_TYPE` values (anything other than `s3`/`r2`) print
+    ///   "Unsupported storage type" and degrade to local.
+    /// - `LIBRA_STORAGE_THRESHOLD` and `LIBRA_STORAGE_CACHE_SIZE` accept any
+    ///   parseable usize and silently fall back to defaults (1 MiB, 200 MiB) when the
+    ///   value is not a valid number.
+    /// - The `expect("Failed to build S3 storage")` is the one panicking path: it
+    ///   only fires if the partial AWS builder is missing a required field, which
+    ///   should be impossible given the explicit checks above.
     fn create_storage_backend(base_path: PathBuf) -> Arc<dyn Storage> {
         // Check for object storage configuration.
         // Uses resolve_env_sync() so vault-stored secrets are picked up.
@@ -153,7 +229,7 @@ impl ClientStorage {
         };
         if bucket.is_empty() {
             eprintln!(
-                "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
             );
             return Arc::new(LocalStorage::new(base_path));
         }
@@ -177,7 +253,7 @@ impl ClientStorage {
                 if let Some(endpoint) = endpoint {
                     if url::Url::parse(&endpoint).is_err() {
                         eprintln!(
-                            "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
+                            "Warning: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
                             endpoint
                         );
                         return Arc::new(LocalStorage::new(base_path));
@@ -210,7 +286,7 @@ impl ClientStorage {
                 if let Some(key) = key {
                     if key.is_empty() {
                         eprintln!(
-                            "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
+                            "Warning: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
                         );
                         return Arc::new(LocalStorage::new(base_path));
                     }
@@ -229,7 +305,7 @@ impl ClientStorage {
                 if let Some(secret) = secret {
                     if secret.is_empty() {
                         eprintln!(
-                            "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
+                            "Warning: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
                         );
                         return Arc::new(LocalStorage::new(base_path));
                     }
@@ -250,11 +326,16 @@ impl ClientStorage {
                     builder = builder.with_allow_http(true);
                 }
 
-                Arc::new(builder.build().expect("Failed to build S3 storage"))
+                Arc::new(builder.build().unwrap_or_else(|err| {
+                    panic!(
+                        "ClientStorage::with_remote: failed to build S3 storage with endpoint/\
+                         bucket/region/credentials from LIBRA_STORAGE_* env: {err}"
+                    )
+                }))
             }
             _ => {
                 eprintln!(
-                    "Error: Unsupported storage type: {}. Falling back to local storage.",
+                    "Warning: Unsupported storage type: {}. Falling back to local storage.",
                     storage_type
                 );
                 return Arc::new(LocalStorage::new(base_path));
@@ -300,19 +381,39 @@ impl ClientStorage {
         ))
     }
 
+    /// Emit a stderr warning and degrade to `LocalStorage` when a storage env
+    /// var cannot be resolved. Centralised so every fallback prints the same
+    /// message shape and ensures CLI commands keep working when remote storage
+    /// is broken — the `Warning:` prefix mirrors the recovered, non-fatal
+    /// nature of the degrade path so users do not mistake it for a fatal
+    /// command failure (e.g. an outdated `~/.libra/config.db` schema still
+    /// surfaces a chain like "Repository database schema is out of date... Run
+    /// 'libra db upgrade'", but the clone/init operation itself still
+    /// succeeds via `LocalStorage`).
     fn storage_config_resolution_fallback(
         base_path: &Path,
         name: &str,
         error: &str,
     ) -> Arc<dyn Storage> {
         eprintln!(
-            "Error: failed to resolve {}: {}. Falling back to local storage.",
+            "Warning: failed to resolve {}: {}. Falling back to local storage.",
             name, error
         );
         Arc::new(LocalStorage::new(base_path.to_path_buf()))
     }
 
-    /// Helper to execute async task on dedicated runtime and block waiting for result
+    /// Helper to execute async task on dedicated runtime and block waiting for result.
+    ///
+    /// Functional scope:
+    /// - Spawns `future` on the private [`RUNTIME`] and blocks the calling thread on
+    ///   an `mpsc::channel` until the result is delivered.
+    ///
+    /// Boundary conditions:
+    /// - Panics if the runtime drops the future before sending a result (e.g. runtime
+    ///   shutdown) — this indicates a programmer error since RUNTIME is a `Lazy`
+    ///   static and should outlive the process.
+    /// - Safe to call from inside another tokio runtime: the work runs on RUNTIME, not
+    ///   the caller's runtime, so nested-runtime panics are avoided.
     fn block_on_storage<F, T>(&self, future: F) -> T
     where
         F: std::future::Future<Output = T> + Send + 'static,
@@ -323,10 +424,27 @@ impl ClientStorage {
             let res = future.await;
             let _ = tx.send(res);
         });
-        rx.recv().unwrap()
+        // INVARIANT: the spawned task above always either returns or panics
+        // before exiting. recv() therefore only returns Err if the spawned
+        // task panicked (sender dropped before sending). The function's doc
+        // comment already documents this as a programmer error since
+        // RUNTIME is a `Lazy` static that outlives the process.
+        rx.recv()
+            .expect("ClientStorage storage-runtime task panicked before sending result")
     }
 
-    /// Wait for all background tasks (e.g. indexing) to complete
+    /// Wait for all background tasks (e.g. indexing) to complete.
+    ///
+    /// Functional scope:
+    /// - Polls [`PENDING_TASKS`] every 100 ms until it reaches zero; logs a progress
+    ///   line every 5 s so a stuck index update is visible to the user.
+    ///
+    /// Boundary conditions:
+    /// - Has no upper time bound. If the consumer is wedged the call blocks forever;
+    ///   in practice the only path that can wedge is a SQLite lock contention bug,
+    ///   which the consumer's panic catcher and short busy timeouts already mitigate.
+    /// - Called by the top-level CLI dispatcher just before process exit so queued
+    ///   index updates are not killed mid-write.
     pub fn wait_for_background_tasks() {
         // Wait until all tasks finish
         let mut waited = 0;
@@ -344,12 +462,41 @@ impl ClientStorage {
         }
     }
 
+    /// Read a Git object's *raw payload* by its hash.
+    ///
+    /// Functional scope:
+    /// - Returns the object content only; the `ObjectType` is dropped here. Use
+    ///   [`Self::get_object_type`] when the type is needed.
+    ///
+    /// Boundary conditions:
+    /// - Returns `GitError::ObjectNotFound` when neither local cache nor remote
+    ///   bucket holds the object.
+    /// - Blocks the calling thread on the storage runtime; safe to call from sync or
+    ///   async contexts.
     pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
         let storage = self.storage.clone();
         let hash = *object_id;
         self.block_on_storage(async move { storage.get(&hash).await.map(|(data, _)| data) })
     }
 
+    /// Persist a Git object and queue a background index update.
+    ///
+    /// Functional scope:
+    /// - Writes the object via the configured backend (synchronously, on the storage
+    ///   runtime), then enqueues an [`IndexUpdateMsg`] so the cloud-backup object
+    ///   index reflects the new entry.
+    ///
+    /// Boundary conditions:
+    /// - The index update is best-effort: if the bounded channel is full, the message
+    ///   is forwarded to a runtime task that performs the blocking `send`. If the
+    ///   channel is closed (RUNTIME tearing down), the index update is dropped with a
+    ///   `tracing::warn` and the put still succeeds.
+    /// - Returns `io::Error` (instead of `GitError`) so callers using `std::io`
+    ///   abstractions can propagate the error directly.
+    /// - The index update is skipped silently when the database path cannot be
+    ///   resolved (e.g. base_path has no parent), since some test harnesses use
+    ///   non-standard layouts.
+    /// - See: `test_content_store`, `background_index_update_uses_storage_database_instead_of_cwd`.
     pub fn put(
         &self,
         obj_id: &ObjectHash,
@@ -412,18 +559,33 @@ impl ClientStorage {
         Ok(result)
     }
 
+    /// Check whether an object exists in the configured backend.
+    ///
+    /// Boundary conditions:
+    /// - For tiered storage, returns `true` if the object lives in either tier; does
+    ///   not promote the object to the local cache.
     pub fn exist(&self, obj_id: &ObjectHash) -> bool {
         let storage = self.storage.clone();
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist(&hash).await })
     }
 
+    /// Read just the `ObjectType` for `obj_id`.
+    ///
+    /// Boundary conditions:
+    /// - For backends that store the object body inline with its type header, this
+    ///   may decode the entire body and discard the payload. Prefer
+    ///   [`Self::is_object_type`] when only checking a single type.
     pub fn get_object_type(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
         let storage = self.storage.clone();
         let hash = *obj_id;
         self.block_on_storage(async move { storage.get(&hash).await.map(|(_, t)| t) })
     }
 
+    /// Convenience wrapper: returns whether `obj_id` resolves to an object of the
+    /// requested type. Returns `false` on any read error (rather than propagating)
+    /// because callers typically use this in match arms where missing-or-wrong-type
+    /// have the same effect.
     pub fn is_object_type(&self, obj_id: &ObjectHash, obj_type: ObjectType) -> bool {
         match self.get_object_type(obj_id) {
             Ok(t) => t == obj_type,
@@ -431,6 +593,15 @@ impl ClientStorage {
         }
     }
 
+    /// Search for objects matching the provided revision-ish identifier.
+    ///
+    /// Functional scope:
+    /// - Wraps [`Self::search_result`]; logs and swallows errors to keep the simple
+    ///   "list of hashes" return shape that callers expect.
+    ///
+    /// Boundary conditions:
+    /// - On any error, returns an empty vector and logs an `error!`. Use
+    ///   [`Self::search_result`] when the caller needs to react to the error.
     pub async fn search(&self, obj_id: &str) -> Vec<ObjectHash> {
         match self.search_result(obj_id).await {
             Ok(matches) => matches,
@@ -441,6 +612,24 @@ impl ClientStorage {
         }
     }
 
+    /// Search for objects matching `obj_id`, surfacing errors to the caller.
+    ///
+    /// Functional scope:
+    /// - Recognises `HEAD`, branch names, and Git navigation suffixes (`~`, `^`).
+    /// - For navigation forms (`HEAD~3`, `main^^`) resolves the base ref then walks
+    ///   parent commits via [`Self::navigate_commit_path`].
+    /// - For prefix matches (e.g. an abbreviated SHA) delegates to the underlying
+    ///   storage's `search`.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(vec![])` when an empty base ref is supplied (e.g. `~1`, `^2`)
+    ///   to avoid degenerating into a prefix search of all objects.
+    /// - Returns `Ok(vec![])` when the base ref is ambiguous (multiple matching
+    ///   commit objects). The caller decides whether ambiguity is an error.
+    /// - Returns `Err` when an underlying database/branch read fails (e.g. corrupt
+    ///   `reference` row), so users see the actionable error instead of silent empty.
+    /// - See: `test_search_result_surfaces_corrupt_branch_storage`,
+    ///   `test_search_result_rejects_empty_base_ref_navigation`.
     pub async fn search_result(&self, obj_id: &str) -> Result<Vec<ObjectHash>, GitError> {
         if obj_id == "HEAD" {
             return Ok(Head::current_commit_result()
@@ -529,13 +718,32 @@ impl ClientStorage {
         Ok(self.storage.search(obj_id).await)
     }
 
+    /// Walk parent commits according to a Git revision suffix.
+    ///
+    /// Functional scope:
+    /// - Parses every `~N` and `^N` token in `path` and walks accordingly:
+    ///   `^N` selects the Nth parent of the current commit; `~N` walks N first-parent
+    ///   steps.
+    ///
+    /// Boundary conditions:
+    /// - Returns `GitError::InvalidArgument` when `path` does not match the expected
+    ///   shape at all (defensive: callers already pre-filter on `~` / `^`).
+    /// - Returns `GitError::ObjectNotFound` when a requested parent index does not
+    ///   exist (e.g. `~5` on a commit whose history is shorter, or `^2` on a non-merge
+    ///   commit).
+    /// - When the count is missing (`~` rather than `~1`) it defaults to 1, matching
+    ///   Git's convention.
     fn navigate_commit_path(
         &self,
         base_commit: ObjectHash,
         path: &str,
     ) -> Result<ObjectHash, GitError> {
         let mut current = base_commit;
-        let re = Regex::new(r"(\^|~)(\d*)").unwrap();
+        // INVARIANT: compile-time literal regex with two capture groups;
+        // Regex::new only fails on syntactically invalid patterns, which
+        // is caught by the surrounding parent-traversal tests.
+        let re =
+            Regex::new(r"(\^|~)(\d*)").expect("revision-suffix regex is a valid hardcoded pattern");
 
         if !re.is_match(path) {
             return Err(GitError::InvalidArgument(format!(
@@ -543,7 +751,12 @@ impl ClientStorage {
             )));
         }
         for cap in re.captures_iter(path) {
-            let symbol = cap.get(1).unwrap().as_str();
+            // INVARIANT: capture group 1 is non-optional (`(\^|~)`), so any
+            // match produced by `captures_iter` is guaranteed to populate it.
+            let symbol = cap
+                .get(1)
+                .expect("regex capture group 1 is non-optional")
+                .as_str();
             let num_str = cap.get(2).map_or("1", |m| m.as_str());
             let num: usize = num_str.parse().unwrap_or(1);
 
@@ -556,46 +769,20 @@ impl ClientStorage {
                         current = self.get_parent_commit(&current, 1)?;
                     }
                 }
-                _ => unreachable!(),
+                // INVARIANT: regex `(\^|~)(\d*)` only captures "^" or "~" in
+                // group 1, so `symbol` cannot hold any other value here.
+                _ => unreachable!("regex capture group 1 is restricted to \"^\" or \"~\""),
             }
         }
         Ok(current)
     }
 
-    #[allow(dead_code)]
-    async fn parse_head_reference(&self, reference: &str) -> Result<ObjectHash, GitError> {
-        let mut current = Head::current_commit().await.unwrap();
-
-        if reference == "HEAD" {
-            return Ok(current);
-        }
-
-        let re = Regex::new(r"(\^|~)(\d*)").unwrap();
-        let path = &reference[4..];
-        if !re.is_match(path) {
-            return Err(GitError::InvalidArgument(reference.to_string()));
-        }
-
-        for cap in re.captures_iter(path) {
-            let symbol = cap.get(1).unwrap().as_str();
-            let num_str = cap.get(2).map_or("1", |m| m.as_str());
-            let num: usize = num_str.parse().unwrap_or(1);
-
-            match symbol {
-                "^" => {
-                    current = self.get_parent_commit(&current, num)?;
-                }
-                "~" => {
-                    for _ in 0..num {
-                        current = self.get_parent_commit(&current, 1)?;
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-        Ok(current)
-    }
-
+    /// Return the Nth parent (1-indexed) of `commit_id`.
+    ///
+    /// Boundary conditions:
+    /// - Returns `GitError::ObjectNotFound` when `n == 0` or `n` exceeds the parent
+    ///   count. Callers using `^` semantics never pass 0; the explicit check is for
+    ///   safety against future callers.
     fn get_parent_commit(&self, commit_id: &ObjectHash, n: usize) -> Result<ObjectHash, GitError> {
         let commit: Commit = load_object(commit_id)?;
         if n == 0 || n > commit.parent_commit_ids.len() {
@@ -606,7 +793,8 @@ impl ClientStorage {
         Ok(commit.parent_commit_ids[n - 1])
     }
 
-    // Helper functions exposed for tests/utils
+    /// Compress `data` with zlib using the default compression level — exposed for
+    /// tests and other utilities that produce loose-object byte streams.
     pub fn compress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data)?;
@@ -614,6 +802,8 @@ impl ClientStorage {
         Ok(compressed_data)
     }
 
+    /// Inverse of [`Self::compress_zlib`] — decompress a previously-zlib-compressed
+    /// byte slice. Used by tests and pack inspection paths.
     pub fn decompress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
         let mut decoder = ZlibDecoder::new(data);
         let mut decompressed_data = Vec::new();
@@ -621,10 +811,104 @@ impl ClientStorage {
         Ok(decompressed_data)
     }
 
+    /// Map `<storage>/objects` back to `<storage>/<DATABASE>` so background index
+    /// updates write to the database that owns this objects directory rather than
+    /// to whichever database happens to be discoverable from the process CWD.
     fn index_db_path_from_base(base_path: &Path) -> Option<PathBuf> {
         base_path
             .parent()
             .map(|storage_path| storage_path.join(DATABASE))
+    }
+}
+
+/// Enqueue an `object_index` row for an object that was written outside the
+/// usual `ClientStorage::put` path — currently agent capture transcript and
+/// metadata blobs, which `HistoryManager::append_checkpoint_commit` writes
+/// directly via [`crate::utils::object::write_git_object`] for the orphan
+/// `refs/libra/agent-traces` history.
+///
+/// Why this exists: cloud sync uploads only the rows it finds in
+/// `object_index` — anything that bypasses `object_index` is invisible to
+/// `libra cloud sync`. Without this hook, agent transcripts written by the
+/// hook runtime would never reach R2, and the Phase 3.5b `cloud restore`
+/// catalogue would resolve commit OIDs that pointed at missing blobs on a
+/// fresh clone (entire.md §14.3 phase-3 item 3 — "走正常 R2 同步").
+///
+/// The function takes the `.libra` directory rather than the storage objects
+/// path because agent capture callers already hold a `repo_path` shaped that
+/// way; the db lives at `<libra_dir>/<DATABASE>`. Returns immediately when
+/// the database file is absent so legacy bootstrap and tempdir tests stay
+/// quiet.
+///
+/// `pub(crate)` — there is no validation that the (`o_id`, `o_type`,
+/// `o_size`) triple matches an actual on-disk Git object, so this is an
+/// internal escape hatch for callers that already hold the truth (only
+/// `HistoryManager` today). External crates / users must go through
+/// `ClientStorage::put`, which both writes the object and indexes it.
+pub(crate) fn enqueue_agent_blob_object_index_update(
+    libra_dir: &Path,
+    o_id: &str,
+    o_type: &str,
+    o_size: i64,
+) {
+    let db_path = libra_dir.join(DATABASE);
+    if !db_path.exists() {
+        return;
+    }
+    let msg = IndexUpdateMsg {
+        hash: o_id.to_string(),
+        obj_type: o_type.to_string(),
+        size: o_size,
+        db_path,
+    };
+    PENDING_TASKS.fetch_add(1, Ordering::Relaxed);
+    match INDEX_UPDATE_CHANNEL.try_send(msg) {
+        Ok(_) => {}
+        Err(TrySendError::Full(msg)) => {
+            // Bounded queue is full. Don't block the caller — spawn the
+            // send onto the storage runtime so the agent capture hook
+            // path keeps moving even when the foreground commit pipeline
+            // is producing index updates faster than the consumer can
+            // drain them. Mirrors the policy used by `ClientStorage::put`.
+            RUNTIME.spawn(async move {
+                if INDEX_UPDATE_CHANNEL.send(msg).await.is_err() {
+                    PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "Failed to queue agent blob object index update: channel closed"
+                    );
+                }
+            });
+        }
+        Err(TrySendError::Closed(_)) => {
+            PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+            tracing::warn!("Failed to queue agent blob object index update: channel closed");
+        }
+    }
+}
+
+#[async_trait]
+impl Storage for ClientStorage {
+    async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+        let storage = self.storage.clone();
+        let hash = *hash;
+        self.block_on_storage(async move { storage.get(&hash).await })
+    }
+
+    async fn put(
+        &self,
+        hash: &ObjectHash,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> Result<String, GitError> {
+        ClientStorage::put(self, hash, data, obj_type).map_err(GitError::IOError)
+    }
+
+    async fn exist(&self, hash: &ObjectHash) -> bool {
+        ClientStorage::exist(self, hash)
+    }
+
+    async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
+        ClientStorage::search(self, prefix).await
     }
 }
 
@@ -636,6 +920,14 @@ impl ClientStorage {
 ///
 /// This avoids deadlocks from nested tokio runtimes during storage init, which
 /// runs synchronously and may be called from within async test contexts.
+///
+/// Boundary conditions:
+/// - Returns `Ok(None)` only when neither the system env nor any config scope
+///   contains the value.
+/// - Returns `Err(String)` when the worker thread crashes before sending or when
+///   the underlying config lookup raises an error (e.g. corrupt SQLite, unreadable
+///   permissions). Callers convert this into a hard storage configuration failure
+///   rather than silently degrading.
 fn resolve_env_sync(name: &str) -> Result<Option<String>, String> {
     // Always check system environment first.
     if let Ok(val) = std::env::var(name) {
@@ -656,6 +948,9 @@ fn resolve_env_sync(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Worker side of [`resolve_env_sync`]: builds a single-purpose tokio runtime in a
+/// dedicated thread so we can drive the async config lookup without colliding with
+/// any runtime the caller already owns.
 fn resolve_env_sync_worker(name: &str) -> Result<Option<String>, String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|err| {
         format!("failed to create tokio runtime for env resolution of '{name}': {err}")
@@ -663,6 +958,17 @@ fn resolve_env_sync_worker(name: &str) -> Result<Option<String>, String> {
     runtime.block_on(resolve_env_for_storage_init(name))
 }
 
+/// Look up `name` in the local repo's config first, then in the global config.
+///
+/// Functional scope:
+/// - Reads `vault.env.<name>` from `<repo>/.libra/<DATABASE>` if it exists, then from
+///   the global config (overridable via `LIBRA_CONFIG_GLOBAL_DB`).
+///
+/// Boundary conditions:
+/// - Returns `Ok(None)` when neither database holds the key.
+/// - Returns `Err` when a database file exists but cannot be opened or queried — the
+///   caller surfaces this so the user sees actionable errors rather than silently
+///   degrading to local-only storage on a typo'd schema.
 async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, String> {
     let vault_key = format!("vault.env.{name}");
 
@@ -687,6 +993,19 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
     Ok(None)
 }
 
+/// Read a single `vault.env.*` entry from a config database, decrypting if needed.
+///
+/// Functional scope:
+/// - Connects with a 200 ms busy timeout so background storage init cannot block on
+///   foreground writers.
+/// - When the entry is encrypted, decrypts using the per-scope key (local repo key
+///   or global key).
+///
+/// Boundary conditions:
+/// - Returns `Err` when the database path is not valid UTF-8 (sea-orm needs a
+///   string-typed URL).
+/// - Returns `Err` when decryption fails — the user sees the raw vault error, not a
+///   silent fall-back to plaintext.
 async fn read_config_env_value(
     env_name: &str,
     vault_key: &str,
@@ -734,6 +1053,12 @@ async fn read_config_env_value(
     }
 }
 
+/// Locate the global config database.
+///
+/// Boundary conditions:
+/// - Honours `LIBRA_CONFIG_GLOBAL_DB` first so tests can redirect to a temp path.
+/// - Returns `None` when no home directory is discoverable; on those platforms global
+///   config is unavailable.
 fn storage_global_config_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
         return Some(PathBuf::from(path));
@@ -741,6 +1066,19 @@ fn storage_global_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
 }
 
+/// Resolve (and lazily create) the per-repo `libra.repoid` used as a key prefix in
+/// shared S3/R2 buckets.
+///
+/// Functional scope:
+/// - Reads `libra.repoid` from the local config; if missing or set to the legacy
+///   placeholder `"unknown-repo"`, generates a fresh UUID and persists it so future
+///   invocations stay aligned with the same prefix.
+///
+/// Boundary conditions:
+/// - Returns `None` if there is no resolvable storage path or no database file yet
+///   (`libra init` has not run); the caller falls back to no prefix in that case.
+/// - The whole computation runs on RUNTIME via mpsc, mirroring the rest of this
+///   module's blocking-into-async pattern.
 fn get_or_create_repo_id_for_prefix() -> Option<String> {
     let storage_path = try_get_storage_path(None).ok()?;
     let db_path = storage_path.join(DATABASE);
@@ -774,6 +1112,11 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
 ///
 /// Best effort only: if config cannot be read (e.g. temp repo already removed),
 /// use a stable fallback to avoid panicking background tasks.
+///
+/// Boundary conditions:
+/// - Returns the literal string `"unknown-repo"` when the entry is missing, blank,
+///   or unreadable. This sentinel is also recognised by `get_or_create_repo_id_for_prefix`
+///   as a placeholder that should be re-rolled on first use.
 async fn resolve_repo_id_for_index(db_conn: &DatabaseConnection) -> String {
     match ConfigKv::get_with_conn(db_conn, "libra.repoid").await {
         Ok(Some(entry)) if !entry.value.trim().is_empty() => entry.value,
@@ -785,32 +1128,68 @@ async fn resolve_repo_id_for_index(db_conn: &DatabaseConnection) -> String {
     }
 }
 
+/// Insert (or no-op) an entry in the `object_index` table with bounded retries on
+/// transient failures.
+///
+/// Functional scope:
+/// - Calls [`update_object_index_once`] up to [`INDEX_UPDATE_MAX_ATTEMPTS`] times.
+///   SQLite locking errors are normally transient because object writes race with
+///   foreground commit/reference updates; dropping the row would make `cloud sync`
+///   upload an incomplete object graph.
+///
+/// Boundary conditions:
+/// - Returns `Ok(())` (without retry) when the database file disappears between
+///   attempts, which happens in test cleanup.
 async fn update_object_index(
     db_path: &Path,
     o_id: &str,
     o_type: &str,
     o_size: i64,
 ) -> Result<(), String> {
-    match update_object_index_once(db_path, o_id, o_type, o_size).await {
-        Ok(()) => Ok(()),
-        Err(_err) if !db_path.exists() => Ok(()),
-        Err(first_err) => {
-            tracing::debug!(
-                db_path = %db_path.display(),
-                object_id = o_id,
-                error = %first_err,
-                "Retrying object index update after transient failure"
-            );
-            match update_object_index_once(db_path, o_id, o_type, o_size).await {
-                Ok(()) => Ok(()),
-                Err(_err) if !db_path.exists() => Ok(()),
-                Err(err) => Err(err),
+    let mut last_err = None;
+
+    for attempt in 1..=INDEX_UPDATE_MAX_ATTEMPTS {
+        match update_object_index_once(db_path, o_id, o_type, o_size).await {
+            Ok(()) => return Ok(()),
+            Err(_err) if !db_path.exists() => return Ok(()),
+            Err(err) => {
+                if attempt == INDEX_UPDATE_MAX_ATTEMPTS {
+                    last_err = Some(err);
+                    break;
+                }
+
+                tracing::debug!(
+                    db_path = %db_path.display(),
+                    object_id = o_id,
+                    attempt,
+                    max_attempts = INDEX_UPDATE_MAX_ATTEMPTS,
+                    error = %err,
+                    "Retrying object index update after transient failure"
+                );
+                let delay_ms = 100 * attempt as u64;
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         }
     }
+
+    Err(last_err.unwrap_or_else(|| "object index update failed".to_string()))
 }
 
-/// Update object_index table for cloud backup tracking.
+/// Update `object_index` for cloud backup tracking — single attempt.
+///
+/// Functional scope:
+/// - Skips entirely when the database file is absent (e.g. temp repo torn down).
+/// - Looks up the existing `(o_id, repo_id)` row; inserts only when missing.
+/// - Uses a short 200 ms busy timeout so foreground commit/reflog/etc. operations
+///   are not blocked by indexing. The outer retry loop gives longer lock windows
+///   time to clear without holding contention for a full second at a time.
+///
+/// Boundary conditions:
+/// - Returns `Ok(())` for any error encountered after the database file disappears
+///   (test teardown), preventing spurious failures from racing tempdirs.
+/// - Returns `Err` when the database path is not valid UTF-8 — sea-orm requires a
+///   string URL.
+/// - See: `update_object_index_skips_missing_database_without_error`.
 async fn update_object_index_once(
     db_path: &Path,
     o_id: &str,
@@ -828,8 +1207,8 @@ async fn update_object_index_once(
         )
     })?;
 
-    // Background indexing is best-effort. Use a short busy timeout so foreground
-    // repo mutations (commit/reflog/etc.) are not blocked by index updates.
+    // Background indexing is best-effort but must not lose rows during ordinary
+    // commit-time SQLite lock windows; the outer retry loop handles longer locks.
     let db_conn =
         match db::establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
             .await
@@ -867,7 +1246,30 @@ async fn update_object_index_once(
         }
     };
 
-    if existing.is_some() {
+    if let Some(existing_row) = existing {
+        // Phase 3.5c codex review: a row may already exist with the
+        // generic `blob` tag (written by the standard storage path)
+        // before the agent capture runtime calls back with a more
+        // specific `agent_transcript` tag for the same content-addressed
+        // OID. Without this upgrade the `agent_transcript` tag would be
+        // silently dropped — first-writer-wins — and downstream tooling
+        // that filters by o_type would never see the captured
+        // transcripts. We promote a generic tag to the agent-specific
+        // one but never demote in the other direction (a row already
+        // tagged `agent_transcript` is left alone).
+        if existing_row.o_type != o_type
+            && o_type.starts_with("agent_")
+            && !existing_row.o_type.starts_with("agent_")
+        {
+            let mut active: object_index::ActiveModel = existing_row.into();
+            active.o_type = Set(o_type.to_string());
+            if let Err(err) = active.update(&db_conn).await {
+                if !db_path.exists() {
+                    return Ok(());
+                }
+                return Err(format!("Failed to upgrade object_index o_type: {}", err));
+            }
+        }
         return Ok(());
     }
 
@@ -915,7 +1317,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::{ClientStorage, resolve_env_sync, update_object_index};
+    use super::{ClientStorage, resolve_env_sync, update_object_index, update_object_index_once};
     use crate::{
         internal::{
             config::ConfigKv,
@@ -925,6 +1327,9 @@ mod tests {
         utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
     };
 
+    /// Test helper that clears an env var on construction and restores it on drop.
+    /// Combined with `#[serial]`, this lets tests assert behaviour when a specific
+    /// env var is unset without leaking state into sibling tests.
     struct ClearedEnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -1013,6 +1418,10 @@ mod tests {
         Ok((dir, objects_dir, pack_path))
     }
 
+    /// Scenario: a freshly-built SHA-1 pack must be readable through `ClientStorage`
+    /// without the caller having touched any database. Guards the pack-reading code
+    /// path that `clone`/`fetch` rely on so they can fall back to packs when the
+    /// loose-object directory is absent.
     #[test]
     #[serial]
     fn client_storage_reads_pack_sha1() -> Result<(), GitError> {
@@ -1027,6 +1436,9 @@ mod tests {
         Ok(())
     }
 
+    /// Scenario: parallel test for SHA-256 pack reading. SHA-256 has a different
+    /// header layout and crc table; this test pins backwards/forwards compatibility
+    /// for repositories created with `core.objectformat=sha256`.
     #[test]
     #[serial]
     fn client_storage_reads_pack_sha256() -> Result<(), GitError> {
@@ -1041,6 +1453,9 @@ mod tests {
         Ok(())
     }
 
+    /// Scenario: round-trip a blob through `put`/`exist`/`get`. This is the smallest
+    /// possible regression check that the synchronous facade and its blocking-on-
+    /// runtime bridge are wired up correctly.
     #[test]
     #[serial]
     fn test_content_store() {
@@ -1063,6 +1478,9 @@ mod tests {
         assert_eq!(String::from_utf8(data).unwrap(), content);
     }
 
+    /// Scenario: searching for a freshly-stored object by its full hash must return a
+    /// non-empty result. This guards the storage-search wiring that downstream
+    /// commands (`cat-file`, `rev-parse`) rely on for hash resolution.
     #[tokio::test]
     async fn test_search() {
         let blob = Blob::from_content("Hello, world!");
@@ -1082,6 +1500,10 @@ mod tests {
         assert!(!objs.is_empty());
     }
 
+    /// Scenario: when a branch row exists but its `commit` column is not a valid
+    /// hash, navigation like `main~1` must surface a fatal error rather than
+    /// silently returning an empty match list. This protects users from acting on
+    /// stale or corrupt references without realising it.
     #[tokio::test]
     #[serial]
     async fn test_search_result_surfaces_corrupt_branch_storage() {
@@ -1114,6 +1536,10 @@ mod tests {
         );
     }
 
+    /// Scenario: input like `~1` or `^2` has no base ref. Without a guard, those
+    /// would degenerate into a prefix search of the empty string, returning every
+    /// object in the repository. The test verifies that we instead return an empty
+    /// vector — the safe behaviour for invalid navigation requests.
     #[tokio::test]
     #[serial]
     async fn test_search_result_rejects_empty_base_ref_navigation() {
@@ -1138,6 +1564,9 @@ mod tests {
         );
     }
 
+    /// Scenario: zlib compress then decompress must yield the original bytes
+    /// verbatim. Pins the compression helpers used by the loose-object writer so a
+    /// crate upgrade cannot silently change the round-trip.
     #[test]
     fn test_decompress() {
         let data = b"blob 13\0Hello, world!";
@@ -1146,6 +1575,10 @@ mod tests {
         assert_eq!(decompressed_data, data);
     }
 
+    /// Scenario: `put` should write its index update to the database that owns the
+    /// objects directory it just wrote into, *not* whichever database is reachable
+    /// from the process CWD. Regression guard for a bug where two repositories sharing
+    /// a CWD could cross-pollinate their object indexes.
     #[tokio::test]
     #[serial]
     async fn background_index_update_uses_storage_database_instead_of_cwd() {
@@ -1178,6 +1611,9 @@ mod tests {
         assert!(row.is_some());
     }
 
+    /// Scenario: index updates must tolerate a missing database file rather than
+    /// returning an error and triggering retry storms. This is common during test
+    /// teardown when a temp repo is removed before its background index task drains.
     #[tokio::test]
     #[serial]
     async fn update_object_index_skips_missing_database_without_error() {
@@ -1188,6 +1624,105 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Phase 3.5c codex round-2 follow-up: a row written first by the
+    /// standard storage path with `o_type='blob'` must be UPGRADED to
+    /// the agent-specific tag (`agent_transcript`) when the agent
+    /// capture call back arrives for the same content-addressed OID.
+    /// This is the regression case the round-1 review flagged: a naive
+    /// "skip if exists" silently kept the generic tag and downstream
+    /// tooling that filtered by o_type lost visibility on captured
+    /// transcripts. We exercise the upgrade branch directly here.
+    #[tokio::test]
+    #[serial]
+    async fn update_object_index_upgrades_generic_blob_to_agent_specific_o_type() {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join(crate::utils::util::DATABASE);
+        let conn = db::create_database(db_path.to_str().expect("test database path is UTF-8"))
+            .await
+            .expect("create database");
+
+        // Seed a generic-blob row that mimics the standard storage path.
+        // The repo_id matches the sentinel returned by
+        // `resolve_repo_id_for_index` when `libra.repoid` is absent. That
+        // keeps the seeded row aligned with what `update_object_index_once`
+        // queries while preserving the full current schema contract.
+        const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
+        let backend = conn.get_database_backend();
+        conn.execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+             VALUES (?, 'blob', 42, 'unknown-repo', 0, 0)",
+            [OID.into()],
+        ))
+        .await
+        .unwrap();
+
+        // First call: agent-specific tag arrives. The row must be
+        // promoted in place; o_id stays unique.
+        update_object_index_once(&db_path, OID, "agent_transcript", 42)
+            .await
+            .expect("upgrade ok");
+
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_type FROM object_index WHERE o_id = ? LIMIT 1",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(
+            row.try_get_by::<String, _>("o_type").unwrap(),
+            "agent_transcript",
+            "blob row must upgrade to agent_transcript"
+        );
+
+        // Second call: a *generic* tag arrives for an OID that is
+        // already agent-specific. The row must NOT demote — that would
+        // strip the spec-mandated tag from the catalogue.
+        update_object_index_once(&db_path, OID, "blob", 42)
+            .await
+            .expect("no-op ok");
+        let row_again = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_type FROM object_index WHERE o_id = ? LIMIT 1",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .expect("row still exists");
+        assert_eq!(
+            row_again.try_get_by::<String, _>("o_type").unwrap(),
+            "agent_transcript",
+            "no demotion: agent_transcript stays sticky"
+        );
+
+        // Third call: same agent tag, same OID — idempotent no-op.
+        update_object_index_once(&db_path, OID, "agent_transcript", 42)
+            .await
+            .expect("idempotent ok");
+
+        let count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM object_index WHERE o_id = ?",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let count: i64 = count_row.try_get_by("n").unwrap();
+        assert_eq!(count, 1, "single row preserved through upgrade + no-op");
+    }
+
+    /// Scenario: when the system environment variable is unset, `resolve_env_sync`
+    /// must consult the repository's `vault.env.*` config entries. This is the
+    /// primary mechanism users rely on to keep storage credentials inside the
+    /// repository config rather than in their shell rc.
     #[test]
     #[serial]
     fn resolve_env_sync_reads_non_allowlisted_local_config_values() {
@@ -1211,6 +1746,10 @@ mod tests {
         assert_eq!(value.as_deref(), Some("https://storage.example.com"));
     }
 
+    /// Scenario: a corrupt global config file must propagate a fatal error rather
+    /// than silently ignoring the global-scope value. Without this guard, an
+    /// invalid global config would silently degrade remote storage to local-only
+    /// without telling the user anything is wrong.
     #[test]
     #[serial]
     fn resolve_env_sync_surfaces_global_config_connection_errors() {

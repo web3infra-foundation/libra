@@ -1,0 +1,10 @@
+{
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "path": "src/lib.rs",
+  "displayMode": "text",
+  "contentSha256": "9a0364b9e99bb480dd25e1f0284c8555a30dca56ab59e10e8a95da4c6f97c5e8",
+  "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/files/9a0364b9e99bb480dd25e1f0284c8555a30dca56ab59e10e8a95da4c6f97c5e8.txt",
+  "sizeBytes": 4096,
+  "language": "rust"
+}

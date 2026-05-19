@@ -423,3 +423,25 @@ async fn ensure_reflog_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{DbErr, TransactionError};
+
+    use super::ReflogError;
+
+    #[test]
+    fn reflog_error_display_pins_static_messages() {
+        assert_eq!(
+            ReflogError::DatabaseError(DbErr::Custom("ignored".to_string())).to_string(),
+            "failed to access reflog storage",
+        );
+        assert_eq!(
+            ReflogError::TransactionError(TransactionError::Transaction(DbErr::Custom(
+                "ignored".to_string()
+            )))
+            .to_string(),
+            "failed to update reflog",
+        );
+    }
+}

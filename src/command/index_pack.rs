@@ -39,6 +39,12 @@ EXAMPLES:
 ";
 const INDEX_WRITE_ERROR_PREFIX: &str = "index write failed";
 
+/// GitHub Issues URL surfaced on the InternalInvariant fall-through path
+/// (unknown upstream `GitError` variant) so users can report unexpected
+/// failures. Mirrors push.rs / tag.rs / commit.rs's hint pattern per
+/// Cross-Cutting G.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 #[derive(Parser, Debug)]
 #[command(after_help = INDEX_PACK_EXAMPLES)]
 pub struct IndexPackArgs {
@@ -154,7 +160,16 @@ fn index_pack_error(err: GitError) -> CliError {
         _ => StableErrorCode::InternalInvariant,
     };
 
-    CliError::fatal(format!("failed to build pack index: {err}")).with_stable_code(stable_code)
+    let cli =
+        CliError::fatal(format!("failed to build pack index: {err}")).with_stable_code(stable_code);
+    // Cross-Cutting G: bug paths that classify as InternalInvariant
+    // (i.e. unknown GitError variants from upstream) must include a
+    // GitHub Issues URL hint so users can report the bug.
+    if stable_code == StableErrorCode::InternalInvariant {
+        cli.with_hint(format!("this is a bug; please report it at {ISSUE_URL}"))
+    } else {
+        cli
+    }
 }
 
 fn format_io_error(err: &std::io::Error) -> String {
@@ -262,7 +277,7 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     let mut cnt: u32 = 0;
     let mut fan_out = Vec::with_capacity(256 * 4);
     let obj_map = take_arc_mutex(obj_map, "index entry map")?;
-    for (hash, _) in obj_map.iter() {
+    for hash in obj_map.keys() {
         // sorted
         let first_byte = hash.as_ref()[0];
         while first_byte > i {
@@ -515,5 +530,28 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Cross-Cutting G: when `index_pack_error` falls through to the
+    /// catch-all `_ => InternalInvariant` arm (an unrecognised upstream
+    /// `GitError` variant) it must surface the GitHub Issues URL hint
+    /// so users can report the unmapped variant. Specific failure modes
+    /// (e.g. write failures classified as `IoWriteFailed`) must NOT
+    /// carry the hint — that's reserved for bug paths.
+    #[test]
+    fn index_pack_error_maps_unknown_git_error_with_issue_url_hint() {
+        let cli_error = index_pack_error(GitError::UnCompletedPackObject(
+            "synthetic uncompleted pack object".to_string(),
+        ));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            cli_error
+                .hints()
+                .iter()
+                .any(|h| h.as_str().contains("issues")),
+            "InternalInvariant fall-through must include the Issues URL hint, got hints: {:?}",
+            cli_error.hints()
+        );
     }
 }

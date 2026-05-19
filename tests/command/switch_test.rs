@@ -170,7 +170,11 @@ async fn test_switch_function() {
             _ => panic!("head not in branch,unreachable"),
             // Head::Detached(name) => name.to_string(),
         };
-        let branch = Branch::find_branch(&ref_name, None).await.unwrap();
+        // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+        let branch = Branch::find_branch_result(&ref_name, None)
+            .await
+            .expect("failed to query current branch")
+            .expect("current branch should exist");
         let commit: Commit = load_object(&branch.commit).unwrap();
         let commit_id_str = commit.id.to_string();
 
@@ -470,7 +474,12 @@ async fn test_detach_head_basic() {
         let commit_message = switch_to_detach("main^~^~^~^~^~^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
-    let master_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    let master_commit_id = Branch::find_branch_result("main", None)
+        .await
+        .expect("failed to query main branch")
+        .expect("main branch should exist")
+        .commit;
     //detach use commit's ref
     {
         switch_to_branch("main".to_string()).await;
@@ -591,7 +600,12 @@ async fn test_detach_head_extra() {
         assert_eq!(commit_message, "commit_0".to_string());
         switch_to_branch("main".to_string()).await;
     }
-    let master_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
+    // Migrated from lossy `Branch::find_branch` per docs/improvement/branch.md.
+    let master_commit_id = Branch::find_branch_result("main", None)
+        .await
+        .expect("failed to query main branch")
+        .expect("main branch should exist")
+        .commit;
     //detach use commit's ref
     {
         let commit_message = switch_to_detach(format!("{master_commit_id}^11~")).await;

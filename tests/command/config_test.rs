@@ -85,6 +85,30 @@ async fn test_cli_config_local_requires_repo() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_system_scope_is_rejected_as_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(&["config", "--system", "list"], temp_path.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--system scope is not supported"),
+        "stderr should describe the unsupported scope, got: {stderr}"
+    );
+    // config.md line 175: classifies as a CLI usage error (exit 2 fine /
+    // 129 coarse). The previous `from_legacy_string` path collapsed this
+    // to a generic failure (exit 128).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--system rejection must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_import_global_from_git() {
     let temp_dir = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
@@ -570,6 +594,97 @@ async fn test_config_add_rejects_implicit_encryption_mixed_with_existing_plainte
 
 #[tokio::test]
 #[serial]
+async fn test_config_set_encrypt_plaintext_mutex_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--encrypt",
+            "--plaintext",
+            "custom.token",
+            "value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--encrypt and --plaintext are mutually exclusive"),
+        "stderr should describe the mutex violation, got: {stderr}"
+    );
+    // config.md line 77: classified as a usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "mutex flag error must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_stdin_with_positional_value_is_command_usage_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "set", "--stdin", "custom.token", "value"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot use both value argument and --stdin"),
+        "stderr should describe the --stdin vs positional mutex, got: {stderr}"
+    );
+    // config.md line 144: usage error (exit 2 fine / 129 coarse).
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "--stdin + positional must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_plaintext_on_vault_internal_key_is_failure() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "set",
+            "--plaintext",
+            "vault.env.API_KEY",
+            "secret-value",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--plaintext cannot be used with vault internal/secret keys"),
+        "stderr should describe the secret-key plaintext reject, got: {stderr}"
+    );
+    // config.md line 77: validation reject (exit 1 fine / 128 coarse) — must
+    // classify as a runtime Failure (exit 128) rather than the previous
+    // legacy-string fallthrough that produced the same number but with the
+    // internal-invariant stable code.
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "vault internal key plaintext reject must classify as Failure (exit 128), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_set_read_failure_does_not_silently_skip_existing_state_check() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -780,6 +895,160 @@ async fn test_config_list_gpg_keys_outputs_configured_key_namespaces() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_generate_ssh_key_replaces_vault_generate_ssh_key_flow() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "origin"],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "config generate-ssh-key --remote origin");
+
+    let pubkey = libra::internal::config::ConfigKv::get("vault.ssh.origin.pubkey")
+        .await
+        .unwrap()
+        .expect("config generate-ssh-key should store a public key");
+    assert!(
+        pubkey.value.starts_with("ssh-rsa "),
+        "expected RSA SSH public key, got: {}",
+        pubkey.value
+    );
+
+    let privkey = libra::internal::config::ConfigKv::get("vault.ssh.origin.privkey")
+        .await
+        .unwrap()
+        .expect("config generate-ssh-key should store an encrypted private key");
+    assert!(privkey.encrypted, "private key must stay vault-encrypted");
+    assert!(
+        !privkey.value.contains("PRIVATE KEY"),
+        "private key must not be stored as plaintext"
+    );
+
+    let get_output = run_libra_command(
+        &["config", "get", "vault.ssh.origin.pubkey"],
+        temp_path.path(),
+    );
+    assert_cli_success(&get_output, "config get vault.ssh.origin.pubkey");
+    let stdout = String::from_utf8_lossy(&get_output.stdout);
+    assert!(stdout.contains("ssh-rsa "), "stdout: {stdout}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "bad.name"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid remote name 'bad.name'"),
+        "stderr should describe the validation failure, got: {stderr}"
+    );
+    // CLI usage errors map to exit code 129 in coarse mode (Cli category →
+    // CliExitCode::Usage). The previous implementation collapsed both the
+    // invalid-name and missing-remote branches into `failure` (exit 128),
+    // which is the wrong category for a user-supplied bad argument.
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid remote name must classify as a CLI usage error (exit 129), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_ssh_key_rejects_unknown_remote_with_invalid_target_code() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &["config", "generate-ssh-key", "--remote", "no-such-remote"],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("remote 'no-such-remote' not found"),
+        "stderr should describe the missing remote, got: {stderr}"
+    );
+    // Missing remote is a Fatal failure (exit 128 in coarse mode) — the
+    // user-supplied name passed validation but the resource does not exist
+    // at the time of execution.
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "unknown remote must classify as a fatal failure (exit 128), got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_gpg_key_replaces_vault_generate_gpg_key_flow() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "generate-gpg-key",
+            "--name",
+            "Config User",
+            "--email",
+            "config@example.com",
+        ],
+        temp_path.path(),
+    );
+    assert_cli_success(&output, "config generate-gpg-key");
+
+    let pubkey = libra::internal::config::ConfigKv::get("vault.gpg.pubkey")
+        .await
+        .unwrap()
+        .expect("config generate-gpg-key should store the signing public key");
+    assert!(
+        pubkey.value.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+        "expected armored PGP public key, got: {}",
+        pubkey.value
+    );
+
+    let generated_stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        generated_stdout.contains("Config User <config@example.com>"),
+        "expected configured user ID in command output, stdout: {generated_stdout}"
+    );
+
+    let signing = libra::internal::config::ConfigKv::get("vault.signing")
+        .await
+        .unwrap()
+        .expect("signing key generation should enable vault signing");
+    assert_eq!(signing.value, "true");
+
+    let get_output = run_libra_command(&["config", "get", "vault.gpg.pubkey"], temp_path.path());
+    assert_cli_success(&get_output, "config get vault.gpg.pubkey");
+    let stdout = String::from_utf8_lossy(&get_output.stdout);
+    assert!(
+        stdout.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+        "stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_generate_gpg_key_rejects_invalid_usage() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -853,4 +1122,114 @@ async fn test_config_cross_platform_paths() {
             assert!(path.to_string_lossy().contains("/"));
         }
     }
+}
+
+/// Regression: a corrupted/incompatible `~/.libra/config.db` must not block
+/// identity resolution.
+///
+/// Reproduced from a real 0.17.500 user report: `libra clone` aborted with
+/// "fatal: vault initialization failed: failed to open config database
+/// '/home/eli/.libra/config.db'" because the global config DB existed but
+/// could not be opened (the only fix path was to delete the file). After
+/// v0.17.515 `resolve_user_identity_sources` downgrades that failure to a
+/// warning and returns `Ok` with `config_*` set to `None`, letting init
+/// fall back to env vars / "Libra User" defaults.
+#[tokio::test]
+#[serial]
+async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
+    use libra::internal::config::{LocalIdentityTarget, resolve_user_identity_sources};
+
+    let temp_dir = tempdir().unwrap();
+    let global_db_path = temp_dir.path().join("corrupt_config.db");
+    // A non-SQLite payload: opening this file as a sea-orm SQLite connection
+    // (or running the schema-compat check on it) is guaranteed to fail.
+    std::fs::write(&global_db_path, b"this is not a sqlite database").unwrap();
+
+    let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
+
+    // Ensure env-var fallbacks are empty so we can attribute the result to
+    // config-read tolerance, not env shadowing.
+    let _git_committer_name = EnvVarGuard::set("GIT_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _git_committer_email = EnvVarGuard::set("GIT_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+    let _git_author_name = EnvVarGuard::set("GIT_AUTHOR_NAME", std::ffi::OsStr::new(""));
+    let _git_author_email = EnvVarGuard::set("GIT_AUTHOR_EMAIL", std::ffi::OsStr::new(""));
+    let _email = EnvVarGuard::set("EMAIL", std::ffi::OsStr::new(""));
+    let _libra_committer_name = EnvVarGuard::set("LIBRA_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _libra_committer_email =
+        EnvVarGuard::set("LIBRA_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+
+    let sources = resolve_user_identity_sources(LocalIdentityTarget::None)
+        .await
+        .expect("identity resolution must not propagate global DB read failures");
+
+    assert!(
+        sources.config_name.is_none(),
+        "expected config_name to be None when global DB is unreadable, got {:?}",
+        sources.config_name
+    );
+    assert!(
+        sources.config_email.is_none(),
+        "expected config_email to be None when global DB is unreadable, got {:?}",
+        sources.config_email
+    );
+}
+
+/// `resolve_env_sync` is the sync wrapper around the async resolver, used by
+/// the `libra code` provider bootstrap (v0.17.556) so a user who runs
+/// `libra config --global add vault.env.GEMINI_API_KEY <…>` once no longer
+/// needs to re-export the key in every shell.
+///
+/// Process-env path: when the var is set, the wrapper must return it
+/// without ever spawning the worker thread (the cheap fast path).
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_returns_process_env_value_without_spawning_worker() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_SYNC_TEST_KEY",
+        std::ffi::OsStr::new("hot"),
+    );
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-fast-path.db"),
+    );
+
+    let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_TEST_KEY").unwrap();
+    assert_eq!(value.as_deref(), Some("hot"));
+}
+
+/// Absence path: when no process env, no repo, and no global DB layer carries
+/// the key, the wrapper returns `Ok(None)` (not an error). A schema-mismatch
+/// on the global DB is treated as missing-value here (the underlying
+/// `resolve_env_for_target` already downgrades that to `tracing::warn!`),
+/// matching the v0.17.515 / v0.17.534 fallback contract.
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY",
+        std::ffi::OsStr::new(""),
+    );
+    // Use an empty value to keep the test hermetic — the env var is in the
+    // ambient process so we can't `unset` it cleanly without a wrapper. The
+    // resolver treats whitespace-only env-var values as set (returns
+    // `Some("")`) because std::env::var doesn't strip; that's the contract.
+    // Switch instead to an env var name that is guaranteed absent.
+    drop(_guard);
+
+    // Now query a guaranteed-missing key with a guaranteed-missing global DB.
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-absent-path.db"),
+    );
+
+    let value =
+        resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_THIS_ENV_VAR_MUST_NOT_EXIST_xyz_42").unwrap();
+    assert!(
+        value.is_none(),
+        "expected None for an unset key, got {value:?}"
+    );
 }

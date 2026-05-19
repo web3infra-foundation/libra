@@ -1,3 +1,9 @@
+//! Retry policy helpers for transient completion-provider failures.
+//!
+//! Boundary: retries are bounded and only wrap errors classified as transient; caller
+//! cancellation and validation errors must surface immediately. Provider tests exercise
+//! retryable transport failures and non-retryable schema errors.
+
 use std::{sync::Arc, time::Duration};
 
 use super::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};
@@ -118,12 +124,22 @@ fn is_retryable_error(err: &CompletionError) -> bool {
 fn is_retryable_provider_message(message: &str) -> bool {
     let msg = message.to_ascii_lowercase();
     [
+        // HTTP status branches (`docs/improvement/opencode.md` line 1109).
         "status 429",
         "status 500",
         "status 502",
         "status 503",
         "status 504",
+        // 429 rate-limit (line 1110).
         "rate limit",
+        // Stream-error codes from the doc taxonomy table
+        // (`docs/improvement/opencode.md` lines 1101-1102): both must
+        // classify as retryable transients per `StreamErrorKind::Transient`.
+        "server_is_overloaded",
+        "server_error",
+        // Generic transient hints we have observed from production
+        // providers — the doc table treats unknown stream codes as
+        // `Transient` (line 1101 default), so these stay retryable.
         "temporarily unavailable",
         "temporarily overloaded",
         "overloaded",
@@ -131,6 +147,8 @@ fn is_retryable_provider_message(message: &str) -> bool {
         "timeout",
         "timed out",
         "connection reset",
+        "error decoding response body",
+        "stream ended before a usable response",
     ]
     .iter()
     .any(|needle| msg.contains(needle))
@@ -170,6 +188,7 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: vec![AssistantContent::Text(Text { text: "ok".into() })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -195,5 +214,12 @@ mod tests {
 
         assert_eq!(response.content.len(), 1);
         assert_eq!(model.attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn retries_stream_body_decode_failures() {
+        assert!(is_retryable_provider_message(
+            "DeepSeek stream ended before a usable response: error decoding response body"
+        ));
     }
 }

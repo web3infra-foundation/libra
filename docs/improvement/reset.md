@@ -42,9 +42,9 @@
 - **`--help` EXAMPLES 已落地**
 - **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数和 pathspec usage error
 
-仍需改进：
+仍需维护：
 
-- **rollback 边界需要继续回归保护**：reset 失败后 rollback 再失败时，必须保持主错误分类不变，避免把 repo corruption 误报成 worktree/I/O 错误
+- **rollback 边界已具备回归保护**：`test_merge_reset_failure_preserves_primary_error_category` 已验证 reset 失败后 rollback 再失败时仍保留主错误分类，避免把 repo corruption 误报成 worktree/I/O 错误；后续新增 rollback 路径时需保持该覆盖
 - **Cross-Cutting `G` 仍可继续增强**：如果后续引入真正的 internal-invariant 类兜底错误，可再统一附带 Issues URL
 
 ### 目标与非目标
@@ -53,7 +53,7 @@
 - `ResetError` typed error enum、typed helper、pathspec typed error、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续用回归测试锁住 rollback / warning / pathspec corruption 这些边界行为
+- 继续保持 rollback / warning / pathspec corruption 边界回归测试覆盖
 - 如后续增加 internal invariant 兜底错误，再统一接入 Issues URL
 
 **本批非目标：**
@@ -76,21 +76,24 @@
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum ResetError {
+enum ResetError {
     #[error("not a libra repository")]
     NotInRepo,
 
-    #[error("invalid revision: '{0}'")]
+    #[error("{0}")]
     InvalidRevision(String),
 
-    #[error("HEAD is unborn — no commits in this repository")]
+    #[error("Cannot reset: HEAD is unborn and points to no commit.")]
     HeadUnborn,
 
-    #[error("failed to load commit '{commit_id}': {detail}")]
-    CommitLoad { commit_id: String, detail: String },
+    #[error("failed to resolve HEAD commit: {0}")]
+    HeadRead(String),
 
-    #[error("failed to load tree: {0}")]
-    TreeLoad(String),
+    #[error("stored HEAD reference is corrupt: {0}")]
+    HeadCorrupt(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad { kind: &'static str, object_id: String, detail: String },
 
     #[error("failed to load index: {0}")]
     IndexLoad(String),
@@ -101,8 +104,17 @@ pub enum ResetError {
     #[error("failed to update HEAD: {0}")]
     HeadUpdate(String),
 
+    #[error("failed to read working tree: {0}")]
+    WorktreeRead(String),
+
     #[error("failed to restore working tree: {0}")]
     WorktreeRestore(String),
+
+    #[error("{0}")]
+    RevisionRead(String),
+
+    #[error("{0}")]
+    RevisionCorrupt(String),
 
     #[error("path contains invalid UTF-8: {0}")]
     InvalidPathspecEncoding(String),
@@ -110,13 +122,24 @@ pub enum ResetError {
     #[error("pathspec '{0}' is not compatible with --soft reset")]
     PathspecWithSoft(String),
 
-    #[error("cannot do hard reset with paths")]
+    #[error("Cannot do hard reset with paths.")]
     PathspecWithHard,
 
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
+
+    #[error("refusing to reset to locked branch '{0}'")]
+    LockedTarget(String),
+
+    #[error("{primary}; rollback failed: {rollback}")]
+    Rollback { primary: Box<ResetError>, rollback: Box<ResetError> },
 }
 ```
+
+> Synced with src/command/reset.rs:144-212 (v0.17.417 mapping table).
+> The `kind` field on `ObjectLoad` is `&'static str` ("commit" /
+> "tree" / "blob"), letting one variant cover what the early sketch
+> split into `CommitLoad` + `TreeLoad`.
 
 **`ResetError → CliError` 显式映射：**
 
@@ -125,16 +148,22 @@ pub enum ResetError {
 | `NotInRepo` | `RepoNotFound` | 128 | `run 'libra init' to create a repository` |
 | `InvalidRevision` | `CliInvalidTarget` | 129 | `check the revision name and try again` |
 | `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first` |
-| `CommitLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
-| `TreeLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
+| `HeadRead` | `IoReadFailed` | 128 | 无（解析 HEAD 时的 SQLite/sea-orm 失败） |
+| `HeadCorrupt` | `RepoCorrupt` | 128 | 无（HEAD ref 行结构损坏） |
+| `ObjectLoad { kind, object_id, detail }` | `RepoCorrupt` | 128 | `the object store may be corrupted`（取代原计划的独立 `CommitLoad` / `TreeLoad`；`kind` 字段携带 commit/tree/blob 三种语义） |
 | `IndexLoad` | `RepoCorrupt` | 128 | `the index file may be corrupted` |
 | `IndexSave` | `IoWriteFailed` | 128 | 无 |
 | `HeadUpdate` | `IoWriteFailed` | 128 | 无 |
+| `WorktreeRead` | `IoReadFailed` | 128 | 无（pathspec 模式枚举工作树失败） |
 | `WorktreeRestore` | `IoWriteFailed` | 128 | 无 |
+| `RevisionRead` | `IoReadFailed` | 128 | 无（解析 revision 字符串时 SQLite 失败） |
+| `RevisionCorrupt` | `RepoCorrupt` | 128 | 无（resolve 出的 ref 行结构损坏） |
 | `InvalidPathspecEncoding` | `CliInvalidArguments` | 129 | `rename the path or invoke libra from a path representable as UTF-8` |
 | `PathspecWithSoft` | `CliInvalidArguments` | 129 | `--soft only moves HEAD; use --mixed to reset index for specific paths` |
 | `PathspecWithHard` | `CliInvalidArguments` | 129 | `--hard updates the working tree; omit pathspecs or use --mixed for specific paths` |
 | `PathspecNotMatched` | `CliInvalidTarget` | 129 | `check the path and try again` |
+| `LockedTarget` | `CliInvalidTarget` | 129 | 无（拒绝 reset 到 `intent` / `agent-traces` 等 Libra 锁定分支） |
+| `Rollback { primary, rollback }` | 继承 `primary` 的 stable code | 128 | 无（rollback 失败时把原错误与 rollback 失败包起来一起传递） |
 
 **与当前代码中 inline 错误的对应关系：**
 
@@ -254,13 +283,15 @@ M       src/lib.rs
     "commit": "abc1234...",
     "short_commit": "abc1234",
     "subject": "feat: add new feature",
-    "previous_commit": "abc1234...",
+    "previous_commit": null,
     "files_unstaged": 2,
     "files_restored": 0,
     "pathspecs": ["src/main.rs", "src/lib.rs"]
   }
 }
 ```
+
+> 注：pathspec reset 不移动 HEAD，因此 `previous_commit` 显式输出 `null`，与 `docs/commands/reset.md` 第 130 行的用户契约一致；机器消费方可借此一字段区分整体 reset 和 pathspec reset。
 
 **错误 JSON：**
 
@@ -336,6 +367,6 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护 rollback 与边界回归 |
+| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES / rollback 主错误分类保护不回退；后续仅维护边界回归 |
 | `tests/command/reset_test.rs` | **扩展** | 在现有 JSON / human 输出回归基础上，补齐 typed error、warning 路径与 help EXAMPLES 回归 |
 | `tests/command/reset_json_test.rs` | **可选拆分** | 若 `reset_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

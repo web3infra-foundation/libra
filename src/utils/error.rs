@@ -4,6 +4,36 @@
 //! process boundary. Domain errors inside commands should be mapped into
 //! [`CliError`] with an explicit stable code, exit code, and hint set instead
 //! of printing raw internal causes to stderr.
+//!
+//! Contract references for maintainers and AI agents:
+//! - Stable rendering and JSON envelope: `docs/development/cli-error-contract-design.md`
+//! - Public stable-code catalogue: `docs/error-codes.md`
+//!
+//! ## Anatomy of a CliError
+//!
+//! Each error carries five pieces of metadata that drive rendering:
+//! - **kind** ([`CliErrorKind`]) — chooses the prefix (`fatal:`, `error:`, none).
+//! - **stable_code** ([`StableErrorCode`]) — machine-readable identifier (`LBR-...`)
+//!   that maps to a [`CliErrorCategory`] and a default exit code.
+//! - **message** — the primary human-readable line.
+//! - **hints** — at most two trailing `Hint:`-prefixed lines.
+//! - **usage** / **details** — optional usage block and structured key/value details.
+//!
+//! ## Rendering modes
+//!
+//! - `render` — single-line prefixed output for human consumption.
+//! - `render_json` — structured envelope used in `--json` mode and when
+//!   `LIBRA_ERROR_JSON=1` forces structured stderr.
+//! - `render_report` — combines both, emitting the human line and a trailing JSON
+//!   payload so log scrapers can parse the same line a developer is reading.
+//!
+//! ## Exit-code resolution
+//!
+//! By default the exit code follows the Git convention: 128 for fatal runtime
+//! errors and 129 for usage errors. Setting `LIBRA_FINE_EXIT_CODES=1` switches to
+//! the legacy 2..=9 category codes for backward compatibility with old scripts.
+//! `with_exit_code` overrides everything else, used when matching Git's quirky
+//! per-command codes (e.g. `git config --get` returning 1).
 
 use std::{
     collections::BTreeMap,
@@ -16,15 +46,28 @@ use serde_json::Value;
 
 use crate::utils::output::{JsonFormat, OutputConfig, record_warning};
 
-/// Shared CLI result type.
+/// Shared CLI result type used by every command handler and dispatcher.
 pub type CliResult<T = ()> = Result<T, CliError>;
 
+/// Env var that forces structured (JSON) error output on stderr regardless of
+/// whether stderr is a TTY. Recognised values: `1`, `true`, `yes`, `on`, `always`.
 pub const LIBRA_ERROR_JSON_ENV: &str = "LIBRA_ERROR_JSON";
+/// Env var that switches exit codes from the Git-style 128/129 to the legacy
+/// fine-grained 2..=9 category codes. Recognised values: `1`, `true`, `yes`, `on`.
 pub const LIBRA_FINE_EXIT_CODES_ENV: &str = "LIBRA_FINE_EXIT_CODES";
+/// Canonical issue tracker URL shown for unexpected internal failures.
+pub const LIBRA_ISSUES_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+/// Human-facing hint appended to internal-invariant errors.
+pub const INTERNAL_ERROR_REPORT_HINT: &str =
+    "please report this issue at: https://github.com/web3infra-foundation/libra/issues";
 
 /// Returns `true` when `LIBRA_FINE_EXIT_CODES=1` is set, enabling backward-
 /// compatible category-specific exit codes (2–9) instead of the default
 /// Git-standard 128/129.
+///
+/// Boundary conditions:
+/// - Only recognises a small allowlist of truthy strings; an unknown value (e.g.
+///   `LIBRA_FINE_EXIT_CODES=yesplease`) leaves the flag off rather than guessing.
 fn fine_exit_codes_enabled() -> bool {
     matches!(
         env::var(LIBRA_FINE_EXIT_CODES_ENV).as_deref(),
@@ -33,19 +76,29 @@ fn fine_exit_codes_enabled() -> bool {
 }
 
 /// High-level CLI error classes used to decide prefixes and parse semantics.
+///
+/// Variants do not encode severity directly — see [`ErrorLevel`] for that — but
+/// they do drive how `render` chooses the leading prefix string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliErrorKind {
+    /// `libra foo` where `foo` is not a known subcommand. Renders without prefix.
     UnknownCommand,
+    /// Top-level argv parse failure (clap-detected). Renders with `error:` prefix.
     ParseUsage,
+    /// Subcommand-specific usage failure (e.g. mutually exclusive flags).
     CommandUsage,
+    /// Hard runtime error: rendered with `fatal:` prefix.
     Fatal,
+    /// Soft runtime error: rendered with `error:` prefix.
     Failure,
 }
 
 /// Prefix level used for rendered messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorLevel {
+    /// Maps to `fatal:` prefix in human output.
     Fatal,
+    /// Maps to `error:` prefix in human output.
     Error,
 }
 
@@ -69,14 +122,20 @@ pub enum CliExitCode {
 }
 
 impl CliExitCode {
+    /// Convert to the platform-native `i32` exit code accepted by `process::exit`.
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
 }
 
+/// Backward-compatible alias kept for older call sites.
 pub type ExitCode = CliExitCode;
 
 /// Stable error categories for machine classification.
+///
+/// Each `StableErrorCode` belongs to exactly one category; agents and CI scripts
+/// can use the category to make broad routing decisions without tracking every
+/// individual code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CliErrorCategory {
@@ -92,6 +151,9 @@ pub enum CliErrorCategory {
 }
 
 impl CliErrorCategory {
+    /// Stable lowercase string used in JSON error envelopes (e.g. `"repo"`,
+    /// `"network"`). Keep in sync with the `serde(rename_all = "snake_case")`
+    /// attribute so manual string matching does not drift from the JSON output.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Cli => "cli",
@@ -107,6 +169,18 @@ impl CliErrorCategory {
 }
 
 /// Stable Libra CLI error codes for agents and structured tooling.
+///
+/// Each variant maps to a fixed `LBR-*` string ID rendered in JSON output and
+/// `Error-Code:` headers. Adding a new code requires:
+/// 1. Adding the variant here and a unique `LBR-*` ID in `as_str`.
+/// 2. Adding the variant -> `CliErrorCategory` mapping in `category`.
+/// 3. Adding a human-readable description in `description` (rendered by
+///    `libra help error-codes`).
+/// 4. Updating `docs/error-codes.md` and checking
+///    `docs/development/cli-error-contract-design.md` for contract impact.
+///
+/// Removing or renaming an existing code is a breaking change for downstream
+/// agents and CI scripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StableErrorCode {
     CliUnknownCommand,
@@ -130,6 +204,15 @@ pub enum StableErrorCode {
     AddNothingStaged,
     /// Feature or operation is not yet supported.
     Unsupported,
+    /// `bisect view` / `bisect run` invoked outside an active bisect session.
+    BisectNotActive,
+    /// `bisect run` command exited with code ≥ 128 or was killed by a signal.
+    BisectRunFailed,
+    /// `bisect run` cannot advance because no candidate commits remain.
+    BisectNoCandidates,
+    /// AI agent run hit a configured budget cap (cost, tokens, steps,
+    /// or wall-clock). OC-Phase 5 P5.3 enforcement surface.
+    AgentBudgetExceeded,
 }
 
 impl Serialize for StableErrorCode {
@@ -142,6 +225,8 @@ impl Serialize for StableErrorCode {
 }
 
 impl StableErrorCode {
+    /// Render the code as its stable `LBR-*` identifier. Documented in
+    /// `docs/error-codes.md` and treated as part of the public CLI contract.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CliUnknownCommand => "LBR-CLI-001",
@@ -162,9 +247,15 @@ impl StableErrorCode {
             Self::WarningEmitted => "LBR-WARN-001",
             Self::AddNothingStaged => "LBR-ADD-001",
             Self::Unsupported => "LBR-UNSUPPORTED-001",
+            Self::BisectNotActive => "LBR-BISECT-001",
+            Self::BisectRunFailed => "LBR-BISECT-002",
+            Self::BisectNoCandidates => "LBR-BISECT-003",
+            Self::AgentBudgetExceeded => "LBR-AGENT-001",
         }
     }
 
+    /// Group this code under one of the broad categories used for shell
+    /// scripting and structured automation.
     pub const fn category(self) -> CliErrorCategory {
         match self {
             Self::CliUnknownCommand | Self::CliInvalidArguments | Self::CliInvalidTarget => {
@@ -177,12 +268,24 @@ impl StableErrorCode {
             Self::NetworkUnavailable | Self::NetworkProtocol => CliErrorCategory::Network,
             Self::AuthMissingCredentials | Self::AuthPermissionDenied => CliErrorCategory::Auth,
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
-            Self::InternalInvariant | Self::Unsupported => CliErrorCategory::Internal,
+            Self::InternalInvariant | Self::Unsupported | Self::BisectRunFailed => {
+                CliErrorCategory::Internal
+            }
             Self::WarningEmitted => CliErrorCategory::Warning,
             Self::AddNothingStaged => CliErrorCategory::Cli,
+            Self::BisectNotActive | Self::BisectNoCandidates => CliErrorCategory::Repo,
+            // Budget caps surface as runtime/internal failures: the run
+            // didn't crash, but the operator-configured cap forced an
+            // early abort. Fits the Internal category (the run could
+            // continue if the cap were lifted) per docs/error-codes.md.
+            Self::AgentBudgetExceeded => CliErrorCategory::Internal,
         }
     }
 
+    /// Default coarse exit code for this stable code, before any per-error
+    /// override is applied. `AddNothingStaged` is special-cased back to
+    /// `Fatal` (128) to match Git's behaviour for `git add` with only ignored
+    /// paths even though the category is `Cli`.
     pub const fn exit_code(self) -> CliExitCode {
         match self {
             // AddNothingStaged falls in the Cli category (which normally
@@ -216,6 +319,8 @@ impl StableErrorCode {
         }
     }
 
+    /// Long-form description rendered by `libra help error-codes`.
+    /// Intended for direct human consumption — should be a complete sentence.
     pub const fn description(self) -> &'static str {
         match self {
             Self::CliUnknownCommand => "Unknown command or unsupported top-level invocation.",
@@ -250,19 +355,38 @@ impl StableErrorCode {
             }
             Self::AddNothingStaged => "All specified paths are ignored; nothing was staged.",
             Self::Unsupported => "Feature or operation is not yet supported.",
+            Self::BisectNotActive => {
+                "`bisect view` or `bisect run` was invoked outside an active bisect session."
+            }
+            Self::BisectRunFailed => {
+                "`bisect run` command exited with code 128+ or was killed by a signal."
+            }
+            Self::BisectNoCandidates => {
+                "Bisect cannot advance because no candidate commits remain to test."
+            }
+            Self::AgentBudgetExceeded => {
+                "AI agent run hit a configured budget cap (cost, tokens, steps, or wall-clock)."
+            }
         }
     }
 }
 
 /// Structured hint text rendered after the main error line.
+///
+/// Hints are added via [`CliError::with_hint`] / [`CliError::with_priority_hint`].
+/// The renderer prefixes every line with `Hint:` (Libra style — not the lowercase
+/// `hint:` used by Git).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hint(String);
 
 impl Hint {
+    /// Construct a hint from any string-like value. The text is stored verbatim;
+    /// any prefix stripping happens later in `with_hint`.
     pub fn new(text: impl Into<String>) -> Self {
         Self(text.into())
     }
 
+    /// Borrow the hint text without the `Hint:` rendering prefix.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -281,6 +405,10 @@ impl From<String> for Hint {
 }
 
 /// User-facing CLI error with explicit rendering and exit semantics.
+///
+/// Build via the family of constructors (`fatal`, `failure`, `repo_not_found`, ...)
+/// then chain with `with_hint`, `with_usage`, `with_detail`, etc. The resulting
+/// error knows how to render itself for both humans and machines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     kind: CliErrorKind,
@@ -295,12 +423,23 @@ pub struct CliError {
     /// When true, `print_for_output` / `print_stderr` emit nothing.
     /// Used for exit-code-only signalling (e.g. `status --exit-code`).
     silent: bool,
+    /// Whether rendering should append the standard issue-report hint.
+    report_issue_hint: bool,
 }
 
 impl CliError {
+    /// Internal constructor used by every public builder.
+    ///
+    /// Boundary conditions:
+    /// - Runs the legacy substring inference (`infer_stable_error_code`) so callers
+    ///   that pre-date the structured-code era still get a reasonable default.
+    ///   Callers should override with `with_stable_code` whenever the precise code
+    ///   is known.
     fn new(kind: CliErrorKind, message: impl Into<String>) -> Self {
         let message = message.into();
         let stable_code = infer_stable_error_code(kind, &message);
+        let report_issue_hint =
+            stable_code == StableErrorCode::InternalInvariant && is_internal_reportable(&message);
         Self {
             kind,
             stable_code,
@@ -310,12 +449,19 @@ impl CliError {
             details: BTreeMap::new(),
             exit_code_override: None,
             silent: false,
+            report_issue_hint,
         }
     }
 
     /// Create a silent exit error that only sets the process exit code
     /// without printing anything to stderr. Used for `--exit-code` style
     /// flags where a non-zero exit is a signal, not an error.
+    ///
+    /// Boundary conditions:
+    /// - `print_stderr` and `print_for_output` become no-ops on silent errors.
+    /// - The `kind` is set to `Failure` and the `stable_code` to
+    ///   `InternalInvariant`; these are unused while silent but become visible if
+    ///   a caller accidentally non-silently renders the error.
     pub fn silent_exit(code: i32) -> Self {
         Self {
             kind: CliErrorKind::Failure,
@@ -326,54 +472,74 @@ impl CliError {
             details: BTreeMap::new(),
             exit_code_override: Some(code),
             silent: true,
+            report_issue_hint: false,
         }
     }
 
+    /// Canonical "not a Libra repository" error with the standard hint suggesting
+    /// `libra init`. Centralising it here keeps the wording identical across every
+    /// preflight site.
     pub fn repo_not_found() -> Self {
         Self::fatal("not a libra repository (or any of the parent directories): .libra")
             .with_stable_code(StableErrorCode::RepoNotFound)
             .with_hint("run 'libra init' to create a repository in the current directory.")
     }
 
+    /// Top-level "no such subcommand" error. Rendered without a prefix so the
+    /// output matches Git's `'wat' is not a libra command.` style verbatim.
     pub fn unknown_command(message: impl Into<String>) -> Self {
         Self::new(CliErrorKind::UnknownCommand, message)
             .with_stable_code(StableErrorCode::CliUnknownCommand)
     }
 
+    /// Argv parse error detected by clap (root-level). Renders with the `error:`
+    /// prefix. Use this for failures that occur before any subcommand handler runs.
     pub fn parse_usage(message: impl Into<String>) -> Self {
         Self::new(CliErrorKind::ParseUsage, message)
             .with_stable_code(StableErrorCode::CliInvalidArguments)
     }
 
+    /// Subcommand-level usage error (e.g. mutually exclusive flags). Same `error:`
+    /// prefix as `parse_usage` but classifies as `CommandUsage` for downstream
+    /// reporting.
     pub fn command_usage(message: impl Into<String>) -> Self {
         Self::new(CliErrorKind::CommandUsage, message)
             .with_stable_code(StableErrorCode::CliInvalidArguments)
     }
 
+    /// Hard runtime error rendered with `fatal:` prefix. Default exit code 128.
     pub fn fatal(message: impl Into<String>) -> Self {
         Self::new(CliErrorKind::Fatal, message)
     }
 
+    /// Soft runtime error rendered with `error:` prefix. Default exit code 128.
     pub fn failure(message: impl Into<String>) -> Self {
         Self::new(CliErrorKind::Failure, message)
     }
 
+    /// Conflict-class fatal with stable code `ConflictOperationBlocked`.
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::fatal(message).with_stable_code(StableErrorCode::ConflictOperationBlocked)
     }
 
+    /// Network-class fatal with stable code `NetworkUnavailable`.
     pub fn network(message: impl Into<String>) -> Self {
         Self::fatal(message).with_stable_code(StableErrorCode::NetworkUnavailable)
     }
 
+    /// Auth-class fatal with stable code `AuthMissingCredentials`.
     pub fn auth(message: impl Into<String>) -> Self {
         Self::fatal(message).with_stable_code(StableErrorCode::AuthMissingCredentials)
     }
 
+    /// IO-class fatal with stable code `IoReadFailed`. For write failures, prefer
+    /// `CliError::fatal(...).with_stable_code(StableErrorCode::IoWriteFailed)`.
     pub fn io(message: impl Into<String>) -> Self {
         Self::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
     }
 
+    /// Internal-invariant fatal. Prefer this for "should not happen" code paths so
+    /// users see a clear "this is a Libra bug" categorisation.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
     }
@@ -387,6 +553,15 @@ impl CliError {
     /// New command code should prefer setting [`StableErrorCode`] explicitly
     /// with [`CliError::with_stable_code`] instead of depending on message
     /// substring inference.
+    ///
+    /// Boundary conditions:
+    /// - `usage:` prefix is converted into a `CommandUsage` error and the original
+    ///   prefix is preserved in the usage block (prefix `usage:` retained for
+    ///   round-trip compatibility).
+    /// - `warning:` prefix is folded into a `Failure` error so the message still
+    ///   shows up; callers who want true warning behaviour should use
+    ///   [`emit_warning`] instead.
+    /// - Any other input falls back to `Failure` with the trimmed message.
     pub fn from_legacy_string(msg: impl Into<String>) -> Self {
         let raw = msg.into();
         let trimmed = raw.trim().to_string();
@@ -403,18 +578,24 @@ impl CliError {
         }
     }
 
+    /// Borrow the [`CliErrorKind`] used to drive prefix selection.
     pub fn kind(&self) -> CliErrorKind {
         self.kind
     }
 
+    /// Borrow the stable machine-readable error code.
     pub fn stable_code(&self) -> StableErrorCode {
         self.stable_code
     }
 
+    /// Convenience: derive the broad [`CliErrorCategory`] from `stable_code`.
     pub fn category(&self) -> CliErrorCategory {
         self.stable_code.category()
     }
 
+    /// Map kind to the human-facing severity level rendered as `fatal:` or
+    /// `error:`. Returns `None` for `UnknownCommand`, which renders without a
+    /// prefix.
     pub fn level(&self) -> Option<ErrorLevel> {
         match self.kind {
             CliErrorKind::Fatal => Some(ErrorLevel::Fatal),
@@ -425,27 +606,48 @@ impl CliError {
         }
     }
 
+    /// Borrow the primary error message.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Borrow the optional usage block displayed after the message.
     pub fn usage(&self) -> Option<&str> {
         self.usage.as_deref()
     }
 
+    /// Borrow the (at most two) accumulated hints.
     pub fn hints(&self) -> &[Hint] {
         &self.hints
     }
 
+    /// Borrow the structured details map (rendered into the JSON envelope).
     pub fn details(&self) -> &BTreeMap<String, Value> {
         &self.details
     }
 
+    /// Override the stable code that was inferred from the message.
+    ///
+    /// When this is called from a `From<DomainError> for CliError` mapping,
+    /// prefer adding a short nearby comment explaining why the selected code
+    /// represents the recovery intent. For example, a partially initialized
+    /// repository should usually map to [`StableErrorCode::RepoStateInvalid`],
+    /// while a missing input path should usually map to
+    /// [`StableErrorCode::IoReadFailed`].
     pub fn with_stable_code(mut self, stable_code: StableErrorCode) -> Self {
         self.stable_code = stable_code;
+        self.report_issue_hint = stable_code == StableErrorCode::InternalInvariant;
         self
     }
 
+    /// Append a hint to the error.
+    ///
+    /// Boundary conditions:
+    /// - The third hint and beyond are silently dropped — the renderer caps
+    ///   visible hints at two for readability.
+    /// - Any leading `Hint:` / `hint:` prefix on the input is stripped, so callers
+    ///   who copy text from existing rendered errors are not double-prefixed.
+    /// - Empty / whitespace-only hints are ignored.
     pub fn with_hint(mut self, hint: impl Into<Hint>) -> Self {
         if self.hints.len() >= 2 {
             return self;
@@ -462,6 +664,11 @@ impl CliError {
 
     /// Insert a high-priority hint at the front.  If the hint budget (2) is
     /// already full, the *last* (lowest-priority) hint is dropped to make room.
+    ///
+    /// Boundary conditions:
+    /// - Empty / whitespace hints are still ignored.
+    /// - Used by repository-conversion preflight to surface a more relevant hint
+    ///   ahead of the generic "run libra init" suggestion.
     pub fn with_priority_hint(mut self, hint: impl Into<Hint>) -> Self {
         let hint = normalize_hint_text(hint.into().0);
         if hint.trim().is_empty() {
@@ -475,11 +682,16 @@ impl CliError {
         self
     }
 
+    /// Attach a structured key/value detail. Detail keys are stable enough to be
+    /// matched against by automation; treat them as part of the public contract
+    /// once a release ships them.
     pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.details.insert(key.into(), value.into());
         self
     }
 
+    /// Set the usage block. Empty / whitespace-only input is ignored so callers
+    /// can pipe through clap output without double-checking for emptiness.
     pub fn with_usage(mut self, usage: impl Into<String>) -> Self {
         let usage = usage.into();
         if !usage.trim().is_empty() {
@@ -500,6 +712,8 @@ impl CliError {
         self
     }
 
+    /// Resolve the final exit code in the order: explicit override > legacy
+    /// fine-grained codes (when env var is set) > coarse Git-style code.
     pub fn exit_code(&self) -> i32 {
         if let Some(code) = self.exit_code_override {
             return code;
@@ -510,6 +724,12 @@ impl CliError {
         self.stable_code.exit_code().as_i32()
     }
 
+    /// Render the error as the structured JSON envelope.
+    ///
+    /// Boundary conditions:
+    /// - Falls back to a hard-coded internal-invariant payload if `serde_json`
+    ///   serialisation fails. This keeps `--json` mode honest even on the
+    ///   pathological case of a bad `details` value.
     pub fn render_json(&self) -> String {
         // INVARIANT: `CliErrorReport` contains only serializable enums, strings,
         // integers, vectors, maps, and `serde_json::Value`. Serialization is
@@ -517,19 +737,25 @@ impl CliError {
         // future regression in the report type itself.
         serde_json::to_string(&self.report()).unwrap_or_else(|_| {
             "{\"ok\":false,\"error_code\":\"LBR-INTERNAL-001\",\"category\":\"internal\",\
-\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
+\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\",\
+\"hints\":[\"please report this issue at: https://github.com/web3infra-foundation/libra/issues\"]}"
                 .to_string()
         })
     }
 
+    /// Render a single human-readable string (no `Error-Code:` header, no JSON).
     pub fn render(&self) -> String {
         self.render_human(false)
     }
 
+    /// Render the human form *and* the JSON envelope on a trailing line.
+    /// Used when stderr is not a TTY so log scrapers can parse the JSON line.
     pub fn render_report(&self) -> String {
         format!("{}\n{}", self.render_human(true), self.render_json())
     }
 
+    /// Pick the right renderer for the current stderr mode (human / structured)
+    /// based on env var override and TTY detection.
     pub fn render_for_stderr(&self) -> String {
         match stderr_render_mode() {
             StderrRenderMode::Human => self.render(),
@@ -537,6 +763,8 @@ impl CliError {
         }
     }
 
+    /// Print the error to stderr with the appropriate renderer. Silent errors
+    /// (constructed with [`Self::silent_exit`]) are skipped.
     pub fn print_stderr(&self) {
         if self.silent {
             return;
@@ -548,6 +776,13 @@ impl CliError {
     ///
     /// When JSON output is active, the error is rendered as a JSON envelope to
     /// **stderr** so stdout remains reserved for successful command data.
+    ///
+    /// Boundary conditions:
+    /// - In `JsonFormat::Pretty`, the rendered JSON is re-parsed into a
+    ///   `serde_json::Value` so the output is human-readable. If that re-parse
+    ///   fails, falls back to the original compact line.
+    /// - Compact / NDJSON output writes a single line plus a newline, matching
+    ///   the format used by successful command output.
     pub fn print_for_output(&self, config: &OutputConfig) {
         if self.silent {
             return;
@@ -576,6 +811,7 @@ impl CliError {
         }
     }
 
+    /// Rendered severity string used by JSON envelopes. Stable across releases.
     fn severity(&self) -> &'static str {
         match self.kind {
             CliErrorKind::Fatal => "fatal",
@@ -586,6 +822,7 @@ impl CliError {
         }
     }
 
+    /// Materialise the error into the serde-friendly `CliErrorReport` snapshot.
     fn report(&self) -> CliErrorReport {
         CliErrorReport {
             ok: false,
@@ -595,11 +832,7 @@ impl CliError {
             severity: self.severity(),
             message: self.message.clone(),
             usage: self.usage.clone(),
-            hints: self
-                .hints
-                .iter()
-                .map(|hint| hint.as_str().to_string())
-                .collect(),
+            hints: self.effective_hints(),
             details: self.details.clone(),
         }
     }
@@ -624,11 +857,32 @@ impl CliError {
             lines.push(usage.trim_end().to_string());
         }
 
-        for hint in &self.hints {
-            lines.extend(render_hint(hint.as_str()));
+        let hints = self.effective_hints();
+        if !hints.is_empty() {
+            lines.push(String::new());
+            for hint in hints {
+                lines.extend(render_hint(&hint));
+            }
         }
 
         lines.join("\n")
+    }
+
+    fn effective_hints(&self) -> Vec<String> {
+        let mut hints = self
+            .hints
+            .iter()
+            .map(|hint| hint.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        if self.report_issue_hint && !hints.iter().any(|hint| hint.contains(LIBRA_ISSUES_URL)) {
+            if hints.len() >= 2 {
+                hints.pop();
+            }
+            hints.push(INTERNAL_ERROR_REPORT_HINT.to_string());
+        }
+
+        hints
     }
 }
 
@@ -1114,6 +1368,13 @@ fn is_internal_error(lower: &str) -> bool {
     contains_any(lower, &["internal error", "panic", "invariant"])
 }
 
+fn is_internal_reportable(message: &str) -> bool {
+    contains_any(
+        &message.to_ascii_lowercase(),
+        &["internal error", "panic", "invariant", "unexpected"],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
@@ -1136,7 +1397,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\n\nHint: run 'libra init' to create a repository in the current directory."
         );
     }
 
@@ -1148,7 +1409,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\n\nHint: use '--help' to see available options."
         );
     }
 
@@ -1161,7 +1422,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\n\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -1180,11 +1441,46 @@ mod tests {
     #[test]
     fn with_hint_strips_prefix_and_limits_count() {
         let rendered = CliError::failure("bad")
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("hint: first")
             .with_hint("Hint: second")
             .with_hint("third")
             .render();
-        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
+        assert_eq!(rendered, "error: bad\n\nHint: first\nHint: second");
+    }
+
+    #[test]
+    fn internal_error_render_includes_issue_url() {
+        let rendered = CliError::internal("status index should be loaded").render();
+        assert_eq!(
+            rendered,
+            "fatal: status index should be loaded\n\nHint: please report this issue at: https://github.com/web3infra-foundation/libra/issues"
+        );
+    }
+
+    #[test]
+    fn explicit_internal_code_render_includes_issue_url() {
+        let rendered = CliError::fatal("tree creation failed")
+            .with_stable_code(StableErrorCode::InternalInvariant)
+            .render();
+        assert!(rendered.contains("https://github.com/web3infra-foundation/libra/issues"));
+    }
+
+    #[test]
+    fn inferred_non_reportable_internal_does_not_add_issue_hint() {
+        let rendered = CliError::failure("bad").render();
+        assert_eq!(rendered, "error: bad");
+    }
+
+    #[test]
+    fn internal_error_json_includes_issue_url_hint() {
+        let json = CliError::internal("unexpected state transition").render_json();
+        let payload: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload["error_code"], "LBR-INTERNAL-001");
+        assert_eq!(
+            payload["hints"][0],
+            "please report this issue at: https://github.com/web3infra-foundation/libra/issues"
+        );
     }
 
     #[test]

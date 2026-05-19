@@ -55,6 +55,28 @@ When fast-forward is not possible:
 error: Not possible to fast-forward merge, try merge manually
 ```
 
+## JSON / Machine Output
+
+`--json` and `--machine` are supported for successful fast-forward and already-up-to-date merges. `--json` emits a command envelope, and `--machine` emits the same envelope as a single NDJSON line.
+
+```json
+{
+  "ok": true,
+  "command": "merge",
+  "data": {
+    "strategy": "fast-forward",
+    "old_commit": "abc1234...",
+    "commit": "def5678...",
+    "files_changed": 1,
+    "up_to_date": false
+  }
+}
+```
+
+Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, `files_changed: 0`, and `up_to_date: true`.
+
+Errors use Libra's standard structured error envelope on stderr. For example, a non-fast-forward merge returns `LBR-CONFLICT-002` with exit code 128. The success schema keeps `files_changed` as a numeric count for backward compatibility; future detailed file statistics must be added as new fields rather than changing this field's type.
+
 ## Design Rationale
 
 ### Why fast-forward only?
@@ -98,7 +120,7 @@ Libra sits between these extremes: it provides an explicit `merge` command (fami
 | Commit message | Not supported | `-m <msg>` | N/A |
 | Verify signatures | Not supported | `--verify-signatures` | N/A |
 | Stat output | Not supported | `--stat` | N/A |
-| JSON output | Not supported | Not supported | N/A |
+| JSON output | `--json` / `--machine` for successful fast-forward and already-up-to-date results | Not supported | N/A |
 
 Note: jj does not have a dedicated merge command. Merges are created implicitly via `jj new` with multiple parent revisions.
 

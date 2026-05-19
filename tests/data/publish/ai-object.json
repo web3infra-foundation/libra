@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "objectType": "Run",
+  "objectId": "run-2026-05-09-001",
+  "layer": "snapshot",
+  "sourceRefs": [
+    "agent_session/4a4f6c7e-e0bc-4cf9-9a17-9d1bd5c4ec01",
+    "agent_checkpoint/6b8c0a91-7c2d-4d20-bf1a-cb9f4f7c2c10"
+  ],
+  "relationships": [
+    {
+      "kind": "appliesTo",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "Plan",
+      "toObjectId": "plan-2026-05-09-001"
+    },
+    {
+      "kind": "produces",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "PatchSet",
+      "toObjectId": "patchset-2026-05-09-001"
+    }
+  ],
+  "payload": {
+    "runId": "run-2026-05-09-001",
+    "planId": "plan-2026-05-09-001",
+    "status": "succeeded",
+    "startedAt": "2026-05-09T12:00:00Z",
+    "finishedAt": "2026-05-09T12:55:00Z",
+    "tokensIn": 12450,
+    "tokensOut": 4220
+  },
+  "redaction": {
+    "mode": "default",
+    "rulesVersion": "2026.05.09-1"
+  },
+  "removedFields": ["payload.providerRawResponse", "payload.absoluteWorkspacePath"]
+}

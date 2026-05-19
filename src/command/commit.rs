@@ -30,6 +30,7 @@ use crate::{
     command::{load_object, save_object_to_storage, status},
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
+        ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
         config::{LocalIdentityTarget, read_cascaded_config_value, resolve_user_identity_sources},
         head::Head,
@@ -60,6 +61,12 @@ use crate::{
 /// libra commit --allow-empty -m "Trigger CI" Create an empty commit
 /// libra commit --json -m "Add feature"       Structured JSON output for agents
 /// ```
+// GitHub Issues URL surfaced on internal-invariant bug paths
+// (`CommitError::TreeCreation`) so users can report unexpected
+// tree-build failures. Mirrors push.rs / tag.rs's hint pattern per
+// Cross-Cutting G.
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
     #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
@@ -204,7 +211,8 @@ impl From<CommitError> for CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("use -m to provide a commit message"),
             CommitError::TreeCreation(..) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::InternalInvariant),
+                .with_stable_code(StableErrorCode::InternalInvariant)
+                .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
             CommitError::ObjectStorage(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -430,7 +438,9 @@ pub async fn run_commit(
         return Err(CommitError::NothingToCommit);
     }
 
-    // Run pre-commit hook
+    // INVARIANT: hooks and message validation must run before creating the
+    // commit object or updating HEAD; once those writes happen, hook failure can
+    // no longer block the commit without explicit rollback logic.
     if !skip_hooks {
         run_pre_commit_hook(output)?;
     }
@@ -527,6 +537,8 @@ pub async fn run_commit(
             &format_commit_msg(&commit_message, gpg_sig.as_deref()),
         );
 
+        // INVARIANT: persist the commit object before moving HEAD so a crash
+        // after ref update never points the branch at a missing object.
         save_commit_object(&storage, &commit)?;
         update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
 
@@ -580,6 +592,8 @@ pub async fn run_commit(
         &format_commit_msg(&commit_message, gpg_sig.as_deref()),
     );
 
+    // INVARIANT: persist the commit object before moving HEAD so a crash after
+    // ref update never points the branch at a missing object.
     save_commit_object(&storage, &commit)?;
     update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
 
@@ -763,11 +777,24 @@ pub async fn execute(args: CommitArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Collects staged changes, resolves committer identity,
-/// builds tree and commit objects, and updates HEAD.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads the index and staged objects to build a new tree and commit object.
+/// - Resolves author/committer identity and optionally signs the commit through
+///   the vault when signing is enabled.
+/// - Writes new objects, updates HEAD/current branch, records reflog state, and
+///   renders the requested success output.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing or corrupt, there is
+/// nothing to commit, identity/signing setup fails, object writes fail, or HEAD
+/// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
-    render_commit_output(&result, output)
+    render_commit_output(&result, output)?;
+    dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_COMMIT).await;
+    Ok(())
 }
 
 /// If vault signing is enabled, sign the commit content and return the
@@ -1074,6 +1101,54 @@ mod test {
         assert_eq!(err.exit_code(), 128);
         assert_eq!(err.stable_code().as_str(), "LBR-REPO-003");
         assert!(err.message().contains("nothing to commit"));
+    }
+
+    /// Pin the `Display` format for the static-message and direct-message
+    /// variants of [`CommitError`]. These strings are used as the
+    /// `CliError` message via `From<CommitError> for CliError` and
+    /// surface in both human and `--json` envelopes (visible to scripts
+    /// reading exit codes and JSON error blobs).
+    ///
+    /// Source-chained / wrapper variants (IndexLoad, IndexSave,
+    /// TreeCreation, ObjectStorage, ParentCommitLoad, HeadUpdate,
+    /// PreCommitHook, VaultSign, AutoStage, StagedChanges,
+    /// MessageFileRead) wrap upstream error strings via `{0}` /
+    /// `{detail}` and are intentionally skipped — their content is
+    /// owned by the wrapped error type.
+    #[test]
+    fn commit_error_display_pins_static_message_variants() {
+        assert_eq!(
+            CommitError::NothingToCommit.to_string(),
+            "nothing to commit, working tree clean",
+        );
+        assert_eq!(
+            CommitError::NothingToCommitNoTracked.to_string(),
+            "nothing to commit (create/copy files and use 'libra add' to track)",
+        );
+        assert_eq!(
+            CommitError::IdentityMissing("set user.name and user.email".to_string()).to_string(),
+            "set user.name and user.email",
+        );
+        assert_eq!(
+            CommitError::NoCommitToAmend.to_string(),
+            "there is no commit to amend",
+        );
+        assert_eq!(
+            CommitError::AmendUnsupported.to_string(),
+            "amend is not supported for merge commits with multiple parents",
+        );
+        assert_eq!(
+            CommitError::InvalidAuthor("missing '<email>'".to_string()).to_string(),
+            "invalid author format: missing '<email>'",
+        );
+        assert_eq!(
+            CommitError::EmptyMessage.to_string(),
+            "aborting commit due to empty commit message",
+        );
+        assert_eq!(
+            CommitError::ConventionalCommit("subject too long".to_string()).to_string(),
+            "conventional commit validation failed: subject too long",
+        );
     }
 
     #[test]
@@ -1561,6 +1636,21 @@ mod test {
         assert!(
             no_verify_result.is_ok(),
             "--no-verify should skip conventional check"
+        );
+    }
+
+    /// Cross-Cutting G: `TreeCreation` is the lone CommitError variant
+    /// that maps to `InternalInvariant`. It must include the GitHub
+    /// Issues URL hint so users can report the bug.
+    #[test]
+    fn test_commit_error_tree_creation_has_issue_url_hint() {
+        let err: CliError =
+            CommitError::TreeCreation("synthetic tree-build failure".to_string()).into();
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+        assert!(
+            err.hints().iter().any(|h| h.as_str().contains("issues")),
+            "TreeCreation must include the GitHub Issues URL hint, got hints: {:?}",
+            err.hints()
         );
     }
 }

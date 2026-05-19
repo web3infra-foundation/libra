@@ -1,3 +1,9 @@
+//! Task executor for running planned AI work through providers and tool loops.
+//!
+//! Boundary: executor launches attempts and captures outputs, while policy, workspace
+//! sync, verification, and persistence remain separate. DAG/tool-loop and runtime
+//! tests cover tool events, provider errors, and timeout boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -17,26 +23,35 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::{
-    acl::{AclVerdict, check_tool_acl},
+    acl::{AclVerdict, cargo_lock_companion_allowed, check_tool_acl},
     checkpoint_policy::dagrs_checkpointing_enabled,
     gate, policy,
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
-        ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
-        TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-        TaskRuntimePhase, TaskSpec, ToolCallRecord,
+        ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, PolicyViolation,
+        ReviewOutcome, TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent,
+        TaskRuntimeNoteLevel, TaskRuntimePhase, TaskSpec, TaskWorkspaceBackend, ToolCallRecord,
+    },
+    workspace::{
+        FuseAttemptOutcome, FuseProvisionState, detect_contract_violations,
+        format_contract_violation_message, is_fuse_infrastructure_error_message,
     },
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-    completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
+    completion::{
+        CompletionError, CompletionModel, CompletionStreamEvent, CompletionUsage,
+        CompletionUsageSummary,
+    },
     hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
+    libra_vcs::run_libra_vcs_tool_guidance,
     runtime::environment::{ExecutionEnvironmentProvider, SyncBackRequest},
     sandbox::{
         NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
     },
     tools::{ToolOutput, registry::ToolRegistry},
+    workspace_snapshot::WorkspaceSnapshot,
 };
 
 /// Configuration for task execution.
@@ -50,6 +65,27 @@ pub struct ExecutorConfig {
     pub reviewer_preamble: Option<String>,
     pub dagrs_resume_checkpoint_id: Option<String>,
     pub observer: Option<Arc<dyn OrchestratorObserver>>,
+    /// Pre-execution snapshot of the worktree this task runs in. When present,
+    /// `execute_task` validates the contract immediately after reviewer approval
+    /// so out-of-scope writes surface as retryable feedback to the LLM instead
+    /// of escaping as terminal sync-back failures that force a replan.
+    pub(crate) workspace_baseline: Option<Arc<WorkspaceSnapshot>>,
+    /// Session-scoped FUSE provisioning gate. Once any task fails to mount FUSE,
+    /// every subsequent provisioning skips FUSE and falls back to the copy
+    /// backend immediately, with one user-visible note emitted at the moment
+    /// of the first failure.
+    pub fuse_state: FuseProvisionState,
+}
+
+const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
+const MAX_STORED_THINKING_CHARS: usize = 64_000;
+const MAX_GATE_FAILURE_OUTPUT_CHARS: usize = 2_000;
+
+struct TaskExecutionArtifacts {
+    tool_calls: Vec<ToolCallRecord>,
+    policy_violations: Vec<super::types::PolicyViolation>,
+    model_usage: Option<CompletionUsageSummary>,
+    thinking: Option<String>,
 }
 
 struct TaskExecutionObserver {
@@ -60,6 +96,8 @@ struct TaskExecutionObserver {
     tool_calls: Vec<ToolCallRecord>,
     violations: Vec<super::types::PolicyViolation>,
     model_usage: CompletionUsageSummary,
+    thinking: String,
+    thinking_truncated: bool,
     observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
@@ -78,19 +116,37 @@ impl TaskExecutionObserver {
             tool_calls: Vec::new(),
             violations: Vec::new(),
             model_usage: CompletionUsageSummary::default(),
+            thinking: String::new(),
+            thinking_truncated: false,
             observer,
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        Vec<ToolCallRecord>,
-        Vec<super::types::PolicyViolation>,
-        Option<CompletionUsageSummary>,
-    ) {
+    fn finish(self) -> TaskExecutionArtifacts {
         let usage = (!self.model_usage.is_zero()).then_some(self.model_usage);
-        (self.tool_calls, self.violations, usage)
+        TaskExecutionArtifacts {
+            tool_calls: self.tool_calls,
+            policy_violations: self.violations,
+            model_usage: usage,
+            thinking: non_empty_text(self.thinking),
+        }
+    }
+
+    fn append_thinking_delta(&mut self, delta: &str) {
+        if self.thinking_truncated {
+            return;
+        }
+
+        let remaining = MAX_STORED_THINKING_CHARS.saturating_sub(self.thinking.chars().count());
+        if delta.chars().count() <= remaining {
+            self.thinking.push_str(delta);
+            return;
+        }
+
+        self.thinking
+            .extend(delta.chars().take(remaining.saturating_sub(1)));
+        self.thinking.push_str("\n[thinking truncated]");
+        self.thinking_truncated = true;
     }
 }
 
@@ -115,6 +171,33 @@ impl ToolLoopObserver for TaskExecutionObserver {
 
     fn on_model_usage(&mut self, usage: &CompletionUsageSummary) {
         self.model_usage.merge(usage);
+    }
+
+    fn on_model_usage_recorded(&mut self, usage: &CompletionUsageSummary, wall_clock_ms: u64) {
+        self.model_usage.merge(usage);
+        if let Some(observer) = &self.observer {
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::UsageUpdated {
+                    usage: usage.clone(),
+                    wall_clock_ms,
+                },
+            );
+        }
+    }
+
+    fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+        if let CompletionStreamEvent::ThinkingDelta { delta, .. } = event
+            && !delta.is_empty()
+        {
+            self.append_thinking_delta(delta);
+            if let Some(observer) = &self.observer {
+                observer.on_task_runtime_event(
+                    &self.task,
+                    TaskRuntimeEvent::ThinkingDelta(delta.clone()),
+                );
+            }
+        }
     }
 
     fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
@@ -199,7 +282,7 @@ impl ToolLoopObserver for TaskExecutionObserver {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ReviewerDecision {
     approved: bool,
     summary: String,
@@ -212,6 +295,7 @@ struct ReviewerPassArtifacts {
     tool_calls: Vec<ToolCallRecord>,
     policy_violations: Vec<super::types::PolicyViolation>,
     model_usage: Option<CompletionUsageSummary>,
+    thinking: Option<String>,
 }
 
 /// Execute a single task with retry logic.
@@ -231,6 +315,7 @@ where
             &config.spec,
             config.tool_loop_config.runtime_context.as_ref(),
             config.observer.as_ref(),
+            &config.fuse_state,
         )
         .await;
     }
@@ -247,6 +332,7 @@ where
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
     let mut accumulated_model_usage = CompletionUsageSummary::default();
+    let mut accumulated_thinking = String::new();
     let mut last_review = None;
     let mut retry_feedback: Option<String> = None;
 
@@ -260,6 +346,35 @@ where
         let tool_loop_config = ToolLoopConfig {
             allowed_tools: Some(allowed_tools.clone()),
             runtime_context: Some(runtime_context.clone()),
+            // Reasoning models (DeepSeek v4-pro reasoning, OpenAI o-series, …)
+            // routinely need 30+ turns to scaffold a project, run verification
+            // commands, and submit a terminal handshake. The previous default
+            // of 24 was tripping the cap on otherwise-healthy implementation
+            // tasks (see Tool-loop-exceeded-maximum-turns clusters in libra.log
+            // 2026-05-05). Repeated-call detection (window=6, abort=3) below
+            // is the actual pathological-loop guard; this is just the outer
+            // safety net.
+            max_turns: Some(default_executor_max_turns(
+                task,
+                config.tool_loop_config.max_turns,
+            )),
+            // Convergence safeguards: a successful `submit_task_complete` call
+            // ends the loop immediately, and tighter repeat thresholds catch
+            // pathological "re-run the same shell command every turn" loops
+            // (see L1499/L8434 in /Volumes/Data/libra.log for the I05 case).
+            terminal_tools: Some(vec!["submit_task_complete".to_string()]),
+            repeat_detection_window: Some(
+                config.tool_loop_config.repeat_detection_window.unwrap_or(6),
+            ),
+            repeat_warning_threshold: Some(
+                config
+                    .tool_loop_config
+                    .repeat_warning_threshold
+                    .unwrap_or(2),
+            ),
+            repeat_abort_threshold: Some(
+                config.tool_loop_config.repeat_abort_threshold.unwrap_or(3),
+            ),
             ..config.tool_loop_config.clone()
         };
         let attempt_prompt = match retry_feedback.as_deref() {
@@ -277,15 +392,40 @@ where
             &mut observer,
         )
         .await;
-        let (tool_calls, policy_violations, model_usage) = observer.finish();
+        let artifacts = observer.finish();
+        let TaskExecutionArtifacts {
+            tool_calls,
+            policy_violations,
+            model_usage,
+            thinking,
+        } = artifacts;
         accumulated_tool_calls.extend(tool_calls.iter().cloned());
         accumulated_policy_violations.extend(policy_violations.iter().cloned());
         if let Some(usage) = model_usage.as_ref() {
             accumulated_model_usage.merge(usage);
         }
+        append_optional_text(&mut accumulated_thinking, thinking);
+
+        if let Some(reason) = tool_calls_fuse_infrastructure_failure(&accumulated_tool_calls) {
+            return TaskResult {
+                task_id: task.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some(reason),
+                retry_count,
+                tool_calls: accumulated_tool_calls,
+                policy_violations: accumulated_policy_violations,
+                model_usage: (!accumulated_model_usage.is_zero())
+                    .then_some(accumulated_model_usage),
+                review: last_review,
+                thinking: non_empty_text(accumulated_thinking),
+            };
+        }
 
         let retryable_failure = match agent_result {
-            Ok(turn) if policy_violations.is_empty() => {
+            Ok(turn)
+                if task_completion_allows_blocked_escalation(&policy_violations, &tool_calls) =>
+            {
                 if let Some(observer) = &config.observer
                     && !turn.final_text.trim().is_empty()
                 {
@@ -294,9 +434,19 @@ where
                         TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
                     );
                 }
-                if let Some(reason) =
-                    implementation_missing_write_output(task, &accumulated_tool_calls)
-                {
+                if let Some(reason) = submit_task_complete_fail_reason(&accumulated_tool_calls) {
+                    (
+                        Some(reason.clone()),
+                        tool_calls,
+                        policy_violations,
+                        reason,
+                        None,
+                    )
+                } else if let Some(reason) = implementation_missing_write_output(
+                    task,
+                    &accumulated_tool_calls,
+                    turn.final_text.as_str(),
+                ) {
                     (
                         Some(reason.clone()),
                         tool_calls,
@@ -320,39 +470,61 @@ where
                     if let Some(usage) = review_artifacts.model_usage.as_ref() {
                         accumulated_model_usage.merge(usage);
                     }
+                    append_optional_text(
+                        &mut accumulated_thinking,
+                        review_artifacts.thinking.clone(),
+                    );
+                    let mut reviewer_infrastructure_failure = false;
                     let review = match review_artifacts.outcome {
                         Ok(review) => review,
                         Err(message) => {
+                            reviewer_infrastructure_failure = true;
+                            let review = Some(reviewer_infrastructure_failure_outcome(&message));
                             if let Some(observer) = &config.observer {
                                 observer.on_task_runtime_event(
                                     task,
-                                    TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
+                                    TaskRuntimeEvent::Note {
+                                        level: TaskRuntimeNoteLevel::Error,
+                                        text: format!("review inconclusive · {message}"),
+                                    },
                                 );
                             }
-                            return TaskResult {
-                                task_id: task.id(),
-                                status: TaskNodeStatus::Failed,
-                                gate_report: None,
-                                agent_output: Some(message),
-                                retry_count,
-                                tool_calls: accumulated_tool_calls,
-                                policy_violations: accumulated_policy_violations,
-                                model_usage: (!accumulated_model_usage.is_zero())
-                                    .then_some(accumulated_model_usage),
-                                review: None,
-                            };
+                            review
                         }
                     };
                     if let Some(review) = review.as_ref()
+                        && !reviewer_infrastructure_failure
                         && !review.approved
                     {
                         last_review = Some(review.clone());
+                        // INVARIANT: agent_output records the *actual* failure
+                        // reason so a Failed TaskResult surfaces "review
+                        // rejected: …" through dagrs and observers, not the
+                        // agent's now-disproved success claim. The verbatim
+                        // final_text is preserved separately on retry via the
+                        // failure_reason → retry_feedback channel below.
+                        let reason = format!("review rejected: {}", review.summary);
                         (
-                            Some(turn.final_text),
+                            Some(reason.clone()),
                             tool_calls,
                             policy_violations,
-                            format!("review rejected: {}", review.summary),
+                            reason,
                             Some(review.clone()),
+                        )
+                    } else if let Some(violation_message) = workspace_contract_failure(task, config)
+                    {
+                        // Surface workspace contract violations (e.g. files
+                        // modified outside the touch_files contract) to the LLM
+                        // so it can correct course on the next attempt rather
+                        // than failing terminally during sync-back. agent_output
+                        // mirrors the violation message — same rationale as the
+                        // review-rejected branch above.
+                        (
+                            Some(violation_message.clone()),
+                            tool_calls,
+                            policy_violations,
+                            violation_message,
+                            review,
                         )
                     } else {
                         return TaskResult {
@@ -366,18 +538,23 @@ where
                             model_usage: (!accumulated_model_usage.is_zero())
                                 .then_some(accumulated_model_usage),
                             review,
+                            thinking: non_empty_text(accumulated_thinking),
                         };
                     }
                 }
             }
-            Ok(turn) => {
+            Ok(_turn) => {
                 let reason = policy_violations
                     .iter()
                     .map(|violation| violation.message.clone())
                     .collect::<Vec<_>>()
                     .join("; ");
+                // INVARIANT: this arm fires when policy violations blocked task
+                // completion. agent_output should reflect those violations so a
+                // terminally Failed TaskResult does not advertise the agent's
+                // pre-violation final text as the failure cause.
                 (
-                    Some(turn.final_text),
+                    Some(reason.clone()),
                     tool_calls,
                     policy_violations,
                     reason,
@@ -399,6 +576,7 @@ where
                     model_usage: (!accumulated_model_usage.is_zero())
                         .then_some(accumulated_model_usage),
                     review: last_review,
+                    thinking: non_empty_text(accumulated_thinking),
                 };
             }
         };
@@ -420,6 +598,7 @@ where
                 model_usage: (!accumulated_model_usage.is_zero())
                     .then_some(accumulated_model_usage),
                 review: last_review,
+                thinking: non_empty_text(accumulated_thinking),
             };
         }
 
@@ -434,22 +613,188 @@ where
     }
 }
 
+/// Per-attempt tool-loop turn cap for non-Gate tasks.
+///
+/// Honors an explicit override on `ExecutorConfig.tool_loop_config.max_turns`
+/// when present; otherwise picks a default sized to the task kind. Gates run
+/// through `execute_gate_task_in_task_worktree` and never reach this path, so
+/// only Implementation/Analysis cases need a bespoke default.
+const DEFAULT_IMPLEMENTATION_MAX_TURNS: usize = 48;
+const DEFAULT_ANALYSIS_MAX_TURNS: usize = 32;
+
+fn default_executor_max_turns(task: &TaskSpec, override_value: Option<usize>) -> usize {
+    if let Some(value) = override_value {
+        return value;
+    }
+    match task.kind {
+        TaskKind::Implementation => DEFAULT_IMPLEMENTATION_MAX_TURNS,
+        TaskKind::Analysis => DEFAULT_ANALYSIS_MAX_TURNS,
+        // Gate tasks take a separate execution path; default conservatively
+        // for any future caller that lands here.
+        TaskKind::Gate => DEFAULT_ANALYSIS_MAX_TURNS,
+    }
+}
+
+fn workspace_contract_failure(task: &TaskSpec, config: &ExecutorConfig) -> Option<String> {
+    let baseline = config.workspace_baseline.as_ref()?;
+    match detect_contract_violations(
+        &config.working_dir,
+        baseline,
+        &task.contract.touch_files,
+        &task.scope_in,
+        &task.scope_out,
+    ) {
+        Ok(violations) if violations.is_empty() => None,
+        Ok(violations) => {
+            let detail = format_contract_violation_message(&violations);
+            Some(format!(
+                "workspace contract violation detected before sync-back. Revert or move these changes back inside the declared contract before reporting completion.\n{detail}"
+            ))
+        }
+        Err(err) => Some(format!(
+            "failed to inspect workspace before sync-back: {err}. Investigate the workspace state and retry."
+        )),
+    }
+}
+
 fn implementation_missing_write_output(
     task: &TaskSpec,
     tool_calls: &[ToolCallRecord],
+    agent_output: &str,
 ) -> Option<String> {
     if task.kind != TaskKind::Implementation {
         return None;
     }
 
-    let has_successful_write = tool_calls
-        .iter()
-        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()));
+    if has_successful_write(tool_calls) {
+        return None;
+    }
 
-    (!has_successful_write).then(|| {
-        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion"
-            .to_string()
+    if submit_task_complete_no_changes_needed(tool_calls) {
+        return None;
+    }
+
+    if agent_declared_no_changes_needed(agent_output) && has_noop_evidence(tool_calls) {
+        return None;
+    }
+
+    Some(format!(
+        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion. If you verified that no change is needed or the write scope is wrong, either call submit_task_complete with `result: \"no_changes_needed\"` and supporting evidence, or end the final response with {NO_CHANGES_NEEDED_TOKEN}"
+    ))
+}
+
+fn has_successful_write(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls
+        .iter()
+        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()))
+}
+
+fn has_noop_evidence(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls.iter().any(|call| {
+        call.success
+            && call.paths_written.is_empty()
+            && call.diffs.is_empty()
+            && (!call.paths_read.is_empty()
+                || matches!(call.action.as_str(), "read" | "query" | "execute"))
     })
+}
+
+fn agent_declared_no_changes_needed(agent_output: &str) -> bool {
+    agent_output.trim_end().ends_with(NO_CHANGES_NEEDED_TOKEN)
+}
+
+/// Returns `true` when the most recent successful `submit_task_complete` call
+/// declared `result: "no_changes_needed"`. Models that submit the structured
+/// argument do not always echo the `[NO_CHANGES_NEEDED]` text sentinel in
+/// `final_text`, so this honours the documented tool-arg path as an equivalent
+/// signal — otherwise the convergence check forces an infinite retry loop on
+/// tasks whose worktree already satisfies acceptance criteria.
+fn submit_task_complete_no_changes_needed(tool_calls: &[ToolCallRecord]) -> bool {
+    submit_task_complete_result(tool_calls)
+        .map(|result| result == "no_changes_needed")
+        .unwrap_or(false)
+}
+
+fn submit_task_complete_fail_reason(tool_calls: &[ToolCallRecord]) -> Option<String> {
+    let call = latest_successful_submit_task_complete(tool_calls)?;
+    let result = call
+        .arguments_json
+        .as_ref()
+        .and_then(|args| args.get("result"))
+        .and_then(|value| value.as_str())?;
+    if result != "fail" {
+        return None;
+    }
+
+    let summary = call
+        .arguments_json
+        .as_ref()
+        .and_then(|args| args.get("summary"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("task reported failure without a summary");
+
+    Some(format!(
+        "task reported failure via submit_task_complete: {summary}"
+    ))
+}
+
+fn submit_task_complete_result(tool_calls: &[ToolCallRecord]) -> Option<&str> {
+    latest_successful_submit_task_complete(tool_calls)
+        .and_then(|call| call.arguments_json.as_ref())
+        .and_then(|args| args.get("result"))
+        .and_then(|value| value.as_str())
+}
+
+fn task_completion_allows_blocked_escalation(
+    policy_violations: &[PolicyViolation],
+    tool_calls: &[ToolCallRecord],
+) -> bool {
+    policy_violations.is_empty()
+        || (latest_successful_submit_task_complete(tool_calls).is_some()
+            && policy_violations
+                .iter()
+                .all(|violation| violation.code == "sandbox-escalation-deny"))
+}
+
+fn latest_successful_submit_task_complete(
+    tool_calls: &[ToolCallRecord],
+) -> Option<&ToolCallRecord> {
+    tool_calls
+        .iter()
+        .rev()
+        .find(|call| call.success && call.tool_name == "submit_task_complete")
+}
+
+fn reviewer_infrastructure_failure_outcome(message: &str) -> ReviewOutcome {
+    ReviewOutcome {
+        approved: false,
+        summary: "automated review did not complete; human review required".to_string(),
+        issues: vec![message.to_string()],
+    }
+}
+
+fn append_optional_text(target: &mut String, text: Option<String>) {
+    let Some(text) = text else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.trim().is_empty() {
+        target.push_str("\n\n");
+    }
+    target.push_str(trimmed);
+}
+
+fn non_empty_text(text: String) -> Option<String> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 async fn execute_gate_task(
@@ -517,21 +862,91 @@ async fn execute_gate_task(
         }
     };
 
+    let status = if gate_report.all_required_passed {
+        TaskNodeStatus::Completed
+    } else {
+        TaskNodeStatus::Failed
+    };
+    let agent_output = failed_gate_report_output(&gate_report);
+
     TaskResult {
         task_id: task.id(),
-        status: if gate_report.all_required_passed {
-            TaskNodeStatus::Completed
-        } else {
-            TaskNodeStatus::Failed
-        },
+        status,
         gate_report: Some(gate_report),
-        agent_output: None,
+        agent_output,
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
+}
+
+fn failed_gate_report_output(report: &GateReport) -> Option<String> {
+    if report.all_required_passed {
+        return None;
+    }
+
+    let failures = report
+        .results
+        .iter()
+        .filter(|result| !result.passed)
+        .map(|result| {
+            let mut summary = format!(
+                "- {} ({}) failed with exit {}{}",
+                result.check_id,
+                result.kind,
+                result.exit_code,
+                if result.timed_out {
+                    " after timeout"
+                } else {
+                    ""
+                }
+            );
+            if let Some(stderr) = gate_output_excerpt("stderr", &result.stderr) {
+                summary.push('\n');
+                summary.push_str(&stderr);
+            }
+            if let Some(stdout) = gate_output_excerpt("stdout", &result.stdout) {
+                summary.push('\n');
+                summary.push_str(&stdout);
+            }
+            summary
+        })
+        .collect::<Vec<_>>();
+
+    if failures.is_empty() {
+        Some("required gate checks failed without per-check output".to_string())
+    } else {
+        Some(format!(
+            "required gate checks failed:\n{}",
+            failures.join("\n")
+        ))
+    }
+}
+
+fn gate_output_excerpt(label: &str, output: &str) -> Option<String> {
+    let output = output.trim();
+    if output.is_empty() {
+        return None;
+    }
+
+    let mut excerpt = output
+        .chars()
+        .take(MAX_GATE_FAILURE_OUTPUT_CHARS)
+        .collect::<String>();
+    if output.chars().count() > MAX_GATE_FAILURE_OUTPUT_CHARS {
+        excerpt.push_str("\n...<truncated>");
+    }
+    Some(format!("{label}:\n{}", indent_lines(&excerpt, "  ")))
+}
+
+fn indent_lines(text: &str, indent: &str) -> String {
+    text.lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn execute_gate_task_in_task_worktree(
@@ -540,39 +955,71 @@ async fn execute_gate_task_in_task_worktree(
     spec: &IntentSpec,
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
+    fuse_state: &FuseProvisionState,
 ) -> TaskResult {
     let environment_provider = ExecutionEnvironmentProvider;
-    let environment = match environment_provider
-        .provision_task_worktree(working_dir.to_path_buf(), task.id())
-        .await
-    {
-        Ok(environment) => environment,
-        Err(err) => return task_workspace_failure(task, err),
-    };
-    let task_worktree_root = environment.root().to_path_buf();
+    let mut retried_after_fuse_failure = false;
 
-    if let Some(observer) = observer {
-        observer.on_task_runtime_event(
-            task,
-            TaskRuntimeEvent::WorkspaceReady {
-                working_dir: task_worktree_root.clone(),
-                isolated: true,
-            },
-        );
+    loop {
+        let environment = match environment_provider
+            .provision_task_worktree(working_dir.to_path_buf(), task.id(), fuse_state.clone())
+            .await
+        {
+            Ok(environment) => environment,
+            Err(err) => return task_workspace_failure(task, err),
+        };
+        let task_worktree_root = environment.root().to_path_buf();
+        let backend = environment.backend();
+
+        if let Some(observer) = observer {
+            emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
+            observer.on_task_runtime_event(
+                task,
+                TaskRuntimeEvent::WorkspaceReady {
+                    working_dir: task_worktree_root.clone(),
+                    isolated: true,
+                    backend,
+                    main_working_dir: Some(working_dir.to_path_buf()),
+                },
+            );
+        }
+
+        let result =
+            execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
+        let gate_fuse_failure =
+            if backend == TaskWorkspaceBackend::Fuse && result.status == TaskNodeStatus::Failed {
+                gate_result_fuse_infrastructure_failure(&result)
+            } else {
+                None
+            };
+
+        let cleanup_result = environment_provider.cleanup(environment).await;
+        let cleanup_fuse_failure = cleanup_result.as_ref().err().and_then(|err| {
+            if backend == TaskWorkspaceBackend::Fuse && result.status == TaskNodeStatus::Failed {
+                fuse_cleanup_failure_reason(err)
+            } else {
+                None
+            }
+        });
+        if let Err(err) = cleanup_result {
+            tracing::warn!(
+                path = %task_worktree_root.display(),
+                "failed to clean up gate worktree: {}",
+                err
+            );
+        }
+
+        if backend == TaskWorkspaceBackend::Fuse
+            && !retried_after_fuse_failure
+            && let Some(reason) = gate_fuse_failure.or(cleanup_fuse_failure)
+        {
+            disable_fuse_after_runtime_failure(task, fuse_state, observer, &reason);
+            retried_after_fuse_failure = true;
+            continue;
+        }
+
+        return result;
     }
-
-    let result =
-        execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
-
-    if let Err(err) = environment_provider.cleanup(environment).await {
-        tracing::warn!(
-            path = %task_worktree_root.display(),
-            "failed to clean up gate worktree: {}",
-            err
-        );
-    }
-
-    result
 }
 
 async fn run_reviewer_pass<M: CompletionModel>(
@@ -592,6 +1039,7 @@ where
             tool_calls: Vec::new(),
             policy_violations: Vec::new(),
             model_usage: None,
+            thinking: None,
         };
     };
 
@@ -610,6 +1058,7 @@ where
             &config.spec,
             config.tool_loop_config.runtime_context.as_ref(),
         )),
+        max_turns: Some(config.tool_loop_config.max_turns.unwrap_or(8)),
         ..config.tool_loop_config.clone()
     };
 
@@ -631,7 +1080,13 @@ where
         &mut observer,
     )
     .await;
-    let (tool_calls, policy_violations, model_usage) = observer.finish();
+    let artifacts = observer.finish();
+    let TaskExecutionArtifacts {
+        tool_calls,
+        policy_violations,
+        model_usage,
+        thinking,
+    } = artifacts;
     let turn = match turn {
         Ok(turn) => turn,
         Err(err) => {
@@ -640,6 +1095,7 @@ where
                 tool_calls,
                 policy_violations,
                 model_usage,
+                thinking,
             };
         }
     };
@@ -652,6 +1108,7 @@ where
                 tool_calls,
                 policy_violations,
                 model_usage,
+                thinking,
             };
         }
     };
@@ -686,6 +1143,7 @@ where
         tool_calls,
         policy_violations,
         model_usage,
+        thinking,
     }
 }
 
@@ -715,68 +1173,317 @@ where
     M::Response: CompletionUsage,
 {
     let environment_provider = ExecutionEnvironmentProvider;
-    let environment = match environment_provider
-        .provision_task_worktree(config.working_dir.clone(), task.id())
-        .await
-    {
-        Ok(environment) => environment,
-        Err(err) => return task_workspace_failure(task, err),
-    };
-    let task_worktree_root = environment.root().to_path_buf();
+    let mut sync_retry_count = 0_u8;
+    let mut retried_after_fuse_failure = false;
 
-    let task_registry = Arc::new(registry.clone_with_working_dir(task_worktree_root.clone()));
-    let mut task_config = config.clone();
-    task_config.working_dir = task_worktree_root.clone();
-    task_config.tool_loop_config =
-        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
-    if let Some(observer) = &config.observer {
-        observer.on_task_runtime_event(
-            task,
-            TaskRuntimeEvent::WorkspaceReady {
-                working_dir: task_worktree_root.clone(),
-                isolated: true,
-            },
-        );
-    }
-
-    let mut result = execute_task(task, model, &task_registry, &task_config).await;
-
-    if result.status == TaskNodeStatus::Completed {
-        let sync_result = {
-            let _guard = workspace_sync.lock().await;
-            environment_provider
-                .sync_back(
-                    &environment,
-                    SyncBackRequest {
-                        main_working_dir: config.working_dir.clone(),
-                        touch_files: task.contract.touch_files.clone(),
-                        scope_in: task.scope_in.clone(),
-                        scope_out: task.scope_out.clone(),
-                    },
-                )
-                .await
+    loop {
+        let environment = match environment_provider
+            .provision_task_worktree(
+                config.working_dir.clone(),
+                task.id(),
+                config.fuse_state.clone(),
+            )
+            .await
+        {
+            Ok(environment) => environment,
+            Err(err) => return task_workspace_failure(task, err),
         };
+        let task_worktree_root = environment.root().to_path_buf();
+        let backend = environment.backend();
+        let baseline = environment.baseline_snapshot();
 
-        match sync_result {
-            Ok(()) => {}
-            Err(err) => {
-                result.status = TaskNodeStatus::Failed;
-                result.agent_output = Some(format!(
-                    "task completed in isolated worktree but failed to sync changes back: {err}"
-                ));
+        let task_registry = Arc::new(registry.clone_with_working_dir_and_alias(
+            task_worktree_root.clone(),
+            config.working_dir.clone(),
+        ));
+        let mut task_config = config.clone();
+        task_config.working_dir = task_worktree_root.clone();
+        task_config.tool_loop_config =
+            clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
+        task_config.workspace_baseline = Some(Arc::new(baseline));
+        if let Some(observer) = &config.observer {
+            emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
+            observer.on_task_runtime_event(
+                task,
+                TaskRuntimeEvent::WorkspaceReady {
+                    working_dir: task_worktree_root.clone(),
+                    isolated: true,
+                    backend,
+                    main_working_dir: Some(config.working_dir.clone()),
+                },
+            );
+        }
+
+        let mut result = execute_task(task, model, &task_registry, &task_config).await;
+
+        if backend == TaskWorkspaceBackend::Fuse
+            && !retried_after_fuse_failure
+            && let Some(reason) = task_result_fuse_infrastructure_failure(&result)
+        {
+            disable_fuse_after_runtime_failure(
+                task,
+                &config.fuse_state,
+                config.observer.as_ref(),
+                &reason,
+            );
+            cleanup_task_environment(
+                &environment_provider,
+                environment,
+                &task_worktree_root,
+                "task worktree",
+            )
+            .await;
+            retried_after_fuse_failure = true;
+            continue;
+        }
+
+        if result.status == TaskNodeStatus::Completed {
+            let sync_result = {
+                let _guard = workspace_sync.lock().await;
+                environment_provider
+                    .sync_back(
+                        &environment,
+                        SyncBackRequest {
+                            main_working_dir: config.working_dir.clone(),
+                            touch_files: task.contract.touch_files.clone(),
+                            scope_in: task.scope_in.clone(),
+                            scope_out: task.scope_out.clone(),
+                        },
+                    )
+                    .await
+            };
+
+            match sync_result {
+                Ok(report) => {
+                    if sync_retry_count > 0 {
+                        result.retry_count = result.retry_count.saturating_add(sync_retry_count);
+                    }
+                    emit_sync_back_report(task, &report, config.observer.as_ref());
+                }
+                Err(err)
+                    if backend == TaskWorkspaceBackend::Fuse
+                        && err.is_fuse_infrastructure()
+                        && !retried_after_fuse_failure =>
+                {
+                    let reason = err.to_string();
+                    disable_fuse_after_runtime_failure(
+                        task,
+                        &config.fuse_state,
+                        config.observer.as_ref(),
+                        &reason,
+                    );
+                    cleanup_task_environment(
+                        &environment_provider,
+                        environment,
+                        &task_worktree_root,
+                        "failed FUSE task worktree",
+                    )
+                    .await;
+                    retried_after_fuse_failure = true;
+                    continue;
+                }
+                Err(err)
+                    if err.is_retryable_conflict() && sync_retry_count < config.max_retries =>
+                {
+                    sync_retry_count = sync_retry_count.saturating_add(1);
+                    if let Some(observer) = &config.observer {
+                        observer.on_task_runtime_event(
+                            task,
+                            TaskRuntimeEvent::Note {
+                                level: TaskRuntimeNoteLevel::Info,
+                                text: format!(
+                                    "sync-back conflict detected; retrying task with a fresh baseline ({}/{}) · {}",
+                                    sync_retry_count,
+                                    config.max_retries,
+                                    err
+                                ),
+                            },
+                        );
+                    }
+                    cleanup_task_environment(
+                        &environment_provider,
+                        environment,
+                        &task_worktree_root,
+                        "conflicted task worktree",
+                    )
+                    .await;
+                    continue;
+                }
+                Err(err) => {
+                    let detail = format!(
+                        "task completed in isolated worktree but failed to sync changes back: {err}"
+                    );
+                    if let Some(observer) = &config.observer {
+                        observer.on_task_runtime_event(
+                            task,
+                            TaskRuntimeEvent::Note {
+                                level: TaskRuntimeNoteLevel::Error,
+                                text: detail.clone(),
+                            },
+                        );
+                    }
+                    result.status = TaskNodeStatus::Failed;
+                    result.agent_output = Some(detail);
+                }
             }
         }
-    }
 
+        cleanup_task_environment(
+            &environment_provider,
+            environment,
+            &task_worktree_root,
+            "task worktree",
+        )
+        .await;
+
+        return result;
+    }
+}
+
+async fn cleanup_task_environment(
+    environment_provider: &ExecutionEnvironmentProvider,
+    environment: crate::internal::ai::runtime::environment::TaskExecutionEnvironment,
+    task_worktree_root: &Path,
+    label: &str,
+) {
     if let Err(err) = environment_provider.cleanup(environment).await {
         tracing::warn!(
             path = %task_worktree_root.display(),
-            "failed to clean up task worktree: {}",
+            "failed to clean up {}: {}",
+            label,
             err
         );
     }
+}
 
-    result
+fn emit_sync_back_report(
+    task: &TaskSpec,
+    report: &crate::internal::ai::orchestrator::workspace::SyncBackReport,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) {
+    if report.already_applied.is_empty() && report.merged.is_empty() && report.skipped.is_empty() {
+        return;
+    }
+    let Some(observer) = observer else { return };
+    let mut details = Vec::new();
+    if !report.already_applied.is_empty() {
+        details.push(format!(
+            "already applied: {}",
+            display_paths(&report.already_applied)
+        ));
+    }
+    if !report.merged.is_empty() {
+        details.push(format!("merged: {}", display_paths(&report.merged)));
+    }
+    if !report.skipped.is_empty() {
+        details.push(format!(
+            "skipped: {}",
+            report
+                .skipped
+                .iter()
+                .map(|path| path.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    observer.on_task_runtime_event(
+        task,
+        TaskRuntimeEvent::Note {
+            level: TaskRuntimeNoteLevel::Info,
+            text: format!("sync-back completed with {}", details.join("; ")),
+        },
+    );
+}
+
+fn display_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn task_result_fuse_infrastructure_failure(result: &TaskResult) -> Option<String> {
+    tool_calls_fuse_infrastructure_failure(&result.tool_calls).or_else(|| {
+        result
+            .agent_output
+            .as_deref()
+            .filter(|output| is_fuse_infrastructure_error_message(output))
+            .map(str::to_string)
+    })
+}
+
+fn gate_result_fuse_infrastructure_failure(result: &TaskResult) -> Option<String> {
+    task_result_fuse_infrastructure_failure(result).or_else(|| {
+        let report = result.gate_report.as_ref()?;
+        report.results.iter().find_map(|gate| {
+            if gate.passed {
+                return None;
+            }
+
+            let detail = [&gate.stderr, &gate.stdout]
+                .into_iter()
+                .map(|output| output.trim())
+                .find(|output| is_fuse_backend_failure_message(output))?;
+            Some(format!(
+                "gate '{}' encountered FUSE infrastructure failure: {}",
+                gate.check_id,
+                truncate_fuse_failure_reason(detail)
+            ))
+        })
+    })
+}
+
+fn tool_calls_fuse_infrastructure_failure(tool_calls: &[ToolCallRecord]) -> Option<String> {
+    tool_calls
+        .iter()
+        .rev()
+        .filter(|call| !call.success)
+        .filter_map(|call| call.summary.as_deref())
+        .find(|summary| is_fuse_infrastructure_error_message(summary))
+        .map(str::to_string)
+}
+
+fn disable_fuse_after_runtime_failure(
+    task: &TaskSpec,
+    fuse_state: &FuseProvisionState,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+    reason: &str,
+) {
+    let first_disable = fuse_state.disable_first_time();
+    if let Some(observer) = observer {
+        let prefix = if first_disable {
+            "FUSE worktree failed during task execution"
+        } else {
+            "FUSE worktree remained unavailable during task execution"
+        };
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::Note {
+                level: TaskRuntimeNoteLevel::Error,
+                text: format!(
+                    "{}: {}. Cleaning the failed mount and retrying once with copy backend.",
+                    prefix,
+                    truncate_fuse_failure_reason(reason)
+                ),
+            },
+        );
+    }
+}
+
+fn fuse_cleanup_failure_reason(err: &io::Error) -> Option<String> {
+    if is_fuse_backend_failure_message(&err.to_string()) {
+        Some(format!("failed to clean up FUSE worktree: {err}"))
+    } else {
+        None
+    }
+}
+
+fn is_fuse_backend_failure_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    is_fuse_infrastructure_error_message(message)
+        || lower.contains("os error 22")
+        || lower.contains("invalid argument (os error 22)")
 }
 
 fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
@@ -790,7 +1497,43 @@ fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
+}
+
+/// Emit a single user-visible TUI note when this task was the first to fail
+/// FUSE provisioning and triggered the session-wide disable. All subsequent
+/// task worktree provisioning will skip FUSE silently.
+fn emit_fuse_disabled_note_if_needed(
+    task: &TaskSpec,
+    outcome: &FuseAttemptOutcome,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) {
+    let Some(reason) = outcome.disabled_reason() else {
+        return;
+    };
+    let Some(observer) = observer else { return };
+    observer.on_task_runtime_event(
+        task,
+        TaskRuntimeEvent::Note {
+            level: TaskRuntimeNoteLevel::Info,
+            text: format!(
+                "FUSE worktree mount failed: {}. Disabled for this session, using copy backend (slightly slower startup, identical behavior).",
+                truncate_fuse_failure_reason(reason)
+            ),
+        },
+    );
+}
+
+fn truncate_fuse_failure_reason(reason: &str) -> String {
+    const MAX_LEN: usize = 1024;
+    if reason.chars().count() <= MAX_LEN {
+        return reason.to_string();
+    }
+
+    let mut truncated = reason.chars().take(MAX_LEN).collect::<String>();
+    truncated.push_str("...<truncated>");
+    truncated
 }
 
 fn terminal_task_result(
@@ -808,6 +1551,7 @@ fn terminal_task_result(
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
 }
 
@@ -1000,6 +1744,8 @@ where
                 TaskRuntimeEvent::WorkspaceReady {
                     working_dir: self.config.working_dir.clone(),
                     isolated: false,
+                    backend: TaskWorkspaceBackend::Shared,
+                    main_working_dir: None,
                 },
             );
         }
@@ -1387,7 +2133,7 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     parts.push(format!(
-        "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+        "## Runtime Workspace\nRepository root: `.`\nInternal absolute path: {}\nAll file access must stay inside this workspace. Treat the internal path as diagnostic only; do not pass it to file tools or shell `cd` commands.",
         working_dir.display()
     ));
 
@@ -1396,12 +2142,17 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     parts.push(
-        "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
+        "## Path Rules\nUse `.` or repository-relative paths for read_file, list_dir, grep_files, apply_patch, and shell commands. The runtime already executes tools from the task workspace. Do not use the original --repo path or /var/folders/.../libra-task-worktree-* paths as tool arguments.".to_string(),
     );
-    parts.push(
-        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, show, or switch operations. Use Libra version-control only; when the run_libra_vcs tool is available, call it for those operations."
-            .to_string(),
-    );
+    parts.push(format!(
+        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, \
+             show, or switch operations. Use Libra version-control only; when the \
+             run_libra_vcs tool is available, call it for those operations.\n{}\nrun_libra_vcs \
+             is not a shell and must not be used for cargo, fmt, clippy, test, build, or \
+             arbitrary command execution; deterministic verification commands are owned by \
+             gate tasks.",
+        run_libra_vcs_tool_guidance()
+    ));
 
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
@@ -1462,8 +2213,18 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     if task.kind == TaskKind::Implementation {
+        parts.push(format!(
+            "## Completion Requirement\nBefore reporting completion, use apply_patch or an allowed shell command that creates or modifies at least one in-scope project file. If no file change is needed or the write scope is wrong, first use read-only tools or verification commands to gather evidence, then explain the evidence and end your final response with {NO_CHANGES_NEEDED_TOKEN}. Do not use {NO_CHANGES_NEEDED_TOKEN} without tool-based evidence."
+        ));
+    }
+
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis) {
         parts.push(
-            "## Completion Requirement\nBefore reporting completion, use apply_patch or an allowed shell command that creates or modifies at least one in-scope project file. If no file change is needed or the write scope is wrong, report the mismatch instead of claiming the task is complete."
+            "## Task Termination\nWhen you have produced enough evidence to report a verdict, call `submit_task_complete` ONCE with:\n\
+             - `result`: \"pass\" if every acceptance criterion is verified, \"fail\" if any criterion failed or the task is blocked, or \"no_changes_needed\" if the workspace already satisfies the criteria.\n\
+             - `summary`: one paragraph describing what changed (or why nothing was needed) and which evidence supports `result`.\n\
+             - `evidence`: command + exit_code (+ optional output_excerpt) for each verification command you ran.\n\
+             The tool loop ends as soon as `submit_task_complete` succeeds. Do NOT re-run a shell command that you already executed in this task — read the prior tool result from history instead."
                 .to_string(),
         );
     }
@@ -1477,6 +2238,28 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+
+    if task
+        .constraints()
+        .iter()
+        .any(|constraint| constraint == "dependency-policy:no-new")
+    {
+        parts.push(
+            "## Dependency Policy\nDo not add new third-party dependencies or edit dependency manifests to introduce new crates/packages. Prefer the standard library or dependencies already present in the project. If the requested task truly requires a new dependency, report the policy mismatch instead of adding it."
+                .to_string(),
+        );
+    }
+
+    if task
+        .constraints()
+        .iter()
+        .any(|constraint| constraint == "dependency-policy:allow-with-review")
+    {
+        parts.push(
+            "## Dependency Policy\nNew third-party dependencies are allowed only when the user explicitly requested that dependency. If you add one, list each dependency name in your summary and include verification evidence commands that exercised the updated dependency graph."
+                .to_string(),
+        );
     }
 
     if task.kind == TaskKind::Analysis {
@@ -1496,21 +2279,33 @@ fn build_reviewer_prompt(
     working_dir: &Path,
     allowed_tools: &[String],
 ) -> String {
-    let touched_files = tool_calls
+    let raw_touched: std::collections::BTreeSet<String> = tool_calls
         .iter()
         .flat_map(|call| call.paths_written.iter().cloned())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect();
+    // Auto-generated companion files (e.g. Cargo.lock that pairs with an
+    // in-contract Cargo.toml) are accepted by sync-back; surfacing them to the
+    // reviewer caused spurious rejections that triggered endless replans.
+    let companion_scope: Vec<String> = task
+        .contract
+        .touch_files
+        .iter()
+        .chain(task.scope_in.iter())
+        .cloned()
+        .collect();
+    let (touched_files, generated_companions): (Vec<String>, Vec<String>) = raw_touched
         .into_iter()
-        .collect::<Vec<_>>();
+        .partition(|path| !cargo_lock_companion_allowed(&companion_scope, path));
 
     let mut parts = vec![
         format!("## Review Task\n{}", task.title()),
         format!("## Objective\n{}", task.objective),
         format!(
-            "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+            "## Runtime Workspace\nRepository root: `.`\nInternal absolute path: {}\nAll file access must stay inside this workspace. Treat the internal path as diagnostic only; do not pass it to file tools or shell `cd` commands.",
             working_dir.display()
         ),
         format!("## Allowed Tools\n{}", allowed_tools.join(", ")),
+        "## Path Rules\nUse `.` or repository-relative paths. The runtime resolves file tools and shell commands from the task workspace; do not use the original --repo path or /var/folders/.../libra-task-worktree-* paths.".to_string(),
         format!("## Candidate Output\n{}", agent_output.trim()),
         "Return JSON only in this exact shape: {\"approved\":true|false,\"summary\":\"...\",\"issues\":[\"...\"]}".to_string(),
     ];
@@ -1519,9 +2314,33 @@ fn build_reviewer_prompt(
         parts.push(format!("## Touched Files\n{}", touched_files.join(", ")));
     }
 
+    if !generated_companions.is_empty() {
+        parts.push(format!(
+            "## Auto-Generated Companions\n{}\nThese were produced as side effects of in-contract files (e.g. Cargo.lock for an in-contract Cargo.toml). The runtime accepts them; do not treat them as contract violations.",
+            generated_companions.join(", ")
+        ));
+    }
+
+    let dependency_manifest_changes = dependency_manifest_changes(tool_calls);
+    if !dependency_manifest_changes.is_empty()
+        || task
+            .constraints()
+            .iter()
+            .any(|constraint| constraint == "dependency-policy:allow-with-review")
+    {
+        let changed_manifests = if dependency_manifest_changes.is_empty() {
+            "None detected in tool diffs".to_string()
+        } else {
+            dependency_manifest_changes.join(", ")
+        };
+        parts.push(format!(
+            "## Dependency Change Review\nChanged manifests: {changed_manifests}\nIf new dependencies were added, approve only when they match the user's explicit intent. The candidate summary or evidence must name the added dependencies and include verification commands that ran after the dependency change."
+        ));
+    }
+
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
-            "## Write Contract\nOnly these paths may be modified:\n{}\nReject the candidate if Touched Files contains any path outside this list.",
+            "## Write Contract\nOnly these paths may be modified:\n{}\nReject the candidate only if Touched Files contains a path outside this list. Auto-generated companions listed above do not count as out-of-contract writes.",
             task.contract
                 .touch_files
                 .iter()
@@ -1539,6 +2358,22 @@ fn build_reviewer_prompt(
     }
 
     parts.join("\n\n")
+}
+
+fn dependency_manifest_changes(tool_calls: &[ToolCallRecord]) -> Vec<String> {
+    let mut manifests = tool_calls
+        .iter()
+        .flat_map(|call| call.diffs.iter())
+        .filter(|diff| {
+            Path::new(&diff.path)
+                .file_name()
+                .is_some_and(|name| name == "Cargo.toml")
+        })
+        .map(|diff| diff.path.clone())
+        .collect::<Vec<_>>();
+    manifests.sort();
+    manifests.dedup();
+    manifests
 }
 
 fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
@@ -1572,11 +2407,28 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
         tools.push("shell".to_string());
     }
 
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
+        && spec.constraints.security.network_policy == NetworkPolicy::Allow
+        && acl_allows(&spec.security.tool_acl, "web.search", "query")
+    {
+        tools.push("web_search".to_string());
+    }
+
+    // `submit_task_complete` is the agent's terminal handshake — required for
+    // every Implementation/Analysis task so the tool loop can converge
+    // deterministically. Exposed to the model regardless of IntentSpec ACL; the
+    // matching ACL bypass lives in policy::terminal_handshake_allowance, so an
+    // explicit deny rule still wins but the default "no allow rule" verdict
+    // does not deadlock the loop.
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis) {
+        tools.push("submit_task_complete".to_string());
+    }
+
     tools
 }
 
 fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
-    if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
+    let mut tools = if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
         vec![
             "read_file".to_string(),
             "list_dir".to_string(),
@@ -1585,7 +2437,13 @@ fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
         ]
     } else {
         Vec::new()
+    };
+    if spec.constraints.security.network_policy == NetworkPolicy::Allow
+        && acl_allows(&spec.security.tool_acl, "web.search", "query")
+    {
+        tools.push("web_search".to_string());
     }
+    tools
 }
 
 fn acl_allows(acl: &ToolAcl, tool: &str, action: &str) -> bool {
@@ -1597,14 +2455,69 @@ fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
         return Ok(parsed);
     }
 
-    let start = raw
-        .find('{')
-        .ok_or_else(|| "reviewer response missing JSON object".to_string())?;
-    let end = raw
-        .rfind('}')
-        .ok_or_else(|| "reviewer response missing JSON terminator".to_string())?;
-    serde_json::from_str::<ReviewerDecision>(&raw[start..=end])
-        .map_err(|err| format!("invalid reviewer JSON: {err}"))
+    let mut last_error = None;
+    for candidate in fenced_json_blocks(raw).chain(json_object_candidates(raw)) {
+        match parse_reviewer_decision_prefix(candidate) {
+            Ok(parsed) => return Ok(parsed),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(format!("invalid reviewer JSON: {error}")),
+        None => Err("reviewer response missing JSON object".to_string()),
+    }
+}
+
+fn fenced_json_blocks(raw: &str) -> impl Iterator<Item = &str> {
+    struct Blocks<'a> {
+        raw: &'a str,
+        offset: usize,
+    }
+
+    impl<'a> Iterator for Blocks<'a> {
+        type Item = &'a str;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            while let Some(relative_start) = self.raw[self.offset..].find("```") {
+                let fence_start = self.offset + relative_start;
+                let header_start = fence_start + 3;
+                let Some(relative_header_end) = self.raw[header_start..].find('\n') else {
+                    self.offset = header_start;
+                    continue;
+                };
+                let header_end = header_start + relative_header_end;
+                let header = self.raw[header_start..header_end].trim();
+                let body_start = header_end + 1;
+                let Some(relative_end) = self.raw[body_start..].find("```") else {
+                    self.offset = body_start;
+                    continue;
+                };
+                let body_end = body_start + relative_end;
+                self.offset = body_end + 3;
+                if header.is_empty() || header.eq_ignore_ascii_case("json") {
+                    return Some(self.raw[body_start..body_end].trim());
+                }
+            }
+            None
+        }
+    }
+
+    Blocks { raw, offset: 0 }
+}
+
+fn json_object_candidates(raw: &str) -> impl Iterator<Item = &str> {
+    const MAX_JSON_OBJECT_CANDIDATES: usize = 16;
+
+    raw.char_indices()
+        .filter(|(_, ch)| *ch == '{')
+        .map(|(index, _)| &raw[index..])
+        .take(MAX_JSON_OBJECT_CANDIDATES)
+}
+
+fn parse_reviewer_decision_prefix(raw: &str) -> Result<ReviewerDecision, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw.trim_start());
+    ReviewerDecision::deserialize(&mut deserializer)
 }
 
 fn runtime_context_for_task(
@@ -1631,6 +2544,7 @@ fn runtime_context_for_task(
         }),
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
+        file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -1655,6 +2569,7 @@ fn runtime_context_for_gate_task(
         }),
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
+        file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -1680,6 +2595,7 @@ fn runtime_context_for_reviewer(
         }),
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
+        file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
     }
 }
@@ -1818,8 +2734,16 @@ mod tests {
                 message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
             },
             intentspec::{profiles, types::*},
-            orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
-            tools::{handlers::ApplyPatchHandler, registry::ToolRegistry},
+            orchestrator::types::{
+                ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec, ToolDiffRecord,
+            },
+            tools::{
+                ToolError, ToolHandler, ToolInvocation, ToolKind, ToolOutput, ToolSpec,
+                handlers::{
+                    ApplyPatchHandler, ListDirHandler, ShellHandler, SubmitTaskCompleteHandler,
+                },
+                registry::ToolRegistry,
+            },
         },
         utils::test,
     };
@@ -1842,6 +2766,7 @@ mod tests {
             async move {
                 Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text { text })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1889,6 +2814,7 @@ mod tests {
                         &prompt,
                         "conditional",
                     ))],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             } else {
@@ -1896,6 +2822,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".into(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1923,6 +2850,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -1944,6 +2872,7 @@ mod tests {
                 content: vec![AssistantContent::ToolCall(add_file_patch_call(
                     &prompt, "budget",
                 ))],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -1997,17 +2926,24 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-            let has_tool_result = request.chat_history.iter().any(|message| match message {
-                Message::User { content } => content
-                    .iter()
-                    .any(|item| matches!(item, UserContent::ToolResult(_))),
-                _ => false,
-            });
-            if has_tool_result {
+            let has_successful_tool_result =
+                request.chat_history.iter().any(|message| match message {
+                    Message::User { content } => content.iter().any(|item| match item {
+                        UserContent::ToolResult(result) => result
+                            .result
+                            .get("success")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        _ => false,
+                    }),
+                    _ => false,
+                });
+            if has_successful_tool_result {
                 return Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2015,17 +2951,25 @@ mod tests {
             let prompt = request
                 .chat_history
                 .iter()
-                .rev()
-                .find_map(|message| match message {
-                    Message::User { content } => content.iter().find_map(|item| match item {
-                        UserContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
-                    }),
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     _ => None,
                 })
-                .unwrap_or_default();
+                .collect::<Vec<_>>()
+                .join("\n");
 
-            let (call_id, patch) = if prompt.contains("## Task\nTask A") {
+            let is_task_a = prompt.contains("task_a.txt") || prompt.contains("## Task\nTask A");
+
+            let (call_id, patch) = if is_task_a {
                 (
                     "call_a",
                     "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch",
@@ -2046,6 +2990,82 @@ mod tests {
                         arguments: serde_json::json!({ "input": patch }),
                     },
                 })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchWithStaleCargoLockModel;
+
+    impl CompletionModel for PatchWithStaleCargoLockModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_successful_tool_result =
+                request.chat_history.iter().any(|message| match message {
+                    Message::User { content } => content.iter().any(|item| match item {
+                        UserContent::ToolResult(result) => result
+                            .result
+                            .get("success")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        _ => false,
+                    }),
+                    _ => false,
+                });
+            if has_successful_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let is_task_a = prompt.contains("task_a.txt") || prompt.contains("## Task\nTask A");
+            let (call_id, file_path, replacement, lock_text) = if is_task_a {
+                ("call_stale_a", "task_a.txt", "task-a", "# stale a")
+            } else {
+                ("call_stale_b", "task_b.txt", "task-b", "# stale b")
+            };
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: {file_path}\n@@\n-base\n+{replacement}\n*** Update File: Cargo.lock\n@@\n-# base lock\n+{lock_text}\n*** End Patch"
+            );
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: call_id.to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({ "input": patch }),
+                    },
+                })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2072,6 +3092,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2087,6 +3108,142 @@ mod tests {
                         }),
                     },
                 })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReviewerLoopLimitModel;
+
+    impl CompletionModel for ReviewerLoopLimitModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_review_list".to_string(),
+                        name: "list_dir".to_string(),
+                        function: Function {
+                            name: "list_dir".to_string(),
+                            arguments: serde_json::json!({ "dir_path": "." }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_src_main".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ImplementationTurnLimitModel {
+        tool_turns_before_final: usize,
+    }
+
+    impl CompletionModel for ImplementationTurnLimitModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let tool_result_count = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                            .count(),
+                    ),
+                    _ => None,
+                })
+                .sum::<usize>();
+
+            if tool_result_count >= self.tool_turns_before_final {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let (id, name, arguments) = if tool_result_count == 0 {
+                (
+                    "call_turn_limit_patch".to_string(),
+                    "apply_patch".to_string(),
+                    serde_json::json!({
+                        "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"turn limit\"); }\n*** End Patch"
+                    }),
+                )
+            } else {
+                let dir_name = format!("probe_{tool_result_count}");
+                (
+                    format!("call_turn_limit_list_{tool_result_count}"),
+                    "list_dir".to_string(),
+                    serde_json::json!({ "dir_path": dir_name }),
+                )
+            };
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id,
+                    name: name.clone(),
+                    function: Function { name, arguments },
+                })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2113,6 +3270,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2142,6 +3300,7 @@ mod tests {
                             }),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2150,6 +3309,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done without edits".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2188,6 +3348,200 @@ mod tests {
                         }),
                     },
                 })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchThenSubmitFailModel;
+
+    impl CompletionModel for PatchThenSubmitFailModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: r#"{"approved":true,"summary":"ok","issues":[]}"#.into(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let saw_apply_patch_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content.iter().any(|item| match item {
+                    UserContent::ToolResult(result) => result.name == "apply_patch",
+                    _ => false,
+                }),
+                _ => false,
+            });
+            if saw_apply_patch_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_submit_fail".to_string(),
+                        name: "submit_task_complete".to_string(),
+                        function: Function {
+                            name: "submit_task_complete".to_string(),
+                            arguments: serde_json::json!({
+                                "result": "fail",
+                                "summary": "acceptance blocked by verification failure",
+                                "evidence": [
+                                    {
+                                        "command": "cargo test",
+                                        "exit_code": 1,
+                                        "output_excerpt": "failed"
+                                    }
+                                ]
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_patch_then_submit_fail".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FuseFailToolModel;
+
+    impl CompletionModel for FuseFailToolModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_fuse_fail".to_string(),
+                    name: "read_file".to_string(),
+                    function: Function {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({ "file_path": "/tmp/workspace/Cargo.toml" }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    struct FuseFailHandler;
+
+    #[async_trait::async_trait]
+    impl ToolHandler for FuseFailHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn handle(&self, _invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
+            Err(ToolError::ExecutionFailed(
+                "failed to snapshot workspace: IO error for operation on /tmp/workspace: Device not configured (os error 6)"
+                    .into(),
+            ))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::read_file()
+        }
+    }
+
+    #[derive(Clone)]
+    struct CargoInitShellModel;
+
+    impl CompletionModel for CargoInitShellModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "created cargo project".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_cargo_init".to_string(),
+                    name: "shell".to_string(),
+                    function: Function {
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({
+                            "command": "cargo init libra --vcs none && cargo build --manifest-path libra/Cargo.toml --target-dir libra/target",
+                            "timeout_ms": 120000
+                        }),
+                    },
+                })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2399,6 +3753,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_execution_observer_persists_streamed_thinking() {
+        let mut observer = TaskExecutionObserver::new(
+            spec(),
+            implementation_task(),
+            PathBuf::from("/tmp/workspace"),
+            None,
+        );
+
+        observer.on_model_stream_event(&CompletionStreamEvent::ThinkingDelta {
+            request_id: None,
+            delta: "inspect ".to_string(),
+        });
+        observer.on_model_stream_event(&CompletionStreamEvent::ThinkingDelta {
+            request_id: None,
+            delta: "workspace".to_string(),
+        });
+
+        let artifacts = observer.finish();
+
+        assert_eq!(artifacts.thinking.as_deref(), Some("inspect workspace"));
+    }
+
     fn scoped_implementation_task(title: &str, file: &str) -> TaskSpec {
         let actor = ActorRef::agent("test-executor").unwrap();
         let mut task = GitTask::new(actor, title, None).unwrap();
@@ -2457,6 +3834,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = execute_gate_task(&task, dir.path(), &spec(), None, None).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
+    async fn execute_gate_task_reports_failed_check_details() {
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "fmt".into(),
+                kind: CheckKind::Command,
+                command: Some("printf 'formatting failed\\n' >&2; exit 1".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_gate_task(&task, dir.path(), &spec(), None, None).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result.agent_output.unwrap();
+        assert!(agent_output.contains("required gate checks failed"));
+        assert!(agent_output.contains("fmt"));
+        assert!(agent_output.contains("exit 1"));
+        assert!(agent_output.contains("formatting failed"));
+    }
+
+    #[tokio::test]
+    async fn execute_gate_task_runs_cargo_checks_in_manifest_touch_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(linked.join("src")).unwrap();
+        std::fs::write(
+            linked.join("Cargo.toml"),
+            "[package]\nname = \"linked\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(linked.join("src/lib.rs"), "").unwrap();
+
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "cargo-metadata".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo metadata --format-version=1 --no-deps >/dev/null".into()),
+                timeout_seconds: Some(30),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            scope_in: vec!["linked/".into()],
+            contract: TaskContract {
+                write_scope: vec!["linked/".into()],
+                forbidden_scope: vec![],
+                touch_files: vec!["linked/Cargo.toml".into(), "linked/src/lib.rs".into()],
+                touch_symbols: vec![],
+                touch_apis: vec![],
+                expected_outputs: vec!["cargo checks pass".into()],
+            },
+            ..implementation_task()
+        };
+
+        let result = execute_gate_task(&task, dir.path(), &spec(), None, None).await;
+
+        assert_eq!(
+            result.status,
+            TaskNodeStatus::Completed,
+            "{}",
+            result.agent_output.as_deref().unwrap_or("")
+        );
         assert!(result.gate_report.unwrap().all_required_passed);
     }
 
@@ -2550,6 +4001,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let registry = ToolRegistry::new();
         let model = MockModel {
@@ -2583,6 +4036,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let task = implementation_task();
         let result = execute_task(&task, &SrcMainPatchModel, &registry, &config).await;
@@ -2592,6 +4047,178 @@ mod tests {
             std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
             "fn main() { println!(\"hello\"); }\n"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_preserves_output_when_reviewer_hits_turn_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                max_turns: Some(3),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: Some("review the candidate and return JSON".into()),
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ReviewerLoopLimitModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert_eq!(result.agent_output.as_deref(), Some("done"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"hello\"); }\n"
+        );
+        let review = result
+            .review
+            .expect("reviewer infrastructure failure should be preserved as a review finding");
+        assert!(!review.approved);
+        assert!(review.summary.contains("review did not complete"));
+        assert!(
+            review
+                .issues
+                .iter()
+                .any(|issue| issue.contains("Tool loop exceeded maximum turns"))
+        );
+    }
+
+    #[test]
+    fn default_executor_max_turns_use_task_kind_defaults_and_override() {
+        assert_eq!(
+            default_executor_max_turns(&implementation_task(), None),
+            DEFAULT_IMPLEMENTATION_MAX_TURNS
+        );
+        assert_eq!(
+            default_executor_max_turns(&analysis_task(), None),
+            DEFAULT_ANALYSIS_MAX_TURNS
+        );
+        assert_eq!(
+            default_executor_max_turns(&implementation_task(), Some(7)),
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_allows_final_text_on_last_default_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        for index in 1..DEFAULT_IMPLEMENTATION_MAX_TURNS {
+            std::fs::create_dir_all(dir.path().join(format!("probe_{index}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                repeat_detection_window: Some(DEFAULT_IMPLEMENTATION_MAX_TURNS + 1),
+                repeat_warning_threshold: Some(usize::MAX),
+                repeat_abort_threshold: Some(usize::MAX),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ImplementationTurnLimitModel {
+                tool_turns_before_final: DEFAULT_IMPLEMENTATION_MAX_TURNS - 1,
+            },
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert_eq!(result.agent_output.as_deref(), Some("done"));
+        assert_eq!(
+            result.tool_calls.len(),
+            DEFAULT_IMPLEMENTATION_MAX_TURNS - 1
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"turn limit\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_reports_default_turn_limit_in_agent_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        for index in 1..=DEFAULT_IMPLEMENTATION_MAX_TURNS {
+            std::fs::create_dir_all(dir.path().join(format!("probe_{index}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                repeat_detection_window: Some(DEFAULT_IMPLEMENTATION_MAX_TURNS + 1),
+                repeat_warning_threshold: Some(usize::MAX),
+                repeat_abort_threshold: Some(usize::MAX),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ImplementationTurnLimitModel {
+                tool_turns_before_final: DEFAULT_IMPLEMENTATION_MAX_TURNS + 1,
+            },
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result
+            .agent_output
+            .as_deref()
+            .expect("failed result should include the turn-limit reason");
+        assert!(
+            agent_output.contains("Tool loop exceeded maximum turns (48)"),
+            "unexpected agent_output: {agent_output}"
+        );
+        assert_eq!(result.tool_calls.len(), DEFAULT_IMPLEMENTATION_MAX_TURNS);
     }
 
     #[tokio::test]
@@ -2610,6 +4237,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let task = implementation_task();
 
@@ -2642,6 +4271,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let result = execute_task(
@@ -2661,6 +4292,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_implementation_task_honors_submit_task_complete_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &PatchThenSubmitFailModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("acceptance blocked"))
+        );
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .any(|call| call.tool_name == "apply_patch" && call.success)
+        );
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .any(|call| call.tool_name == "submit_task_complete" && call.success)
+        );
+    }
+
+    /// Regression: when the agent submits `submit_task_complete: pass` but the
+    /// reviewer rejects the result and retries are exhausted, `agent_output`
+    /// must carry the actual `review rejected: …` reason — not echo the
+    /// agent's now-disproved success claim. The previous behaviour produced
+    /// misleading dagrs error logs of the form
+    /// `[DgRun0006] Task complete: pass (N evidence entries)`.
+    #[derive(Clone)]
+    struct PatchThenSubmitPassModel;
+
+    impl CompletionModel for PatchThenSubmitPassModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: r#"{"approved":false,"summary":"missing test for new branch","issues":["no test"]}"#.into(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let saw_apply_patch_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content.iter().any(|item| match item {
+                    UserContent::ToolResult(result) => result.name == "apply_patch",
+                    _ => false,
+                }),
+                _ => false,
+            });
+            if saw_apply_patch_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_submit_pass".to_string(),
+                        name: "submit_task_complete".to_string(),
+                        function: Function {
+                            name: "submit_task_complete".to_string(),
+                            arguments: serde_json::json!({
+                                "result": "pass",
+                                "summary": "implementation done",
+                                "evidence": [
+                                    {"command": "cargo test", "exit_code": 0}
+                                ]
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_patch_then_submit_pass".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_carries_review_rejection_into_agent_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: Some("review the candidate and return JSON".into()),
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &PatchThenSubmitPassModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result
+            .agent_output
+            .as_deref()
+            .expect("failed task must carry an agent_output");
+        assert!(
+            agent_output.starts_with("review rejected:"),
+            "agent_output should reflect the rejection reason, got: {agent_output}",
+        );
+        assert!(
+            agent_output.contains("missing test for new branch"),
+            "agent_output should include the reviewer summary, got: {agent_output}",
+        );
+        assert!(
+            !agent_output.contains("Task complete: pass"),
+            "agent_output must not echo the agent's pre-rejection success claim, got: {agent_output}",
+        );
+        let review = result
+            .review
+            .expect("rejected review should be persisted on the result");
+        assert!(!review.approved);
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_stops_retrying_on_fuse_tool_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("read_file", Arc::new(FuseFailHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 3,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &FuseFailToolModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert_eq!(
+            result.retry_count, 0,
+            "FUSE infrastructure failures should escape the in-workspace retry loop"
+        );
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("Device not configured"))
+        );
+        assert_eq!(result.tool_calls.len(), 1);
+    }
+
+    #[tokio::test]
     #[serial]
     async fn execute_dag_fails_noop_implementation_task() {
         let repo = tempfile::tempdir().unwrap();
@@ -2676,6 +4544,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let plan = plan_for_tasks(vec![implementation_task()], 1);
         let model = MockModel {
@@ -2718,6 +4588,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let plan = plan_for_tasks(
@@ -2750,6 +4622,122 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn execute_dag_skips_parallel_stale_cargo_lock_side_effects() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("Cargo.lock"), "# base lock\n").unwrap();
+        std::fs::write(repo.path().join("task_a.txt"), "base\n").unwrap();
+        std::fs::write(repo.path().join("task_b.txt"), "base\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let mut task_a = scoped_implementation_task("Task A", "task_a.txt");
+        task_a.contract.touch_files = Vec::new();
+        task_a.scope_in = vec![".".into()];
+        let mut task_b = scoped_implementation_task("Task B", "task_b.txt");
+        task_b.contract.touch_files = Vec::new();
+        task_b.scope_in = vec![".".into()];
+
+        let run_state = execute_dag(
+            &plan_for_tasks(vec![task_a, task_b], 2),
+            &PatchWithStaleCargoLockModel,
+            &registry,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
+            "task-a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_b.txt")).unwrap(),
+            "task-b\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("Cargo.lock")).unwrap(),
+            "# base lock\n"
+        );
+        assert!(
+            run_state
+                .ordered_task_results()
+                .iter()
+                .all(|result| result.status == TaskNodeStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_syncs_cargo_project_without_treating_lockfile_or_target_as_scope_creep() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("shell", Arc::new(ShellHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let mut task = scoped_implementation_task("Initialize Cargo project", "libra/Cargo.toml");
+        task.task.set_description(Some(
+            "Initialize a Cargo project named libra and verify it builds".into(),
+        ));
+        task.scope_in = vec!["libra/".into()];
+        task.contract.write_scope = vec!["libra/".into()];
+        task.contract.touch_files = vec!["libra/Cargo.toml".into(), "libra/src/main.rs".into()];
+        task.contract.expected_outputs = vec![
+            "libra/Cargo.toml exists".into(),
+            "libra/src/main.rs exists".into(),
+            "cargo build succeeds".into(),
+        ];
+
+        let run_state = execute_dag(
+            &plan_for_tasks(vec![task], 1),
+            &CargoInitShellModel,
+            &registry,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let result = &run_state.ordered_task_results()[0];
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.policy_violations.is_empty());
+        assert!(repo.path().join("libra/Cargo.toml").exists());
+        assert!(repo.path().join("libra/src/main.rs").exists());
+        assert!(repo.path().join("libra/Cargo.lock").exists());
+        assert!(!repo.path().join("libra/target/.rustc_info.json").exists());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn execute_dag_keeps_main_workspace_clean_when_serial_task_fails() {
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -2768,6 +4756,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let plan = plan_for_tasks(vec![scoped_implementation_task("Task A", "task_a.txt")], 1);
@@ -2793,14 +4783,18 @@ mod tests {
             Path::new("/tmp/workspace"),
             &["read_file".into(), "apply_patch".into()],
         );
-        assert!(prompt.contains("Working directory: /tmp/workspace"));
+        assert!(prompt.contains("Repository root: `.`"));
+        assert!(prompt.contains("Internal absolute path: /tmp/workspace"));
+        assert!(prompt.contains("do not pass it to file tools or shell `cd` commands"));
         assert!(prompt.contains("Allowed Tools"));
     }
 
     #[test]
     fn task_prompt_marks_touch_files_as_hard_write_contract() {
+        let mut task = implementation_task();
+        task.task.add_constraint("dependency-policy:no-new");
         let prompt = build_task_prompt(
-            &implementation_task(),
+            &task,
             Path::new("/tmp/workspace"),
             &["read_file".into(), "apply_patch".into()],
         );
@@ -2810,9 +4804,462 @@ mod tests {
         assert!(prompt.contains("## Version Control"));
         assert!(prompt.contains("Do not use git"));
         assert!(prompt.contains("run_libra_vcs"));
+        assert!(prompt.contains("Allowed run_libra_vcs commands"));
+        assert!(prompt.contains("status --json"));
+        assert!(prompt.contains("ls-files"));
+        assert!(prompt.contains("status -uall"));
+        assert!(prompt.contains("must not be used for cargo"));
+        assert!(prompt.contains("verification commands are owned by gate tasks"));
         assert!(prompt.contains("## Completion Requirement"));
         assert!(prompt.contains("Before reporting completion"));
+        assert!(prompt.contains(NO_CHANGES_NEEDED_TOKEN));
+        assert!(prompt.contains("without tool-based evidence"));
+        assert!(prompt.contains("## Dependency Policy"));
+        assert!(prompt.contains("Do not add new third-party dependencies"));
         assert!(prompt.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn task_prompt_explains_allow_with_review_dependency_policy() {
+        let mut task = implementation_task();
+        task.task
+            .add_constraint("dependency-policy:allow-with-review");
+        let prompt = build_task_prompt(
+            &task,
+            Path::new("/tmp/workspace"),
+            &["read_file".into(), "apply_patch".into()],
+        );
+
+        assert!(prompt.contains("## Dependency Policy"));
+        assert!(prompt.contains("only when the user explicitly requested"));
+        assert!(prompt.contains("list each dependency name"));
+        assert!(prompt.contains("verification evidence commands"));
+    }
+
+    #[test]
+    fn implementation_task_allows_no_changes_needed_with_evidence() {
+        let record = ToolCallRecord {
+            tool_name: "read_file".into(),
+            action: "read".into(),
+            paths_read: vec!["src/main.rs".into()],
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        assert_eq!(
+            implementation_missing_write_output(
+                &implementation_task(),
+                &[record],
+                &format!("Already correct. {NO_CHANGES_NEEDED_TOKEN}"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn implementation_task_rejects_no_changes_needed_without_evidence() {
+        let reason = implementation_missing_write_output(
+            &implementation_task(),
+            &[],
+            &format!("Already correct. {NO_CHANGES_NEEDED_TOKEN}"),
+        )
+        .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+        assert!(reason.contains(NO_CHANGES_NEEDED_TOKEN));
+    }
+
+    #[test]
+    fn implementation_task_rejects_no_changes_needed_token_not_at_end() {
+        let record = ToolCallRecord {
+            tool_name: "read_file".into(),
+            action: "read".into(),
+            paths_read: vec!["src/main.rs".into()],
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        let reason = implementation_missing_write_output(
+            &implementation_task(),
+            &[record],
+            &format!("{NO_CHANGES_NEEDED_TOKEN} but I kept writing"),
+        )
+        .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+    }
+
+    #[test]
+    fn implementation_task_accepts_submit_task_complete_no_changes_needed_arg() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "no_changes_needed",
+                "summary": "workspace already satisfies acceptance criteria",
+                "evidence": [],
+            })),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        assert_eq!(
+            implementation_missing_write_output(&implementation_task(), &[submit_call], ""),
+            None
+        );
+    }
+
+    #[test]
+    fn implementation_task_ignores_submit_task_complete_pass_arg() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "pass",
+                "summary": "wrote nothing but claimed pass",
+                "evidence": [],
+            })),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        let reason =
+            implementation_missing_write_output(&implementation_task(), &[submit_call], "")
+                .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+    }
+
+    #[test]
+    fn implementation_task_ignores_failed_submit_task_complete() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "no_changes_needed",
+                "summary": "rejected",
+                "evidence": [],
+            })),
+            success: false,
+            ..ToolCallRecord::default()
+        };
+
+        let reason =
+            implementation_missing_write_output(&implementation_task(), &[submit_call], "")
+                .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+    }
+
+    #[test]
+    fn task_completion_allows_only_blocked_shell_escalation_after_terminal_submit() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "no_changes_needed",
+                "summary": "workspace already satisfies acceptance criteria",
+                "evidence": [],
+            })),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+        let violations = vec![PolicyViolation {
+            code: "sandbox-escalation-deny".into(),
+            message: "shell escalation is not allowed for orchestrator-managed tasks".into(),
+            tool_name: Some("shell".into()),
+            path: None,
+        }];
+
+        assert!(task_completion_allows_blocked_escalation(
+            &violations,
+            &[submit_call]
+        ));
+    }
+
+    #[test]
+    fn task_completion_keeps_other_policy_violations_blocking() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+        let violations = vec![PolicyViolation {
+            code: "scope-creep".into(),
+            message: "write escaped declared scope".into(),
+            tool_name: Some("apply_patch".into()),
+            path: Some("outside.txt".into()),
+        }];
+
+        assert!(!task_completion_allows_blocked_escalation(
+            &violations,
+            &[submit_call]
+        ));
+    }
+
+    #[test]
+    fn task_result_detects_fuse_infrastructure_tool_failure() {
+        let result = TaskResult {
+            task_id: Uuid::new_v4(),
+            status: TaskNodeStatus::Failed,
+            gate_report: None,
+            agent_output: None,
+            retry_count: 0,
+            tool_calls: vec![ToolCallRecord {
+                success: false,
+                summary: Some("Tool 'read_file' failed: Device not configured (os error 6)".into()),
+                ..ToolCallRecord::default()
+            }],
+            policy_violations: Vec::new(),
+            model_usage: None,
+            review: None,
+            thinking: None,
+        };
+
+        assert!(
+            task_result_fuse_infrastructure_failure(&result)
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Device not configured"))
+        );
+    }
+
+    #[test]
+    fn task_result_detects_fuse_infrastructure_shell_snapshot_failure() {
+        let result = TaskResult {
+            task_id: Uuid::new_v4(),
+            status: TaskNodeStatus::Completed,
+            gate_report: None,
+            agent_output: None,
+            retry_count: 0,
+            tool_calls: vec![ToolCallRecord {
+                tool_name: "shell".into(),
+                success: false,
+                summary: Some(
+                    "Tool execution failed: failed to inspect workspace changes after shell command: IO error for operation on /tmp/workspace: Device not configured (os error 6)"
+                        .into(),
+                ),
+                ..ToolCallRecord::default()
+            }],
+            policy_violations: Vec::new(),
+            model_usage: None,
+            review: None,
+            thinking: None,
+        };
+
+        assert!(
+            task_result_fuse_infrastructure_failure(&result)
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed to inspect workspace changes"))
+        );
+    }
+
+    #[test]
+    fn gate_result_detects_fuse_backend_os_error_22() {
+        let result = TaskResult {
+            task_id: Uuid::new_v4(),
+            status: TaskNodeStatus::Failed,
+            gate_report: Some(GateReport {
+                results: vec![GateResult {
+                    check_id: "cargo-build".into(),
+                    kind: "command".into(),
+                    passed: false,
+                    exit_code: 101,
+                    stdout: String::new(),
+                    stderr: "error: failed to read source: Invalid argument (os error 22)".into(),
+                    duration_ms: 1,
+                    timed_out: false,
+                }],
+                all_required_passed: false,
+            }),
+            agent_output: None,
+            retry_count: 0,
+            tool_calls: Vec::new(),
+            policy_violations: Vec::new(),
+            model_usage: None,
+            review: None,
+            thinking: None,
+        };
+
+        assert!(
+            gate_result_fuse_infrastructure_failure(&result)
+                .as_deref()
+                .is_some_and(|reason| {
+                    reason.contains("cargo-build") && reason.contains("os error 22")
+                })
+        );
+    }
+
+    #[test]
+    fn fuse_cleanup_failure_reason_detects_os_error_22() {
+        let err = io::Error::other("Invalid argument (os error 22)");
+
+        assert!(
+            fuse_cleanup_failure_reason(&err)
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed to clean up FUSE worktree"))
+        );
+    }
+
+    #[test]
+    fn workspace_contract_failure_detects_writes_outside_touch_files() {
+        use crate::internal::ai::workspace_snapshot::snapshot_workspace;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let baseline = snapshot_workspace(dir.path()).unwrap();
+        std::fs::write(dir.path().join("untracked.bin"), b"junk").unwrap();
+
+        let mut config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+        // Without baseline, the precheck is a no-op.
+        assert!(workspace_contract_failure(&implementation_task(), &config).is_none());
+
+        config.workspace_baseline = Some(Arc::new(baseline));
+        let message =
+            workspace_contract_failure(&implementation_task(), &config).expect("violation");
+        assert!(message.contains("workspace contract violation"));
+        assert!(
+            message.contains("untracked.bin"),
+            "expected violating path in message: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn workspace_contract_failure_accepts_cargo_lock_companion_via_absolute_touch_file() {
+        use crate::internal::ai::workspace_snapshot::snapshot_workspace;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let baseline = snapshot_workspace(dir.path()).unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "# generated\n").unwrap();
+
+        let mut task = implementation_task();
+        task.contract.touch_files = vec![
+            "/some/abs/Cargo.toml".into(),
+            "/some/abs/src/main.rs".into(),
+        ];
+        task.scope_in = vec![];
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: Some(Arc::new(baseline)),
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        assert!(
+            workspace_contract_failure(&task, &config).is_none(),
+            "Cargo.lock companion should be accepted even when touch_files contain absolute Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn reviewer_prompt_filters_cargo_lock_companion_into_auto_generated_section() {
+        let record = ToolCallRecord {
+            paths_written: vec!["src/main.rs".into(), "Cargo.lock".into()],
+            ..ToolCallRecord::default()
+        };
+        let mut task = implementation_task();
+        task.contract.touch_files = vec!["Cargo.toml".into(), "src/main.rs".into()];
+        let prompt = build_reviewer_prompt(
+            &task,
+            "done",
+            &[record],
+            Path::new("/tmp/workspace"),
+            &["apply_patch".to_string()],
+        );
+
+        assert!(prompt.contains("## Touched Files\nsrc/main.rs"));
+        assert!(prompt.contains("## Auto-Generated Companions\nCargo.lock"));
+        assert!(
+            !prompt.contains("## Touched Files\nCargo.lock")
+                && !prompt.contains("Cargo.lock, src/main.rs"),
+            "Cargo.lock should not appear in the Touched Files section"
+        );
+    }
+
+    #[test]
+    fn reviewer_prompt_includes_dependency_change_review_block() {
+        let record = ToolCallRecord {
+            diffs: vec![ToolDiffRecord {
+                path: "Cargo.toml".into(),
+                change_type: "update".into(),
+                diff: "@@\n [dependencies]\n+clap = \"4\"\n".into(),
+            }],
+            ..ToolCallRecord::default()
+        };
+        let mut task = implementation_task();
+        task.task
+            .add_constraint("dependency-policy:allow-with-review");
+
+        let prompt = build_reviewer_prompt(
+            &task,
+            "added clap",
+            &[record],
+            Path::new("/tmp/workspace"),
+            &["read_file".to_string()],
+        );
+
+        assert!(prompt.contains("## Dependency Change Review"));
+        assert!(prompt.contains("Changed manifests: Cargo.toml"));
+        assert!(prompt.contains("match the user's explicit intent"));
+        assert!(prompt.contains("name the added dependencies"));
+    }
+
+    #[test]
+    fn parses_reviewer_json_from_fenced_block_after_markdown_notes() {
+        let raw = "\
+Review notes:
+- Do not parse this pseudo object: {approved: true}
+
+```json
+{\"approved\":true,\"summary\":\"clap dependency added\",\"issues\":[]}
+```
+
+Done.";
+
+        let decision = parse_reviewer_decision(raw).unwrap();
+
+        assert!(decision.approved);
+        assert_eq!(decision.summary, "clap dependency added");
+        assert!(decision.issues.is_empty());
+    }
+
+    #[test]
+    fn parses_reviewer_json_embedded_in_plain_text() {
+        let raw = "The change is acceptable. {\"approved\":false,\"summary\":\"needs test\",\"issues\":[\"missing CLI test\"]}";
+
+        let decision = parse_reviewer_decision(raw).unwrap();
+
+        assert!(!decision.approved);
+        assert_eq!(decision.summary, "needs test");
+        assert_eq!(decision.issues, vec!["missing CLI test"]);
+    }
+
+    #[test]
+    fn rejects_reviewer_text_without_json_object() {
+        let error = parse_reviewer_decision("approved: true").unwrap_err();
+
+        assert!(error.contains("missing JSON object"));
     }
 
     #[test]
@@ -2839,11 +5286,42 @@ mod tests {
         let task = implementation_task();
         let mut spec = (*spec()).clone();
         spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Deny;
         let tools = allowed_tools_for_task(&spec, &task);
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(tools.contains(&"run_libra_vcs".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+        assert!(!tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn shell_acl_exposes_shell_to_coder() {
+        let task = implementation_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Deny;
+        spec.security.tool_acl.allow.push(ToolRule {
+            tool: "shell".into(),
+            actions: vec!["execute".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let tools = allowed_tools_for_task(&spec, &task);
+
+        assert!(tools.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn network_allow_exposes_web_search_to_coder() {
+        let task = analysis_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Allow;
+
+        let tools = allowed_tools_for_task(&spec, &task);
+
+        assert!(tools.contains(&"web_search".to_string()));
     }
 
     #[test]
@@ -2934,6 +5412,8 @@ mod tests {
             observer: Some(Arc::new(RecordingObserver {
                 events: Arc::clone(&events),
             })),
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let a = scoped_implementation_task("A", "src/a.txt");
@@ -2992,6 +5472,8 @@ mod tests {
             observer: Some(Arc::new(RecordingObserver {
                 events: Arc::clone(&events),
             })),
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let mut failing = implementation_task();
@@ -3058,6 +5540,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let first = implementation_task();
@@ -3131,6 +5615,8 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: Some("todo".into()),
             observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let err = execute_dag(
             &plan,

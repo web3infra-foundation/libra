@@ -1,3 +1,9 @@
+//! Provider-neutral chat message primitives for completion requests.
+//!
+//! Boundary: message roles and parts must round-trip across all configured providers;
+//! provider adapters are responsible for translating unsupported fields. Mock provider
+//! tests cover empty content, tool messages, and multi-part messages.
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,6 +20,8 @@ pub enum Message {
     // The message is from an assistant.
     Assistant {
         id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         content: OneOrMany<AssistantContent>,
     },
     // Future-proof: Explicit System message support
@@ -186,6 +194,7 @@ impl Message {
     pub fn assistant(text: impl Into<String>) -> Self {
         Message::Assistant {
             id: None,
+            reasoning_content: None,
             content: OneOrMany::One(AssistantContent::Text(Text { text: text.into() })),
         }
     }
@@ -213,5 +222,18 @@ pub enum MessageError {
 impl From<MessageError> for CompletionError {
     fn from(error: MessageError) -> Self {
         CompletionError::RequestError(error.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MessageError;
+
+    #[test]
+    fn message_error_display_pins_conversion_error_template() {
+        assert_eq!(
+            MessageError::ConversionError("unsupported role".to_string()).to_string(),
+            "Message conversion error: unsupported role",
+        );
     }
 }

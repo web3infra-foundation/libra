@@ -27,6 +27,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
+        pager::Pager,
         path, util,
     },
 };
@@ -158,17 +159,28 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
         return validate_show_quiet(&args).await;
     }
 
+    let rendered = render_show_human(&args).await?;
+    if rendered.is_empty() {
+        return Ok(());
+    }
+
+    let mut pager = Pager::with_config(output)?;
+    pager.write_str(&rendered)?;
+    pager.finish()
+}
+
+async fn render_show_human(args: &ShowArgs) -> CliResult<String> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
     // Handle `<revision>:<path>` lookups before generic revision resolution.
     if let Some((rev, path)) = object_ref.split_once(':') {
-        return show_commit_file(rev, path, &args).await;
+        return show_commit_file(rev, path).await;
     }
 
     // Raw object IDs should keep their native schema, including annotated tag
     // objects, but hash-like ref names must still fall back to ref resolution.
     if let Some(hash) = resolve_existing_object_hash(object_ref) {
-        return show_object_by_hash(&hash, &args).await;
+        return show_object_by_hash(&hash, args).await;
     }
 
     // Resolve refs first so tags keep their custom rendering.
@@ -182,11 +194,11 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
                 } else {
                     commit_hash
                 };
-                return show_tag_by_hash(&tag_hash, &args).await;
+                return show_tag_by_hash(&tag_hash, args).await;
             }
             _ => {
                 // Not a tag, lightweight tag, or tag doesn't exist: show as commit.
-                return show_commit(&commit_hash, &args).await;
+                return show_commit(&commit_hash, args).await;
             }
         }
     }
@@ -228,7 +240,7 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
 fn show_object_by_hash<'a>(
     hash: &'a ObjectHash,
     args: &'a ShowArgs,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<()>> + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<String>> + 'a>> {
     Box::pin(async move {
         let storage = ClientStorage::init(path::objects());
 
@@ -276,15 +288,15 @@ fn validate_object_by_hash<'a>(
 }
 
 /// Shows a commit together with optional diff output.
-async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<String> {
     // Load the commit before rendering any metadata or diff output.
     let commit = load_object::<Commit>(commit_hash).map_err(|e| {
         CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
-    // Render the commit header first.
-    display_commit_info(&commit, args);
+    let mut output = String::new();
+    display_commit_info(&mut output, &commit, args);
 
     // Render patch-style details when requested.
     if !args.no_patch {
@@ -292,26 +304,29 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()>
 
         if args.stat {
             // Show the summary view.
-            show_diffstat(&commit, paths.clone()).await?;
+            let diffstat = show_diffstat(&commit, paths.clone()).await?;
+            if !diffstat.is_empty() {
+                output.push_str(&diffstat);
+            }
         } else if args.name_only {
             // Show only changed file names.
             let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
             if !changed_files.is_empty() {
-                println!();
+                output.push('\n');
                 for file in changed_files {
-                    println!("{}", file.path.display());
+                    output.push_str(&format!("{}\n", file.path.display()));
                 }
             }
         } else {
             // Show the full patch.
             let diff_output = generate_diff(&commit, paths).await?;
             if !diff_output.is_empty() {
-                println!();
-                print!("{}", diff_output);
+                output.push('\n');
+                output.push_str(&diff_output);
             }
         }
     }
-    Ok(())
+    Ok(output)
 }
 
 async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
@@ -338,42 +353,39 @@ async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> Cl
 }
 
 /// Shows an annotated or lightweight tag.
-async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<String> {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => {
+            let mut output = String::new();
             // Render the annotated tag header.
-            println!("{} {}", "tag".yellow(), tag_obj.tag_name);
-            println!(
+            output.push_str(&format!("{} {}\n", "tag".yellow(), tag_obj.tag_name));
+            output.push_str(&format!(
                 "Tagger: {} <{}>",
                 tag_obj.tagger.name.trim(),
                 tag_obj.tagger.email.trim()
-            );
+            ));
+            output.push('\n');
 
             let date = chrono::DateTime::from_timestamp(tag_obj.tagger.timestamp as i64, 0)
                 .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-            println!("Date:   {}", date.to_rfc2822());
-            println!();
-            println!("{}", tag_obj.message.trim());
-            println!();
+            output.push_str(&format!("Date:   {}\n\n", date.to_rfc2822()));
+            output.push_str(tag_obj.message.trim());
+            output.push_str("\n\n");
 
             // Continue with the tagged object.
-            show_object_by_hash(&tag_obj.object_hash, args).await?;
+            output.push_str(&show_object_by_hash(&tag_obj.object_hash, args).await?);
+            Ok(output)
         }
         Ok(tag::TagObject::Commit(commit)) => {
             // Lightweight tags point directly to commits.
-            show_commit(&commit.id, args).await?;
+            show_commit(&commit.id, args).await
         }
-        Ok(_) => {
-            return Err(CliError::fatal("tag points to unsupported object type")
-                .with_stable_code(StableErrorCode::CliInvalidTarget));
-        }
+        Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
+            .with_stable_code(StableErrorCode::CliInvalidTarget)),
         Err(e) => {
-            return Err(
-                CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
-            );
+            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
         }
     }
-    Ok(())
 }
 
 async fn validate_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
@@ -391,24 +403,24 @@ async fn validate_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<(
 }
 
 /// Shows a tree object.
-async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
+async fn show_tree(hash: &ObjectHash) -> CliResult<String> {
     let tree = load_object::<Tree>(hash).map_err(|e| {
         CliError::fatal(format!("could not load tree {}: {}", hash, e))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
-    println!("{} {}\n", "tree".yellow(), hash);
+    let mut output = format!("{} {}\n\n", "tree".yellow(), hash);
 
     for item in &tree.tree_items {
-        println!(
-            "{:06o} {} {}\t{}",
+        output.push_str(&format!(
+            "{:06o} {} {}\t{}\n",
             tree_item_mode_to_u32(item.mode),
             tree_item_mode_to_object_type(item.mode),
             item.id,
             item.name
-        );
+        ));
     }
-    Ok(())
+    Ok(output)
 }
 
 fn validate_tree(hash: &ObjectHash) -> CliResult<()> {
@@ -420,7 +432,7 @@ fn validate_tree(hash: &ObjectHash) -> CliResult<()> {
 }
 
 /// Shows a blob as text when possible.
-async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
+async fn show_blob(hash: &ObjectHash) -> CliResult<String> {
     let blob = load_object::<Blob>(hash).map_err(|e| {
         CliError::fatal(format!("could not load blob {}: {}", hash, e))
             .with_stable_code(StableErrorCode::RepoCorrupt)
@@ -428,12 +440,9 @@ async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
 
     // Print text blobs directly and summarize binary blobs.
     match String::from_utf8(blob.data.clone()) {
-        Ok(text) => print!("{}", text),
-        Err(_) => {
-            println!("Binary file (size: {} bytes)", blob.data.len());
-        }
+        Ok(text) => Ok(text),
+        Err(_) => Ok(format!("Binary file (size: {} bytes)\n", blob.data.len())),
     }
-    Ok(())
 }
 
 fn validate_blob(hash: &ObjectHash) -> CliResult<()> {
@@ -445,7 +454,7 @@ fn validate_blob(hash: &ObjectHash) -> CliResult<()> {
 }
 
 /// Shows a file from a specific revision.
-async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) -> CliResult<()> {
+async fn show_commit_file(rev: &str, file_path: &str) -> CliResult<String> {
     // Resolve the revision before looking up the path.
     let commit_hash = util::get_commit_base(rev)
         .await
@@ -467,14 +476,13 @@ async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) -> CliRe
     let target_path = PathBuf::from(file_path);
 
     if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
-        show_blob(blob_hash).await?;
+        show_blob(blob_hash).await
     } else {
-        return Err(
+        Err(
             CliError::fatal(format!("path '{}' does not exist in '{}'", file_path, rev))
                 .with_stable_code(StableErrorCode::CliInvalidTarget),
-        );
+        )
     }
-    Ok(())
 }
 
 async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
@@ -506,44 +514,48 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
 }
 
 /// Renders the commit header using the selected format.
-fn display_commit_info(commit: &Commit, args: &ShowArgs) {
+fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
     if args.oneline {
         // Oneline format prints the short hash and the first subject line.
         let short_hash = &commit.id.to_string()[..7];
         let (msg, _) = parse_commit_msg(&commit.message);
         let first_line = msg.lines().next().unwrap_or("");
-        println!("{} {}", short_hash.yellow(), first_line);
+        output.push_str(&format!("{} {}\n", short_hash.yellow(), first_line));
     } else {
         // Full format matches the default `show` header layout.
-        println!("{} {}", "commit".yellow(), commit.id.to_string().yellow());
-        println!(
-            "Author: {} <{}>",
+        output.push_str(&format!(
+            "{} {}\n",
+            "commit".yellow(),
+            commit.id.to_string().yellow()
+        ));
+        output.push_str(&format!(
+            "Author: {} <{}>\n",
             commit.author.name.trim(),
             commit.author.email.trim()
-        );
+        ));
 
         // Format the commit timestamp for display.
         let date = chrono::DateTime::from_timestamp(commit.committer.timestamp as i64, 0)
             .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-        println!("Date:   {}", date.to_rfc2822());
+        output.push_str(&format!("Date:   {}\n", date.to_rfc2822()));
 
         // Print the commit message body.
         let (msg, _) = parse_commit_msg(&commit.message);
         for line in msg.lines() {
-            println!("    {}", line);
+            output.push_str(&format!("    {}\n", line));
         }
     }
 }
 
 /// Renders a simple diffstat summary.
-async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
+async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<String> {
     let changed_files = get_changed_files_for_commit(commit, &paths).await?;
 
     if changed_files.is_empty() {
-        return Ok(());
+        return Ok(String::new());
     }
 
-    println!();
+    let mut output = String::from("\n");
 
     // Count summary totals while printing each changed path.
     let mut additions = 0;
@@ -563,10 +575,10 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
             ChangeType::Modified => "M",
             ChangeType::Deleted => "D",
         };
-        println!("{}  {}", status, change.path.display());
+        output.push_str(&format!("{}  {}\n", status, change.path.display()));
     }
 
-    println!(
+    output.push_str(&format!(
         "\n{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
         changed_files.len(),
         if changed_files.len() != 1 { "s" } else { "" },
@@ -574,8 +586,9 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
         if additions != 1 { "s" } else { "" },
         deletions,
         if deletions != 1 { "s" } else { "" }
-    );
-    Ok(())
+    ));
+    output.push('\n');
+    Ok(output)
 }
 
 fn show_bad_revision_error(object_ref: &str) -> CliError {

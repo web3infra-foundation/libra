@@ -240,6 +240,65 @@ impl HistoryCell for AssistantHistoryCell {
     }
 }
 
+/// Provider thinking/reasoning output shown to the developer while a turn streams.
+#[derive(Debug, Clone)]
+pub struct ThinkingHistoryCell {
+    /// Incremental thinking content emitted by the provider.
+    pub content: String,
+    /// Whether the provider is still streaming this thinking block.
+    pub is_streaming: bool,
+}
+
+impl ThinkingHistoryCell {
+    /// Create a streaming thinking cell.
+    pub fn streaming() -> Self {
+        Self {
+            content: String::new(),
+            is_streaming: true,
+        }
+    }
+
+    /// Append streamed thinking text.
+    pub fn append(&mut self, delta: &str) {
+        self.content.push_str(delta);
+    }
+
+    /// Mark the thinking block as complete.
+    pub fn complete(&mut self) {
+        self.is_streaming = false;
+    }
+}
+
+impl HistoryCell for ThinkingHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let content = self.content.trim();
+        if content.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::new();
+        let style = theme::text::subtle();
+        lines.push(Line::styled("● Think", style.add_modifier(Modifier::BOLD)));
+        for line in content.lines() {
+            lines.extend(wrap_text(line, "  ", width, style));
+        }
+        if self.is_streaming {
+            lines.push(Line::styled("  ▌", theme::status::ready()));
+        } else {
+            lines.push(Line::raw(""));
+        }
+        lines
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// A tool call in the chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ToolCallGroup {
@@ -254,11 +313,13 @@ enum ToolCallGroup {
 impl ToolCallGroup {
     fn for_tool(tool_name: &str) -> Self {
         match tool_name {
-            "read_file" | "list_dir" | "grep_files" | "search_files" => Self::Explore,
+            "read_file" | "list_dir" | "grep_files" | "search_files" | "web_search" => {
+                Self::Explore
+            }
             "apply_patch" => Self::Edit,
             "shell" => Self::Shell,
             "request_user_input" => Self::Input,
-            "submit_intent_draft" => Self::Draft,
+            "submit_intent_draft" | "submit_plan_draft" => Self::Draft,
             _ => Self::Other(tool_name.to_string()),
         }
     }
@@ -569,11 +630,11 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
         "read_file" => format!(
             "Read {}",
-            argument_string(arguments, "file_path").unwrap_or("?")
+            redact_internal_workspace_paths(argument_string(arguments, "file_path").unwrap_or("?"))
         ),
         "list_dir" => format!(
             "List {}",
-            argument_string(arguments, "dir_path").unwrap_or(".")
+            redact_internal_workspace_paths(argument_string(arguments, "dir_path").unwrap_or("."))
         ),
         "grep_files" | "search_files" => {
             let pattern = argument_string(arguments, "pattern")
@@ -583,21 +644,141 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
             format!(
                 "Search {} in {}",
                 truncate_utf8(pattern, 80),
-                truncate_utf8(path, 80)
+                truncate_utf8(&redact_internal_workspace_paths(path), 80)
             )
+        }
+        "web_search" => {
+            let query = argument_string(arguments, "query").unwrap_or("(query)");
+            format!("Search web for {}", truncate_utf8(query, 80))
         }
         "shell" => format!(
             "Run {}",
             truncate_utf8(
-                argument_string(arguments, "command").unwrap_or("(command)"),
+                &redact_internal_workspace_paths(
+                    argument_string(arguments, "command").unwrap_or("(command)")
+                ),
                 120
             )
         ),
         "apply_patch" => summarize_apply_patch(arguments),
         "request_user_input" => "Ask for input".to_string(),
         "submit_intent_draft" => "Submit intent draft".to_string(),
-        _ => format!("Run {}", tool_name.replace('_', " ")),
+        "submit_plan_draft" => "Submit plan draft".to_string(),
+        _ => {
+            // For unrecognised tools, show a compact pretty-printed JSON
+            // signature so reviewers can see the actual argument shape rather
+            // than just the tool name.
+            let head = format!("Run {}", tool_name.replace('_', " "));
+            match format_arguments_inline(arguments, 96) {
+                Some(body) if !body.is_empty() => format!("{head} {body}"),
+                _ => head,
+            }
+        }
     }
+}
+
+/// Render a JSON value as a compact one-line summary (`{"key":"value", ...}`)
+/// while preserving pretty-printed JSON indentation for embedded multi-line
+/// strings. Returns `None` when the value is null or empty.
+fn format_arguments_inline(value: &Value, max_chars: usize) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(obj) = value.as_object()
+        && obj.is_empty()
+    {
+        return None;
+    }
+    if let Some(arr) = value.as_array()
+        && arr.is_empty()
+    {
+        return None;
+    }
+    // serde_json::to_string never fails for `Value`.
+    let raw = serde_json::to_string(value).unwrap_or_default();
+    let collapsed = collapse_whitespace(&raw);
+    Some(truncate_chars(&collapsed, max_chars))
+}
+
+/// Char-based truncation that always respects code-point boundaries and
+/// appends `…` when the input is longer than `max_chars`. Used for JSON
+/// argument previews where the parameter is genuinely a character budget,
+/// not a byte budget — non-ASCII keys/values stay readable.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = String::with_capacity(text.len());
+    for ch in text.chars().take(max_chars.saturating_sub(1)) {
+        truncated.push(ch);
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+                out.push(ch);
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            last_space = false;
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        last_space = false;
+        out.push(ch);
+    }
+    out
+}
+
+/// Pretty-print a JSON value with two-space indentation for use inside
+/// multi-line tool argument displays. Returns `None` for null / empty values.
+pub(super) fn format_arguments_pretty(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(obj) = value.as_object()
+        && obj.is_empty()
+    {
+        return None;
+    }
+    if let Some(arr) = value.as_array()
+        && arr.is_empty()
+    {
+        return None;
+    }
+    serde_json::to_string_pretty(value).ok()
 }
 
 fn summarize_apply_patch(arguments: &Value) -> String {
@@ -633,19 +814,31 @@ fn summarize_apply_patch(arguments: &Value) -> String {
 fn summarize_tool_output_failure(output: &ToolOutput) -> String {
     match output {
         ToolOutput::Function { content, .. } => first_non_empty_line(content)
-            .map(|line| truncate_utf8(line, 180))
+            .map(|line| truncate_utf8(&redact_internal_workspace_paths(line), 180))
             .unwrap_or_else(|| "Tool failed".to_string()),
         ToolOutput::Mcp { .. } => "MCP tool failed".to_string(),
     }
 }
 
 fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option<String> {
-    if tool_name != "shell" {
-        return None;
+    // MCP tool results carry structured JSON. Surface a pretty single-line
+    // preview so the TUI shows shape rather than `[object Object]`-style.
+    if let ToolOutput::Mcp { result } = output {
+        return format_arguments_inline(result, 180);
     }
 
     let text = output.as_text()?.trim();
     if text.is_empty() {
+        return None;
+    }
+
+    // If the output looks like JSON, prefer a compact pretty-printed preview
+    // so reviewers see structure rather than a long unindented blob.
+    if let Some(json_preview) = json_preview_from_text(text, 180) {
+        return Some(json_preview);
+    }
+
+    if tool_name != "shell" {
         return None;
     }
 
@@ -654,6 +847,7 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !line.starts_with("Exit code: 0"))
+        .map(redact_internal_workspace_paths)
         .take(3)
         .collect::<Vec<_>>();
 
@@ -664,8 +858,59 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
     }
 }
 
+/// Detect JSON-shaped tool output and return a pretty-printed preview of the
+/// first few lines so structure shows up nicely in the chat history.
+fn json_preview_from_text(text: &str, max_chars: usize) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    let pretty = format_arguments_pretty(&value)?;
+    let preview = pretty
+        .lines()
+        .take(3)
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(truncate_chars(&collapse_whitespace(&preview), max_chars))
+}
+
 fn first_non_empty_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn redact_internal_workspace_paths(text: &str) -> String {
+    const MARKERS: [&str; 2] = ["libra-task-worktree-copy-", "libra-task-worktree-fuse-"];
+    let mut redacted = text.to_string();
+
+    while let Some((marker_index, _)) = MARKERS
+        .iter()
+        .filter_map(|marker| redacted.find(marker).map(|index| (index, marker)))
+        .min_by_key(|(index, _)| *index)
+    {
+        let start = redacted[..marker_index]
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| path_token_boundary(ch).then_some(index + ch.len_utf8()))
+            .unwrap_or(0);
+        let end = redacted[marker_index..]
+            .char_indices()
+            .find_map(|(offset, ch)| path_token_boundary(ch).then_some(marker_index + offset))
+            .unwrap_or(redacted.len());
+
+        redacted.replace_range(start..end, "<task workspace>");
+    }
+
+    redacted
+}
+
+fn path_token_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':' | ';'
+        )
 }
 
 fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
@@ -1029,7 +1274,7 @@ impl PlanSummaryHistoryCell {
                 ),
             ]),
             Line::styled(
-                "  Workflow graph is shown in the side panel.",
+                "  Workflow graph is shown on the right.",
                 theme::text::muted().add_modifier(Modifier::DIM),
             ),
         ]
@@ -1381,7 +1626,7 @@ impl OrchestratorResultHistoryCell {
             ),
         ]));
         lines.push(Line::styled(
-            "  DAG execution flow is shown in the card above.",
+            "  Execution flow is shown on the right.",
             theme::text::muted().add_modifier(Modifier::DIM),
         ));
         lines
@@ -1842,7 +2087,7 @@ mod tests {
 
     use super::{
         AssistantHistoryCell, HistoryCell, OrchestratorResultHistoryCell, PlanSummaryHistoryCell,
-        PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        PlanUpdateHistoryCell, ThinkingHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     };
     use crate::internal::ai::{
         intentspec::{
@@ -1918,6 +2163,7 @@ mod tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
                 TaskResult {
                     task_id: plan.tasks[1].id(),
@@ -1929,6 +2175,7 @@ mod tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
             ],
             system_report: SystemReport {
@@ -1961,7 +2208,7 @@ mod tests {
                             kind: ObjectiveKind::Analysis,
                         },
                         Objective {
-                            title: "show dag in side panel".to_string(),
+                            title: "show workflow on right".to_string(),
                             kind: ObjectiveKind::Analysis,
                         },
                     ],
@@ -2008,6 +2255,18 @@ mod tests {
     }
 
     #[test]
+    fn thinking_cell_renders_provider_thoughts_for_developers() {
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append("Inspecting failure evidence");
+        let rendered = to_strings(cell.display_lines(80));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Think"));
+        assert!(joined.contains("Inspecting failure evidence"));
+        assert!(rendered.iter().any(|line| line.trim() == "▌"));
+    }
+
+    #[test]
     fn plan_summary_cell_renders_compact_sections() {
         let cell = PlanSummaryHistoryCell::new(
             intentspec_fixture(),
@@ -2027,6 +2286,7 @@ mod tests {
         assert!(joined.contains("[max 2]"));
         assert!(joined.contains("[lanes 2]"));
         assert!(joined.contains("[layers 2]"));
+        assert!(!joined.contains("Plan:"));
         assert!(!joined.contains("files:"));
         assert!(!joined.contains("depends on:"));
     }
@@ -2107,6 +2367,72 @@ mod tests {
     }
 
     #[test]
+    fn unrecognised_tool_args_show_pretty_json_signature() {
+        let cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "trade_execute_order".to_string(),
+            json!({
+                "symbol": "BTC-USD",
+                "side": "buy",
+                "size": 0.5,
+                "limit": 41250.0
+            }),
+        );
+        let rendered = to_strings(cell.display_lines(120));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"symbol\":\"BTC-USD\""),
+            "expected JSON signature, got:\n{joined}"
+        );
+        assert!(joined.contains("trade execute order"));
+    }
+
+    #[test]
+    fn json_signature_preserves_escaped_quotes_and_unicode() {
+        // Inputs with quoted-quotes and CJK content should round-trip
+        // through `format_arguments_inline` without splitting strings or
+        // mangling escape sequences.
+        let cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "render_caption".to_string(),
+            json!({
+                "title": "He said \"hello\"",
+                "subtitle": "中文标题"
+            }),
+        );
+        let rendered = to_strings(cell.display_lines(160));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"He said \\\"hello\\\"\""),
+            "expected escaped quotes preserved in JSON preview, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("中文标题"),
+            "expected CJK content preserved in JSON preview, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn json_tool_output_is_previewed_in_summary() {
+        // Use a non-`shell` tool so the only way the assertion below can pass
+        // is via the JSON-preview branch (the shell fallback would simply
+        // forward the raw blob).
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "fetch_inventory".to_string(),
+            json!({"limit": 1}),
+        );
+        let json_blob = "{\n  \"items\": [\n    {\"id\": 1, \"name\": \"alpha\"}\n  ]\n}";
+        cell.complete_call("1", Ok(ToolOutput::success(json_blob)));
+        let rendered = to_strings(cell.display_lines(160));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"items\""),
+            "expected JSON preview, got:\n{joined}"
+        );
+    }
+
+    #[test]
     fn shell_tool_cell_renders_successful_command_output() {
         let mut cell = ToolCallHistoryCell::new(
             "1".to_string(),
@@ -2127,6 +2453,29 @@ mod tests {
         assert!(joined.contains("Run cargo test"));
         assert!(joined.contains("running 3 tests"));
         assert!(joined.contains("test result: ok"));
+    }
+
+    #[test]
+    fn tool_cell_redacts_internal_task_worktree_paths() {
+        let internal_path = "/var/folders/x/y/T/libra-task-worktree-copy-123-019dc9dd-44a7-70f1-8a75-3811b7660261/workspace";
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "shell".to_string(),
+            json!({"command": format!("cd {internal_path} && cargo test")}),
+        );
+        cell.complete_call(
+            "1",
+            Ok(ToolOutput::success(format!(
+                "Exit code: 0\nAbsolute path: {internal_path}/src"
+            ))),
+        );
+
+        let rendered = to_strings(cell.display_lines(140));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("cd <task workspace> && cargo test"));
+        assert!(joined.contains("Absolute path: <task workspace>"));
+        assert!(!joined.contains("libra-task-worktree-copy"));
     }
 
     #[test]

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "syncRunId": "11111111-aaaa-bbbb-cccc-deadbeef0003",
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "status": "failed",
+  "startedAt": "2026-05-09T15:00:00Z",
+  "finishedAt": "2026-05-09T15:04:42Z",
+  "refsCount": 5,
+  "revisionCount": 2,
+  "fileCount": 184,
+  "aiObjectCount": 0,
+  "aiBundleCount": 0,
+  "warnings": [
+    "ai-object encoder failed for run-2026-05-09-007 (skipped)"
+  ],
+  "errorMessage": "R2 PutObject failed for sites/<site>/<rev>/ai/index.json: 503 Service Unavailable after 3 retries",
+  "cliVersion": "0.16.3"
+}

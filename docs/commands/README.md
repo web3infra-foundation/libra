@@ -12,6 +12,7 @@ Every Libra command accepts the following global flags:
 | `--machine` | | Strict machine mode (implies `--json=ndjson --no-pager --color=never --quiet`) |
 | `--no-pager` | | Disable pager (`less`) |
 | `--color` | | When to use colors (`auto`, `never`, `always`) |
+| `--no-color` | | Disable colors; equivalent to `--color=never` |
 | `--quiet` | `-q` | Suppress stdout |
 | `--exit-code-on-warning` | | Return exit code 9 on warnings |
 | `--progress` | | Control progress output (`json`, `text`, `none`, `auto`) |
@@ -51,6 +52,8 @@ Every Libra command accepts the following global flags:
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |
 | `libra reflog` | | View, delete, or check existence of reference change logs | [reflog.md](reflog.md) |
+| `libra rev-list` | | List commit objects reachable from a revision | [rev-list.md](rev-list.md) |
+| `libra rev-parse` | | Parse revision names, abbreviate refs, and print repository paths | [rev-parse.md](rev-parse.md) |
 
 ### Branching & Navigation
 
@@ -59,7 +62,7 @@ Every Libra command accepts the following global flags:
 | `libra branch` | `br` | Create, delete, rename, list, and inspect branches | [branch.md](branch.md) |
 | `libra tag` | | Create, list, or delete lightweight and annotated tags | [tag.md](tag.md) |
 | `libra switch` | `sw` | Switch branches, create new branches, or detach HEAD with fuzzy suggestions | [switch.md](switch.md) |
-| `libra checkout` | | Compatibility surface over `switch` + `restore` (hidden) | [checkout.md](checkout.md) |
+| `libra checkout` | | Branch compatibility surface; prefer `switch` for branches and `restore` for files | [checkout.md](checkout.md) |
 
 ### History Manipulation
 
@@ -70,7 +73,7 @@ Every Libra command accepts the following global flags:
 | `libra rebase` | `rb` | Reapply commits on top of another base tip with conflict resolution | [rebase.md](rebase.md) |
 | `libra cherry-pick` | `cp` | Apply changes from existing commits onto the current branch | [cherry-pick.md](cherry-pick.md) |
 | `libra revert` | | Create a new commit that undoes changes from a specified commit | [revert.md](revert.md) |
-| `libra bisect` | | Binary search to find the commit that introduced a bug (hidden) | [bisect.md](bisect.md) |
+| `libra bisect` | | Binary search to find the commit that introduced a bug; supports `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` | [bisect.md](bisect.md) |
 
 ### Remote Operations
 
@@ -78,6 +81,7 @@ Every Libra command accepts the following global flags:
 |---------|-------|-------------|-----|
 | `libra remote` | | Manage remote repositories: add, remove, rename, inspect URLs, prune stale refs | [remote.md](remote.md) |
 | `libra fetch` | | Download objects and update remote-tracking refs from one or all remotes | [fetch.md](fetch.md) |
+| `libra ls-remote` | | List references advertised by a remote repository without fetching objects | [ls-remote.md](ls-remote.md) |
 | `libra push` | | Send local commits and objects to a remote with LFS integration | [push.md](push.md) |
 | `libra pull` | | Fetch and fast-forward merge into the current branch | [pull.md](pull.md) |
 | `libra open` | | Open the repository's remote URL in the system browser | [open.md](open.md) |
@@ -88,6 +92,8 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra cloud` | | Cloud backup and restore operations via Cloudflare D1/R2 | [cloud.md](cloud.md) |
+| `libra publish` | | Manage read-only Cloudflare Worker publishing | [publish.md](publish.md) |
+| `libra db` | | Inspect and upgrade the repository SQLite schema | [db.md](db.md) |
 | `libra worktree` | `wt` | Manage multiple working trees attached to the repository | [worktree.md](worktree.md) |
 
 ### AI & Development
@@ -95,14 +101,23 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra code` | | Interactive TUI with AI agent, web server, and MCP integration | [code.md](code.md) |
+| `libra code-control` | | Drive a local Libra Code TUI automation control session | [code-control.md](code-control.md) |
+| `libra automation` | | List, run, and inspect AI automation rules | [automation.md](automation.md) |
+| `libra usage` | | Report and prune AI provider/model usage aggregates | [usage.md](usage.md) |
 | `libra graph` | | Inspect a Libra Code thread version graph in a dedicated TUI | [graph.md](graph.md) |
+| `libra sandbox` | | Inspect AI sandbox diagnostics, including OS backend availability and downgrade warnings | [sandbox.md](sandbox.md) |
+| `libra agent` | | Manage external-agent capture, checkpoints, hooks, and RPC adapters | [agent.md](agent.md) |
 
 ### Low-Level & Inspection
 
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra cat-file` | | Inspect Git objects and AI objects by type, size, or pretty-printed content | [cat-file.md](cat-file.md) |
+| `libra fsck` | | Verify the integrity of objects, refs, and index in a Libra repository | [fsck.md](fsck.md) |
+| `libra hash-object` | | Compute Git-compatible blob object IDs from files or standard input | [hash-object.md](hash-object.md) |
+| `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
+| `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |
 
 ## Structured Output Envelope
@@ -148,7 +163,7 @@ On error:
 Libra's command-line interface is designed with these principles:
 
 1. **Git compatibility where it makes sense** — Most commands mirror Git's flag names and behavior so existing muscle memory transfers directly.
-2. **Structured output as a first-class citizen** — Every command supports `--json` and `--machine` for CI/CD pipelines and AI agent consumption.
+2. **Structured output as a first-class citizen** — `--json` and `--machine` are global flags, and structured output is enabled command-by-command as each surface is modernised. Individual command pages document the currently stable machine-readable contract.
 3. **SQLite over flat files** — Refs, config, and metadata are stored in SQLite for transactional consistency and atomic updates.
 4. **Security by default** — Vault-backed signing and secret encryption are enabled by default, not opt-in.
 5. **Explicit over implicit** — Commands like `clean` require `-f` or `-n`; `status --exit-code` is an explicit opt-in rather than Git's ambiguous exit code behavior.

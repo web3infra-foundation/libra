@@ -1,3 +1,20 @@
+//! Agent runtime — the execution layer that turns a [`CompletionModel`] plus
+//! configuration into something callable from the rest of the codebase.
+//!
+//! The runtime exposes three top-level building blocks:
+//!
+//! - [`Agent`] — a stateless wrapper that bundles a model with a system preamble and
+//!   tool set. One call, one tool loop, no memory between calls.
+//! - [`AgentBuilder`] (in `builder`) — fluent constructor that validates configuration
+//!   before producing an `Agent`.
+//! - [`ChatAgent`] (in `chat`) — stateful counterpart that owns a conversation history
+//!   and is the type the TUI/MCP layers actually drive.
+//!
+//! The lower-level [`tool_loop`] module exposes `run_tool_loop` /
+//! `run_tool_loop_with_history_and_observer` for callers that want full control over
+//! the model/tool ping-pong without hiding it behind `Agent`. Those entry points are
+//! also what the codex executor (`codex/`) uses to execute a long-running plan.
+
 use std::sync::Arc;
 
 use crate::internal::ai::{
@@ -17,6 +34,24 @@ pub use tool_loop::{
 
 pub mod chat;
 pub use chat::ChatAgent;
+
+// OC-Phase 3 P3.2: SubAgentDispatcher trait + DispatchContext + TaskFailure
+// vocabulary. Schema-only — no runtime implementation, no tool-loop wiring.
+pub mod sub_agent;
+pub use sub_agent::{
+    AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
+    DispatchContext, MessageId, PermissionAskRequest, PermissionAskSource, PermissionAsker,
+    PermissionReply, PermissionService, SafetyDecisionDenial, SubAgentDispatcher, TaskEntryKind,
+    TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
+};
+
+// OC-Phase 3 P3.3 + P3.4: DefaultSubAgentDispatcher gate + ask
+// implementation (steps 1-8 minus the safety-policy hook in step 5,
+// which stays a TODO until a `SubAgentSpawn` ToolOperation variant
+// lands). Steps 9-13 (handoff, model build, child loop, events,
+// AgentRunEvent::Spawned wiring) follow in P3.4+ sub-PRs.
+pub mod sub_agent_dispatcher;
+pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
 
 /// An AI Agent that manages interactions with a CompletionModel.
 ///
@@ -47,6 +82,11 @@ pub struct Agent<M: CompletionModel> {
 impl<M: CompletionModel> Agent<M> {
     /// Creates a new Agent with the given model.
     ///
+    /// Functional scope: wraps `model` in an [`Arc`] so cheap clones share the same
+    /// network client, and initializes the rest of the configuration to zero/default.
+    /// Most callers should go through [`AgentBuilder`] instead, which validates the
+    /// preamble and tool set before construction.
+    ///
     /// # Arguments
     /// * `model` - The completion model instance.
     pub fn new(model: M) -> Self {
@@ -58,6 +98,26 @@ impl<M: CompletionModel> Agent<M> {
         }
     }
 
+    /// Drive the model/tool ping-pong starting from a pre-populated chat history.
+    ///
+    /// Functional scope:
+    /// - Snapshots the configured tool definitions once and reuses them across
+    ///   iterations to avoid repeating the rebuild on every step.
+    /// - Repeatedly issues completion requests; if the response contains tool calls,
+    ///   it appends the assistant turn, executes each tool, appends the tool results
+    ///   as a synthetic user turn, and loops. As soon as the model stops calling
+    ///   tools, the function joins all text content and returns.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Err(CompletionError::ResponseError)` if the model produced content
+    ///   that contained no text (e.g. only thoughts) — this is surfaced verbatim to
+    ///   the user instead of being silently treated as success.
+    /// - Returns `Err(CompletionError::RequestError)` with `NotFound` when the model
+    ///   tried to call a tool that is not registered on the agent.
+    /// - Empty content in either the assistant turn or the tool-result turn is treated
+    ///   as a malformed response and surfaces as `ResponseError` rather than panicking.
+    /// - This loop has no iteration limit by design; callers that need a budget should
+    ///   use the [`tool_loop`] entry points instead.
     pub(crate) async fn run_with_history(
         &self,
         mut chat_history: Vec<Message>,
@@ -83,6 +143,7 @@ impl<M: CompletionModel> Agent<M> {
             }
 
             if tool_calls.is_empty() {
+                // Terminal state: aggregate every text fragment into the final answer.
                 let text_response = response
                     .content
                     .iter()
@@ -94,7 +155,8 @@ impl<M: CompletionModel> Agent<M> {
                     .join("\n");
 
                 if text_response.is_empty() && !response.content.is_empty() {
-                    // Return a more user-friendly error instead of debug format
+                    // Content existed but contained no text — typically only reasoning
+                    // tokens. Return a more user-friendly error instead of debug format.
                     return Err(CompletionError::ResponseError(
                         "Model returned non-text response (likely only thought or unsupported content)".into()
                     ));
@@ -114,6 +176,7 @@ impl<M: CompletionModel> Agent<M> {
 
             chat_history.push(Message::Assistant {
                 id: None,
+                reasoning_content: response.reasoning_content.clone(),
                 content: assistant_content,
             });
 
@@ -160,6 +223,8 @@ impl<M: CompletionModel> Agent<M> {
 }
 
 impl<M: CompletionModel> Prompt for Agent<M> {
+    /// Single-shot prompt: starts a fresh conversation containing only `prompt` and
+    /// drives the tool loop until the model stops calling tools.
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, CompletionError> {
         let msg = prompt.into();
         self.run_with_history(vec![msg]).await
@@ -167,6 +232,9 @@ impl<M: CompletionModel> Prompt for Agent<M> {
 }
 
 impl<M: CompletionModel> Chat for Agent<M> {
+    /// Multi-turn prompt: appends `prompt` to `chat_history` (without persisting the
+    /// updated history anywhere) and drives the tool loop. The agent itself stays
+    /// stateless — the caller owns the history.
     async fn chat(
         &self,
         prompt: impl Into<Message> + Send,
@@ -219,6 +287,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -227,6 +296,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -264,6 +334,9 @@ mod tests {
         }
     }
 
+    /// Scenario: a mock model first emits a tool call, then on the second iteration
+    /// emits a plain text response. This exercises the full tool-execution path:
+    /// assistant turn → tool dispatch → user (tool result) turn → final text.
     #[tokio::test]
     async fn test_tool_call_loop_executes_tool() {
         let mut tool_set = ToolSet::default();

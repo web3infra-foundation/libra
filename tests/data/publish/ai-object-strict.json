@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "objectType": "Run",
+  "objectId": "run-2026-05-09-002",
+  "layer": "snapshot",
+  "sourceRefs": [
+    "agent_session/4a4f6c7e-e0bc-4cf9-9a17-9d1bd5c4ec02"
+  ],
+  "relationships": [
+    {
+      "kind": "appliesTo",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-002",
+      "toObjectType": "Plan",
+      "toObjectId": "plan-2026-05-09-002"
+    }
+  ],
+  "payload": {
+    "runId": "run-2026-05-09-002",
+    "planId": "plan-2026-05-09-002",
+    "status": "succeeded",
+    "tokensIn": 4000,
+    "tokensOut": 1500
+  },
+  "redaction": {
+    "mode": "strict",
+    "rulesVersion": "2026.05.09-strict"
+  },
+  "removedFields": [
+    "payload.providerRawResponse",
+    "payload.absoluteWorkspacePath",
+    "payload.toolPayload",
+    "payload.promptText",
+    "payload.providerRawTranscript",
+    "payload.startedAt",
+    "payload.finishedAt"
+  ]
+}

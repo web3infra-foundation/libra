@@ -38,10 +38,12 @@ Start a new rebase, replaying current branch commits onto the specified upstream
 
 ```bash
 $ libra rebase main
-Rebasing (1/3): feat: add parser
-Rebasing (2/3): feat: add lexer
-Rebasing (3/3): test: add parser tests
-Successfully rebased and updated refs/heads/feature.
+Found common ancestor: abc1234
+Rebasing 3 commits from `feature` onto `main`...
+Applied: def5678 feat: add parser
+Applied: 987abcd feat: add lexer
+Applied: 13579bd test: add parser tests
+Successfully rebased branch 'feature' onto '1234567'.
 ```
 
 **`--continue`**
@@ -50,9 +52,10 @@ After resolving conflicts and staging the resolved files, continue the rebase:
 
 ```bash
 $ libra rebase --continue
-Rebasing (2/3): feat: add lexer
-Rebasing (3/3): test: add parser tests
-Successfully rebased and updated refs/heads/feature.
+Applied: 987abcd feat: add lexer
+Rebasing 1 commits from `feature` onto `1234567`...
+Applied: 13579bd test: add parser tests
+Successfully rebased branch 'feature' onto '1234567'.
 ```
 
 **`--abort`**
@@ -61,6 +64,7 @@ Abort the rebase and restore the original branch state:
 
 ```bash
 $ libra rebase --abort
+Rebase aborted. Restored branch 'feature'.
 ```
 
 **`--skip`**
@@ -69,8 +73,10 @@ Skip the current conflicting commit and move to the next one:
 
 ```bash
 $ libra rebase --skip
-Rebasing (3/3): test: add parser tests
-Successfully rebased and updated refs/heads/feature.
+Skipped: 987abcd feat: add lexer
+Rebasing 1 commits from `feature` onto `1234567`...
+Applied: 13579bd test: add parser tests
+Successfully rebased branch 'feature' onto '1234567'.
 ```
 
 ## Common Commands
@@ -100,26 +106,135 @@ libra rb main
 Normal rebase progress:
 
 ```text
-Rebasing (1/3): feat: add parser
-Rebasing (2/3): feat: add lexer
-Rebasing (3/3): test: add parser tests
-Successfully rebased and updated refs/heads/feature.
+Found common ancestor: abc1234
+Rebasing 3 commits from `feature` onto `main`...
+Applied: def5678 feat: add parser
+Applied: 987abcd feat: add lexer
+Applied: 13579bd test: add parser tests
+Successfully rebased branch 'feature' onto '1234567'.
 ```
 
 Conflict during rebase:
 
 ```text
-Rebasing (2/3): feat: add lexer
-CONFLICT: merge conflict in src/lexer.rs
-After resolving conflicts, run "libra rebase --continue".
-To abort, run "libra rebase --abort".
-To skip this commit, run "libra rebase --skip".
+fatal: rebase stopped while applying 987abcd: feat: add lexer
+
+Hint: conflicted files:
+Hint:   src/lexer.rs
+Hint: resolve conflicts, stage them, then run 'libra rebase --continue'.
+Hint: or run 'libra rebase --skip' / 'libra rebase --abort'.
 ```
 
 Already up to date:
 
 ```text
-Current branch is up to date.
+Current branch is ahead of upstream. No rebase needed.
+```
+
+Fast-forward-only case:
+
+```text
+Fast-forwarded branch 'feature' to 'main'.
+```
+
+Abort:
+
+```text
+Rebase aborted. Restored branch 'feature'.
+```
+
+## JSON / Machine Output
+
+`--json` and `--machine` are currently supported for successful `rebase <upstream>`, `--abort`, `--continue`, and `--skip` output. CLI/preflight failures, unresolved-conflict `--continue` failures, and structured `rebase <upstream>` conflict stops are rendered through Libra's standard structured error envelope. Deeper replay/conflict-stop error taxonomy is still tracked as follow-up work in the command improvement plan.
+
+Start and complete a replay:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "start",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "upstream": "main",
+    "onto": "fedcba9...",
+    "common_ancestor": "0123456...",
+    "replay_count": 1,
+    "previous_commit": "def5678...",
+    "applied_commits": [
+      {
+        "original_commit": "0123456...",
+        "commit": "abc1234...",
+        "subject": "Feature adds file"
+      }
+    ],
+    "remaining": 0
+  }
+}
+```
+
+Fast-forward start results use the same envelope with `status: "fast-forwarded"`, `commit` equal to `onto`, and no `applied_commits`. Branches already ahead of upstream return `status: "already-up-to-date"`.
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "abort",
+    "status": "aborted",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "previous_commit": "def5678...",
+    "restored": true
+  }
+}
+```
+
+Continue after resolving a conflict:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "continue",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "onto": "fedcba9...",
+    "previous_commit": "def5678...",
+    "applied_commits": [
+      {
+        "original_commit": "0123456...",
+        "commit": "abc1234...",
+        "subject": "Feature modifies conflict.txt"
+      }
+    ],
+    "remaining": 0
+  }
+}
+```
+
+Skip the stopped commit:
+
+```json
+{
+  "ok": true,
+  "command": "rebase",
+  "data": {
+    "action": "skip",
+    "status": "completed",
+    "branch": "feature",
+    "commit": "abc1234...",
+    "onto": "fedcba9...",
+    "previous_commit": "def5678...",
+    "skipped_commit": "0123456...",
+    "skipped_subject": "Feature modifies conflict.txt",
+    "remaining": 0
+  }
+}
 ```
 
 ## Rebase State Persistence
@@ -191,13 +306,19 @@ Note: jj does not stop on conflicts during rebase. Instead, conflicts are materi
 
 ## Error Handling
 
-| Scenario | Behavior |
-|----------|----------|
-| Not a libra repository | Error with repo-not-found message |
-| Upstream ref cannot be resolved | Error indicating the ref is not valid |
-| No common ancestor found | Error refusing to rebase unrelated histories |
-| Conflict during commit replay | Rebase stops, state is saved, user prompted to resolve |
-| `--continue` without rebase in progress | Error indicating no rebase in progress |
-| `--abort` without rebase in progress | Error indicating no rebase in progress |
-| Failed to create rebased commit | Error with commit details |
-| Failed to update branch reference | Error with ref update details |
+`execute_safe` currently returns standard structured `CliError` envelopes for CLI/preflight failures. The deeper replay engine is still a legacy text path and is tracked as pending structured-output work.
+
+| Scenario | StableErrorCode | Exit | Behavior |
+|----------|-----------------|------|----------|
+| Not a libra repository | `LBR-REPO-001` (RepoNotFound) | 128 | Error with repo-not-found message |
+| Missing upstream | `LBR-CLI-002` (CliInvalidArgument) | 129 | Usage error from clap |
+| Upstream ref cannot be resolved | `LBR-CLI-003` (CliInvalidTarget) | 129 | Error indicating the ref is not valid |
+| `--continue` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
+| `--continue` with unresolved conflicts | `LBR-CONFLICT-001` (ConflictUnresolved) | 128 | Error indicating conflicts must be staged with `libra add <file>` |
+| `--abort` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
+| `--skip` without rebase in progress | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating no rebase in progress |
+| `--skip` without stopped or pending commit | `LBR-REPO-003` (RepoStateInvalid) | 128 | Error indicating there is no commit to skip |
+| No common ancestor found | pending typed mapping | 128 | Legacy text error refusing to rebase unrelated histories |
+| Conflict during commit replay | pending typed mapping | 128 | Rebase stops, state is saved, user prompted to resolve |
+| Failed to create rebased commit | pending typed mapping | 128 | Legacy text error with commit details |
+| Failed to update branch reference | pending typed mapping | 128 | Legacy text error with ref update details |

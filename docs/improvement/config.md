@@ -10,7 +10,7 @@
 2. **子命令风格 CLI**：`libra config get/set/list/unset/generate-ssh-key/generate-gpg-key`
 3. **两级 scope**：`--local`（仓库级，默认）、`--global`（用户级）。**⚠️ Breaking change：`--system` scope 移除**——system 级配置在多用户环境下的权限隔离（unseal key 仅 root 可读，普通用户级联读取时解密失败导致命令崩溃）会造成比收益更大的安全风险和运维复杂度。现有 `ConfigScope::System` 实现标记 `#[deprecated]` 并移除。使用 `--system` 时报错并提示迁移到 `--global`。此变更需记入 CHANGELOG
 4. **环境变量解析优先级**（从高到低）：CLI 参数 → 系统环境变量 → 仓库 config → 全局 config。环境变量优先于配置文件，符合 12-Factor App 原则和主流 CLI 工具惯例（Git、Docker、AWS CLI、kubectl），确保 `GEMINI_API_KEY=B libra push` 这类 per-process override 始终生效
-5. **AI provider 的 `from_env()` 改造不在 config 批次内**（`src/internal/ai/providers/*/client.rs`），但 `src/internal/ai/hooks/runtime.rs` 等直接读取配置的模块**纳入本批迁移**。provider 侧的 follow-up 由 [code.md](code.md) 的 AI Agent / `libra code` 专项计划统一实施，和 Runtime / provider bootstrap 一起切换到 `resolve_env()`
+5. **AI provider 的 `from_env()` 改造不在 config 批次内**（`src/internal/ai/providers/*/client.rs`），但 `src/internal/ai/hooks/runtime.rs` 等直接读取配置的模块**纳入本批迁移**。provider 侧的 follow-up 由 [agent.md](agent.md) Part B 的 AI Agent / `libra code` 专项计划统一实施，和 Runtime / provider bootstrap 一起切换到 `resolve_env()`
 6. **依赖命令同步迁移**：本批将所有依赖 `Config` 旧 API 的命令和模块**直接迁移**到新 `config_kv` 后端，不做 shim/代理层。**旧 `config` 表不在本批处理范围内**（不读、不写、不迁移、不导入），`libra config import` 仅从 Git config 导入
 7. **SSH 私钥改为 vault-backed 存储 + 按需临时落盘；GPG 私钥由 vault PKI 引擎托管，不导出**：
     - **SSH 私钥**：存入 vault（`config_kv` 表，`vault.ssh.<remote>.privkey`，加密存储），不再持久化写入 `~/.libra/ssh-keys/`。SSH transport 调用时，从 vault 解密私钥 → 写入临时文件 → 传递给 SSH client → 操作完成后删除
@@ -242,7 +242,7 @@ pub async fn resolve_env(name: &str) -> Result<Option<String>> {
 - `src/utils/client_storage.rs` — env var 读取 → `resolve_env()`
 - `src/utils/d1_client.rs` — 同上
 
-> **注：** `src/internal/ai/providers/*/client.rs` 的 `from_env()` → `resolve_env()` 改造**不在 config 批次范围内**，后续由 [code.md](code.md) 的 `libra code` 专项计划统一收口；这样可以把 provider 启动、vault/env 优先级、诊断和工作流 Runtime 改造放在同一波次完成，避免 `resolve_env()` 与旧 `from_env()` 长期双轨并存。
+> **注：** `src/internal/ai/providers/*/client.rs` 的 `from_env()` → `resolve_env()` 改造**不在 config 批次范围内**，后续由 [agent.md](agent.md) Part B 的 `libra code` 专项计划统一收口；这样可以把 provider 启动、vault/env 优先级、诊断和工作流 Runtime 改造放在同一波次完成，避免 `resolve_env()` 与旧 `from_env()` 长期双轨并存。
 
 ### 特性 4：SSH Key 与 GPG Key 管理
 
@@ -269,8 +269,8 @@ libra config list --ssh-keys
 **remote 名校验规则：** `--remote <name>` 的 `<name>` 必须满足以下约束（同时用于 config key 和文件路径，必须安全）：
 - 只允许 `[a-zA-Z0-9_-]` 字符，长度 1-64
 - 禁止 `.`（会造成 config key `vault.ssh.<remote>.pubkey` 歧义）、`/`、`\`、`..`（路径注入风险）
-- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，exit 1。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
-- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，exit 2
+- **必须是已配置的 remote**（用户直接调用时）：`generate-ssh-key --remote <name>` 前先检查 `remote.<name>.url` 是否存在于 config 中；不存在则报错 `error: remote '<name>' not found, add it first with libra remote add`，exit 128（coarse）/ exit 1（fine）——`Fatal` 失败，对应 `tests/command/config_test.rs::test_config_generate_ssh_key_rejects_unknown_remote_with_invalid_target_code`。**豁免**：`libra init` bootstrap 内部调用 `generate-ssh-key` 时不做此校验（init 时 origin 尚未配置是正常流程）
+- 校验失败 → `error: invalid remote name '<name>': only [a-zA-Z0-9_-] allowed`，exit 129（coarse）/ exit 2（fine）——`CommandUsage` 分类，由 `CliError::from_legacy_string` 解析 `error:` 前缀路由到 `command_usage`；测试为 `test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage`。
 
 **存储：**
 - 公钥：`vault.ssh.<remote>.pubkey` in config_kv（明文）
@@ -1252,16 +1252,18 @@ EXAMPLES:
 说明：`<remote-name>` 需替换为仓库中实际的 remote 名称；若仓库只有一个默认 remote，通常为 `origin`
 
 **实施清单：**
-- [ ] 删除 `src/command/vault.rs`
-- [ ] 从 `src/cli.rs` 中移除 `vault` 子命令注册
-- [ ] 删除 `tests/command/vault_test.rs` 和 `tests/command/vault_cli_test.rs`
-- [ ] `src/internal/vault.rs` **保留**，作为加密基础设施继续被 config 使用
-- [ ] 将 vault 测试用例中的功能覆盖迁移到 config 测试中：
+- [x] 删除 `src/command/vault.rs`
+- [x] 从 `src/cli.rs` 中移除 `vault` 子命令注册
+- [x] 删除 `tests/command/vault_test.rs` 和 `tests/command/vault_cli_test.rs`
+- [x] `src/internal/vault.rs` **保留**，作为加密基础设施继续被 config 使用
+- [x] 将 vault 测试用例中的功能覆盖迁移到 config 测试中：
   - `vault generate-ssh-key` → `config generate-ssh-key --remote origin` 测试
   - `vault generate-gpg-key` → `config generate-gpg-key` 测试
   - `vault gpg-public-key` → `config get vault.gpg.pubkey` 测试
   - `vault ssh-public-key` → `config get vault.ssh.origin.pubkey` 测试
   - vault init / unseal / encrypt / decrypt → config set 敏感 key 的加密存储测试
+
+**2026-05-11 复核证据**：`src/command/vault.rs`、`tests/command/vault_test.rs`、`tests/command/vault_cli_test.rs` 已不存在；`src/cli.rs` / `src/command/mod.rs` / `tests/command/mod.rs` 不再注册 `vault` 子命令；`src/internal/vault.rs` 保留；`tests/command/config_test.rs` 覆盖 `config generate-ssh-key --remote origin`、`config generate-gpg-key`、`config get vault.gpg.pubkey`、`config get vault.ssh.origin.pubkey` 以及敏感 key 加密路径。
 
 ---
 

@@ -32,7 +32,7 @@
 
 `checkout` 侧的详细兼容要求单列于 [checkout.md](checkout.md)；本文件只记录 `switch` 需要暴露给 `checkout` 的共享接口变化，避免两份计划互相覆盖。
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 仍需维护部分）：**
 
 已改进（当前代码已具备）：
 
@@ -46,9 +46,9 @@
 - **分支不存在时已有 `-c` 提示和模糊建议**：`resolve_switch_branch_target()` 会构造 `BranchNotFound`，由 `impl From<SwitchError> for CliError` 统一补全 hint
 - **`checkout` 已不再依赖字符串匹配**：`checkout::execute_safe()` 直接匹配 `SwitchError::DirtyUnstaged | DirtyUncommitted | UntrackedOverwrite(..)` 变体
 
-仍需改进：
+仍需维护：
 
-- **目标感知的 untracked 覆盖检查仍会重建目标 index**：如果后续在超大仓库中观察到切换延迟，可继续优化 `utils::worktree::untracked_overwrite_path()` 这条共享路径
+- **目标感知的 untracked 覆盖检查仍会重建目标 index**：当前行为正确且已覆盖目标感知检查；如果后续在超大仓库中观察到切换延迟，可继续优化 `utils::worktree::untracked_overwrite_path()` 这条共享路径
 - **命令文档需持续跟随行为演进**：例如错误表和 feature comparison 需要随着新增错误场景与 hint 覆盖面更新
 
 ### 目标与非目标
@@ -113,7 +113,7 @@ pub enum SwitchError {
     #[error("a branch named '{0}' already exists")]
     BranchAlreadyExists(String),
 
-    #[error("creating/switching to '{0}' branch is not allowed")]
+    #[error("'{0}' is a reserved branch name")]
     InternalBranchBlocked(String),
 
     #[error("unstaged changes, can't switch branch")]
@@ -121,6 +121,9 @@ pub enum SwitchError {
 
     #[error("uncommitted changes, can't switch branch")]
     DirtyUncommitted,
+
+    #[error("untracked working tree file would be overwritten by switch: {0}")]
+    UntrackedOverwrite(String),
 
     #[error("failed to determine working tree status: {0}")]
     StatusCheck(String),
@@ -201,6 +204,7 @@ restore::execute_safe(args, output)
 | `InternalBranchBlocked` | `CliInvalidTarget` | 129 | 无 |
 | `DirtyUnstaged` | `RepoStateInvalid` | 128 | `commit or stash your changes before switching.` |
 | `DirtyUncommitted` | `RepoStateInvalid` | 128 | `commit or stash your changes before switching.` |
+| `UntrackedOverwrite` | `ConflictOperationBlocked` | 128 | `move or remove it before switching.` |
 | `StatusCheck` | `IoReadFailed` | 128 | 无 |
 | `CommitResolve` | `CliInvalidTarget` | 129 | `check the revision name and try again.` |
 | `BranchCreate` | `IoWriteFailed` | 128 | 无 |

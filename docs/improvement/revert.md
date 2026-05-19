@@ -9,7 +9,7 @@
 ### 已确认落地的基线
 - `RevertError` typed enum 已落地，detached HEAD / invalid commit / conflict / object / index / HEAD 更新失败均有显式 `StableErrorCode`
 - `run_revert()` + `render_revert_output()` 已完成执行层/渲染层拆分
-- `RevertOutput` 已覆盖 `reverted_commit`、`new_commit`、`no_commit`、`files_changed`
+- `RevertOutput` 已覆盖 `reverted_commit`、`short_reverted`、`new_commit`、`short_new`、`no_commit`、`files_changed`（`short_reverted` / `short_new` 是对应 commit hash 的 7 字符短形式，便于 human / agent 直接消费）
 - `docs/commands/revert.md` 已记录 JSON schema、错误码和常用示例
 - `tests/command/revert_test.rs` 已覆盖基础 revert、`--no-commit`、root commit、JSON 输出和错误码
 

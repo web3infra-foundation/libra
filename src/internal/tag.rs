@@ -205,8 +205,29 @@ pub async fn create(
     })
 }
 
+/// Typed failures from [`list`]. Lets callers distinguish a transient SQLite
+/// read failure (mapped to `IoReadFailed`) from a genuinely corrupt tag row
+/// (`RepoCorrupt`) without parsing the underlying error string.
+#[derive(Debug, thiserror::Error)]
+pub enum ListTagError {
+    #[error("failed to query tag references: {0}")]
+    Query(#[from] DbErr),
+
+    #[error("tag '{name}' is missing the commit field")]
+    MissingCommit { name: String },
+
+    #[error("tag '{name}' has invalid object hash: {detail}")]
+    InvalidObjectHash { name: String, detail: String },
+
+    #[error("tag reference row is missing the name field")]
+    MissingName,
+
+    #[error("failed to load object for tag '{name}': {detail}")]
+    LoadObject { name: String, detail: String },
+}
+
 /// Lists all tags available in the repository.
-pub async fn list() -> Result<Vec<Tag>, anyhow::Error> {
+pub async fn list() -> Result<Vec<Tag>, ListTagError> {
     let db_conn = get_db_conn_instance().await;
     let models = reference::Entity::find()
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
@@ -215,21 +236,28 @@ pub async fn list() -> Result<Vec<Tag>, anyhow::Error> {
 
     let mut tags = Vec::new();
     for m in models {
-        let commit_str = m.commit.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Tag '{}' is missing commit field",
-                m.name.as_deref().unwrap_or(UNKNOWN_TAG)
-            )
-        })?;
-        let object_id = ObjectHash::from_str(commit_str)
-            .map_err(|e| anyhow::anyhow!("Invalid ObjectHash: {}", e))?;
-        let object = load_object_trait(&object_id).await?;
-        let tag_name = m
-            .name
+        let display_name = m.name.as_deref().unwrap_or(UNKNOWN_TAG).to_string();
+        let commit_str = m
+            .commit
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Tag is missing name field"))?
+            .ok_or_else(|| ListTagError::MissingCommit {
+                name: display_name.clone(),
+            })?;
+        let object_id =
+            ObjectHash::from_str(commit_str).map_err(|e| ListTagError::InvalidObjectHash {
+                name: display_name.clone(),
+                detail: e.to_string(),
+            })?;
+        let object = load_object_trait(&object_id)
+            .await
+            .map_err(|e| ListTagError::LoadObject {
+                name: display_name.clone(),
+                detail: e.to_string(),
+            })?;
+        let stored_name = m.name.as_ref().ok_or(ListTagError::MissingName)?;
+        let tag_name = stored_name
             .strip_prefix(TAG_REF_PREFIX)
-            .unwrap_or_else(|| m.name.as_ref().expect("Name field should exist"))
+            .unwrap_or(stored_name.as_str())
             .to_string();
         tags.push(Tag {
             name: tag_name,
@@ -335,5 +363,41 @@ pub async fn load_object_trait(hash: &ObjectHash) -> Result<TagObject, GitError>
             Ok(TagObject::Blob(blob))
         }
         _ => Err(GitError::ObjectNotFound(hash.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format contract for [`CreateTagError`]. The
+    /// strings are produced via `thiserror` `#[error(...)]` attributes
+    /// and surface in the `tag` CLI command's human + `--json` output
+    /// envelope. Future refactors that touch the `#[error(...)]`
+    /// attributes will trip this test.
+    #[test]
+    fn create_tag_error_display_pins_each_variant() {
+        // Static-message variants (the source-chained ones below cover
+        // the `{0}` interpolation slot).
+        assert_eq!(
+            CreateTagError::HeadUnborn.to_string(),
+            "Cannot create tag: HEAD does not point to a commit",
+        );
+        assert_eq!(
+            CreateTagError::AlreadyExists("v1.0.0".to_string()).to_string(),
+            "Tag 'v1.0.0' already exists",
+        );
+
+        // Source-chained variants: only assert the surface prefix; the
+        // `{0}` portion forwards to the source error's Display, which
+        // is owned by the upstream crate or by another pinned test
+        // (BranchStoreError in v0.17.272).
+        let resolve = CreateTagError::ResolveHead(BranchStoreError::NotFound("main".to_string()));
+        assert!(
+            resolve
+                .to_string()
+                .starts_with("failed to resolve HEAD commit: "),
+            "unexpected: {resolve}",
+        );
     }
 }

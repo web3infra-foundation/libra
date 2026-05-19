@@ -528,3 +528,43 @@ fn metadata_from_row(raw: Option<&str>, thread_id: ThreadId) -> Result<Option<Va
         .transpose()
         .with_context(|| format!("Failed to parse scheduler metadata for {thread_id}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::SchedulerStateCasError;
+
+    #[test]
+    fn scheduler_state_cas_error_display_pins_owned_variants() {
+        let thread_id = Uuid::nil();
+        assert_eq!(
+            SchedulerStateCasError::Missing { thread_id }.to_string(),
+            format!("scheduler state for thread {thread_id} does not exist"),
+        );
+        assert_eq!(
+            SchedulerStateCasError::VersionConflict {
+                thread_id,
+                expected: 7,
+                actual: Some(9),
+            }
+            .to_string(),
+            format!(
+                "scheduler state version conflict for thread {thread_id}: \
+                 expected 7, actual Some(9)",
+            ),
+        );
+        assert_eq!(
+            SchedulerStateCasError::VersionConflict {
+                thread_id,
+                expected: 7,
+                actual: None,
+            }
+            .to_string(),
+            format!(
+                "scheduler state version conflict for thread {thread_id}: \
+                 expected 7, actual None",
+            ),
+        );
+    }
+}

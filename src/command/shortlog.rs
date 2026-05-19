@@ -321,7 +321,8 @@ async fn get_commits_for_shortlog(
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();
 
-    commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
+    // newest first
+    commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
 
     Ok(commits)
 }

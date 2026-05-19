@@ -1,6 +1,8 @@
 //! Utilities module aggregator exposing storage, path, object, LFS, D1 client, and testing helpers.
 
 pub mod error;
+#[cfg(unix)]
+pub mod fuse;
 pub mod output;
 
 pub mod client_storage;

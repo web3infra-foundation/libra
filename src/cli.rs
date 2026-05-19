@@ -1,5 +1,13 @@
-//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
-//! and dispatching each command handler.
+//! CLI entry for Libra.
+//!
+//! Defines the clap subcommand grammar, performs cross-cutting preflight (locating the
+//! repository database and pinning the global hash algorithm to whatever is recorded
+//! in `core.objectformat`), and dispatches every parsed command to its `command::*`
+//! handler.
+//!
+//! Because every subcommand reads or writes objects whose hash kind must match the
+//! repository's recorded `core.objectformat`, this module is the single point where
+//! that global is configured before any handler runs.
 
 use std::{env, io::Write, path::Path};
 
@@ -8,18 +16,28 @@ use clap::{
     error::{ContextKind, ContextValue, ErrorKind},
 };
 use git_internal::hash::{HashKind, set_hash_kind};
+use sea_orm::{ConnectionTrait, Statement};
 
 use crate::{
     command,
-    internal::{config::ConfigKv, db},
+    internal::{config::ConfigKv, db, db::SchemaCompatibility},
     utils,
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
     },
 };
 
 const ROOT_AFTER_HELP: &str = "\
+Command Groups:
+  Repository Setup        init, clone, config
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
+  History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
+  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
+  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
+  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
@@ -30,9 +48,23 @@ Output Examples:
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
 
-/// Reads the repository's configuration and sets the global hash kind.
-/// This must be called for any command that operates within an existing repository.
-/// Returns an error if the repository database is missing or corrupted.
+/// Read the repository's `core.objectformat` and pin the global hash algorithm.
+///
+/// Functional scope:
+/// - Opens the SQLite database at `<storage>/<DATABASE>` and reads
+///   `core.objectformat`, defaulting to `"sha1"` when the row is absent.
+/// - Calls `git_internal::hash::set_hash_kind` so every object hashed by the rest of
+///   the process matches the repository's storage format.
+///
+/// Boundary conditions:
+/// - Returns a fatal error when the database file is missing — every non-`init`,
+///   non-`clone` command requires a repository, and silently continuing would hash
+///   objects with the wrong algorithm.
+/// - Returns a fatal error when the database cannot be opened (permissions, disk
+///   corruption) so the user sees the underlying message instead of a downstream
+///   panic.
+/// - Currently accepts only `"sha1"` and `"sha256"`; anything else is rejected with a
+///   fatal error.
 async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
     let db_path = storage.join(utils::util::DATABASE);
     if !db_path.exists() {
@@ -53,11 +85,94 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
         })?;
     let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
         .map(|e| e.value)
         .unwrap_or_else(|| "sha1".to_string());
 
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn set_local_hash_kind_for_storage_without_schema_guard(storage: &Path) -> CliResult<()> {
+    let db_path = storage.join(utils::util::DATABASE);
+    if !db_path.exists() {
+        return Err(CliError::fatal(format!(
+            "repository database not found at '{}'",
+            db_path.display()
+        )));
+    }
+
+    let db_conn = db::open_database_without_migrations(&db_path)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+    let object_format = read_schema_free_object_format(&db_conn, &db_path).await?;
+
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn read_schema_free_object_format(
+    db_conn: &sea_orm::DatabaseConnection,
+    db_path: &Path,
+) -> CliResult<String> {
+    let has_config_kv = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
+            ["table".into(), "config_kv".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to inspect repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
+        .is_some();
+
+    if !has_config_kv {
+        return Ok("sha1".to_string());
+    }
+
+    let row = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT value FROM config_kv WHERE key = ? ORDER BY id DESC LIMIT 1",
+            ["core.objectformat".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+
+    match row {
+        Some(row) => row.try_get_by_index(0).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to decode core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        }),
+        None => Ok("sha1".to_string()),
+    }
+}
+
+fn set_hash_kind_from_object_format(object_format: String) -> CliResult<()> {
     let hash_kind = match object_format.as_str() {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
@@ -76,7 +191,8 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
 #[command(
     about = "Libra: An AI native version control system for monorepo and trunk-based development.",
     version = env!("CARGO_PKG_VERSION"),
-    after_help = ROOT_AFTER_HELP
+    after_help = ROOT_AFTER_HELP,
+    arg_required_else_help = true,
 )]
 struct Cli {
     /// Emit machine-readable JSON to stdout.
@@ -116,6 +232,11 @@ struct Cli {
     )]
     color: String,
 
+    /// Disable terminal colors.
+    /// Equivalent to --color=never and takes precedence over --color.
+    #[arg(long, global = true)]
+    no_color: bool,
+
     /// Suppress standard stdout output; keep warnings/errors on stderr.
     /// This includes primary command results, unlike some Git per-command
     /// `--quiet` flags that only suppress informational chatter.
@@ -149,17 +270,15 @@ enum Commands {
     // Each variant of the enum represents a subcommand.
     // The about attribute provides a brief description of the subcommand.
     // The arguments of the subcommand are defined in the command module.
-
-    // Init and Clone are the only commands that can be executed without a repository
     #[command(about = "Initialize a new repository")]
     Init(command::init::InitArgs),
     #[command(about = "Clone a repository into a new directory")]
     Clone(command::clone::CloneArgs),
-    #[command(about = "Start Libra Code interactive TUI (with background web server)")]
-    Code(command::code::CodeArgs),
-    #[command(about = "Inspect an AI thread version graph in a TUI")]
-    Graph(command::graph::GraphArgs),
-    // The rest of the commands require a repository to be present
+    #[command(about = "Manage repository configurations", alias = "cfg")]
+    Config(command::config::ConfigArgs),
+
+    #[command(about = "Show the working tree status", alias = "st")]
+    Status(command::status::StatusArgs),
     #[command(about = "Add file contents to the index")]
     Add(command::add::AddArgs),
     #[command(
@@ -168,19 +287,27 @@ enum Commands {
         alias = "delete"
     )]
     Rm(command::remove::RemoveArgs),
+    #[command(about = "Move or rename a file, a directory, or a symlink")]
+    Mv(command::mv::MvArgs),
     #[command(about = "Restore working tree files", alias = "unstage")]
     Restore(command::restore::RestoreArgs),
-    #[command(about = "Show the working tree status", alias = "st")]
-    Status(command::status::StatusArgs),
     #[command(about = "Remove untracked files from the working tree")]
     Clean(command::clean::CleanArgs),
     #[command(
         subcommand,
-        about = "Stash the changes in a dirty working directory away"
+        about = "Stash the changes in a dirty working directory away",
+        after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
     #[command(subcommand, about = "Large File Storage")]
     Lfs(command::lfs::LfsCmds),
+    #[command(
+        about = "Manage multiple working trees attached to this repository",
+        alias = "wt",
+        after_help = command::worktree::WORKTREE_EXAMPLES
+    )]
+    Worktree(command::worktree::WorktreeArgs),
+
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
     #[command(about = "Summarize 'git log' output", alias = "slog")]
@@ -189,27 +316,50 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
-    #[command(about = "List, create, or delete branches", alias = "br")]
-    Branch(command::branch::BranchArgs),
-    #[command(about = "Create a new tag")]
-    Tag(command::tag::TagArgs),
-    #[command(about = "Record changes to the repository", alias = "ci")]
-    Commit(command::commit::CommitArgs),
-    #[command(about = "Switch branches", alias = "sw")]
-    Switch(command::switch::SwitchArgs),
-    #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
-    Rebase(command::rebase::RebaseArgs),
-    #[command(about = "Merge changes")]
-    Merge(command::merge::MergeArgs),
-    #[command(about = "Reset current HEAD to specified state")]
-    Reset(command::reset::ResetArgs),
-    #[command(about = "Move or rename a file, a directory, or a symlink")]
-    Mv(command::mv::MvArgs),
+    #[command(about = "List references in a remote repository")]
+    LsRemote(command::ls_remote::LsRemoteArgs),
+    #[command(about = "Read or update the symbolic HEAD ref")]
+    SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
+    #[command(about = "Parse and normalize revision names and repository paths")]
+    RevParse(command::rev_parse::RevParseArgs),
+    #[command(about = "List commit objects reachable from a revision")]
+    RevList(command::rev_list::RevListArgs),
+    #[command(about = "Show changes between commits, commit and working tree, etc")]
+    Diff(command::diff::DiffArgs),
+    #[command(about = "Search for patterns in tracked files")]
+    Grep(command::grep::GrepArgs),
+    #[command(about = "Show author and history of each line of a file")]
+    Blame(command::blame::BlameArgs),
     #[command(
         about = "Give an object a human readable name based on an available ref",
         alias = "desc"
     )]
     Describe(command::describe::DescribeArgs),
+    #[command(about = "Provide content, type or size info for repository objects")]
+    CatFile(command::cat_file::CatFileArgs),
+    #[command(about = "Compute Git-compatible object IDs")]
+    HashObject(command::hash_object::HashObjectArgs),
+    #[command(about = "Validate pack index files against pack archives")]
+    VerifyPack(command::verify_pack::VerifyPackArgs),
+
+    #[command(about = "Record changes to the repository", alias = "ci")]
+    Commit(command::commit::CommitArgs),
+    #[command(about = "List, create, or delete branches", alias = "br")]
+    Branch(command::branch::BranchArgs),
+    #[command(about = "Switch branches", alias = "sw")]
+    Switch(command::switch::SwitchArgs),
+    #[command(
+        about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
+    )]
+    Checkout(command::checkout::CheckoutArgs),
+    #[command(about = "Create a new tag")]
+    Tag(command::tag::TagArgs),
+    #[command(about = "Merge changes")]
+    Merge(command::merge::MergeArgs),
+    #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
+    Rebase(command::rebase::RebaseArgs),
+    #[command(about = "Reset current HEAD to specified state")]
+    Reset(command::reset::ResetArgs),
     #[command(
         about = "Apply the changes introduced by some existing commits",
         alias = "cp"
@@ -221,52 +371,56 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
-    #[command(about = "Show changes between commits, commit and working tree, etc")]
-    Diff(command::diff::DiffArgs),
-    #[command(about = "Search for patterns in tracked files")]
-    Grep(command::grep::GrepArgs),
-    #[command(about = "Show author and history of each line of a file")]
-    Blame(command::blame::BlameArgs),
+    #[command(about = "Verify the integrity of objects, refs, and index")]
+    Fsck(command::fsck::FsckArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
-    #[command(subcommand, about = "Manage set of tracked repositories")]
-    Remote(command::remote::RemoteCmds),
-    #[command(about = "Open the repository in the browser")]
-    Open(command::open::OpenArgs),
-    #[command(about = "Manage repository configurations", alias = "cfg")]
-    Config(command::config::ConfigArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(about = "View and restore command-level operation history")]
     Op(command::op::OpArgs),
     #[command(
-        about = "Manage multiple working trees attached to this repository",
-        alias = "wt"
+        subcommand,
+        about = "Use binary search to find the commit that introduced a bug",
+        after_help = command::bisect::BISECT_EXAMPLES
     )]
-    Worktree(command::worktree::WorktreeArgs),
+    Bisect(Bisect),
+
+    #[command(subcommand, about = "Manage set of tracked repositories")]
+    Remote(command::remote::RemoteCmds),
+    #[command(about = "Open the repository in the browser")]
+    Open(command::open::OpenArgs),
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
     Cloud(command::cloud::CloudArgs),
+    #[command(about = "Manage read-only Cloudflare Worker publishing")]
+    Publish(command::publish::PublishArgs),
 
-    // other hidden commands
-    #[command(about = "Provide content, type or size info for repository objects")]
-    CatFile(command::cat_file::CatFileArgs),
-
+    #[command(about = "Start Libra Code interactive TUI (with background web server)")]
+    Code(command::code::CodeArgs),
+    #[command(about = "Drive a local Libra Code TUI automation control session")]
+    CodeControl(command::code_control::CodeControlArgs),
+    #[command(about = "Manage AI automation rules and history")]
+    Automation(command::automation::AutomationArgs),
+    #[command(about = "Report AI provider/model usage")]
+    Usage(command::usage::UsageArgs),
+    #[command(about = "Inspect an AI thread version graph in a TUI")]
+    Graph(command::graph::GraphArgs),
+    #[command(about = "Inspect AI sandbox diagnostics")]
+    Sandbox(command::sandbox::SandboxArgs),
+    #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
+    Agent(command::agent::AgentArgs),
+    #[command(about = "Inspect and upgrade the repository database schema")]
+    Db(command::db::DbArgs),
     #[command(
         about = "Build pack index file for an existing packed archive",
         hide = true
     )]
     IndexPack(command::index_pack::IndexPackArgs),
-
     #[command(
-        about = "Check out and switch to a local or remote branches",
+        about = "Compatibility entry for hook configurations installed by `libra agent enable`",
         hide = true
     )]
-    Checkout(command::checkout::CheckoutArgs),
-    #[command(
-        subcommand,
-        about = "Use binary search to find the commit that introduced a bug"
-    )]
-    Bisect(Bisect),
+    Hooks(command::hooks::HooksArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -292,6 +446,30 @@ pub enum Stash {
     Drop {
         #[arg(help = "The stash to drop")]
         stash: Option<String>,
+    },
+    #[command(about = "Show the changes recorded in the stash as a file-level summary")]
+    Show {
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+        #[arg(long, help = "Show only the file names that changed")]
+        name_only: bool,
+        #[arg(long, help = "Show only file names with their status code")]
+        name_status: bool,
+    },
+    #[command(about = "Create and check out a new branch from the stash, then drop it")]
+    Branch {
+        #[arg(help = "Name of the new branch to create")]
+        branch: String,
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+    },
+    #[command(about = "Remove all stashed entries")]
+    Clear {
+        #[arg(
+            long,
+            help = "Skip confirmation; required outside JSON / machine modes"
+        )]
+        force: bool,
     },
 }
 
@@ -326,11 +504,33 @@ pub enum Bisect {
     },
     #[command(about = "Show bisect log")]
     Log,
+    #[command(about = "Run a script for each commit until convergence")]
+    Run {
+        #[arg(
+            help = "Command to run for each commit; first arg is the executable",
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        cmd: Vec<String>,
+    },
+    #[command(about = "Show the current bisect state and remaining candidates")]
+    View,
 }
 
-/// The main function is the entry point of the Libra application.
-/// It parses the command-line arguments and executes the corresponding function.
-/// - `args`: parse from command line if it's `None`, otherwise parse from the given args
+/// Synchronous CLI entry — used by both the `libra` binary and embedders that cannot
+/// (or do not wish to) own their own Tokio runtime.
+///
+/// Functional scope:
+/// - Builds a multi-thread Tokio runtime, then drives [`parse_async`] to completion.
+/// - When `args` is `None`, the underlying parser falls back to `std::env::args`.
+///
+/// Boundary conditions:
+/// - Calling this from inside an existing Tokio runtime panics; embedders that are
+///   already async must call [`parse_async`] directly. See the embedding contract in
+///   [`crate::exec`].
+/// - Returns `CliError::fatal` if the runtime itself cannot be constructed (extremely
+///   unlikely outside of OOM scenarios).
 pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -340,7 +540,23 @@ pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
     runtime.block_on(Box::pin(parse_async(args)))
 }
 
-// Rewrite `log -<n>` into `log -n <n>` only when `log` is the actual subcommand.
+/// Rewrite Git-style `-<n>` shortcuts into the long-form `-n <n>` flag, but only when
+/// the active subcommand is `log`.
+///
+/// Git accepts `git log -3` as shorthand for `git log -n 3`, but clap cannot express a
+/// purely numeric flag without conflicting with positional revisions. This helper
+/// patches argv before clap sees it so users keep the familiar shortcut.
+///
+/// Boundary conditions:
+/// - The rewrite only fires for arguments before any `--` separator inside the `log`
+///   subcommand, so paths or revisions that happen to look like `-3` are preserved
+///   verbatim once the user explicitly closes the option list.
+/// - When `log` is not the active subcommand the original argv is returned unchanged,
+///   leaving every other command's `-<n>` semantics untouched.
+///
+/// See: [`tests::clap_alias_br_resolves_to_branch`] and friends for related parser
+/// behaviour. The exact rewrite is exercised end-to-end by the integration tests in
+/// `tests/command/log_test.rs`.
 fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     // Detect the real subcommand position to avoid rewriting positional args for other commands.
     let subcommand = find_subcommand_index(&args);
@@ -389,8 +605,17 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
-// Find the first argument that represents the subcommand.
-// If `--` appears, treat the next argument as the subcommand.
+/// Locate the first non-flag token in `args` and return its index plus whether it was
+/// produced by an explicit `--` separator.
+///
+/// Boundary conditions:
+/// - Skips over any leading flags (`-x`, `--long`) so `libra --json status` still
+///   identifies `status` as the subcommand.
+/// - When `--` appears, the *next* argument is treated as the subcommand and the
+///   returned `bool` is `true` to signal the caller to drop the separator. Returns
+///   `None` if `--` is the last token.
+/// - Returns `None` when no non-flag token exists (e.g. argv is `["libra"]` or
+///   `["libra", "--help"]`).
 fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
     let mut i = 1;
     while i < args.len() {
@@ -531,32 +756,182 @@ fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<Str
     )
 }
 
-fn repo_not_found_error() -> CliError {
-    CliError::repo_not_found()
+fn shell_quote_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    shell_quote_text(&raw)
 }
 
-fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
+#[cfg(windows)]
+fn shell_quote_text(raw: &str) -> String {
+    format!("\"{}\"", raw)
+}
+
+#[cfg(not(windows))]
+fn shell_quote_text(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', "'\"'\"'"))
+}
+
+fn git_conversion_hint(location: &utils::util::GitRepositoryLocation) -> String {
+    let command = if location.is_bare {
+        "libra init --bare --from-git-repository ."
+    } else {
+        "libra init --from-git-repository ."
+    };
+    let current = utils::util::cur_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| utils::util::cur_dir());
+
+    if current == location.root {
+        format!("run '{command}' to convert this Git repository to Libra.")
+    } else {
+        format!("run: cd {} && {command}", shell_quote_path(&location.root))
+    }
+}
+
+fn repo_not_found_error(path: Option<&Path>) -> CliError {
+    let mut error = CliError::repo_not_found();
+    if let Some(location) = utils::util::find_git_repository(path) {
+        error = error.with_priority_hint(git_conversion_hint(&location));
+    }
+    error
+}
+
+struct CommandPreflight {
+    storage: Option<std::path::PathBuf>,
+    check_schema: bool,
+    set_hash_kind: bool,
+}
+
+impl CommandPreflight {
+    fn none() -> Self {
+        Self {
+            storage: None,
+            check_schema: false,
+            set_hash_kind: false,
+        }
+    }
+
+    fn sha1_without_repo() -> Self {
+        Self {
+            storage: None,
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
+
+    fn repo(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: true,
+            set_hash_kind: true,
+        }
+    }
+
+    fn repo_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: false,
+        }
+    }
+
+    fn repo_hash_kind_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: true,
+        }
+    }
+}
+
+fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
     match command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => Ok(None),
+        Commands::Init(_)
+        | Commands::Clone(_)
+        | Commands::Open(_)
+        | Commands::CodeControl(_)
+        | Commands::LsRemote(_)
+        | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
+        Commands::HashObject(args) if !args.write => {
+            match utils::util::try_get_storage_path(None) {
+                Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                    storage,
+                )),
+                Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+            }
+        }
+        Commands::VerifyPack(_) => match utils::util::try_get_storage_path(None) {
+            Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            )),
+            Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+        },
+        #[cfg(unix)]
+        Commands::Worktree(command::worktree::WorktreeArgs {
+            command: command::worktree::WorktreeSubcommand::Umount { .. },
+        }) => Ok(CommandPreflight::none()),
         // Config global/system scopes don't require a repository.
-        Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
+        Commands::Config(cfg) if cfg.global || cfg.system => Ok(CommandPreflight::none()),
         Commands::Code(code_args) => {
             let working_dir = command::code::resolve_code_preflight_working_dir(code_args)?;
-            let storage = utils::util::try_get_storage_path(Some(working_dir))
-                .map_err(|_| repo_not_found_error())?;
-            Ok(Some(storage))
+            let storage = utils::util::try_get_storage_path(Some(working_dir.clone()))
+                .map_err(|_| repo_not_found_error(Some(&working_dir)))?;
+            Ok(CommandPreflight::repo(storage))
         }
         Commands::Graph(graph_args) => {
             let storage = utils::util::try_get_storage_path(graph_args.repo.clone())
-                .map_err(|_| repo_not_found_error())?;
-            Ok(Some(storage))
+                .map_err(|_| repo_not_found_error(graph_args.repo.as_deref()))?;
+            Ok(CommandPreflight::repo(storage))
+        }
+        Commands::Db(_) => {
+            let storage =
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
+            Ok(CommandPreflight::repo_without_schema_guard(storage))
         }
         _ => {
             let storage =
-                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
-            Ok(Some(storage))
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
+            Ok(CommandPreflight::repo(storage))
         }
     }
+}
+
+async fn check_database_schema_for_storage(storage: &Path) -> CliResult<()> {
+    let db_path = storage.join(utils::util::DATABASE);
+    match db::inspect_database_schema(&db_path).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to inspect repository database '{}': {}",
+            db_path.display(),
+            error
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })? {
+        SchemaCompatibility::Compatible { .. } => Ok(()),
+        SchemaCompatibility::UpgradeRequired {
+            current_version,
+            latest_version,
+        } => Err(CliError::fatal(format!(
+            "repository database schema is out of date (current: {}, required: {latest_version})",
+            format_schema_version(current_version)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+        .with_hint("run 'libra db upgrade' in this repository to upgrade the database schema.")),
+        SchemaCompatibility::UnsupportedFuture {
+            current_version,
+            latest_version,
+        } => Err(CliError::fatal(format!(
+            "repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {})",
+            format_schema_version(latest_version)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+        .with_hint("install a newer Libra binary before running commands in this repository.")),
+    }
+}
+
+fn format_schema_version(version: Option<i64>) -> String {
+    version
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn is_error_codes_help_topic(argv: &[String]) -> bool {
@@ -633,7 +1008,35 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
     cli_error
 }
 
-/// `async` version of the [parse] function
+/// Async CLI dispatcher — the actual orchestrator behind every Libra invocation.
+///
+/// Functional scope:
+/// 1. Normalises argv (rewrites `log -<n>` shortcuts, strips a leading `--`).
+/// 2. Resets the per-process warning tracker so `--exit-code-on-warning` cannot be
+///    polluted by a previous invocation in long-lived processes (TUI, tests).
+/// 3. Short-circuits the `help error-codes` topic before clap parsing because it
+///    would otherwise be treated as an unknown subcommand.
+/// 4. Parses with clap and translates every parse failure into a structured
+///    [`CliError`] (see [`classify_parse_error`]).
+/// 5. Validates command-specific arg constraints that clap cannot express (e.g.
+///    [`command::tag::validate_cli_args`]).
+/// 6. For commands that operate on a repository, runs [`command_preflight_storage`]
+///    and primes the global hash kind via [`set_local_hash_kind_for_storage`].
+/// 7. Resolves the global output flags into a single [`OutputConfig`] and dispatches
+///    to the matching `command::*::execute_safe` handler.
+/// 8. After the command returns, waits for any background storage tasks (object
+///    indexing, cache flushes) so they cannot be killed by process exit.
+///
+/// Boundary conditions:
+/// - `--help` / `--version` are still rendered through clap so output matches user
+///   expectations exactly; the function then returns `Ok(())` without dispatching.
+/// - The `Init` arm explicitly restores the original CWD afterwards because the
+///   handler may `cd` into a freshly-created repo and downstream callers (notably
+///   the integration test suite and `--from-git-repository`) rely on the CWD being
+///   stable across invocations.
+/// - When `--exit-code-on-warning` is set and at least one warning was recorded, the
+///   function returns a `CliError::failure` with stable code `WarningEmitted` even
+///   though the underlying command succeeded.
 pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let argv = match args {
         Some(args) => args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -647,7 +1050,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
-            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
                 err.print().map_err(|print_err| {
                     CliError::fatal(format!("failed to write clap output: {print_err}"))
                 })?;
@@ -659,15 +1064,32 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
-    if let Some(storage) = command_preflight_storage(&args.command)? {
-        set_local_hash_kind_for_storage(&storage).await?;
+    let preflight = command_preflight(&args.command)?;
+    if let Some(storage) = preflight.storage.as_deref() {
+        if preflight.check_schema {
+            check_database_schema_for_storage(storage).await?;
+        }
+        if preflight.set_hash_kind {
+            if preflight.check_schema {
+                set_local_hash_kind_for_storage(storage).await?;
+            } else {
+                set_local_hash_kind_for_storage_without_schema_guard(storage).await?;
+            }
+        }
+    } else if preflight.set_hash_kind {
+        set_hash_kind(HashKind::Sha1);
     }
     // Resolve global output flags into a single config before dispatching.
+    let color = if args.no_color {
+        "never"
+    } else {
+        args.color.as_str()
+    };
     let output = OutputConfig::resolve(
         args.json.as_deref(),
         args.machine,
         args.no_pager,
-        &args.color,
+        color,
         args.quiet,
         args.exit_code_on_warning,
         &args.progress,
@@ -701,7 +1123,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
+        Commands::CodeControl(cmd_args) => command::code_control::execute(cmd_args).await?,
+        Commands::Automation(cmd_args) => {
+            command::automation::execute_safe(cmd_args, &output).await?
+        }
+        Commands::Usage(cmd_args) => command::usage::execute_safe(cmd_args, &output).await?,
         Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
+        Commands::Sandbox(cmd_args) => command::sandbox::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
         Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,
@@ -713,6 +1141,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
+        Commands::SymbolicRef(cmd_args) => {
+            command::symbolic_ref::execute_safe(cmd_args, &output).await?
+        }
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
@@ -720,6 +1152,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,
         Commands::Merge(cmd_args) => command::merge::execute_safe(cmd_args, &output).await?,
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
+        Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
+        Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,
         Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
         Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
         Commands::CherryPick(cmd_args) => {
@@ -727,8 +1161,15 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::HashObject(cmd_args) => {
+            command::hash_object::execute_safe(cmd_args, &output).await?
+        }
+        Commands::VerifyPack(cmd_args) => {
+            command::verify_pack::execute_safe(cmd_args, &output).await?
+        }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
+        Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
@@ -737,11 +1178,15 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
+        Commands::Db(cmd_args) => command::db::execute_safe(cmd_args, &output).await?,
         Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Op(cmd_args) => command::op::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
         Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
+        Commands::Publish(cmd_args) => command::publish::execute_safe(cmd_args, &output).await?,
+        Commands::Agent(cmd_args) => command::agent::execute_safe(cmd_args, &output).await?,
+        Commands::Hooks(cmd_args) => command::hooks::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
     }
 
@@ -770,8 +1215,23 @@ mod tests {
     use super::*;
     use crate::utils::{output, test};
 
-    /// this test is to verify that the CLI can be built without panicking
-    /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
+    /// Scenario: running `libra` with no arguments should show usage information without
+    /// an `error:` prefix, matching the behaviour of `git` and other standard tools.
+    /// The underlying `arg_required_else_help = true` flag triggers clap's
+    /// `DisplayHelpOnMissingArgumentOrSubcommand` path, which we treat the same as
+    /// `DisplayHelp` — i.e. print and return `Ok(())`.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn no_subcommand_shows_help_without_error_prefix() {
+        // `parse_async` must succeed (return Ok) so no `error:` label is emitted.
+        parse_async(Some(&["libra"])).await.unwrap();
+    }
+
+    /// Scenario: clap's `debug_assert` walks the entire command tree and panics on any
+    /// structural mistake (duplicate flags, conflicting aliases, malformed value
+    /// parsers). This test is the cheapest way to keep the giant `Commands` enum
+    /// honest as new subcommands are added.
+    /// See: <https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html>
     #[test]
     fn verify_cli() {
         use clap::CommandFactory;
@@ -779,6 +1239,10 @@ mod tests {
         Cli::command().debug_assert()
     }
 
+    /// Scenario: `libra import` is intentionally not a subcommand because importing
+    /// is exposed via `libra config --import`. This test guards the redirect hint
+    /// emitted by [`parse_error_hints`] / [`REDIRECTED_COMMANDS`] so users typing the
+    /// natural-but-wrong word are pointed at the real flag.
     #[tokio::test]
     async fn parse_error_shows_import_hint() {
         let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();
@@ -789,6 +1253,9 @@ mod tests {
         );
     }
 
+    /// Scenario: the `branch` command advertises a `br` alias for ergonomics. This
+    /// test ensures the alias keeps resolving even after the `Commands` enum is
+    /// reordered or extended.
     #[test]
     fn clap_alias_br_resolves_to_branch() {
         let cli = Cli::try_parse_from(["libra", "br"]).unwrap();
@@ -798,6 +1265,9 @@ mod tests {
         );
     }
 
+    /// Scenario: the `config` command advertises a `cfg` alias. Mirrors
+    /// [`clap_alias_br_resolves_to_branch`] for the second alias that tends to break
+    /// when the subcommand list is touched.
     #[test]
     fn clap_alias_cfg_resolves_to_config() {
         let cli = Cli::try_parse_from(["libra", "cfg"]).unwrap();
@@ -807,6 +1277,34 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn worktree_umount_preflight_does_not_require_repo() {
+        let cli = Cli::try_parse_from(["libra", "worktree", "umount", "/tmp/libra-task"]).unwrap();
+
+        let preflight = command_preflight(&cli.command).unwrap();
+        assert!(preflight.storage.is_none());
+        assert!(!preflight.check_schema);
+        assert!(!preflight.set_hash_kind);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn hash_object_read_only_preflight_skips_schema_guard() {
+        let repo = tempfile::tempdir().expect("failed to create test repo");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let cli = Cli::try_parse_from(["libra", "hash-object", "hello.txt"]).unwrap();
+
+        let preflight = command_preflight(&cli.command).unwrap();
+        assert!(preflight.storage.is_some());
+        assert!(!preflight.check_schema);
+        assert!(preflight.set_hash_kind);
+    }
+
+    /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the
+    /// typo `initt`. We accept either "Hint:" (Libra-formatted) or "similar"
+    /// (clap-formatted) so the test survives clap upgrades that re-word the message.
     #[tokio::test]
     async fn clap_fuzzy_suggests_similar_command() {
         // "initt" is close enough to "init" for clap's built-in fuzzy match.
@@ -819,6 +1317,11 @@ mod tests {
         );
     }
 
+    /// Scenario: the warning tracker is a process-global static. In long-lived
+    /// processes (TUI, tests) a previously-recorded warning would otherwise leak
+    /// into the next invocation and silently flip the exit code under
+    /// `--exit-code-on-warning`. This test seeds a stale warning, then verifies that
+    /// [`parse_async`] clears it before any handler runs.
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn parse_async_resets_warning_tracker_before_dispatch() {
@@ -833,6 +1336,12 @@ mod tests {
         );
     }
 
+    /// Scenario: `libra code --repo <path>` should perform repository preflight
+    /// against `<path>`, *not* the process CWD. The test arranges for the CWD to be
+    /// outside any repo, sets `--repo` to a freshly-initialised one, and confirms
+    /// that the error we hit is the *next* validation step (missing ollama model)
+    /// rather than "not a libra repository". This guards a regression where preflight
+    /// was hitting CWD before honoring `--repo`.
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn code_repo_flag_uses_target_repo_during_preflight() {
@@ -869,6 +1378,11 @@ mod tests {
         );
     }
 
+    /// Scenario: `libra help error-codes` (and its `errors` alias) should bypass
+    /// clap and stream the bundled error-code reference. Tests cover the two valid
+    /// spellings plus two negative cases — a different `help <topic>` and the global
+    /// `--help` flag — so the matcher in [`is_error_codes_help_topic`] stays tight
+    /// enough that we don't accidentally swallow other help requests.
     #[test]
     fn detects_help_error_codes_topic() {
         assert!(is_error_codes_help_topic(&[
@@ -890,5 +1404,31 @@ mod tests {
             "libra".to_string(),
             "--help".to_string(),
         ]));
+    }
+
+    /// Scenario (Unix): paths embedded in conversion-hint messages must be
+    /// shell-safe. POSIX shells require `'...'` quoting with `'\'\''` escapes for
+    /// embedded single quotes; this test pins that rule using a path containing an
+    /// apostrophe, the canonical breakage case.
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_quote_path_uses_posix_single_quote_escaping() {
+        assert_eq!(
+            shell_quote_path(Path::new("repo's path")),
+            "'repo'\"'\"'s path'"
+        );
+    }
+
+    /// Scenario (Windows): cmd.exe and PowerShell expect double-quoted paths and
+    /// tolerate spaces inside them. This test pins the simpler Windows behaviour and
+    /// exists as a sibling to the POSIX test so both platforms have explicit
+    /// coverage when [`shell_quote_path`] is touched.
+    #[cfg(windows)]
+    #[test]
+    fn shell_quote_path_uses_windows_double_quotes() {
+        assert_eq!(
+            shell_quote_path(Path::new(r"C:\Program Files\repo")),
+            r#""C:\Program Files\repo""#
+        );
     }
 }

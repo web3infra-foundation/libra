@@ -50,7 +50,12 @@ pub struct LocalStorage {
 
 impl LocalStorage {
     pub fn new(base_path: PathBuf) -> Self {
-        fs::create_dir_all(&base_path).expect("Create directory failed!");
+        fs::create_dir_all(&base_path).unwrap_or_else(|err| {
+            panic!(
+                "LocalStorage::new({}): create_dir_all failed: {err}",
+                base_path.display()
+            )
+        });
         Self {
             base_path,
             hash_kind: Some(get_hash_kind()),
@@ -60,11 +65,15 @@ impl LocalStorage {
     /// Transforms an object hash into a path like "ab/cdef...". This is used for loose objects.
     fn transform_path(&self, hash: &ObjectHash) -> String {
         let hash = hash.to_string();
+        // INVARIANT: `hash` is the lowercase-hex string from `ObjectHash::to_string()`
+        // (SHA-1 / SHA-256), so every byte of the resulting path is ASCII alphanumeric
+        // and therefore valid UTF-8. `OsString::into_string()` only returns Err on
+        // non-UTF-8 byte sequences, which cannot occur here.
         Path::new(&hash[0..2])
             .join(&hash[2..hash.len()])
             .into_os_string()
             .into_string()
-            .unwrap()
+            .expect("hex object hash always round-trips through OsString as UTF-8")
     }
 
     /// Gets the full path to an object file based on its hash. For example, "base_path/ab/cdef...".
@@ -103,21 +112,44 @@ impl LocalStorage {
         Ok(compressed_data)
     }
 
-    /// Parses the header of a loose object, which has the format "type size\0". This is used after decompressing a loose object's data to extract its type and size.
-    fn parse_header(data: &[u8]) -> (String, usize, usize) {
+    /// Parses the header of a loose object, which has the format "type size\0".
+    /// This is used after decompressing a loose object's data to extract its
+    /// type and size.
+    ///
+    /// Returns [`GitError::InvalidObjectInfo`] for any of the corruption shapes
+    /// that previously panicked: missing `\0` terminator, non-UTF-8 header bytes,
+    /// missing type prefix, missing size, non-numeric size, or size mismatch
+    /// against the decompressed payload.
+    fn parse_header(data: &[u8]) -> Result<(String, usize, usize), GitError> {
         let end_of_header = data
             .iter()
             .position(|&b| b == b'\0')
-            .expect("Invalid object: no header terminator");
-        let header_str =
-            std::str::from_utf8(&data[..end_of_header]).expect("Invalid UTF-8 in header");
+            .ok_or_else(|| GitError::InvalidObjectInfo("missing header terminator".to_string()))?;
+        let header_str = std::str::from_utf8(&data[..end_of_header])
+            .map_err(|e| GitError::InvalidObjectInfo(format!("non-UTF-8 header bytes: {e}")))?;
 
         let mut parts = header_str.splitn(2, ' ');
-        let obj_type = parts.next().expect("No object type in header").to_string();
-        let size_str = parts.next().expect("No size in header");
-        let size = size_str.parse::<usize>().expect("Invalid size in header");
-        assert_eq!(size, data.len() - 1 - end_of_header, "Invalid object size");
-        (obj_type, size, end_of_header)
+        let obj_type = parts
+            .next()
+            .ok_or_else(|| {
+                GitError::InvalidObjectInfo("missing object type in header".to_string())
+            })?
+            .to_string();
+        let size_str = parts.next().ok_or_else(|| {
+            GitError::InvalidObjectInfo("missing object size in header".to_string())
+        })?;
+        let size = size_str.parse::<usize>().map_err(|e| {
+            GitError::InvalidObjectInfo(format!(
+                "non-numeric object size '{size_str}' in header: {e}"
+            ))
+        })?;
+        let expected = data.len() - 1 - end_of_header;
+        if size != expected {
+            return Err(GitError::InvalidObjectInfo(format!(
+                "object size mismatch: header says {size}, payload is {expected}"
+            )));
+        }
+        Ok((obj_type, size, end_of_header))
     }
 
     // --- Pack related methods ---
@@ -128,12 +160,31 @@ impl LocalStorage {
             return Vec::new();
         }
         let mut packs = Vec::new();
-        if let Ok(entries) = fs::read_dir(pack_dir) {
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_file() && path.extension().unwrap() == "pack" {
-                    packs.push(path);
+        let entries = match fs::read_dir(&pack_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::warn!(
+                    pack_dir = %pack_dir.display(),
+                    error = %err,
+                    "failed to read pack directory, skipping"
+                );
+                return packs;
+            }
+        };
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(err) => {
+                    tracing::warn!(
+                        pack_dir = %pack_dir.display(),
+                        error = %err,
+                        "skipping unreadable pack directory entry"
+                    );
+                    continue;
                 }
+            };
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "pack") {
+                packs.push(path);
             }
         }
         packs
@@ -156,18 +207,27 @@ impl LocalStorage {
             };
 
             if needs_rebuild {
-                if want_v2 {
-                    command::index_pack::build_index_v2(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
+                let (Some(pack_str), Some(idx_str)) = (pack.to_str(), idx.to_str()) else {
+                    tracing::warn!(
+                        pack = %pack.display(),
+                        idx = %idx.display(),
+                        "skipping pack with non-UTF-8 path; cannot pass to build_index"
+                    );
+                    continue;
+                };
+                let build_result = if want_v2 {
+                    command::index_pack::build_index_v2(pack_str, idx_str)
                 } else {
-                    command::index_pack::build_index_v1(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
+                    command::index_pack::build_index_v1(pack_str, idx_str)
+                };
+                if let Err(err) = build_result {
+                    tracing::warn!(
+                        pack = %pack.display(),
+                        idx = %idx.display(),
+                        error = %err,
+                        "failed to (re)build pack index; skipping this pack"
+                    );
+                    continue;
                 }
             }
             idxs.push(idx);
@@ -210,10 +270,10 @@ impl LocalStorage {
         idx_file.seek(io::SeekFrom::Start(fanout_offset))?;
         let mut fanout: [u32; 256] = [0; 256];
         let mut buf = [0; 4];
-        fanout.iter_mut().for_each(|x| {
-            idx_file.read_exact(&mut buf).unwrap();
-            *x = u32::from_be_bytes(buf);
-        });
+        for slot in fanout.iter_mut() {
+            idx_file.read_exact(&mut buf)?;
+            *slot = u32::from_be_bytes(buf);
+        }
         Ok((version, fanout))
     }
 
@@ -283,10 +343,25 @@ impl LocalStorage {
     }
 
     fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
-        let file_name = pack_file.file_name().unwrap().to_str().unwrap().to_owned();
+        let file_name = pack_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                GitError::InvalidObjectInfo(format!(
+                    "pack path has no UTF-8 file name: {}",
+                    pack_file.display()
+                ))
+            })?
+            .to_owned();
         let cache_key = format!("{:?}-{}", file_name, offset);
 
-        if let Some(cached) = PACK_OBJ_CACHE.lock().unwrap().get(&cache_key) {
+        // INVARIANT: PACK_OBJ_CACHE mutex poisoning would require an earlier
+        // panic while holding the lock; treated as unrecoverable here.
+        if let Some(cached) = PACK_OBJ_CACHE
+            .lock()
+            .expect("PACK_OBJ_CACHE mutex poisoned")
+            .get(&cache_key)
+        {
             return Ok(cached.clone());
         }
 
@@ -307,16 +382,27 @@ impl LocalStorage {
         })?;
         let full_obj = match obj.object_type() {
             ObjectType::OffsetDelta => {
-                let delta = obj.offset_delta().unwrap();
+                // INVARIANT: obj.object_type() == OffsetDelta implies offset_delta() is Some.
+                let delta = obj
+                    .offset_delta()
+                    .expect("OffsetDelta object must have offset_delta");
                 let base_offset = offset - delta as u64;
                 let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
             }
             ObjectType::HashDelta => {
-                let base_hash = obj.hash_delta().unwrap();
+                // INVARIANT: obj.object_type() == HashDelta implies hash_delta() is Some.
+                let base_hash = obj
+                    .hash_delta()
+                    .expect("HashDelta object must have hash_delta");
                 let idx_file = pack_file.with_extension("idx");
-                let base_offset = Self::read_idx(&idx_file, &base_hash)?.unwrap();
+                let base_offset = Self::read_idx(&idx_file, &base_hash)?.ok_or_else(|| {
+                    GitError::InvalidObjectInfo(format!(
+                        "HashDelta base {base_hash} not found in pack idx {}",
+                        idx_file.display()
+                    ))
+                })?;
                 let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
@@ -326,7 +412,7 @@ impl LocalStorage {
 
         if PACK_OBJ_CACHE
             .lock()
-            .unwrap()
+            .expect("PACK_OBJ_CACHE mutex poisoned")
             .insert(cache_key, full_obj.clone())
             .is_err()
         {
@@ -379,7 +465,7 @@ impl Storage for LocalStorage {
             if self_clone.exist_loosely(&hash) {
                 let raw_data = self_clone.read_raw_data(&hash)?;
                 let data = Self::decompress_zlib(&raw_data)?;
-                let (type_str, _, end_of_header) = Self::parse_header(&data);
+                let (type_str, _, end_of_header) = Self::parse_header(&data)?;
                 let obj_type = ObjectType::from_string(&type_str)?;
                 Ok((data[end_of_header + 1..].to_vec(), obj_type))
             } else {
@@ -408,7 +494,10 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let path = self_clone.get_obj_path(&hash);
-            let dir = path.parent().unwrap();
+            // INVARIANT: get_obj_path always returns `objects/AB/CD...` so it has a parent.
+            let dir = path
+                .parent()
+                .expect("get_obj_path output always has a parent directory");
             fs::create_dir_all(dir)?;
 
             let header = format!("{} {}\0", obj_type, data.len());
@@ -416,7 +505,12 @@ impl Storage for LocalStorage {
 
             let mut file = fs::File::create(&path)?;
             file.write_all(&Self::compress_zlib(&full_content)?)?;
-            Ok(path.to_str().unwrap().to_string())
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                GitError::InvalidArgument(format!(
+                    "loose object path is not valid UTF-8: {}",
+                    path.display()
+                ))
+            })
         })
         .await
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
@@ -431,7 +525,23 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let path = self_clone.get_obj_path(&hash);
-            Path::exists(&path) || self_clone.get_from_pack(&hash).unwrap().is_some()
+            if Path::exists(&path) {
+                return true;
+            }
+            match self_clone.get_from_pack(&hash) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(err) => {
+                    // exist() returns bool, so any pack-read failure is treated as "not present".
+                    // Log so a corrupt pack doesn't silently cause re-fetch loops.
+                    tracing::warn!(
+                        hash = %hash,
+                        error = %err,
+                        "failed to consult pack while checking object existence; assuming missing"
+                    );
+                    false
+                }
+            }
         })
         .await
         .unwrap_or(false)
@@ -446,33 +556,67 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let mut objects = Vec::new();
-            // Loose objects
+            // Loose objects: walk objects/AB/CDEF... directories. Skip-and-warn on any
+            // filesystem hiccup so a single bad entry doesn't kill the whole search.
             if let Ok(paths) = fs::read_dir(&self_clone.base_path) {
-                for path in paths {
-                    let path = path.unwrap().path();
-                    if path.is_dir() && path.file_name().unwrap().len() == 2 {
-                        let dir_name = path.file_name().unwrap().to_str().unwrap();
-                        if !prefix.starts_with(dir_name)
-                            && !dir_name.starts_with(&prefix[..std::cmp::min(2, prefix.len())])
-                        {
+                for entry in paths {
+                    let path = match entry {
+                        Ok(entry) => entry.path(),
+                        Err(err) => {
+                            tracing::warn!(
+                                base = %self_clone.base_path.display(),
+                                error = %err,
+                                "skipping unreadable objects/ entry during search"
+                            );
                             continue;
                         }
+                    };
+                    let Some(dir_name) = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|n| n.len() == 2)
+                    else {
+                        continue;
+                    };
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    if !prefix.starts_with(dir_name)
+                        && !dir_name.starts_with(&prefix[..std::cmp::min(2, prefix.len())])
+                    {
+                        continue;
+                    }
 
-                        if let Ok(sub_paths) = fs::read_dir(&path) {
-                            for sub_path in sub_paths {
-                                let sub_path = sub_path.unwrap().path();
-                                if sub_path.is_file() {
-                                    let parent_name =
-                                        path.file_name().unwrap().to_str().unwrap().to_string();
-                                    let file_name =
-                                        sub_path.file_name().unwrap().to_str().unwrap().to_string();
-                                    let full_hash = parent_name + &file_name;
-                                    if full_hash.starts_with(&prefix)
-                                        && let Ok(hash) = ObjectHash::from_str(&full_hash)
-                                    {
-                                        objects.push(hash);
-                                    }
+                    let parent_name = dir_name.to_string();
+                    if let Ok(sub_paths) = fs::read_dir(&path) {
+                        for sub_entry in sub_paths {
+                            let sub_path = match sub_entry {
+                                Ok(entry) => entry.path(),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        dir = %path.display(),
+                                        error = %err,
+                                        "skipping unreadable inner objects/ entry during search"
+                                    );
+                                    continue;
                                 }
+                            };
+                            if !sub_path.is_file() {
+                                continue;
+                            }
+                            let Some(file_name) = sub_path.file_name().and_then(|n| n.to_str())
+                            else {
+                                tracing::warn!(
+                                    sub_path = %sub_path.display(),
+                                    "skipping loose-object entry with non-UTF-8 file name"
+                                );
+                                continue;
+                            };
+                            let full_hash = format!("{parent_name}{file_name}");
+                            if full_hash.starts_with(&prefix)
+                                && let Ok(hash) = ObjectHash::from_str(&full_hash)
+                            {
+                                objects.push(hash);
                             }
                         }
                     }
@@ -534,5 +678,90 @@ impl LocalStorage {
             }
         }
         Ok(objs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit-test the loose-object header parser. Validates the v0.17.226
+    //! `Result<_, GitError>` migration — each corruption shape that used to
+    //! panic is now a `GitError::InvalidObjectInfo` with a descriptive detail.
+
+    use super::*;
+
+    /// Build a valid loose-object header for `(type, payload)`.
+    fn header_bytes(obj_type: &str, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("{} {}\0", obj_type, payload.len()).into_bytes();
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn parse_header_accepts_well_formed_header() {
+        let data = header_bytes("blob", b"hello world");
+        let (kind, size, end) = LocalStorage::parse_header(&data).expect("valid header parses");
+        assert_eq!(kind, "blob");
+        assert_eq!(size, b"hello world".len());
+        assert_eq!(end, "blob 11".len());
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_terminator() {
+        let err = LocalStorage::parse_header(b"blob 4abcd")
+            .expect_err("missing NUL terminator should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("missing header terminator")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_size_segment() {
+        let mut data = b"blob\0".to_vec();
+        data.extend_from_slice(b"payload");
+        let err = LocalStorage::parse_header(&data).expect_err("missing size segment should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("missing object size")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_non_numeric_size() {
+        let mut data = b"blob abc\0".to_vec();
+        data.extend_from_slice(b"xyz");
+        let err = LocalStorage::parse_header(&data).expect_err("non-numeric size should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-numeric object size")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_size_mismatch() {
+        // Header claims size 100 but only 5 payload bytes follow.
+        let mut data = b"blob 100\0".to_vec();
+        data.extend_from_slice(b"short");
+        let err = LocalStorage::parse_header(&data).expect_err("size mismatch should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("object size mismatch")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    /// Pre-NUL header bytes that are not valid UTF-8 must surface as
+    /// `InvalidObjectInfo("non-UTF-8 header bytes: …")`. v0.17.228 deferred
+    /// this branch as "contrived", but `\xFF\xFF\xFF\0payload` is in fact a
+    /// minimal way to exercise the path: the position-of-\0 check passes
+    /// (terminator at offset 3) and the slice [0..3] is then invalid UTF-8.
+    #[test]
+    fn parse_header_rejects_non_utf8_header_bytes() {
+        // 3 invalid-UTF-8 bytes followed by NUL terminator and a 0-length payload.
+        let data = [0xFFu8, 0xFFu8, 0xFFu8, b'\0'];
+        let err = LocalStorage::parse_header(&data).expect_err("non-UTF-8 header should fail");
+        assert!(
+            matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
+            "unexpected err: {err:?}"
+        );
     }
 }

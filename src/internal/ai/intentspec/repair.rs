@@ -1,3 +1,9 @@
+//! Deterministic repair passes for incomplete or loosely-formed IntentSpec drafts.
+//!
+//! Boundary: repair may add defaults and normalize fields, but it must not invent
+//! hidden goals or widen user scope. Edge cases around absent checks, duplicated
+//! artifacts, and missing acceptance criteria are exercised by the intent-flow tests.
+
 use std::collections::HashSet;
 
 use super::{

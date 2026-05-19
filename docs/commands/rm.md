@@ -7,10 +7,10 @@ Remove files from the working tree and/or the index.
 ## Synopsis
 
 ```
-libra rm <pathspec>...
-libra rm --cached <pathspec>...
-libra rm -r <pathspec>...
-libra rm --dry-run <pathspec>...
+libra rm [--json|--machine] <pathspec>...
+libra rm [--json|--machine] --cached <pathspec>...
+libra rm [--json|--machine] -r <pathspec>...
+libra rm [--json|--machine] --dry-run <pathspec>...
 ```
 
 ## Description
@@ -89,6 +89,7 @@ libra rm -r old_module/
 
 # Preview what would be removed
 libra rm --dry-run -r build/
+libra --json rm --dry-run -r build/
 
 # Force remove a file with local modifications
 libra rm -f src/experimental.rs
@@ -112,6 +113,41 @@ rm 'old_module/bar.rs'
 
 In `--dry-run` mode, the same output is produced but no files are modified.
 
+Global `--quiet` suppresses this primary human output while keeping warnings
+and errors on stderr.
+
+## JSON Output
+
+`--json` and `--machine` use the `rm` command envelope. `paths` contains every
+tracked file matched for index removal. `directories` contains recursive
+directory pathspecs that were removed from disk. In `--dry-run`, the same
+candidate paths are reported, but `removed_from_index` and `removed_from_disk`
+are `false`.
+
+```json
+{
+  "ok": true,
+  "command": "rm",
+  "data": {
+    "pathspecs": ["src/deprecated.rs"],
+    "paths": [
+      {
+        "path": "src/deprecated.rs",
+        "removed_from_index": true,
+        "removed_from_disk": true
+      }
+    ],
+    "directories": [],
+    "cached": false,
+    "recursive": false,
+    "forced": false,
+    "dry_run": false
+  }
+}
+```
+
+`--machine` emits the same envelope as compact single-line JSON.
+
 ## Design Rationale
 
 ### Why aliases `remove` and `delete`?
@@ -126,9 +162,11 @@ When removing many files programmatically (e.g., a CI cleanup step or a migratio
 
 Removing a file that has local modifications silently destroys work. Git requires `--force` in the same scenario. Libra follows this convention exactly: if the working tree differs from the index or the index differs from HEAD, the command errors with a message explaining which flag to use (`--cached` to keep the file, `-f` to force deletion). This two-flag escape hatch lets users express intent clearly.
 
-### Why no `--quiet` flag?
+### Why no per-command `--quiet` flag?
 
-Unlike `libra clean`, the `rm` command does not yet support `--quiet`. Each removal is reported to provide a clear audit trail. In scripting contexts, stdout can be redirected if silence is needed.
+Unlike `libra clean`, the `rm` command does not have a command-specific quiet
+flag. Use the global `--quiet` flag to suppress primary stdout while preserving
+warnings and errors.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -142,7 +180,7 @@ Unlike `libra clean`, the `rm` command does not yet support `--quiet`. Each remo
 | Ignore unmatch | `--ignore-unmatch` | `--ignore-unmatch` | Not available |
 | Pathspec from file | `--pathspec-from-file` | `--pathspec-from-file` | Not available |
 | NUL separator | `--pathspec-file-nul` | `--pathspec-file-nul` | Not available |
-| Quiet | Not supported | `-q` / `--quiet` | Not available |
+| Quiet | Global `--quiet` | `-q` / `--quiet` | Not available |
 | Aliases | `rm`, `remove`, `delete` | `rm` only | `file untrack` |
 
 Note: jj's `file untrack` is conceptually similar to `libra rm --cached` -- it stops tracking a file without deleting it. jj does not have a command that both untracks and deletes a file in one step.

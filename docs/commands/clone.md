@@ -17,10 +17,11 @@ transparently reuses `run_init()` for the local metadata setup.
 Cloning fetches all objects and refs from the remote, creates a `.libra` directory with a
 SQLite-backed metadata store, sets up the `origin` remote, and checks out the default branch
 (or the branch specified with `-b`). Vault signing is always bootstrapped during clone,
-matching `libra init` defaults.
+matching `libra init` defaults. For non-bare clones, any checked-out `.gitignore` files are
+copied to matching `.libraignore` files so Libra ignore rules work immediately.
 
 For bare clones, no working tree checkout is performed and the repository directory itself
-becomes the object store.
+becomes the object store. Bare clones do not create `.libraignore`.
 
 ## Options
 
@@ -28,12 +29,45 @@ becomes the object store.
 
 The remote repository URL to clone from. Supports SSH (`git@host:user/repo.git`) and
 HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem paths.
+`libra+cloud://` publish sources are recognized and strictly validated. The clone
+domain must be configured locally before restore starts; otherwise Libra returns
+`LBR-AUTH-001` and does not create the destination directory. Configured cloud
+sources resolve the D1 site, repository row, published refs, selected/default
+revision, object index, and R2 object availability before creating the target
+directory. Restore then initializes a local Libra repo, downloads indexed Git
+objects from R2, restores refs metadata, writes origin cloud config, and checks
+out the selected/default revision. Cloud sources never fall through to generic
+Git discovery.
 
 ```bash
 libra clone git@github.com:user/repo.git
 libra clone https://github.com/user/repo.git
 libra clone /path/to/local/repo
+libra clone libra+cloud://code.example.com/kepler-ledger
+libra clone libra+cloud://code.example.com/repo/rp_8f4c1b
+libra clone "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
+libra clone "libra+cloud://code.example.com/kepler-ledger?revision=latest"
 ```
+
+For `libra+cloud://`, the authority is the configured clone domain. The path must be
+either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
+or `?revision=<oid|latest>`.
+The first Cloudflare restore surface does not accept Git transport shaping flags:
+`--branch`, `--depth`, `--single-branch`, and `--bare` return `LBR-CLI-002`
+before clone-domain config lookup and before creating the destination directory.
+Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
+
+Required clone-domain config keys:
+
+```text
+cloud.clone_domains.<domain>.account_id
+cloud.clone_domains.<domain>.d1_database_id
+cloud.clone_domains.<domain>.r2_bucket
+```
+
+Cloud site resolution also requires `LIBRA_D1_API_TOKEN` from the environment or
+Libra vault config so the CLI can query the configured D1 database before
+starting restore.
 
 ### `[LOCAL_PATH]`
 
@@ -49,6 +83,8 @@ libra clone git@github.com:user/repo.git my-dir
 
 Check out `<NAME>` instead of the remote's HEAD. The branch must exist on the remote;
 otherwise a "remote branch not found" error is raised.
+For `libra+cloud://` sources, use `?ref=<branch|tag|full-ref>` in the URL instead;
+`--branch` is rejected before restore starts.
 
 ```bash
 libra clone -b develop git@github.com:user/repo.git
@@ -58,6 +94,8 @@ libra clone -b develop git@github.com:user/repo.git
 
 Fetch only the history leading to the tip of a single branch (HEAD, or the branch given
 by `-b`). Reduces transfer size for large repositories when only one branch is needed.
+Only Git remotes support this transport optimization; `libra+cloud://` restore rejects it
+because the restored local repository must preserve all published refs.
 
 ```bash
 libra clone --single-branch -b main git@github.com:user/repo.git
@@ -67,6 +105,8 @@ libra clone --single-branch -b main git@github.com:user/repo.git
 
 Create a bare repository without a working tree. The destination directory becomes the
 object store directly. Useful for central/server-side repositories.
+Bare Cloudflare restores are not part of the first restore surface; `libra+cloud://`
+currently rejects `--bare` explicitly.
 
 ```bash
 libra clone --bare git@github.com:user/repo.git
@@ -76,6 +116,8 @@ libra clone --bare git@github.com:user/repo.git
 
 Create a shallow clone with history truncated to the specified number of commits.
 `N` must be a positive integer.
+Only Git remotes support shallow transfer. Cloudflare restore rejects `--depth`
+because it must download the complete published object set.
 
 ```bash
 libra clone --depth 1 git@github.com:user/repo.git
@@ -195,6 +237,7 @@ Empty remote returns `"branch": null` and a warning:
 
 - `branch` is the actual checked-out branch; `null` when the remote has no refs
 - `shallow` is `true` when `--depth` was used
+- `source_kind` and `cloud_site` are omitted for ordinary Git/local clones; `libra+cloud://` clones add them with clone domain, site id, slug, repo id, selected ref, and restored revision
 - `ref_format` and `converted_from` from init are intentionally excluded
 - `objects_fetched` / `bytes_received` are not exposed until the fetch improvement lands
 
@@ -218,6 +261,12 @@ cloning, which means most cloned repositories produce unsigned commits by defaul
 bootstrapping the vault at clone time, Libra ensures that the security posture of a cloned
 repository matches that of a freshly initialized one.
 
+### Ignore file conversion
+
+Libra uses `.libraignore` for its ignore policy. During non-bare clone, every checked-out
+`.gitignore` is copied to a sibling `.libraignore`. Existing user-owned `.libraignore` files
+are preserved and surfaced as warnings; the original `.gitignore` files remain untouched.
+
 ### `--depth` for shallow clones
 
 Shallow clones are essential for CI/CD pipelines and large monorepos where full history is
@@ -226,6 +275,24 @@ truncated to the specified number of commits. The depth value is validated at pa
 (must be a positive integer) and propagated to the fetch protocol layer. Unlike Git, Libra
 does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
 shallow boundaries, keeping the initial implementation focused and predictable.
+
+### `--sparse` is intentionally unsupported
+
+Sparse-checkout (`git clone --sparse`, `git sparse-checkout`) is intentionally not
+implemented. Sparse cone/skip-worktree relies on Git-managed worktree configuration,
+while Libra has migrated config / HEAD / refs to SQLite. The bridge is not free, and
+the audit-driven decision is to keep `--sparse` deferred until there is a concrete
+monorepo subtree-checkout requirement that cannot be met by tiered cloud storage.
+See [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+entry **D10** for the restart conditions.
+
+### `--recurse-submodules` is intentionally unsupported
+
+Per the broader product boundary on submodules (no submodule subcommand surface),
+`clone --recurse-submodules` is also unsupported. See
+[`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+entries **D1** (submodule) and **D4** (clone --recurse-submodules) for restart
+conditions.
 
 ### `--single-branch` flag
 

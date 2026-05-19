@@ -1,6 +1,9 @@
 //! Implements `clean` to remove untracked files from the working tree.
 
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use git_internal::internal::index::Index;
@@ -8,6 +11,7 @@ use serde::Serialize;
 
 use crate::utils::{
     error::{CliError, CliResult, StableErrorCode},
+    ignore::{self, IgnorePolicy},
     output::{OutputConfig, emit_json_data},
     path, util, worktree,
 };
@@ -16,6 +20,10 @@ const CLEAN_EXAMPLES: &str = "\
 EXAMPLES:
   libra clean -n
   libra clean -f
+  libra clean -fd
+  libra clean -fx
+  libra clean -fX
+  libra clean -f --exclude '*.log'
   libra clean -n --json
 ";
 
@@ -28,6 +36,18 @@ pub struct CleanArgs {
     /// Force removal of untracked files
     #[clap(short, long)]
     pub force: bool,
+    /// Remove untracked directories in addition to untracked files
+    #[clap(short = 'd', long = "dir")]
+    pub directories: bool,
+    /// Remove all untracked files, including those in .gitignore/.libraignore
+    #[clap(short = 'x')]
+    pub ignored: bool,
+    /// Remove only untracked files that are in .gitignore/.libraignore
+    #[clap(short = 'X')]
+    pub only_ignored: bool,
+    /// Exclude files matching the given pattern (can be repeated)
+    #[clap(long = "exclude", value_name = "pattern")]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +60,8 @@ struct CleanOutput {
 enum CleanError {
     #[error("clean requires -f or -n (use -f to remove files, -n to dry-run)")]
     MissingMode,
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
     #[error("failed to load index: {0}")]
     LoadIndex(String),
     #[error("{0}")]
@@ -61,7 +83,17 @@ pub async fn execute(args: CleanArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Removes untracked files from the working tree.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Scans the working tree for untracked files.
+/// - Removes matching files unless `--dry-run` is active.
+/// - Renders removed or would-remove paths in human or JSON form.
+///
+/// # Errors
+/// Returns [`CliError`] when the command is run outside a repository, candidate
+/// paths cannot be resolved safely, a path escapes the worktree, or removal
+/// fails.
 pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let clean_output = run_clean(args).map_err(clean_cli_error)?;
@@ -86,6 +118,13 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
         return Err(CleanError::MissingMode);
     }
 
+    // Validate mutually exclusive flags
+    if args.ignored && args.only_ignored {
+        return Err(CleanError::InvalidArgs(
+            "cannot use -x and -X together".to_string(),
+        ));
+    }
+
     let index_path = path::index();
     let index = match Index::load(&index_path) {
         Ok(index) => index,
@@ -97,8 +136,60 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
             }
         }
     };
-    let untracked = worktree::untracked_workdir_paths(&index)
-        .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+
+    // Determine the ignore policy based on flags
+    let policy = if args.only_ignored {
+        IgnorePolicy::OnlyIgnored
+    } else if args.ignored {
+        IgnorePolicy::IncludeIgnored
+    } else {
+        IgnorePolicy::Respect
+    };
+
+    // Collect all workdir files and apply ignore policy
+    let workdir_files =
+        util::list_workdir_files().map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+    let filtered_files = ignore::filter_workdir_paths(workdir_files, policy, &index);
+
+    // Find untracked files
+    let mut untracked: Vec<PathBuf> = Vec::new();
+    for path in filtered_files {
+        let path_str = path.to_str().ok_or_else(|| {
+            CleanError::ScanUntracked(format!("path {:?} is not valid UTF-8", path))
+        })?;
+        if !worktree::index_has_any_stage(&index, path_str) {
+            untracked.push(path);
+        }
+    }
+
+    // If -d, also find untracked directories
+    if args.directories {
+        let untracked_dirs = find_untracked_dirs(&index, policy)?;
+        for dir in untracked_dirs {
+            // Skip the root directory (empty path)
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            // Remove any files that are inside this directory from the untracked list
+            // since the directory itself will be removed
+            untracked.retain(|p| !p.starts_with(&dir));
+            // Add the directory if it's not already covered by a parent directory
+            if !untracked.iter().any(|p| dir.starts_with(p)) {
+                untracked.push(dir);
+            }
+        }
+    }
+
+    // Apply --exclude patterns
+    if !args.exclude.is_empty() {
+        untracked.retain(|path| {
+            let path_str = path.display().to_string();
+            !args
+                .exclude
+                .iter()
+                .any(|pattern| matches_exclude_pattern(&path_str, pattern))
+        });
+    }
 
     if untracked.is_empty() {
         return Ok(CleanOutput {
@@ -130,10 +221,17 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
             if !resolved.starts_with(&workdir) {
                 return Err(CleanError::OutsideWorkdir(abs_path.display().to_string()));
             }
-            fs::remove_file(&abs_path).map_err(|e| CleanError::RemoveFile {
-                path: abs_path.display().to_string(),
-                detail: e.to_string(),
-            })?;
+            if abs_path.is_dir() {
+                fs::remove_dir_all(&abs_path).map_err(|e| CleanError::RemoveFile {
+                    path: abs_path.display().to_string(),
+                    detail: e.to_string(),
+                })?;
+            } else {
+                fs::remove_file(&abs_path).map_err(|e| CleanError::RemoveFile {
+                    path: abs_path.display().to_string(),
+                    detail: e.to_string(),
+                })?;
+            }
             removed.push(path.display().to_string());
         }
     }
@@ -143,12 +241,115 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
     })
 }
 
+/// Find untracked directories based on the ignore policy.
+/// A directory is considered untracked if it does not contain any tracked files.
+fn find_untracked_dirs(index: &Index, policy: IgnorePolicy) -> Result<Vec<PathBuf>, CleanError> {
+    let workdir = util::working_dir();
+    let mut untracked_dirs = Vec::new();
+
+    fn scan_dir(
+        dir: &Path,
+        workdir: &Path,
+        index: &Index,
+        policy: IgnorePolicy,
+        untracked_dirs: &mut Vec<PathBuf>,
+    ) -> Result<(), CleanError> {
+        let entries = fs::read_dir(dir).map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+        let mut has_tracked = false;
+        let mut subdirs = Vec::new();
+
+        for entry in entries {
+            let entry = entry.map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(workdir)
+                .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default();
+                if name == ".git" || name == util::ROOT_DIR {
+                    continue;
+                }
+                subdirs.push(path.clone());
+            } else if let Some(path_str) = relative.to_str() {
+                // Check if this file is tracked
+                if index.tracked(path_str, 0) {
+                    has_tracked = true;
+                }
+            }
+        }
+
+        if !has_tracked {
+            // Check if this directory should be ignored
+            let relative = dir
+                .strip_prefix(workdir)
+                .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+            let should_include = match policy {
+                IgnorePolicy::Respect => {
+                    // Only include if not ignored
+                    !ignore::should_ignore(relative, policy, index)
+                }
+                IgnorePolicy::IncludeIgnored => true,
+                IgnorePolicy::OnlyIgnored => {
+                    // Only include if ignored
+                    ignore::should_ignore(relative, IgnorePolicy::Respect, index)
+                }
+            };
+            if should_include {
+                untracked_dirs.push(relative.to_path_buf());
+            }
+        }
+
+        // Recurse into subdirs
+        for subdir in subdirs {
+            scan_dir(&subdir, workdir, index, policy, untracked_dirs)?;
+        }
+
+        Ok(())
+    }
+
+    scan_dir(&workdir, &workdir, index, policy, &mut untracked_dirs)?;
+    Ok(untracked_dirs)
+}
+
+/// Check if a path matches an exclude pattern using glob-style matching.
+/// Supports * (match any characters) and ? (match single character).
+fn matches_exclude_pattern(path: &str, pattern: &str) -> bool {
+    // Escape special regex characters, then convert glob patterns
+    let mut regex_pattern = String::new();
+    regex_pattern.push('^');
+    let chars = pattern.chars();
+    for c in chars {
+        match c {
+            '*' => regex_pattern.push_str(".*"),
+            '?' => regex_pattern.push('.'),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\' => {
+                regex_pattern.push('\\');
+                regex_pattern.push(c);
+            }
+            _ => regex_pattern.push(c),
+        }
+    }
+    regex_pattern.push('$');
+
+    if let Ok(re) = regex::Regex::new(&regex_pattern) {
+        re.is_match(path)
+    } else {
+        // Fallback to simple string matching
+        path.contains(pattern)
+    }
+}
+
 fn clean_cli_error(error: CleanError) -> CliError {
     match error {
         CleanError::MissingMode => CliError::fatal(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("use 'libra clean -n' to preview removals.")
             .with_hint("use 'libra clean -f' to remove untracked files."),
+        CleanError::InvalidArgs(message) => {
+            CliError::fatal(format!("invalid arguments: {message}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        }
         CleanError::LoadIndex(message) => {
             CliError::fatal(format!("failed to load index: {message}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
@@ -191,6 +392,55 @@ mod tests {
                 .contains("failed to resolve working directory"),
             "unexpected error message: {}",
             error.message()
+        );
+    }
+
+    /// Pin the `Display` format for every variant of [`CleanError`].
+    /// These strings are used as the CliError message via
+    /// `clean_cli_error` and surface in both human and `--json`
+    /// envelopes for the `clean` subcommand.
+    #[test]
+    fn clean_error_display_pins_each_variant() {
+        assert_eq!(
+            CleanError::MissingMode.to_string(),
+            "clean requires -f or -n (use -f to remove files, -n to dry-run)",
+        );
+        assert_eq!(
+            CleanError::InvalidArgs("--fff is not a valid flag".to_string()).to_string(),
+            "invalid arguments: --fff is not a valid flag",
+        );
+        assert_eq!(
+            CleanError::LoadIndex("index file corrupt".to_string()).to_string(),
+            "failed to load index: index file corrupt",
+        );
+        // ScanUntracked echoes the inner string verbatim.
+        assert_eq!(
+            CleanError::ScanUntracked("walk failed at /tmp".to_string()).to_string(),
+            "walk failed at /tmp",
+        );
+        assert_eq!(
+            CleanError::ResolveWorkdir("permission denied".to_string()).to_string(),
+            "failed to resolve working directory: permission denied",
+        );
+        assert_eq!(
+            CleanError::ResolvePath {
+                path: "src/foo.rs".to_string(),
+                detail: "no such file".to_string(),
+            }
+            .to_string(),
+            "failed to resolve path src/foo.rs: no such file",
+        );
+        assert_eq!(
+            CleanError::OutsideWorkdir("/tmp/elsewhere".to_string()).to_string(),
+            "refusing to remove path outside workdir: /tmp/elsewhere",
+        );
+        assert_eq!(
+            CleanError::RemoveFile {
+                path: "build/artifact.o".to_string(),
+                detail: "permission denied".to_string(),
+            }
+            .to_string(),
+            "failed to remove build/artifact.o: permission denied",
         );
     }
 }

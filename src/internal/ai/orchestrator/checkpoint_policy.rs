@@ -1,3 +1,10 @@
+//! Checkpoint policy for deciding when an orchestrated AI run should save durable
+//! progress.
+//!
+//! Boundary: policy reads intent risk and plan state but does not persist records
+//! directly. Scheduler and storage-flow tests cover high-risk plans, skipped phases,
+//! and final validation checkpoints.
+
 use crate::internal::ai::intentspec::types::IntentSpec;
 
 pub(super) fn checkpoint_on_replan(spec: &IntentSpec) -> bool {

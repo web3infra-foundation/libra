@@ -8,6 +8,7 @@ use crate::internal::ai::{
     sandbox::{
         AskForApproval, ExecApprovalRequest, ReviewDecision, request_cached_approval_with_keys,
     },
+    session::file_history::FileHistoryStore,
     tools::{
         apply_patch::{self, ApplyPatchArgs},
         context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
@@ -19,6 +20,11 @@ use crate::internal::ai::{
 };
 
 /// Handler for applying patches to files.
+///
+/// AI user story: let the agent make small, reviewable source edits using a
+/// structured patch format. Paths are parsed and validated before filesystem
+/// writes, and approval is requested when the patch crosses the configured
+/// workspace boundary.
 pub struct ApplyPatchHandler;
 
 #[async_trait]
@@ -90,13 +96,19 @@ impl ToolHandler for ApplyPatchHandler {
                     },
                     network_access: false,
                     writable_roots: touched_paths.iter().cloned().collect(),
+                    cache_disabled_reason: None,
                     response_tx,
                 }
             })
             .await;
 
             match decision {
-                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+                ReviewDecision::Approved
+                | ReviewDecision::ApprovedForSession
+                | ReviewDecision::ApprovedForTtl
+                | ReviewDecision::ApprovedForDirectoryTtl
+                | ReviewDecision::ApprovedForPatternTtl
+                | ReviewDecision::ApprovedForAllCommands => {}
                 ReviewDecision::Denied => {
                     return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
                 }
@@ -104,6 +116,19 @@ impl ToolHandler for ApplyPatchHandler {
                     return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
                 }
             }
+        }
+
+        if let Some(file_history) = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.file_history.as_ref())
+        {
+            FileHistoryStore::new(file_history.session_root.clone())
+                .record_preimages(&file_history.batch_id, &working_dir, &touched_paths)
+                .map_err(|err| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to record undo snapshot before applying patch: {err}"
+                    ))
+                })?;
         }
 
         // All paths validated — safe to apply.

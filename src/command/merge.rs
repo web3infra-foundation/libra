@@ -10,6 +10,7 @@ use git_internal::{
     hash::{ObjectHash, get_hash_kind},
     internal::object::{commit::Commit, tree::Tree},
 };
+use serde::Serialize;
 
 use super::{
     get_target_commit, load_object, log,
@@ -26,7 +27,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -37,7 +38,7 @@ pub struct MergeArgs {
     pub branch: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PullMergeSummary {
     pub strategy: String,
     /// The previous HEAD commit before merge (None for root commits).
@@ -46,6 +47,8 @@ pub(crate) struct PullMergeSummary {
     pub files_changed: usize,
     pub up_to_date: bool,
 }
+
+pub(crate) type MergeOutput = PullMergeSummary;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PullMergeError {
@@ -70,6 +73,8 @@ pub(crate) enum PullMergeError {
     #[error("failed to restore working tree after merge: {0}")]
     Restore(String),
 }
+
+pub(crate) type MergeError = PullMergeError;
 
 impl From<PullMergeError> for CliError {
     fn from(error: PullMergeError) -> Self {
@@ -103,25 +108,52 @@ pub async fn execute(args: MergeArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Resolves the merge target, performs fast-forward or
-/// recursive merge, stages results, and updates refs.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Resolves and reads the current and target commits.
+/// - Performs a fast-forward merge for supported cases.
+/// - Updates HEAD/current branch and restores the working tree to the merged
+///   tree state.
+/// - Emits merge status text through [`OutputConfig`].
+///
+/// # Errors
+/// Returns [`CliError`] when the target is invalid, histories are unrelated,
+/// manual merge is required, objects cannot be read, or HEAD/worktree updates
+/// fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = match run_merge_for_pull(&args.branch, &args.branch, output).await {
-        Ok(result) => result,
-        Err(PullMergeError::ManualMergeRequired { .. }) => {
-            return Err(
-                CliError::fatal("Not possible to fast-forward merge, try merge manually")
-                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
-            );
-        }
-        Err(error) => return Err(CliError::from(error)),
-    };
+    let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
+    render_merge_output(&result, output)
+}
+
+async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
+    run_merge_for_pull(&args.branch, &args.branch, output).await
+}
+
+fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("merge", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
     if result.up_to_date {
         info_println!(output, "Already up to date.");
     } else {
         info_println!(output, "Fast-forward");
     }
     Ok(())
+}
+
+fn merge_error_to_cli(error: MergeError) -> CliError {
+    match error {
+        MergeError::ManualMergeRequired { .. } => {
+            CliError::fatal("Not possible to fast-forward merge, try merge manually")
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+        }
+        error => CliError::from(error),
+    }
 }
 
 pub(crate) async fn run_merge_for_pull(
@@ -138,8 +170,7 @@ pub(crate) async fn run_merge_for_pull(
             detail: error.to_string(),
         })?;
 
-    let current_commit_id = Head::current_commit().await;
-    if current_commit_id.is_none() {
+    let Some(current_commit_id) = Head::current_commit().await else {
         let files_changed = count_changed_files(None, &target_commit)?;
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
@@ -149,11 +180,6 @@ pub(crate) async fn run_merge_for_pull(
             files_changed,
             up_to_date: false,
         });
-    }
-
-    let current_commit_id = match current_commit_id {
-        Some(commit_id) => commit_id,
-        None => unreachable!("checked above"),
     };
     let current_commit: Commit =
         load_object(&current_commit_id).map_err(|error| PullMergeError::CurrentLoad {
@@ -333,4 +359,73 @@ fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, ObjectHash>, Pu
         detail: error.to_string(),
     })?;
     Ok(tree.get_plain_items().into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`PullMergeError`]
+    /// (also exposed as `MergeError`). These strings are used as the
+    /// CliError message via `From<PullMergeError> for CliError` and
+    /// surface in both human and `--json` envelopes for `merge` and
+    /// the merge phase of `pull`.
+    #[test]
+    fn pull_merge_error_display_pins_each_variant() {
+        assert_eq!(
+            PullMergeError::InvalidTarget("a/b".to_string()).to_string(),
+            "a/b - not something we can merge",
+        );
+        assert_eq!(
+            PullMergeError::TargetLoad {
+                commit_id: "deadbeef".to_string(),
+                detail: "object not found".to_string(),
+            }
+            .to_string(),
+            "failed to load merge target 'deadbeef': object not found",
+        );
+        assert_eq!(
+            PullMergeError::CurrentLoad {
+                commit_id: "feedface".to_string(),
+                detail: "io error".to_string(),
+            }
+            .to_string(),
+            "failed to load current commit 'feedface': io error",
+        );
+        assert_eq!(
+            PullMergeError::History("walk failed".to_string()).to_string(),
+            "failed to inspect merge history: walk failed",
+        );
+        assert_eq!(
+            PullMergeError::UnrelatedHistories.to_string(),
+            "refusing to merge unrelated histories",
+        );
+        assert_eq!(
+            PullMergeError::ManualMergeRequired {
+                upstream: "origin/main".to_string(),
+            }
+            .to_string(),
+            "non-fast-forward merge from 'origin/main' requires manual merge",
+        );
+        assert_eq!(
+            PullMergeError::TreeLoad {
+                tree_id: "abc123".to_string(),
+                detail: "decode failed".to_string(),
+            }
+            .to_string(),
+            "failed to load tree 'abc123': decode failed",
+        );
+        assert_eq!(
+            PullMergeError::HeadResolve("db locked".to_string()).to_string(),
+            "failed to resolve HEAD state: db locked",
+        );
+        assert_eq!(
+            PullMergeError::HeadUpdate("write failed".to_string()).to_string(),
+            "failed to update HEAD during merge: write failed",
+        );
+        assert_eq!(
+            PullMergeError::Restore("checkout failed".to_string()).to_string(),
+            "failed to restore working tree after merge: checkout failed",
+        );
+    }
 }

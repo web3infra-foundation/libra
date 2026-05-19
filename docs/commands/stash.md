@@ -10,6 +10,9 @@ libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
 libra stash drop [<stash>]
+libra stash show [<stash>] [--name-only | --name-status]
+libra stash branch <branch> [<stash>]
+libra stash clear [--force]
 ```
 
 ## Description
@@ -86,6 +89,62 @@ Remove a single stash entry from the stash list without applying it.
 ```bash
 libra stash drop
 libra stash drop stash@{1}
+```
+
+#### `show`
+
+Show the file-level changes recorded in a stash entry.
+
+| Argument / Flag | Description |
+|-----------------|-------------|
+| `<stash>` | Stash reference, e.g. `stash@{1}`. Defaults to `stash@{0}`. |
+| `--name-only` | Show only the changed file names, one per line. |
+| `--name-status` | Show file names prefixed with the status code (`A` / `M` / `D`). |
+
+`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set.
+
+```bash
+# File-level summary of stash@{0}
+libra stash show
+
+# Inspect a specific stash entry
+libra stash show stash@{1}
+
+# File names only
+libra stash show --name-only
+```
+
+#### `branch`
+
+Create a new branch from a stash entry, apply the stash on it, then drop the entry. Useful when a stash applies cleanly only on a branch that no longer exists, or when you want to resume the stashed work as a normal branch.
+
+| Argument | Description |
+|----------|-------------|
+| `<branch>` | Name of the new branch to create. Required. |
+| `<stash>` | Stash reference, e.g. `stash@{1}`. Defaults to `stash@{0}`. |
+
+```bash
+# Branch off the latest stash and drop it
+libra stash branch hotfix
+
+# Branch off a specific stash
+libra stash branch hotfix stash@{2}
+```
+
+#### `clear`
+
+Remove every stash entry. Outside `--json` / `--machine` mode, `--force` is required to prevent accidental data loss.
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Skip the confirmation requirement. Mandatory in human mode; bypassed automatically in JSON / machine mode. |
+
+```bash
+# Human mode (refuses without --force)
+libra stash clear --force
+
+# JSON mode (--force not required)
+libra stash clear --json
 ```
 
 ### Global Flags
@@ -174,7 +233,7 @@ On a clean working tree, `stash push --json` returns:
 }
 ```
 
-The `data.action` field is one of: `noop`, `push`, `pop`, `apply`, `drop`, `list`.
+The `data.action` field is one of: `noop`, `push`, `pop`, `apply`, `drop`, `list`, `show`, `branch`, `clear`.
 
 ### `list` JSON schema
 
@@ -217,6 +276,58 @@ The `data.action` field is one of: `noop`, `push`, `pop`, `apply`, `drop`, `list
 }
 ```
 
+### `show` JSON schema
+
+```json
+{
+  "command": "stash",
+  "data": {
+    "action": "show",
+    "stash": "stash@{0}",
+    "stash_id": "abc1234...",
+    "files": [
+      { "path": "src/foo.rs", "status": "M" }
+    ],
+    "files_changed": {
+      "total": 1,
+      "added": 0,
+      "modified": 1,
+      "deleted": 0
+    }
+  }
+}
+```
+
+The structured envelope always emits the full `files` list. The `--name-only` / `--name-status` flags only affect human render output.
+
+### `branch` JSON schema
+
+```json
+{
+  "command": "stash",
+  "data": {
+    "action": "branch",
+    "branch": "hotfix",
+    "stash": "stash@{0}",
+    "stash_id": "abc1234...",
+    "applied": true,
+    "dropped": true
+  }
+}
+```
+
+### `clear` JSON schema
+
+```json
+{
+  "command": "stash",
+  "data": {
+    "action": "clear",
+    "cleared_count": 3
+  }
+}
+```
+
 ## Design Rationale
 
 ### Why no `--keep-index`?
@@ -227,9 +338,9 @@ Git's `stash push --keep-index` stashes changes but leaves the index (staged fil
 
 Git's `--include-untracked` (`-u`) and `--all` (`-a`) stash untracked and ignored files respectively. These flags are rarely needed and add significant complexity to the stash storage format (requiring additional tree objects). In Libra, untracked files are not part of the version-controlled state and should be managed through other means (e.g., `libra clean` for removal, or simply leaving them in place).
 
-### Why a simplified subcommand model?
+### Why a curated subcommand model?
 
-Git's stash has grown organically and supports `git stash` as a shorthand for `git stash push`, plus `git stash save` (deprecated), `git stash branch`, `git stash show`, and `git stash create`/`git stash store` (plumbing). Libra keeps only the five essential operations: `push`, `pop`, `list`, `apply`, `drop`. This covers the core workflow (save, restore, inspect, clean up) without the maintenance burden of rarely-used variants.
+Git's stash has grown organically and supports `git stash` as a shorthand for `git stash push`, plus `git stash save` (deprecated) and the plumbing pair `git stash create` / `git stash store`. Libra exposes the eight subcommands users actually reach for in practice: `push`, `pop`, `list`, `apply`, `drop`, `show`, `branch`, and `clear`. The plumbing pair (`create` / `store`) and the `save` shorthand are deferred — see [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md) sections D8 and D9. This keeps the surface aligned with stock Git for everyday workflows while leaving rarely-used plumbing out of the maintained surface.
 
 ### Why `stash@{N}` syntax instead of plain indices?
 
@@ -249,10 +360,10 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |
 | List | `stash list` | `stash list [<log-options>]` | N/A |
-| Show diff | Not supported | `stash show [-p] [<stash>]` | N/A |
-| Create branch from stash | Not supported | `stash branch <branch> [<stash>]` | N/A |
-| Clear all stashes | Not supported | `stash clear` | N/A |
-| Plumbing create/store | Not supported | `stash create` / `stash store` | N/A |
+| Show file-level summary | `stash show [<stash>] [--name-only \| --name-status]` | `stash show [-p] [<stash>]` | N/A |
+| Create branch from stash | `stash branch <branch> [<stash>]` | `stash branch <branch> [<stash>]` | N/A |
+| Clear all stashes | `stash clear [--force]` | `stash clear` | N/A |
+| Plumbing create/store | Not supported (deferred — see compatibility/declined.md D8/D9) | `stash create` / `stash store` | N/A |
 | JSON output | `--json` | Not supported | N/A |
 | Quiet mode | `--quiet` | `-q` / `--quiet` | N/A |
 

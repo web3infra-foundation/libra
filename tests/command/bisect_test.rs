@@ -1,6 +1,15 @@
-//! Tests bisect command functionality for finding commits that introduced bugs.
+//! Tests `libra bisect` for finding the commit that introduced a regression.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture convention: each test sets up a fresh repo via
+//! `setup_with_new_libra_in()`, configures a stable identity, and uses
+//! `create_linear_commits(n)` to lay down a straight chain of commits whose
+//! hashes are returned newest-first. The sub-state machine `BisectState` is
+//! inspected directly to verify that `start`/`bad`/`good`/`skip`/`reset`
+//! transitions write the expected on-disk state. CLI-level smoke tests at
+//! the bottom run the binary outside or inside an empty repo to confirm
+//! the user-visible failure behaviour.
 
 use std::process::Command;
 
@@ -11,7 +20,7 @@ use libra::{
         bisect::{BisectState, execute_safe},
         commit,
     },
-    internal::{config::ConfigKv, head::Head},
+    internal::{branch::Branch, config::ConfigKv, head::Head},
     utils::{
         output::OutputConfig,
         test::{self, ChangeDirGuard},
@@ -52,7 +61,8 @@ fn init_repo_via_cli(repo: &std::path::Path) {
     );
 }
 
-/// Configure test identity for commits
+/// Configure test identity directly through the in-process config layer.
+/// Required before any commit because Libra refuses to author without it.
 async fn configure_identity() {
     ConfigKv::set("user.name", "Bisect Test", false)
         .await
@@ -62,15 +72,25 @@ async fn configure_identity() {
         .unwrap();
 }
 
-/// Create a linear chain of commits and return their hashes in order (newest first)
-/// So hashes[0] = latest commit, hashes[n-1] = oldest commit
+/// Create a linear chain of `count` commits, each modifying `file.txt`.
+///
+/// Returns the commit hashes ordered newest-first: `hashes[0]` is HEAD and
+/// `hashes[count - 1]` is the root commit. The first commit also stages
+/// `.libraignore` so subsequent runs see a clean tree. Assumes the caller
+/// already holds a `ChangeDirGuard` rooted in a fresh repo.
 async fn create_linear_commits(count: usize) -> Vec<String> {
     let mut hashes = Vec::new();
 
     for i in 0..count {
         test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
+        let pathspec = if i == 0 {
+            vec![String::from(".libraignore"), String::from("file.txt")]
+        } else {
+            vec![String::from("file.txt")]
+        };
+
         add::execute(AddArgs {
-            pathspec: vec![String::from("file.txt")],
+            pathspec,
             all: false,
             update: false,
             refresh: false,
@@ -104,6 +124,9 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
     hashes
 }
 
+/// Scenario: `bisect start` (no bounds) must transition the repo into the
+/// `in_progress` state with empty `bad` and `good` slots. Pins the initial
+/// state shape.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_creates_state() {
@@ -131,6 +154,9 @@ async fn test_bisect_start_creates_state() {
     assert!(state.good.is_empty());
 }
 
+/// Scenario: `bisect start <bad> <good>` must record both bounds and
+/// immediately check out a midpoint commit (`state.current` populated).
+/// Confirms the binary search seeding behaviour.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_with_bad_and_good() {
@@ -161,6 +187,9 @@ async fn test_bisect_start_with_bad_and_good() {
     assert!(state.current.is_some());
 }
 
+/// Scenario: marking `bad` followed by `good` on a 3-commit chain narrows
+/// the search to the single middle commit, which becomes `state.current`.
+/// Locks in the bisection convergence path.
 #[tokio::test]
 #[serial]
 async fn test_bisect_mark_bad_then_good() {
@@ -200,6 +229,10 @@ async fn test_bisect_mark_bad_then_good() {
     assert_eq!(state.current.unwrap().to_string(), hashes[1]);
 }
 
+/// Scenario: end-to-end bisection over 7 commits where commits 4-6 are
+/// "bad". The loop drives the algorithm to termination using the index of
+/// the current commit as ground truth. Confirms the algorithm terminates
+/// and exits the bisect session cleanly.
 #[tokio::test]
 #[serial]
 async fn test_bisect_find_first_bad_commit() {
@@ -253,6 +286,10 @@ async fn test_bisect_find_first_bad_commit() {
     assert!(!BisectState::is_in_progress().await.unwrap());
 }
 
+/// Scenario: `bisect reset` must clear the in-progress state and return
+/// HEAD to its pre-bisect commit. Pins both the state-cleanup and the
+/// HEAD-restore behaviour after a session is started and `bad`/`good`
+/// have moved HEAD off the original tip.
 #[tokio::test]
 #[serial]
 async fn test_bisect_reset() {
@@ -298,6 +335,42 @@ async fn test_bisect_reset() {
     assert_eq!(Head::current_commit().await.unwrap().to_string(), orig_head);
 }
 
+/// `bisect reset` must surface corrupt storage for the original branch instead
+/// of silently treating it as a deleted branch and falling back to detached
+/// checkout. Otherwise a storage-corruption bug can be hidden behind a
+/// successful reset.
+#[tokio::test]
+#[serial]
+async fn test_bisect_reset_surfaces_corrupt_original_branch_storage() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    create_linear_commits(3).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: None,
+            good: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+    Branch::update_branch("main", "not-a-valid-hash", None)
+        .await
+        .unwrap();
+
+    let error = execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .expect_err("bisect reset must fail when the original branch row is corrupt");
+    assert_eq!(error.stable_code().as_str(), "LBR-REPO-002");
+}
+
+/// Scenario: `bisect skip` must record the current commit in
+/// `state.skipped` and advance to a different commit. Locks in the skip
+/// behaviour for untestable commits.
 #[tokio::test]
 #[serial]
 async fn test_bisect_skip() {
@@ -336,6 +409,9 @@ async fn test_bisect_skip() {
     assert_ne!(state.current.unwrap().to_string(), current);
 }
 
+/// Scenario: `bisect log` must execute without error during an active
+/// session. Smoke-tests the log subcommand path (the actual log content is
+/// not asserted here).
 #[tokio::test]
 #[serial]
 async fn test_bisect_log() {
@@ -359,6 +435,8 @@ async fn test_bisect_log() {
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 }
 
+/// Scenario: starting a second bisect session while one is active must
+/// return an error. Pins the "single active session" invariant.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_already_in_progress_fails() {
@@ -386,6 +464,8 @@ async fn test_bisect_start_already_in_progress_fails() {
     assert!(result.is_err());
 }
 
+/// Scenario: `bad`, `good`, and `skip` must all return errors when no
+/// bisect session has been started. Pins the no-implicit-session contract.
 #[tokio::test]
 #[serial]
 async fn test_bisect_operations_without_session_fails() {
@@ -413,6 +493,10 @@ async fn test_bisect_operations_without_session_fails() {
     assert!(result.is_err());
 }
 
+/// Scenario: invoking `libra bisect start` outside any repo through the
+/// real binary must exit 128 and emit a "fatal" message on stderr. Note
+/// the explicit `#[::std::prelude::rust_2024::test]` path because the
+/// surrounding async tests pull `tokio::test` into scope.
 #[::std::prelude::rust_2024::test]
 fn test_bisect_cli_outside_repository_returns_fatal() {
     let temp = tempdir().unwrap();
@@ -426,6 +510,8 @@ fn test_bisect_cli_outside_repository_returns_fatal() {
     );
 }
 
+/// Scenario: `libra bisect start` against a repo with no commits must
+/// fail (no objects to walk). Captures the "empty history" error path.
 #[::std::prelude::rust_2024::test]
 fn test_bisect_cli_empty_repository_returns_fatal() {
     let repo = tempdir().unwrap();
@@ -434,4 +520,148 @@ fn test_bisect_cli_empty_repository_returns_fatal() {
     let output = run_libra_command(&["bisect", "start"], repo.path());
     // Should fail because there are no commits
     assert!(!output.status.success());
+}
+
+// ── C4 surface tests: `bisect run` / `bisect view` ────────────────────────────────────────
+
+/// `libra bisect --help` lists the new `run` and `view` subcommands plus
+/// the EXAMPLES banner produced by `BISECT_EXAMPLES`.
+#[::std::prelude::rust_2024::test]
+fn test_bisect_help_lists_run_and_view() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["bisect", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "bisect --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("run"),
+        "bisect --help should list 'run', stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("view"),
+        "bisect --help should list 'view', stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "bisect --help should include EXAMPLES, stdout: {stdout}"
+    );
+}
+
+/// `bisect view` outside an active session must return `BisectNotActive`
+/// (LBR-BISECT-001) so callers can distinguish "no bisect" from a transient
+/// failure.
+#[tokio::test]
+#[serial]
+async fn test_bisect_view_without_session_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let _hashes = create_linear_commits(3).await;
+
+    let result = execute_safe(Bisect::View, &OutputConfig::default()).await;
+    assert!(result.is_err(), "view without session must error");
+    let err = result.unwrap_err();
+    let stable = err.stable_code().as_str();
+    assert_eq!(
+        stable, "LBR-BISECT-001",
+        "view without session must use BisectNotActive, got {stable}"
+    );
+}
+
+/// `bisect view` during an active session prints state without erroring.
+#[tokio::test]
+#[serial]
+async fn test_bisect_view_inside_active_session() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: Some(hashes[0].clone()),
+            good: Some(hashes[4].clone()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    execute_safe(Bisect::View, &OutputConfig::default())
+        .await
+        .expect("view inside an active session must succeed");
+
+    // Clean up.
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+}
+
+/// `bisect run` without an active session must reject with `BisectNotActive`.
+/// The user must `bisect start` (with bounds) before automation kicks in.
+#[tokio::test]
+#[serial]
+async fn test_bisect_run_without_session_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let _hashes = create_linear_commits(3).await;
+
+    let result = execute_safe(
+        Bisect::Run {
+            cmd: vec!["true".to_string()],
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+    assert!(result.is_err(), "run without session must error");
+    let err = result.unwrap_err();
+    let stable = err.stable_code().as_str();
+    assert_eq!(stable, "LBR-BISECT-001");
+}
+
+/// `bisect run` with a script that always returns 128 must surface the
+/// non-recoverable exit code through `BisectRunFailed` (LBR-BISECT-002).
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_bisect_run_propagates_fatal_exit_code() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: Some(hashes[0].clone()),
+            good: Some(hashes[4].clone()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = execute_safe(
+        Bisect::Run {
+            cmd: vec!["sh".to_string(), "-c".to_string(), "exit 128".to_string()],
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+    assert!(result.is_err(), "exit 128 must abort bisect run");
+    let err = result.unwrap_err();
+    let stable = err.stable_code().as_str();
+    assert_eq!(stable, "LBR-BISECT-002");
+
+    // Clean up so the next test in the suite starts fresh.
+    let _ = execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default()).await;
 }

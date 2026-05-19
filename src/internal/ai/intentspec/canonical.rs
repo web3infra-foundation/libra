@@ -1,3 +1,10 @@
+//! Canonicalization logic that converts draft IntentSpec data into stable serialized
+//! form.
+//!
+//! Boundary: canonicalization normalizes order, defaults, and aliases while preserving
+//! user intent; semantic validation is left to `validator`. Tests compare canonical
+//! JSON output so AI plans and persisted objects remain stable across refactors.
+
 use std::collections::BTreeMap;
 
 use serde_json::Value;

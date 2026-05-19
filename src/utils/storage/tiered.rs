@@ -72,7 +72,7 @@ impl Storage for TieredStorage {
         if self.local.exist(hash).await {
             // If it's in LRU, access it to update recency
             {
-                let mut lru = self.lru.lock().unwrap();
+                let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
                 let _ = lru.get(hash);
             }
             return self.local.get(hash).await;
@@ -91,7 +91,7 @@ impl Storage for TieredStorage {
             self.local.put(hash, &data, obj_type).await?;
             let path = self.local.get_obj_path(hash);
 
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
             // insert returns the evicted value (if any). The CachedFile drop impl will delete the file.
             let _ = lru.insert(
                 *hash,
@@ -129,7 +129,7 @@ impl Storage for TieredStorage {
             self.local.put(hash, data, obj_type).await?;
             let path = self.local.get_obj_path(hash);
 
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
             let _ = lru.insert(
                 *hash,
                 CachedFile {

@@ -6,6 +6,14 @@
 > `analysis`). Code-changing objectives may now run concurrently inside
 > task-specific linked worktrees, with successful results replayed back
 > into the primary workspace after conflict checks.
+>
+> Update (2026-04-29): Code-mode persistence writes reviewed plan sets as
+> execution/test Plan heads, creates task-level Run records for executed
+> plan tasks, materializes selected plan pairs in Scheduler state, and
+> rebuilds ContextFrame reverse indexes from direct frame links as well as
+> PlanStepEvent frame references. Code-mode AI object writes go through
+> `ClientStorage`, so the `.libra/libra.db` `object_index` is populated
+> alongside the AI history branch.
 
 
 This document defines the runtime workflow after the snapshot / event /
@@ -234,6 +242,11 @@ The Scheduler translates the confirmed `Intent` revision into reviewed
 plan and task definitions, while Libra derives the mutable planning
 view.
 
+Implementation note: provider output is only a draft. Libra persists a
+formal execution/test plan set and matching `Task` snapshots; every
+`Task.origin_step_id` must point to the persisted
+`Plan.steps[*].step_id` in the plan that owns that task.
+
 1. **Plan Construction**:
    - Read the confirmed `Intent` snapshot and relevant context material.
    - Call the provider to generate a plan candidate; provider may call
@@ -286,6 +299,10 @@ remains in Libra.
    - Only after required execution work completes does Libra compile and
      run `test_dag`.
    - No cross-plan DAG edges are allowed in this baseline policy.
+   - The `test` plan is still a planner-defined task DAG. It is executed
+     in Phase 2, even though its outputs become validation `Evidence`.
+     Phase 3 consumes those artifacts; it does not execute this second
+     plan itself.
 
 1. **Runtime Context Preparation**:
    - Load prerequisite outputs from immutable `PatchSet`,
@@ -362,6 +379,10 @@ validation and assembles the final audit chain.
 Boundary rule:
 - If the system is still executing a task to produce or repair a
   candidate result, it remains in Phase 2.
+- If the system is executing the Phase 1 `test` / verification plan,
+  it also remains in Phase 2. That plan is the second selected plan in
+  the Phase 2 `execution_dag -> test_dag` sequence, not the Phase 3
+  audit pipeline.
 - Once the system starts evaluating the aggregated release candidate as
   a whole, it has entered Phase 3.
 - Phase 3 does not build or execute a planner-defined DAG; it runs a

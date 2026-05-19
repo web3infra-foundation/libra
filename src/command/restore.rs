@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::{
     command::{calc_file_blob_hash, load_object},
     internal::{
-        branch::{Branch, BranchStoreError},
+        branch::{self, Branch, BranchStoreError},
         head::Head,
         protocol::lfs_client::LFSClient,
     },
@@ -68,6 +68,11 @@ pub enum RestoreError {
     WriteWorktree,
     #[error("failed to download LFS content")]
     LfsDownload,
+    /// Refused to restore from a Libra-managed locked branch (`intent`,
+    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// should not be able to overwrite with `restore --source`.
+    #[error("refusing to restore from locked branch '{0}'")]
+    LockedSource(String),
 }
 
 impl RestoreError {
@@ -82,6 +87,7 @@ impl RestoreError {
             Self::InvalidPathEncoding => StableErrorCode::CliInvalidArguments,
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
+            Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
         }
     }
 }
@@ -107,6 +113,12 @@ impl From<RestoreError> for CliError {
             RestoreError::LfsDownload => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("check LFS server availability"),
+            RestoreError::LockedSource(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint(
+                    "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
+                ),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -150,8 +162,18 @@ pub async fn execute(args: RestoreArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Resets files or entire trees from a commit or the
-/// index, respecting pathspecs and staged-vs-worktree targets.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Restores selected paths from the index or a commit tree.
+/// - May rewrite index entries when `--staged` is set.
+/// - May overwrite working-tree files when the worktree target is active.
+/// - Renders human or JSON output for restored paths.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing, the source revision or
+/// pathspecs cannot be resolved, object reads fail, or index/worktree writes
+/// fail.
 pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let result = run_restore(args).await.map_err(CliError::from)?;
@@ -171,6 +193,15 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
     let mut source = args.source;
     if source.is_none() && staged {
         source = Some(HEAD.to_string());
+    }
+
+    // Refuse to use Libra-managed locked branches (`intent`, `agent-traces`)
+    // as a restore source. `is_locked_revision` also strips revision suffixes
+    // (`~1`, `^`, `@{0}`) so users can't end-run the guard with `agent-traces~1`.
+    if let Some(src) = source.as_deref()
+        && branch::is_locked_revision(src)
+    {
+        return Err(RestoreError::LockedSource(src.to_string()));
     }
 
     let storage = util::objects_storage();
@@ -666,6 +697,7 @@ async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), 
             } else {
                 LFSClient::get()
                     .await
+                    .map_err(|_| RestoreError::LfsDownload)?
                     .download_object(&oid, size, &path_abs, None)
                     .await
                     .map_err(|_| RestoreError::LfsDownload)?;
@@ -693,12 +725,13 @@ pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()
             let lfs_obj_path = lfs::lfs_object_path(&oid);
             if lfs_obj_path.exists() {
                 fs::copy(&lfs_obj_path, &path_abs)?;
-            } else if let Err(e) = LFSClient::get()
-                .await
-                .download_object(&oid, size, &path_abs, None)
-                .await
-            {
-                return Err(io::Error::other(e.to_string()));
+            } else {
+                let client = LFSClient::get()
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                if let Err(e) = client.download_object(&oid, size, &path_abs, None).await {
+                    return Err(io::Error::other(e.to_string()));
+                }
             }
         }
         None => {
@@ -953,4 +986,59 @@ fn get_index_deleted_files_in_filters_typed(
         }
     }
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`RestoreError`].
+    /// These strings are used as the `CliError` message via the
+    /// `From<RestoreError> for CliError` mapping and surface in both
+    /// human and `--json` envelopes for `restore` and the
+    /// checkout-from-commit phase of `clone` / `switch`.
+    ///
+    /// Every variant carries either a static message or an explicit
+    /// `{0}` field interpolation; none wrap an upstream source error,
+    /// so all variants are pinned.
+    #[test]
+    fn restore_error_display_pins_each_variant() {
+        assert_eq!(
+            RestoreError::ResolveSource.to_string(),
+            "failed to resolve checkout source",
+        );
+        assert_eq!(
+            RestoreError::ReferenceNotCommit.to_string(),
+            "reference is not a commit",
+        );
+        assert_eq!(
+            RestoreError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
+            "pathspec 'src/missing.rs' did not match any files",
+        );
+        assert_eq!(RestoreError::ReadIndex.to_string(), "failed to read index");
+        assert_eq!(
+            RestoreError::ReadObject.to_string(),
+            "failed to read object",
+        );
+        assert_eq!(
+            RestoreError::ReadWorktree.to_string(),
+            "failed to read worktree",
+        );
+        assert_eq!(
+            RestoreError::InvalidPathEncoding.to_string(),
+            "invalid path encoding",
+        );
+        assert_eq!(
+            RestoreError::WriteWorktree.to_string(),
+            "failed to write worktree file",
+        );
+        assert_eq!(
+            RestoreError::LfsDownload.to_string(),
+            "failed to download LFS content",
+        );
+        assert_eq!(
+            RestoreError::LockedSource("intent".to_string()).to_string(),
+            "refusing to restore from locked branch 'intent'",
+        );
+    }
 }

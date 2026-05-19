@@ -1,8 +1,10 @@
 //! Tests clone command setup to ensure objects, refs, and working copies are created correctly.
 //!
-//! All tests in this file are **L2 (network)**: they require `LIBRA_TEST_GITHUB_TOKEN`
-//! and `LIBRA_TEST_GITHUB_NAMESPACE` to create a temporary GitHub repository.
-//! Without these env vars the tests are silently skipped.
+//! All tests in this file are **L2 (network)**: they require
+//! `LIBRA_TEST_GITHUB_LIVE=1`, `LIBRA_TEST_GITHUB_TOKEN`, and
+//! `LIBRA_TEST_GITHUB_NAMESPACE` to create and push to a temporary GitHub
+//! repository. Without the explicit live-test flag and credentials, the tests
+//! are skipped so normal acceptance runs do not depend on external GitHub state.
 
 use std::{fs, process::Command, sync::OnceLock};
 
@@ -36,12 +38,28 @@ impl Drop for GitHubTestRepo {
 }
 
 static GITHUB_REPO: OnceLock<Option<GitHubTestRepo>> = OnceLock::new();
+const LIVE_GITHUB_SKIP_MESSAGE: &str = "skipped (set LIBRA_TEST_GITHUB_LIVE=1, LIBRA_TEST_GITHUB_TOKEN, and LIBRA_TEST_GITHUB_NAMESPACE)";
+
+/// Return whether the GitHub-backed clone tests should contact GitHub.
+///
+/// Test coverage: every clone scenario below flows through `github_test_repo`,
+/// so the boundary between deterministic local acceptance and opt-in network
+/// validation is exercised before any GitHub API call or authenticated push.
+fn live_github_clone_tests_enabled() -> bool {
+    std::env::var("LIBRA_TEST_GITHUB_LIVE")
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
 
 /// Get or lazily create the shared temporary GitHub repo.
-/// Returns `None` (and tests skip) when env vars are absent.
+/// Returns `None` (and tests skip) when the live flag or env vars are absent.
 fn github_test_repo() -> Option<&'static GitHubTestRepo> {
     GITHUB_REPO
         .get_or_init(|| {
+            if !live_github_clone_tests_enabled() {
+                return None;
+            }
+
             let token = std::env::var("LIBRA_TEST_GITHUB_TOKEN")
                 .ok()
                 .filter(|v| !v.is_empty())?;
@@ -51,6 +69,19 @@ fn github_test_repo() -> Option<&'static GitHubTestRepo> {
             Some(setup_github_repo(&token, &namespace))
         })
         .as_ref()
+}
+
+/// Resolve the shared GitHub fixture from an async test without dropping
+/// `reqwest::blocking` internals inside Tokio's worker runtime.
+///
+/// Test coverage: every `#[tokio::test]` in this file calls this helper before
+/// invoking `clone::execute`; missing credentials still return `None` so the L2
+/// network scenarios skip cleanly, while configured environments exercise the
+/// real GitHub repository setup on a blocking thread.
+async fn github_test_repo_for_async_test() -> Option<&'static GitHubTestRepo> {
+    tokio::task::spawn_blocking(github_test_repo)
+        .await
+        .expect("GitHub test-repo setup task panicked")
 }
 
 fn setup_github_repo(token: &str, namespace: &str) -> GitHubTestRepo {
@@ -139,10 +170,10 @@ fn setup_github_repo(token: &str, namespace: &str) -> GitHubTestRepo {
 #[tokio::test]
 #[serial]
 async fn test_clone_branch() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -169,10 +200,10 @@ async fn test_clone_branch() {
 #[tokio::test]
 #[serial]
 async fn test_clone_bare_repository() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -216,10 +247,10 @@ async fn test_clone_bare_repository() {
 #[tokio::test]
 #[serial]
 async fn test_clone_branch_single_branch() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -246,10 +277,10 @@ async fn test_clone_branch_single_branch() {
 #[tokio::test]
 #[serial]
 async fn test_clone_default_branch() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -276,10 +307,10 @@ async fn test_clone_default_branch() {
 #[tokio::test]
 #[serial]
 async fn test_clone_default_branch_single_branch() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -306,10 +337,10 @@ async fn test_clone_default_branch_single_branch() {
 #[tokio::test]
 #[serial]
 async fn test_clone_to_existing_empty_dir() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -338,10 +369,10 @@ async fn test_clone_to_existing_empty_dir() {
 #[tokio::test]
 #[serial]
 async fn test_clone_to_existing_dir() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -371,10 +402,10 @@ async fn test_clone_to_existing_dir() {
 #[tokio::test]
 #[serial]
 async fn test_clone_to_dir_with_existing_file_name() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -404,10 +435,10 @@ async fn test_clone_to_dir_with_existing_file_name() {
 #[tokio::test]
 #[serial]
 async fn test_clone_with_depth() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };
@@ -434,10 +465,10 @@ async fn test_clone_with_depth() {
 #[tokio::test]
 #[serial]
 async fn test_clone_with_depth_and_branch() {
-    let repo = match github_test_repo() {
+    let repo = match github_test_repo_for_async_test().await {
         Some(r) => r,
         None => {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            eprintln!("{LIVE_GITHUB_SKIP_MESSAGE}");
             return;
         }
     };

@@ -458,10 +458,12 @@ pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    // Reject --system early
+    // Reject --system early. config.md treats this as a CLI usage error
+    // (exit 2 fine / 129 coarse) — the user picked an unsupported scope at
+    // the argument level, not at runtime.
     if args.system {
-        return Err(CliError::from_legacy_string(
-            "error: --system scope is not supported\n\nhint: use --local or --global",
+        return Err(CliError::command_usage(
+            "--system scope is not supported\n\nhint: use --local or --global",
         ));
     }
 
@@ -804,18 +806,25 @@ async fn handle_set(
         .with_exit_code(1));
     }
 
-    // --encrypt and --plaintext are mutually exclusive
+    // `--encrypt` and `--plaintext` are mutually exclusive. config.md (line 77)
+    // classifies this as a CLI usage error (exit 2 in fine mode, 129 in
+    // coarse) — route through `command_usage` so the category matches.
     if encrypt && plaintext {
-        return Err(CliError::from_legacy_string(
-            "error: --encrypt and --plaintext are mutually exclusive",
+        return Err(CliError::command_usage(
+            "--encrypt and --plaintext are mutually exclusive",
         ));
     }
 
-    // --plaintext must not be used with vault internal/secret keys
+    // `--plaintext` must not be used with vault internal/secret keys.
+    // config.md (line 77) classifies this as a validation reject (exit 1 in
+    // fine mode). We use `Failure` (coarse 128) with a stable code so the
+    // error class is recoverable rather than silently falling through to
+    // `InternalInvariant`.
     if plaintext && (is_vault_internal_key(key) || key.starts_with("vault.env.")) {
-        return Err(CliError::from_legacy_string(
-            "error: --plaintext cannot be used with vault internal/secret keys",
-        ));
+        return Err(CliError::failure(
+            "--plaintext cannot be used with vault internal/secret keys",
+        )
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     // Check encryption state inheritance from existing entries.
@@ -831,9 +840,11 @@ async fn handle_set(
 
     // Resolve the value
     let resolved_value = if stdin {
+        // `--stdin` and a positional value are mutually exclusive (config.md
+        // line 144 — usage error, exit 2 fine / 129 coarse).
         if value.is_some() {
-            return Err(CliError::from_legacy_string(
-                "error: cannot use both value argument and --stdin",
+            return Err(CliError::command_usage(
+                "cannot use both value argument and --stdin",
             ));
         }
         let mut buf = String::new();
@@ -1646,26 +1657,36 @@ async fn handle_generate_ssh_key(
     _scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    // Validate remote name
+    // Validate remote name. config.md "generate-ssh-key" spec classifies
+    // this as a CLI usage error (`error: invalid remote name '<name>': only
+    // [a-zA-Z0-9_-] allowed`), so we must surface it via
+    // `CliError::command_usage` (which maps to the `Cli` category → exit
+    // 129 in coarse mode, 2 in fine mode) rather than the generic
+    // `from_legacy_string` path that collapses to `Failure` / exit 128.
     if !remote
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         || remote.is_empty()
         || remote.len() > 64
     {
-        return Err(CliError::from_legacy_string(format!(
-            "error: invalid remote name '{remote}': only [a-zA-Z0-9_-] allowed, 1-64 chars"
+        return Err(CliError::command_usage(format!(
+            "invalid remote name '{remote}': only [a-zA-Z0-9_-] allowed, 1-64 chars"
         )));
     }
 
-    // Verify remote exists
+    // Verify remote exists. Missing remote is a Fatal failure (the user's
+    // input is well-formed but the resource does not exist at execution
+    // time), classified under the Repo category — exit 128 in coarse mode
+    // matches the pre-existing behaviour from the legacy `from_legacy_string`
+    // routing this branch used to follow.
     let remote_exists = ConfigKv::remote_config(remote)
         .await
         .map_err(|e| CliError::from_legacy_string(e.to_string()))?;
     if remote_exists.is_none() {
-        return Err(CliError::from_legacy_string(format!(
-            "error: remote '{remote}' not found, add it first with libra remote add"
-        )));
+        return Err(CliError::failure(format!(
+            "remote '{remote}' not found, add it first with libra remote add"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     // Get vault root dir and unseal key

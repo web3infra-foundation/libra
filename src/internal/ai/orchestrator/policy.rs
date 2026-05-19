@@ -1,13 +1,26 @@
-use std::path::{Path, PathBuf};
+//! Execution policy helpers for orchestrated AI runs.
+//!
+//! Boundary: this module computes allowed paths, commands, and workspace constraints;
+//! concrete process execution and object persistence live in sibling modules. ACL and
+//! hardening tests cover traversal, cargo-lock companion, and denied command cases.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 
 use super::{
-    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
+    acl::{
+        AclVerdict, ScopeVerdict, cargo_lock_companion_allowed, check_scope,
+        check_tool_acl_with_context,
+    },
     types::{PolicyViolation, TaskKind, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
-    intentspec::types::{IntentSpec, NetworkPolicy},
+    intentspec::types::{DependencyPolicy, IntentSpec, NetworkPolicy},
+    libra_vcs::unsupported_command_message,
     tools::{
         ToolOutput,
         apply_patch::{ApplyPatchArgs, parse_patch},
@@ -50,6 +63,12 @@ pub fn evaluate_tool_call(
                 // Gate tasks execute spec-defined verification commands directly, so
                 // they do not need the interactive shell ACL that governs agent-chosen
                 // tool calls.
+            } else if terminal_handshake_allowance(task, tool_name, &reason) {
+                // `submit_task_complete` is the runtime↔agent terminal handshake that
+                // ends the tool loop; it is always exposed to Implementation/Analysis
+                // tasks (see executor::allowed_tools_for_task) and must not be gated by
+                // user-authored IntentSpec ACLs. An explicit deny rule still wins —
+                // only the implicit "no allow rule" verdict is relaxed here.
             } else {
                 return Err(PolicyViolation {
                     code: "tool-acl-deny".into(),
@@ -59,6 +78,16 @@ pub fn evaluate_tool_call(
                 });
             }
         }
+    }
+
+    if tool_name == "web_search" && spec.constraints.security.network_policy == NetworkPolicy::Deny
+    {
+        return Err(PolicyViolation {
+            code: "network-policy-deny".into(),
+            message: "web_search requires network access while networkPolicy=deny".into(),
+            tool_name: Some(tool_name.to_string()),
+            path: None,
+        });
     }
 
     if tool_name == "shell" {
@@ -119,6 +148,12 @@ fn gate_shell_uses_internal_verification_allowance(
         && reason.starts_with("no allow rule for tool 'shell' action 'execute'")
 }
 
+fn terminal_handshake_allowance(task: &TaskSpec, tool_name: &str, reason: &str) -> bool {
+    matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
+        && tool_name == "submit_task_complete"
+        && reason.starts_with("no allow rule for tool 'submit_task_complete' action 'execute'")
+}
+
 pub fn evaluate_tool_result(
     spec: &IntentSpec,
     task: &TaskSpec,
@@ -143,6 +178,8 @@ pub fn evaluate_tool_result(
     if tool_name == "shell" && !record.paths_written.is_empty() {
         validate_recorded_writes(spec, task, record)?;
     }
+
+    validate_dependency_policy(spec, tool_name, record)?;
 
     if spec.security.output_handling.no_direct_eval
         && tool_name == "apply_patch"
@@ -177,11 +214,201 @@ pub fn evaluate_tool_result(
     Ok(())
 }
 
+fn validate_dependency_policy(
+    spec: &IntentSpec,
+    tool_name: &str,
+    record: &ToolCallRecord,
+) -> Result<(), PolicyViolation> {
+    if spec.constraints.security.dependency_policy != DependencyPolicy::NoNew {
+        return Ok(());
+    }
+
+    for diff in &record.diffs {
+        if cargo_manifest_diff_adds_dependency(diff) {
+            return Err(PolicyViolation {
+                code: "dependency-policy-no-new".into(),
+                message: format!(
+                    "dependency-policy:no-new forbids adding new dependencies in '{}'",
+                    diff.path
+                ),
+                tool_name: Some(tool_name.to_string()),
+                path: Some(diff.path.clone()),
+            });
+        }
+    }
+
+    let manifest_write_without_diff = record
+        .paths_written
+        .iter()
+        .find(|path| {
+            is_cargo_manifest_path(path.as_str())
+                && !record
+                    .diffs
+                    .iter()
+                    .any(|diff| diff.path == path.as_str() && is_cargo_manifest_path(&diff.path))
+        })
+        .cloned();
+    if tool_name == "shell"
+        && let Some(path) = manifest_write_without_diff
+    {
+        return Err(PolicyViolation {
+            code: "dependency-policy-no-new".into(),
+            message:
+                "dependency-policy:no-new cannot verify shell Cargo.toml changes without a captured manifest diff"
+                    .into(),
+            tool_name: Some(tool_name.to_string()),
+            path: Some(path),
+        });
+    }
+
+    Ok(())
+}
+
+fn cargo_manifest_diff_adds_dependency(diff: &ToolDiffRecord) -> bool {
+    if !is_cargo_manifest_path(&diff.path) {
+        return false;
+    }
+
+    let mut current_dependency_collection = None;
+    let mut added_dependency_tables = BTreeSet::new();
+    let mut removed_dependency_tables = BTreeSet::new();
+    let mut added_keys_by_table: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut removed_keys_by_table: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for raw_line in diff.diff.lines() {
+        let (is_added, is_removed, line) = match raw_line.as_bytes().first() {
+            Some(b'+') => (true, false, &raw_line[1..]),
+            Some(b'-') => (false, true, &raw_line[1..]),
+            Some(b' ') => (false, false, &raw_line[1..]),
+            _ => (false, false, raw_line),
+        };
+        let trimmed = line.trim();
+
+        if let Some(table) = toml_table_header(trimmed) {
+            let normalized_table = normalize_toml_table_name(table);
+            if is_dependency_declaration_table_name(&normalized_table) {
+                if is_added {
+                    added_dependency_tables.insert(normalized_table.clone());
+                } else if is_removed {
+                    removed_dependency_tables.insert(normalized_table.clone());
+                }
+            }
+            current_dependency_collection =
+                is_dependency_collection_table_name(&normalized_table).then_some(normalized_table);
+            continue;
+        }
+
+        if let Some(table) = current_dependency_collection.as_ref()
+            && let Some(key) = toml_dependency_key(trimmed)
+        {
+            if is_added {
+                added_keys_by_table
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(key);
+            } else if is_removed {
+                removed_keys_by_table
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(key);
+            }
+        }
+    }
+
+    if added_dependency_tables
+        .iter()
+        .any(|table| !removed_dependency_tables.contains(table))
+    {
+        return true;
+    }
+
+    for (table, added_keys) in added_keys_by_table {
+        let removed_keys = removed_keys_by_table.get(&table);
+        if added_keys
+            .iter()
+            .any(|key| removed_keys.is_none_or(|removed| !removed.contains(key)))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_cargo_manifest_path(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .is_some_and(|name| name == "Cargo.toml")
+}
+
+fn toml_table_header(line: &str) -> Option<&str> {
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.starts_with('[') || inner.ends_with(']') {
+        return None;
+    }
+    Some(inner)
+}
+
+fn is_dependency_collection_table_name(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "dependencies"
+            | "dev-dependencies"
+            | "build-dependencies"
+            | "workspace.dependencies"
+            | "workspace.dev-dependencies"
+            | "workspace.build-dependencies"
+    ) || (normalized.starts_with("target.")
+        && (normalized.ends_with(".dependencies")
+            || normalized.ends_with(".dev-dependencies")
+            || normalized.ends_with(".build-dependencies")))
+}
+
+fn is_dependency_declaration_table_name(normalized: &str) -> bool {
+    normalized.starts_with("dependencies.")
+        || normalized.starts_with("dev-dependencies.")
+        || normalized.starts_with("build-dependencies.")
+        || normalized.starts_with("workspace.dependencies.")
+        || normalized.starts_with("workspace.dev-dependencies.")
+        || normalized.starts_with("workspace.build-dependencies.")
+        || (normalized.starts_with("target.")
+            && (normalized.contains(".dependencies.")
+                || normalized.contains(".dev-dependencies.")
+                || normalized.contains(".build-dependencies.")))
+}
+
+fn normalize_toml_table_name(table: &str) -> String {
+    table
+        .chars()
+        .filter(|ch| *ch != '"' && *ch != '\'')
+        .collect::<String>()
+}
+
+fn toml_line_adds_key(line: &str) -> bool {
+    !line.is_empty() && !line.starts_with('#') && !line.starts_with('[') && line.contains('=')
+}
+
+fn toml_dependency_key(line: &str) -> Option<String> {
+    if !toml_line_adds_key(line) {
+        return None;
+    }
+    let key = line.split_once('=')?.0.trim();
+    let normalized = normalize_toml_key_name(key);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_toml_key_name(key: &str) -> String {
+    key.chars()
+        .filter(|ch| !matches!(*ch, '"' | '\'') && !ch.is_whitespace())
+        .collect::<String>()
+}
+
 fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
         "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
+        "web_search" => "web.search",
         "request_user_input" => "interaction",
-        "submit_intent_draft" => "planning",
+        "submit_intent_draft" | "submit_plan_draft" => "planning",
         _ => tool_name,
     }
 }
@@ -294,12 +521,21 @@ fn task_write_contract_violation(task: &TaskSpec, path: &str) -> Option<String> 
         if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
             return Some(reason);
         }
+        if cargo_lock_companion_allowed(&task.contract.touch_files, path) {
+            return None;
+        }
         return match check_scope(&task.contract.touch_files, &[], path) {
             ScopeVerdict::InScope => None,
             ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
         };
     }
 
+    if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
+        return Some(reason);
+    }
+    if cargo_lock_companion_allowed(&task.scope_in, path) {
+        return None;
+    }
     match check_scope(&task.scope_in, &task.scope_out, path) {
         ScopeVerdict::InScope => None,
         ScopeVerdict::OutOfScope(reason) => Some(reason),
@@ -343,6 +579,7 @@ fn derive_tool_footprint(
                 Vec::new(),
             ))
         }
+        "web_search" => Ok(("web.search".into(), "query".into(), Vec::new(), Vec::new())),
         "apply_patch" => {
             let patch_text = parse_patch_text(arguments)?;
             let patch = parse_patch(&patch_text).map_err(|e| e.to_string())?;
@@ -370,7 +607,9 @@ fn derive_tool_footprint(
             Vec::new(),
             Vec::new(),
         )),
-        "submit_intent_draft" => Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new())),
+        "submit_intent_draft" | "submit_plan_draft" => {
+            Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new()))
+        }
         other => Ok((other.to_string(), "execute".into(), Vec::new(), Vec::new())),
     }
 }
@@ -444,9 +683,7 @@ fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
         "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
         "add" | "commit" | "switch" => Ok("write"),
         "" => Err("missing run_libra_vcs command".to_string()),
-        other => Err(format!(
-            "unsupported run_libra_vcs command '{other}'; use an allowlisted Libra VCS command"
-        )),
+        other => Err(unsupported_command_message("run_libra_vcs", other)),
     }
 }
 
@@ -773,6 +1010,39 @@ mod tests {
     }
 
     #[test]
+    fn test_web_search_honors_network_policy() {
+        let mut intent = spec();
+        intent.security.tool_acl.allow.push(ToolRule {
+            tool: "web.search".into(),
+            actions: vec!["query".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let denied = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect_err("web_search should be blocked when networkPolicy=deny");
+
+        assert_eq!(denied.code, "network-policy-deny");
+
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let allowed = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect("web_search should be allowed when ACL and network policy allow it");
+
+        assert_eq!(allowed.record.action, "query");
+    }
+
+    #[test]
     fn test_shell_git_version_control_is_rejected() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
@@ -809,6 +1079,15 @@ mod tests {
 
         assert_eq!(preflight.record.tool_name, "run_libra_vcs");
         assert_eq!(preflight.record.action, "read");
+    }
+
+    #[test]
+    fn test_run_libra_vcs_unknown_command_error_is_actionable() {
+        let error = libra_vcs_action("ls-files").unwrap_err();
+
+        assert!(error.contains("allowed commands"));
+        assert!(error.contains("status --json"));
+        assert!(error.contains("workspace file tools"));
     }
 
     #[test]
@@ -911,6 +1190,83 @@ mod tests {
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
     }
 
+    fn submit_task_complete_args() -> Value {
+        serde_json::json!({
+            "result": "pass",
+            "summary": "all acceptance checks pass",
+            "evidence": [
+                { "command": "cargo build", "exit_code": 0, "output_excerpt": "Finished" }
+            ]
+        })
+    }
+
+    #[test]
+    fn test_submit_task_complete_terminal_handshake_allowed_without_acl() {
+        let intent = spec();
+        assert!(
+            !intent
+                .security
+                .tool_acl
+                .allow
+                .iter()
+                .any(|rule| rule.tool == "submit_task_complete"),
+            "default IntentSpec must not register submit_task_complete in ACL — the runtime exemption is what unblocks it"
+        );
+
+        let res = evaluate_tool_call(
+            &intent,
+            &task(),
+            "submit_task_complete",
+            &submit_task_complete_args(),
+            Path::new("/tmp/work"),
+        );
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    #[test]
+    fn test_submit_task_complete_handshake_applies_to_analysis_tasks() {
+        let mut analysis = task();
+        analysis.kind = TaskKind::Analysis;
+        let res = evaluate_tool_call(
+            &spec(),
+            &analysis,
+            "submit_task_complete",
+            &submit_task_complete_args(),
+            Path::new("/tmp/work"),
+        );
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    #[test]
+    fn test_submit_task_complete_blocked_for_gate_tasks() {
+        let res = evaluate_tool_call(
+            &spec(),
+            &gate_task(),
+            "submit_task_complete",
+            &submit_task_complete_args(),
+            Path::new("/tmp/work"),
+        );
+        assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
+    }
+
+    #[test]
+    fn test_submit_task_complete_still_honors_explicit_deny() {
+        let mut intent = spec();
+        intent.security.tool_acl.deny.push(ToolRule {
+            tool: "submit_task_complete".into(),
+            actions: vec!["execute".into()],
+            constraints: BTreeMap::new(),
+        });
+        let res = evaluate_tool_call(
+            &intent,
+            &task(),
+            "submit_task_complete",
+            &submit_task_complete_args(),
+            Path::new("/tmp/work"),
+        );
+        assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
+    }
+
     #[test]
     fn test_shell_result_records_written_paths_from_metadata() {
         let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
@@ -973,5 +1329,176 @@ mod tests {
         assert_eq!(violation.code, "scope-creep");
         assert_eq!(violation.path.as_deref(), Some("src/main.rs"));
         assert!(violation.message.contains("not in touchFiles"));
+    }
+
+    #[test]
+    fn test_shell_result_allows_cargo_lock_companion_for_cargo_toml_touch_file() {
+        let mut task = task();
+        task.contract.touch_files = vec!["libra/Cargo.toml".into(), "libra/src/main.rs".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["libra/Cargo.lock"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({ "command": "cargo build" })),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task, "shell", &output, &mut record).unwrap();
+
+        assert_eq!(record.paths_written, vec!["libra/Cargo.lock".to_string()]);
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_cargo_toml_dependency_addition() {
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n+clap = { version = \"4\", features = [\"derive\"] }\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record)
+            .expect_err("dependency-policy:no-new must reject newly added Cargo dependencies");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_failed_shell_dependency_addition() {
+        let mut task = task();
+        task.scope_in = vec!["Cargo.toml".into()];
+        let output = ToolOutput::failure("Exit code: 1").with_metadata(serde_json::json!({
+            "paths_written": ["Cargo.toml"],
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n+clap = \"4\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "printf 'clap = \"4\"\\n' >> Cargo.toml; false" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task, "shell", &output, &mut record)
+            .expect_err("failed shell calls that add dependencies must still be rejected");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_unverifiable_shell_manifest_edit() {
+        let mut task = task();
+        task.scope_in = vec!["Cargo.toml".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["Cargo.toml"],
+            "diffs": []
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "perl -0pi -e 's/$/clap = \"4\"/' Cargo.toml" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task, "shell", &output, &mut record)
+            .expect_err("Cargo.toml shell writes without captured diffs must fail closed");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_allows_cargo_toml_dependency_version_update() {
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n-serde = \"1.0.0\"\n+serde = \"1.0.1\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record).unwrap();
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_cargo_toml_dependency_subtable_addition() {
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n+[dependencies.clap]\n+version = \"4\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record)
+            .expect_err("dependency-policy:no-new must reject dependency subtables");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_allows_non_dependency_manifest_edits() {
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [package]\n-name = \"old\"\n+name = \"new\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record).unwrap();
+    }
+
+    #[test]
+    fn test_dependency_policy_allow_with_review_allows_cargo_toml_dependency_addition() {
+        let mut intent = spec();
+        intent.constraints.security.dependency_policy = DependencyPolicy::AllowWithReview;
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n+clap = \"4\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&intent, &task(), "apply_patch", &output, &mut record).unwrap();
     }
 }

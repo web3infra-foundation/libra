@@ -8,7 +8,7 @@
 
 第一批全部 8 个命令（config、init、clone、add、status、commit、push、pull）的主改造已在当前代码库落地。`log` 是第三批（历史查询命令）中最关键的命令，AI Agent / MCP 场景依赖结构化提交列表。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> **实施状态：✅ 已落地（用户契约）** — `run_log()` / `LogOutput`、JSON / machine 输出、主要稳定错误码、refs best-effort、历史 blob strict failure 和 `--help` EXAMPLES 均已交付。完整 `LogError` + human render split 是后续跨命令内部收口，不阻塞第三批验收。
 
 **已确认落地的基线：**
 
@@ -16,12 +16,12 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:313/322`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`log.rs:453/462`）
 - `Pager` 支持 `Pager::with_config(output)` 自动检测 TTY 与 `--no-pager`
 - `internal/log/formatter.rs`（205 行）提供 Full/Oneline/Custom 三种格式
 - `internal/log/date_parser.rs`（89 行）支持绝对日期、Unix 时间戳和相对日期
-- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:121-197`）
-- `GraphState` 支持 ASCII 图形渲染（`log.rs:805-876`）
+- `CommitFilter` 支持 author、since/until、path 过滤（`log.rs:234` 起的 struct + impl）
+- `GraphState` 支持 ASCII 图形渲染（`log.rs:1127` 起的 struct + impl）
 - `--stat` / `--name-only` / `--name-status` / `--patch` 输出模式已实现
 - `--decorate` 支持 no/short/full/auto（从 `log.decorate` 配置读取默认值）
 - `run_log()` + `LogOutput` 已落地，`--json` / `--machine` 已可返回结构化提交列表
@@ -31,9 +31,7 @@
 - patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
 - `tests/command/log_test.rs` 已覆盖 JSON schema、author 过滤统计、无效日期 / decorate 参数和坏 ref 元数据回归
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
-
-已改进（当前代码已具备）：
+**基于当前代码的 Review 结论：**
 
 - **JSON / machine 输出已落地**：`run_log()` + `LogOutput` 已提供结构化提交列表，author/date/path 过滤会直接反映到 JSON 结果
 - **主要参数错误已带显式错误码**：空分支、无效日期、无效 `--decorate` 选项都已接入 `StableErrorCode`
@@ -41,10 +39,10 @@
 - **`--decorate=no` 回归已修复**：禁用 decoration 时不再因为无关 branch ref 损坏而阻塞普通 `log` 输出
 - **命令文档已与现状对齐**：`docs/commands/log.md` 已记录 JSON schema 和错误码约定
 
-仍需改进：
+后续维护项：
 
-- **尚未引入统一 `LogError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
-- **第三批计划文档需要继续收口**：本文后续章节仍保留完整设计稿写法，后续可继续压缩为“现状 + follow-up”格式，但不阻塞第三批验收
+- **统一 `LogError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
+- **第三批计划文档维护**：本文后续章节保留设计稿写法作为实现规格；后续可继续压缩为“现状 + follow-up”格式，但不阻塞第三批验收
 
 ### 目标与非目标
 
@@ -75,7 +73,7 @@
 
 ### 特性 1：LogError typed error enum
 
-**当前问题：** 错误散落在 `execute_safe()` 内部，使用 `CliError::fatal()` 无显式错误码。
+**历史设计目标（用户契约已落地，内部统一收口后续处理）：** 早期错误散落在 `execute_safe()` 内部，使用 `CliError::fatal()` 无显式错误码；当前主要用户可见错误路径已接入稳定错误码，完整 `LogError` enum 留给后续跨命令收口。
 
 **方案：**
 
@@ -123,7 +121,7 @@ pub enum LogError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**当前问题：** `execute_safe()` 直接在内部做 commit walking、格式化和输出，约 240 行混合逻辑。
+**历史设计目标（用户契约已落地，内部统一收口后续处理）：** 早期 `execute_safe()` 直接在内部做 commit walking、格式化和输出，约 240 行混合逻辑；当前 JSON 执行层已通过 `run_log()` / `LogOutput` 拆出，human render 的完整统一留给后续跨命令收口。
 
 **方案：**
 
@@ -157,6 +155,11 @@ pub struct LogCommitEntry {
     /// Changed files with status (always populated; equivalent to --name-status)
     pub files: Vec<LogFileChange>,
 }
+
+// Schema ownership: 本 LogCommitEntry 是 commit 元数据 JSON schema 的权威定义，
+// 详见 [README.md 跨命令契约约定 §4](README.md#4-json-schema-的所有权与重叠)。
+// `show` 命令的 ShowCommitData 直接复用这一字段集；任何新增字段必须先在这里落地，
+// 再同步到 show.md。`diff` 命令负责 hunk / patch 级输出，不在此 schema 中重复。
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogFileChange {
@@ -294,17 +297,21 @@ EXAMPLES:
   - `InvalidDecorateOption`：无效 decorate 值返回 exit `129`
 - **（新增）`run_log()` 结构化结果**：验证 `LogOutput.commits` 中 hash/author/subject/files 分类准确
 
-#### `tests/command/log_json_test.rs`（JSON schema 稳定性，新增文件）
+#### JSON schema 稳定性测试（位于 `tests/command/log_test.rs`）
 
-- **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性
-- **`-n 1 --json`**：`commits` 数组恰好 1 个元素
-- **`--author --json`**：过滤后的 commits 仅包含匹配 author
-- **`--since --json`**：过滤后的 commits 日期均在指定范围内
-- **pathspec `--json`**：`files` 数组仅包含匹配路径的变更
-- **empty branch `--json`**：返回 `ok == false` + 错误码
-- **root commit `--json`**：`parents` 为空数组，`files` 全部为 "added"
-- **`--machine log`**：stdout 恰好 1 行非空行，可被 `serde_json::from_str()` 解析
-- **human-only flags in JSON mode**：`--oneline --json`、`--graph --json` 等不影响 JSON 输出内容
+为保持 `tests/command/log_test.rs` 的单文件覆盖率，JSON schema 测试与核心执行
+路径测试共存，未拆出独立的 `log_json_test.rs` 文件。当前已落地的 JSON 用例包括：
+
+- `test_log_json_output_includes_commit_list`（`-n 1 --json`，commits 数组、subject、files 数组形态）
+- `test_log_json_total_reflects_filtered_scope`（`--author --json` 过滤后 `total` 与 `commits` 长度一致）
+- `test_log_json_root_commit_has_empty_parents_and_added_files`（root commit 的 `parents` 空数组、`files` 全部 "added"）
+- `test_log_json_since_filter_restricts_results`（`--since --json` 日期过滤）
+- `test_log_json_oneline_flag_does_not_alter_schema`（`--oneline --json` 不影响 schema）
+- `test_log_machine_output_is_single_line_json`（`--machine log` stdout 恰好 1 行非空 JSON）
+- `test_log_invalid_decorate_uses_command_usage_error`（错误 JSON envelope）
+
+后续新增 JSON 契约用例（pathspec、empty branch error envelope 等）继续写入
+同一文件即可；如行数过大则按 `mod` 拆分而非新文件。
 
 #### CLI 错误码验证
 

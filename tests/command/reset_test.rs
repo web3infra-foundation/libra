@@ -6,6 +6,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use libra::utils::error::StableErrorCode;
 use libra::{
     command::{
         branch::{self, BranchArgs},
@@ -14,7 +16,7 @@ use libra::{
         status::{changes_to_be_committed, changes_to_be_staged},
     },
     internal::{branch::Branch as InternalBranch, config::ConfigKv},
-    utils::{error::StableErrorCode, test::setup_with_new_libra_in},
+    utils::test::setup_with_new_libra_in,
 };
 
 use super::*;
@@ -177,6 +179,94 @@ fn test_reset_hard_with_pathspec_returns_usage_error() {
 }
 
 #[test]
+fn test_reset_soft_with_pathspec_returns_usage_error() {
+    // PathspecWithSoft is documented in docs/improvement/reset.md and mapped
+    // to CliInvalidArguments (LBR-CLI-002, exit 129). The --hard variant
+    // already has coverage above; this pins the --soft side too.
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["reset", "--soft", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("is not compatible with --soft reset")
+            || stderr.contains("--soft only moves HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_onto_locked_branch_rejects_intent() {
+    // Libra refuses to `reset` onto its managed locked branches
+    // (`main`, `intent`, `agent-traces`) — see
+    // src/internal/branch.rs::is_locked_branch and the early guard in
+    // src/command/reset.rs::run_reset. Locked-target rejection maps to
+    // CliInvalidTarget (LBR-CLI-003, exit 129); no integration test
+    // exercised it before this patch, so a regression that removed the
+    // guard could have shipped silently.
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "intent"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("intent"),
+        "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_json_pathspec_omits_previous_commit() {
+    // Pathspec resets do not move HEAD, so the JSON schema documented in
+    // docs/commands/reset.md (line 130: "previous_commit is null for
+    // pathspec-only resets") must emit `null`. Code historically captured
+    // current HEAD into this field even for pathspec resets, contradicting
+    // the user contract; this test pins the documented behavior.
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let output = run_libra_command(
+        &["--json", "reset", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reset");
+    assert_eq!(json["data"]["mode"], "mixed");
+    assert!(
+        json["data"]["previous_commit"].is_null(),
+        "pathspec resets must emit previous_commit=null, got: {}",
+        json["data"]["previous_commit"]
+    );
+    assert_eq!(json["data"]["files_unstaged"], 1);
+    assert_eq!(json["data"]["files_restored"], 0);
+    let pathspecs = json["data"]["pathspecs"]
+        .as_array()
+        .expect("pathspecs should be an array");
+    assert_eq!(pathspecs.len(), 1);
+    assert_eq!(pathspecs[0], "tracked.txt");
+}
+
+#[test]
 fn test_reset_json_hard_with_pathspec_returns_usage_error() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
@@ -207,8 +297,11 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     let target_commit = {
         let _guard = ChangeDirGuard::new(repo.path());
-        InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md —
+        // storage errors no longer collapse into "main branch should exist".
+        InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit
             .to_string()
@@ -242,27 +335,38 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
 #[tokio::test]
 #[serial]
 async fn test_reset_corrupt_target_branch_returns_repo_corrupt() {
+    // Use a non-locked branch as the target. Libra now refuses to `reset`
+    // onto locked branches (`main`, `intent`, `agent-traces`) — see
+    // `src/internal/branch.rs::is_locked_branch` and the early check in
+    // `src/command/reset.rs::run_reset` — so corrupting `main` and then
+    // calling `reset main` short-circuits at the locked-target guard with
+    // `LBR-CLI-003` instead of reaching the corrupt-branch resolution we
+    // want this test to exercise. Creating a `feature-corrupt-target`
+    // branch (locked-list check does not match it) and corrupting that
+    // branch's commit lets `reset` reach the
+    // `CommitBaseError::CorruptReference` → `ResetError::RevisionCorrupt`
+    // mapping.
+    const TARGET_BRANCH: &str = "feature-corrupt-target";
+
     let repo = create_committed_repo_via_cli();
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        InternalBranch::update_branch("main", "not-a-valid-hash", None)
+        // Seed the branch with the current main tip so reset would
+        // otherwise be a no-op happy path, then corrupt it.
+        InternalBranch::update_branch(TARGET_BRANCH, "not-a-valid-hash", None)
             .await
             .unwrap();
     }
 
-    let output = run_libra_command(&["reset", "main"], repo.path());
+    let output = run_libra_command(&["reset", TARGET_BRANCH], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-002");
-    assert!(
-        stderr.contains("failed to resolve branch 'main'"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("stored branch reference 'main' is corrupt"),
-        "unexpected stderr: {stderr}"
-    );
+    let resolve_msg = format!("failed to resolve branch '{TARGET_BRANCH}'");
+    let corrupt_msg = format!("stored branch reference '{TARGET_BRANCH}' is corrupt");
+    assert!(stderr.contains(&resolve_msg), "unexpected stderr: {stderr}");
+    assert!(stderr.contains(&corrupt_msg), "unexpected stderr: {stderr}");
     assert!(
         !stderr.contains("invalid reference"),
         "reset should not misclassify corrupt branch storage as invalid target: {stderr}"
@@ -284,8 +388,10 @@ async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
 
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        let head = InternalBranch::find_branch("main", None)
+        // Migrated from lossy `InternalBranch::find_branch` per docs/improvement/branch.md.
+        let head = InternalBranch::find_branch_result("main", None)
             .await
+            .expect("failed to query main branch")
             .expect("main branch should exist")
             .commit;
         let commit: Commit = load_object(&head).expect("load HEAD commit");
@@ -327,7 +433,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
 
     fs::write("base.txt", "base\n").unwrap();
     add::execute(AddArgs {
-        pathspec: vec!["base.txt".to_string()],
+        pathspec: vec![".libraignore".to_string(), "base.txt".to_string()],
         all: false,
         update: false,
         verbose: false,

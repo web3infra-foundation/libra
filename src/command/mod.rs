@@ -1,6 +1,16 @@
-//! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
+//! Command module hub exporting all subcommands plus shared helpers for
+//! loading/saving objects and prompting for authentication.
+//!
+//! Commenting convention for AI-maintained command code: public command entry
+//! points should document their externally visible side effects and error
+//! mapping intent. Prefer `# Side Effects` and `# Errors` sections on
+//! `execute_safe`/equivalent structured handlers so future agents can modify
+//! command flows without missing repository, index, worktree, network, or
+//! rendering consequences.
 
 pub mod add;
+pub mod agent;
+pub mod automation;
 pub mod bisect;
 pub mod blame;
 pub mod branch;
@@ -11,21 +21,30 @@ pub mod clean;
 pub mod clone;
 pub mod cloud;
 pub mod code;
+pub mod code_control;
+pub mod code_control_files;
 pub mod commit;
 pub mod config;
+pub mod db;
 pub mod describe;
 pub mod diff;
 pub mod fetch;
+pub mod fsck;
 pub mod graph;
 pub mod grep;
+pub mod hash_object;
+pub mod hooks;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
+pub mod lfs_schema;
 pub mod log;
+pub mod ls_remote;
 pub mod merge;
 pub mod mv;
 pub mod op;
 pub mod open;
+pub mod publish;
 pub mod pull;
 pub mod push;
 pub mod rebase;
@@ -34,11 +53,17 @@ pub mod remote;
 pub mod remove;
 pub mod reset;
 pub mod restore;
+pub mod rev_list;
+pub mod rev_parse;
 pub mod revert;
+pub mod sandbox;
 pub mod shortlog;
 pub mod show;
 pub mod show_ref;
+pub mod symbolic_ref;
 pub mod tag;
+pub mod usage;
+pub mod verify_pack;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 #[path = "worktree-fuse.rs"]
 pub mod worktree;

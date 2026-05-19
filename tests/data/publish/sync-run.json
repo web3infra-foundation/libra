@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "syncRunId": "11111111-aaaa-bbbb-cccc-deadbeef0001",
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "status": "succeeded",
+  "startedAt": "2026-05-09T12:00:00Z",
+  "finishedAt": "2026-05-09T13:00:00Z",
+  "refsCount": 5,
+  "revisionCount": 3,
+  "fileCount": 248,
+  "aiObjectCount": 96,
+  "aiBundleCount": 1,
+  "warnings": [
+    "1 file exceeded publish.max_preview_bytes and was indexed without contents",
+    "1 file matched .librapublishignore"
+  ],
+  "cliVersion": "0.16.3"
+}

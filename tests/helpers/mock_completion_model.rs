@@ -1,3 +1,8 @@
+//! Mock completion model used by runtime and tool-loop tests.
+//!
+//! Scenario focus: deterministic provider responses, injected failures, and captured
+//! follow-up requests so tests can assert orchestration behavior without live AI calls.
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -51,6 +56,7 @@ impl CompletionModel for MockCompletionModel {
         match step {
             MockCompletionStep::Response(text) => Ok(CompletionResponse {
                 content: vec![AssistantContent::Text(Text { text })],
+                reasoning_content: None,
                 raw_response: serde_json::json!({ "provider": "mock" }),
             }),
             MockCompletionStep::Error(message) => Err(CompletionError::ProviderError(message)),

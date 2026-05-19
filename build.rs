@@ -28,7 +28,9 @@ fn main() {
 
     // Re-run this build script when relevant environment variables change.
     println!("cargo:rerun-if-env-changed=LIBRA_PNPM");
+    println!("cargo:rerun-if-env-changed=NODE_OPTIONS");
     println!("cargo:rerun-if-env-changed=LIBRA_SKIP_WEB_BUILD");
+    println!("cargo:rerun-if-env-changed=CI");
 
     if should_skip_web_build() {
         ensure_stub_web_out(&web_dir);
@@ -91,7 +93,8 @@ fn run_pnpm_build(web_dir: &Path) {
 
     // Install dependencies if node_modules is missing (e.g. fresh clone).
     if !web_dir.join("node_modules").exists() {
-        let install = Command::new(&pnpm)
+        let mut install_command = pnpm_command(&pnpm);
+        let install = install_command
             .arg("install")
             .arg("--frozen-lockfile")
             .current_dir(web_dir)
@@ -103,7 +106,8 @@ fn run_pnpm_build(web_dir: &Path) {
         }
     }
 
-    let status = Command::new(&pnpm)
+    let mut build_command = pnpm_command(&pnpm);
+    let status = build_command
         .arg("run")
         .arg("build")
         .current_dir(web_dir)
@@ -113,4 +117,64 @@ fn run_pnpm_build(web_dir: &Path) {
     if !status.success() {
         panic!("frontend build failed (exit code {:?})", status.code());
     }
+}
+
+fn pnpm_command(pnpm: &str) -> Command {
+    let mut command = Command::new(pnpm);
+    if env::var_os("CI").is_none() {
+        // pnpm 11 prompts before purging an incompatible node_modules directory.
+        // Cargo build scripts are non-interactive, so force pnpm's CI behavior.
+        command.env("CI", "true");
+    }
+    if let Some(node_options) = node_options_with_sqlite_flag() {
+        command.env("NODE_OPTIONS", node_options);
+    }
+    command
+}
+
+fn node_options_with_sqlite_flag() -> Option<String> {
+    const SQLITE_FLAG: &str = "--experimental-sqlite";
+
+    let existing = env::var("NODE_OPTIONS").unwrap_or_default();
+    if existing
+        .split_whitespace()
+        .any(|option| option == SQLITE_FLAG)
+    {
+        return None;
+    }
+    if !node_requires_experimental_sqlite() {
+        return None;
+    }
+
+    let trimmed = existing.trim();
+    if trimmed.is_empty() {
+        Some(SQLITE_FLAG.to_string())
+    } else {
+        Some(format!("{trimmed} {SQLITE_FLAG}"))
+    }
+}
+
+fn node_requires_experimental_sqlite() -> bool {
+    let Ok(output) = Command::new("node")
+        .arg("-p")
+        .arg("process.versions.node")
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(major) = stdout
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+    else {
+        return false;
+    };
+
+    (22..24).contains(&major)
 }

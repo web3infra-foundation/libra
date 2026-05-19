@@ -1,4 +1,10 @@
 //! Claude Code lifecycle hook provider facade.
+//!
+//! Wires the canonical [`HookProvider`] trait to the Claude-specific parser
+//! (`parser`) and Claude settings.json installer (`settings`). All Claude-specific
+//! decoding logic lives in those submodules; this module contains only the
+//! singleton plumbing.
+
 mod parser;
 mod settings;
 
@@ -11,8 +17,11 @@ use super::super::{
     },
 };
 
+/// Singleton instance referenced by [`super::claude_provider`].
 pub static CLAUDE_PROVIDER: ClaudeProvider = ClaudeProvider;
 
+/// Hook commands the Claude provider can install and parse. Order matters only
+/// for documentation/listing; lookup is by value.
 const SUPPORTED_COMMANDS: &[ProviderHookCommand] = &[
     ProviderHookCommand::SessionStart,
     ProviderHookCommand::Prompt,
@@ -23,6 +32,7 @@ const SUPPORTED_COMMANDS: &[ProviderHookCommand] = &[
     ProviderHookCommand::SessionEnd,
 ];
 
+/// Zero-sized provider type. All state lives in the submodules.
 #[derive(Debug, Clone, Copy)]
 pub struct ClaudeProvider;
 
