@@ -329,6 +329,74 @@ pub fn apply_scheduler_mutation(
     Ok(next)
 }
 
+/// Errors returned by [`advance_scheduler`] when the async load → apply →
+/// CAS-save cycle can't complete.
+#[derive(Debug, thiserror::Error)]
+pub enum AdvanceSchedulerError {
+    /// Scheduler state for the target thread doesn't exist. Caller
+    /// should `SeedThread` the projection first.
+    #[error("scheduler state for thread {thread_id} does not exist")]
+    StateMissing { thread_id: uuid::Uuid },
+    /// The pure-function apply step rejected the mutation. See
+    /// [`ApplySchedulerMutationError`] for the specific reason.
+    #[error(transparent)]
+    Apply(#[from] ApplySchedulerMutationError),
+    /// The CAS save failed — either a concurrent writer raced us or
+    /// the underlying storage returned an error. See
+    /// [`crate::internal::ai::projection::scheduler::SchedulerStateCasError`]
+    /// for the specific cause.
+    #[error(transparent)]
+    Cas(#[from] crate::internal::ai::projection::scheduler::SchedulerStateCasError),
+    /// The repository load itself failed (DB error, deserialization,
+    /// etc.). Distinct from `StateMissing` which is the load-OK-but-no-
+    /// row case.
+    #[error("scheduler state load failed: {0}")]
+    Load(String),
+}
+
+/// Async wrapper around [`apply_scheduler_mutation`]: loads the current
+/// scheduler state for `thread_id` from the repository, applies the
+/// mutation in-memory, then CAS-saves the result.
+///
+/// This is the **formal-write entry point** for Phase 1 scheduler
+/// advances; callers should prefer it over driving
+/// [`SchedulerStateRepository`](crate::internal::ai::projection::scheduler::SchedulerStateRepository)
+/// directly because:
+///
+/// 1. It enforces the version-equality precondition (the pure
+///    `apply_scheduler_mutation` checks `mutation.expected.scheduler ==
+///    current.version` before applying) so CAS conflicts surface as
+///    `ApplySchedulerMutationError::VersionMismatch` instead of as a
+///    raw CAS error.
+/// 2. It centralises the load-then-CAS pattern so future variants
+///    (e.g. retry-on-conflict, observer hooks) only need to land in
+///    one place.
+///
+/// # Errors
+///
+/// Returns [`AdvanceSchedulerError`] which transparently re-exports the
+/// apply-side ([`ApplySchedulerMutationError`]) and CAS-side
+/// ([`crate::internal::ai::projection::scheduler::SchedulerStateCasError`])
+/// errors so callers can route on either kind.
+pub async fn advance_scheduler(
+    repo: &crate::internal::ai::projection::scheduler::SchedulerStateRepository,
+    thread_id: uuid::Uuid,
+    mutation: crate::internal::ai::runtime::contracts::SchedulerMutation,
+) -> Result<crate::internal::ai::projection::scheduler::SchedulerState, AdvanceSchedulerError> {
+    let current = repo
+        .load(thread_id)
+        .await
+        .map_err(|err| AdvanceSchedulerError::Load(err.to_string()))?
+        .ok_or(AdvanceSchedulerError::StateMissing { thread_id })?;
+
+    let expected_version = current.version;
+    let next = apply_scheduler_mutation(&current, mutation)?;
+
+    repo.compare_and_swap(expected_version, &next).await?;
+
+    Ok(next)
+}
+
 /// Persist a new plan set as the **formal write** for Phase 1.
 ///
 /// Bridges into

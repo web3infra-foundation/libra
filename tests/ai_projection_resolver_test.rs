@@ -278,3 +278,148 @@ async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {
     assert_eq!(bundle.thread.intents.len(), 1);
     assert_eq!(bundle.scheduler.thread_id, intent.header().object_id());
 }
+
+// ---------------------------------------------------------------------------
+// advance_scheduler (v0.17.592): async wrapper around apply_scheduler_mutation
+// ---------------------------------------------------------------------------
+
+use libra::internal::ai::runtime::{
+    contracts::{ProjectionVersions, SchedulerMutation},
+    phase1::{AdvanceSchedulerError, advance_scheduler},
+};
+
+/// Scenario: an initial `SchedulerState` is inserted at version 1; an
+/// `advance_scheduler` call with a `MarkTaskActive` mutation loads it,
+/// applies the mutation, and CAS-saves the resulting state. Asserts
+/// the persisted state has the new task / run ids and bumped version.
+#[tokio::test]
+async fn advance_scheduler_marks_task_active_end_to_end() {
+    let db = setup_db().await;
+    let thread_id = id("22222222-2222-4222-8222-222222222222");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&sample_scheduler(thread_id))
+        .await
+        .unwrap();
+
+    let task_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let next = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 1,
+                live_context_window: 0,
+            },
+            task_id,
+            run_id: Some(run_id),
+        },
+    )
+    .await
+    .expect("advance_scheduler should apply and CAS-save");
+
+    assert_eq!(next.active_task_id, Some(task_id));
+    assert_eq!(next.active_run_id, Some(run_id));
+    assert_eq!(next.version, 2);
+
+    // Reload to confirm the CAS actually persisted.
+    let reloaded = repo
+        .load(thread_id)
+        .await
+        .unwrap()
+        .expect("state should still exist after advance");
+    assert_eq!(reloaded.active_task_id, Some(task_id));
+    assert_eq!(reloaded.active_run_id, Some(run_id));
+    assert_eq!(reloaded.version, 2);
+}
+
+/// Scenario: advance_scheduler against a thread with no scheduler state
+/// row must surface `AdvanceSchedulerError::StateMissing { thread_id }`
+/// so callers know to `SeedThread` first.
+#[tokio::test]
+async fn advance_scheduler_returns_state_missing_when_thread_has_no_row() {
+    let db = setup_db().await;
+    let thread_id = id("33333333-3333-4333-8333-333333333333");
+    sample_thread(thread_id).create(&db).await.unwrap();
+    // NOTE: no `repo.insert_initial(...)` — the scheduler row is
+    // deliberately absent.
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let error = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 0,
+                live_context_window: 0,
+            },
+            task_id: Uuid::new_v4(),
+            run_id: None,
+        },
+    )
+    .await
+    .expect_err("advance_scheduler must error when no scheduler row exists");
+
+    match error {
+        AdvanceSchedulerError::StateMissing { thread_id: tid } => {
+            assert_eq!(tid, thread_id);
+        }
+        other => panic!("expected StateMissing, got {other:?}"),
+    }
+}
+
+/// Scenario: when the mutation's `expected.scheduler` doesn't match the
+/// loaded state's `version`, advance_scheduler must surface the
+/// pure-function `ApplySchedulerMutationError::VersionMismatch` through
+/// the `AdvanceSchedulerError::Apply` transparent wrapper — before
+/// hitting the CAS path. This proves the pure-function precondition
+/// check fires before the DB CAS would.
+#[tokio::test]
+async fn advance_scheduler_surfaces_version_mismatch_before_cas() {
+    use libra::internal::ai::runtime::phase1::ApplySchedulerMutationError;
+
+    let db = setup_db().await;
+    let thread_id = id("44444444-4444-4444-8444-444444444444");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&sample_scheduler(thread_id))
+        .await
+        .unwrap();
+    // sample_scheduler installs version=1; we ask for expected=99.
+
+    let error = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 99,
+                live_context_window: 0,
+            },
+            task_id: Uuid::new_v4(),
+            run_id: None,
+        },
+    )
+    .await
+    .expect_err("version mismatch must fail-closed before CAS");
+
+    match error {
+        AdvanceSchedulerError::Apply(ApplySchedulerMutationError::VersionMismatch {
+            expected,
+            actual,
+        }) => {
+            assert_eq!(expected, 99);
+            assert_eq!(actual, 1);
+        }
+        other => panic!("expected Apply(VersionMismatch), got {other:?}"),
+    }
+
+    // Reload — version must NOT have advanced (no CAS happened).
+    let reloaded = repo.load(thread_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.version, 1, "no CAS should have run");
+}
