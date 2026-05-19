@@ -298,6 +298,7 @@ mod ls_remote_test;
 mod merge_test;
 mod mv_test;
 mod open_test;
+mod op_test;
 mod output_flags_test;
 mod publish_test;
 mod pull_json_test;
