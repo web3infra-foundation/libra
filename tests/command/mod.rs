@@ -67,6 +67,7 @@ pub(crate) struct CliErrorReport {
 fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
+    let global_db = home.join(".libra").join("config.db");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
@@ -78,6 +79,7 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_db)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env(LIBRA_TEST_ENV, "1");

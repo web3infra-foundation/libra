@@ -16,6 +16,7 @@ use clap::{
     error::{ContextKind, ContextValue, ErrorKind},
 };
 use git_internal::hash::{HashKind, set_hash_kind};
+use sea_orm::{ConnectionTrait, Statement};
 
 use crate::{
     command,
@@ -84,11 +85,94 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
         })?;
     let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
         .map(|e| e.value)
         .unwrap_or_else(|| "sha1".to_string());
 
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn set_local_hash_kind_for_storage_without_schema_guard(storage: &Path) -> CliResult<()> {
+    let db_path = storage.join(utils::util::DATABASE);
+    if !db_path.exists() {
+        return Err(CliError::fatal(format!(
+            "repository database not found at '{}'",
+            db_path.display()
+        )));
+    }
+
+    let db_conn = db::open_database_without_migrations(&db_path)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+    let object_format = read_schema_free_object_format(&db_conn, &db_path).await?;
+
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn read_schema_free_object_format(
+    db_conn: &sea_orm::DatabaseConnection,
+    db_path: &Path,
+) -> CliResult<String> {
+    let has_config_kv = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
+            ["table".into(), "config_kv".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to inspect repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
+        .is_some();
+
+    if !has_config_kv {
+        return Ok("sha1".to_string());
+    }
+
+    let row = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT value FROM config_kv WHERE key = ? ORDER BY id DESC LIMIT 1",
+            ["core.objectformat".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+
+    match row {
+        Some(row) => row.try_get_by_index(0).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to decode core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        }),
+        None => Ok("sha1".to_string()),
+    }
+}
+
+fn set_hash_kind_from_object_format(object_format: String) -> CliResult<()> {
     let hash_kind = match object_format.as_str() {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
@@ -768,7 +852,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
-                Ok(storage) => Ok(CommandPreflight::repo(storage)),
+                Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                    storage,
+                )),
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
@@ -982,7 +1068,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             check_database_schema_for_storage(storage).await?;
         }
         if preflight.set_hash_kind {
-            set_local_hash_kind_for_storage(storage).await?;
+            if preflight.check_schema {
+                set_local_hash_kind_for_storage(storage).await?;
+            } else {
+                set_local_hash_kind_for_storage_without_schema_guard(storage).await?;
+            }
         }
     } else if preflight.set_hash_kind {
         set_hash_kind(HashKind::Sha1);
@@ -1193,6 +1283,20 @@ mod tests {
         assert!(preflight.storage.is_none());
         assert!(!preflight.check_schema);
         assert!(!preflight.set_hash_kind);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn hash_object_read_only_preflight_skips_schema_guard() {
+        let repo = tempfile::tempdir().expect("failed to create test repo");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let cli = Cli::try_parse_from(["libra", "hash-object", "hello.txt"]).unwrap();
+
+        let preflight = command_preflight(&cli.command).unwrap();
+        assert!(preflight.storage.is_some());
+        assert!(!preflight.check_schema);
+        assert!(preflight.set_hash_kind);
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

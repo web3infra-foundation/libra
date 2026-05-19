@@ -91,8 +91,12 @@ pub async fn execute_safe(args: HashObjectArgs, output: &OutputConfig) -> CliRes
         );
     }
 
-    let result = hash_objects(&args)?;
-    render_hash_object_output(&result, output)
+    if output.is_json() {
+        let result = hash_objects(&args)?;
+        return render_hash_object_output(&result, output);
+    }
+
+    hash_objects_streaming(&args, output)
 }
 
 fn hash_objects(args: &HashObjectArgs) -> CliResult<HashObjectOutput> {
@@ -115,6 +119,28 @@ fn hash_objects(args: &HashObjectArgs) -> CliResult<HashObjectOutput> {
         write: args.write,
         objects,
     })
+}
+
+fn hash_objects_streaming(args: &HashObjectArgs, output: &OutputConfig) -> CliResult<()> {
+    if output.quiet {
+        return hash_objects(args).map(|_| ());
+    }
+
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    if args.stdin {
+        let entry = hash_one_source("-", read_stdin()?, args.write)?;
+        write_hash_line(&mut writer, &entry.oid)?;
+        return Ok(());
+    }
+
+    for path in &args.paths {
+        let entry = hash_one_source(path.display().to_string(), read_file(path)?, args.write)?;
+        write_hash_line(&mut writer, &entry.oid)?;
+    }
+
+    Ok(())
 }
 
 fn hash_one_source(

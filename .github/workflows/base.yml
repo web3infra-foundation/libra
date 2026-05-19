@@ -214,6 +214,9 @@ jobs:
       - name: Run TUI automation scenarios
         env:
           LIBRA_ENABLE_TEST_PROVIDER: "1"
+          # These scenarios validate the loopback browser against the real
+          # embedded Next.js app, so the build.rs fallback stub is not valid here.
+          LIBRA_SKIP_WEB_BUILD: "0"
         run: |
           cargo test --features test-provider \
             --test code_ui_scenarios \

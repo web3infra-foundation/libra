@@ -121,3 +121,51 @@ async fn normal_command_refuses_stale_schema_and_does_not_upgrade() {
         "normal command preflight must not recreate pending indexes"
     );
 }
+
+#[tokio::test]
+async fn hash_object_read_only_skips_stale_schema_guard() {
+    let repo = stale_repo_at_approved_permission().await;
+    std::fs::write(repo.path().join("hello.txt"), b"hello world\n").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "hello.txt"], repo.path());
+    assert_cli_success(
+        &output,
+        "read-only hash-object should not require db upgrade",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+    );
+
+    let conn = connect_raw_repo_db(repo.path()).await;
+    assert_eq!(max_schema_version(&conn).await, Some(2026050601));
+    assert!(
+        !column_exists(&conn, "agent_usage_stats", "agent_name").await,
+        "read-only hash-object preflight must not apply pending migrations"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_read_only_defaults_sha1_when_config_kv_is_missing() {
+    let repo = stale_repo_at_approved_permission().await;
+    std::fs::write(repo.path().join("hello.txt"), b"hello world\n").expect("write fixture");
+
+    let conn = connect_raw_repo_db(repo.path()).await;
+    conn.execute(Statement::from_string(
+        conn.get_database_backend(),
+        "DROP TABLE config_kv",
+    ))
+    .await
+    .expect("drop config_kv table");
+    conn.close().await.expect("close raw connection");
+
+    let output = run_libra_command(&["hash-object", "hello.txt"], repo.path());
+    assert_cli_success(
+        &output,
+        "read-only hash-object should not require config_kv schema",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+    );
+}

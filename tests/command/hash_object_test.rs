@@ -130,6 +130,31 @@ async fn hash_object_write_persists_blob_for_cat_file() {
 }
 
 #[tokio::test]
+async fn hash_object_batch_prints_successes_before_later_failure() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("first.txt"), b"first").expect("write fixture");
+
+    let output = run_libra_command(&["hash-object", "first.txt", "missing.txt"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "missing trailing input should fail the command"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "fe4f02ad058b43f6ed467fdf65b935107529564b"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("failed to read 'missing.txt'"),
+        "human stderr should explain unreadable input: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-IO-001");
+}
+
+#[tokio::test]
 async fn hash_object_json_reports_source_size_and_write_mode() {
     let repo = tempfile::tempdir().expect("create temp repo");
     init_repo_via_cli(repo.path());
