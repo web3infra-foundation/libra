@@ -167,6 +167,27 @@ impl SchedulerMutation {
             | SchedulerMutation::ApplyRebuild { expected, .. } => *expected,
         }
     }
+
+    /// Stable lower-snake-case identifier for the mutation variant.
+    ///
+    /// Used by audit log emission, the `ApplySchedulerMutationError::
+    /// VariantNotWired { variant }` field, and any other site that needs
+    /// to refer to "which mutation" without pattern-matching the full
+    /// enum. The strings match the `#[serde(rename_all = "snake_case")]`
+    /// tag values so a stringified variant name lines up with what
+    /// observers see in serialised mutation payloads.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SchedulerMutation::SeedThread { .. } => "seed_thread",
+            SchedulerMutation::SetCurrentPlanHeads { .. } => "set_current_plan_heads",
+            SchedulerMutation::SelectPlanSet { .. } => "select_plan_set",
+            SchedulerMutation::StartStage { .. } => "start_stage",
+            SchedulerMutation::MarkTaskActive { .. } => "mark_task_active",
+            SchedulerMutation::ClearActiveRun { .. } => "clear_active_run",
+            SchedulerMutation::MarkProjectionStale { .. } => "mark_projection_stale",
+            SchedulerMutation::ApplyRebuild { .. } => "apply_rebuild",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +412,107 @@ mod tests {
                 "stage": "execution"
             })
         );
+    }
+
+    /// `variant_name()` must produce stable lower-snake-case strings
+    /// matching the `#[serde(rename_all = "snake_case")]` tag values, so
+    /// audit consumers can correlate the string against the serialised
+    /// `mutation` field of the same payload.
+    #[test]
+    fn scheduler_mutation_variant_names_match_serde_tags() {
+        let expected = ProjectionVersions::default();
+        let logical = Uuid::new_v4();
+        let selected = SelectedPlanSet {
+            execution_plan_id: Uuid::new_v4(),
+            test_plan_id: Uuid::new_v4(),
+        };
+        let bundle = Phase0Bundle {
+            thread_id: Uuid::new_v4(),
+            intent_id: Uuid::new_v4(),
+            context_snapshot_id: None,
+        };
+
+        let cases: Vec<(SchedulerMutation, &str)> = vec![
+            (
+                SchedulerMutation::SeedThread {
+                    expected,
+                    bundle: bundle.clone(),
+                },
+                "seed_thread",
+            ),
+            (
+                SchedulerMutation::SetCurrentPlanHeads {
+                    expected,
+                    execution_plan_id: logical,
+                    test_plan_id: logical,
+                },
+                "set_current_plan_heads",
+            ),
+            (
+                SchedulerMutation::SelectPlanSet {
+                    expected,
+                    selected: selected.clone(),
+                },
+                "select_plan_set",
+            ),
+            (
+                SchedulerMutation::StartStage {
+                    expected,
+                    stage: DagStage::Execution,
+                },
+                "start_stage",
+            ),
+            (
+                SchedulerMutation::MarkTaskActive {
+                    expected,
+                    task_id: logical,
+                    run_id: Some(logical),
+                },
+                "mark_task_active",
+            ),
+            (
+                SchedulerMutation::ClearActiveRun {
+                    expected,
+                    reason: SchedulerClearReason::Completed,
+                },
+                "clear_active_run",
+            ),
+            (
+                SchedulerMutation::MarkProjectionStale {
+                    expected,
+                    reason: ProjectionStaleReason::RebuildRequired,
+                },
+                "mark_projection_stale",
+            ),
+            (
+                SchedulerMutation::ApplyRebuild {
+                    expected,
+                    materialized: MaterializedProjection {
+                        thread_id: bundle.thread_id,
+                        versions: expected,
+                        freshness: ProjectionFreshness::Fresh,
+                        summary: serde_json::Value::Null,
+                    },
+                },
+                "apply_rebuild",
+            ),
+        ];
+
+        for (mutation, expected_name) in cases {
+            // The variant_name() must match the const string.
+            assert_eq!(
+                mutation.variant_name(),
+                expected_name,
+                "variant_name mismatch for {expected_name}",
+            );
+            // It must also match the serialised `mutation` tag.
+            let serialised = serde_json::to_value(&mutation).unwrap();
+            assert_eq!(
+                serialised.get("mutation").and_then(|v| v.as_str()),
+                Some(expected_name),
+                "serde tag mismatch for {expected_name}",
+            );
+        }
     }
 
     #[test]
