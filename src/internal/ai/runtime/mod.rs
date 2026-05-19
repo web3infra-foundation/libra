@@ -14,6 +14,7 @@ pub mod phase2;
 pub mod phase3;
 pub mod phase4;
 pub mod prompt_builders;
+pub mod revision;
 pub mod snapshot;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
