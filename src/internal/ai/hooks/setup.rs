@@ -201,3 +201,181 @@ where
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Empty `--binary-path` triggers an actionable error. Pin so a
+    /// future "trim and accept" refactor doesn't silently accept
+    /// `--binary-path=` and resolve to the current directory.
+    #[test]
+    fn resolve_hook_binary_path_rejects_empty_input() {
+        for raw in ["", "   ", "\t\n"] {
+            let err = resolve_hook_binary_path(Some(raw)).unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("invalid --binary-path"),
+                "raw {raw:?} produced: {rendered}",
+            );
+            assert!(
+                rendered.contains("cannot be empty"),
+                "must mention empty-value rule; got: {rendered}",
+            );
+        }
+    }
+
+    /// Non-existent absolute path surfaces a canonicalisation error
+    /// referencing the offending path so operators can fix the
+    /// config.
+    #[test]
+    fn resolve_hook_binary_path_reports_canonicalisation_failure() {
+        // Pick a path that almost certainly doesn't exist.
+        let bogus = "/definitely-not-a-real-binary-9f7a3c5e";
+        let err = resolve_hook_binary_path(Some(bogus)).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(bogus),
+            "error must mention the offending path; got: {rendered}",
+        );
+        assert!(
+            rendered.contains("failed to resolve"),
+            "must mention resolution failure; got: {rendered}",
+        );
+    }
+
+    /// `load_json_settings` returns `T::default()` for a non-existent
+    /// path — callers can blindly load + mutate + write without
+    /// branching on file existence.
+    #[test]
+    fn load_json_settings_returns_default_for_missing_path() {
+        #[derive(Default, Debug, PartialEq, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let missing = tmp.path().join("never-created.json");
+        let loaded: Settings = load_json_settings(&missing, "test").expect("load ok");
+        assert_eq!(loaded, Settings::default());
+    }
+
+    /// `load_json_settings` returns `T::default()` for a
+    /// whitespace-only file. Pin the documented "editor-saved
+    /// unfinished file doesn't derail the installer" rule.
+    #[test]
+    fn load_json_settings_returns_default_for_whitespace_only_file() {
+        #[derive(Default, Debug, PartialEq, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let path = tmp.path().join("empty.json");
+        for content in ["", "   ", "\n\n\t"] {
+            fs::write(&path, content).expect("write");
+            let loaded: Settings = load_json_settings(&path, "test").expect("load ok");
+            assert_eq!(loaded, Settings::default(), "content {content:?}");
+        }
+    }
+
+    /// Malformed JSON surfaces an error referencing the file path
+    /// and provider name — operators must see which file is broken.
+    /// Pin so a future "silent default fallback" regression breaks.
+    #[test]
+    fn load_json_settings_reports_invalid_json_with_path_and_provider() {
+        #[derive(Default, Debug, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            _field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let path = tmp.path().join("broken.json");
+        fs::write(&path, "{ this is not json }").expect("write");
+
+        let err = load_json_settings::<Settings>(&path, "claude").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("claude"),
+            "error must include provider name; got: {rendered}",
+        );
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "error must include path; got: {rendered}",
+        );
+    }
+
+    /// `load_json_settings` successfully parses a valid JSON file.
+    #[test]
+    fn load_json_settings_parses_valid_json() {
+        #[derive(Default, Debug, PartialEq, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let path = tmp.path().join("ok.json");
+        fs::write(&path, r#"{"field":"hello"}"#).expect("write");
+        let loaded: Settings = load_json_settings(&path, "test").expect("load ok");
+        assert_eq!(loaded.field, "hello");
+    }
+
+    /// `write_json_settings` creates parent directories, writes
+    /// pretty-printed JSON with a trailing newline, and leaves the
+    /// content readable by `load_json_settings`.
+    #[test]
+    fn write_json_settings_atomically_writes_with_trailing_newline() {
+        #[derive(Serialize, Default, Debug, PartialEq, Deserialize)]
+        struct Settings {
+            field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let path = tmp.path().join("nested/dir/output.json");
+        let settings = Settings {
+            field: "value".to_string(),
+        };
+        write_json_settings(&path, &settings, "test").expect("write ok");
+
+        // File exists, with a trailing newline.
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.ends_with('\n'),
+            "must end with newline; got: {content:?}",
+        );
+        // Round-trips through load_json_settings.
+        let loaded: Settings = load_json_settings(&path, "test").expect("load ok");
+        assert_eq!(loaded, settings);
+        // Temp file was cleaned up.
+        let tmp_path = path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "temp file must be renamed away; survived at {}",
+            tmp_path.display(),
+        );
+    }
+
+    /// `write_json_settings` overwrites an existing file atomically:
+    /// reading the file after the write yields the new content
+    /// (never a partial-write intermediate state).
+    #[test]
+    fn write_json_settings_overwrites_existing_file() {
+        #[derive(Serialize, Default, Debug, PartialEq, Deserialize)]
+        struct Settings {
+            field: String,
+        }
+        let tmp = TempDir::new().expect("tmp dir");
+        let path = tmp.path().join("existing.json");
+        fs::write(&path, r#"{"field":"old"}"#).expect("seed");
+
+        let new_settings = Settings {
+            field: "new".to_string(),
+        };
+        write_json_settings(&path, &new_settings, "test").expect("write ok");
+
+        let loaded: Settings = load_json_settings(&path, "test").expect("load ok");
+        assert_eq!(loaded.field, "new");
+    }
+}
