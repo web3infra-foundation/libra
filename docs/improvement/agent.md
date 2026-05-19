@@ -160,7 +160,7 @@
 | `src/internal/ai/runtime/phase1.rs` | Phase 1 Plan 的 formal write helper（`write_plan_set` / `advance_scheduler`） | 缺失；逻辑分散在 `orchestrator/planner.rs` | 高（Wave 1B 阻塞项） |
 | `src/internal/ai/runtime/phase2.rs` | Phase 2 Execution 的 formal write helper（attempt 生命周期 + formal writes） | 缺失；逻辑分散在 `orchestrator/executor.rs` | 高（Wave 1B 阻塞项） |
 | `src/internal/ai/runtime/revision.rs` | 跨 phase 的 revision chain helper | 缺失 | 中 |
-| `src/internal/ai/mcp/authz.rs` | Phase 5 安全层 `McpAuthorizer` | 缺失（mcp/ 仅有 `mod.rs` / `resource.rs` / `server.rs`） | 中（Phase 5 收尾项） |
+| `src/internal/ai/mcp/authz.rs` | Phase 5 安全层 `McpAuthorizer` | **Schema 已落地（v0.17.573）**：trait + `McpOperation` / `AuthzDecision` / `AuthzError` 类型已声明并通过 4 个单测覆盖；trait 是 dyn-compatible 的 `Arc<dyn McpAuthorizer>` 形态；尚未 wire 入 `mcp/server.rs` 请求路径——Phase 5 hardening 收尾时只需在 server.rs 注入 authz 字段并调用 `authorize(...)` | 中（Phase 5 收尾项） |
 | `impl TaskExecutor for CodexTaskExecutor` 块 | Wave 1B Definition of Done #1 | 缺失（trait 已定义，未实装） | **高（Wave 1B 阻塞项）** |
 | `impl<M> TaskExecutor for CompletionTaskExecutor<M>` 块 | Wave 1B Definition of Done #1 | 缺失 | **高（Wave 1B 阻塞项）** |
 
@@ -175,7 +175,7 @@
 | Phase 2 Thread ID + Projection Resolver | 100% | ~70% | execution → barrier → test 两阶段语义、ExecutionReport / ExecutionTerminated 显式消费待核 |
 | Phase 3 Code UI Source Of Truth | 100% | ~40% | `CodeUiCommandAdapter` 已存在；完整 unification（typed delta / gap recovery）仍是后续 |
 | Phase 4 ArtifactLedger + ValidatorEngine + DecisionProposal | 100% | ~60% | `ValidationReport` / `RiskScoreBreakdown` 字段是否完整存储待核；`ValidatorEngine` 仍归 planner gate |
-| Phase 5 Security / Permission / Diagnostics / Hardening | 100% | ~50% | `mcp/authz.rs` 缺失；TUI direct provider bootstrap 与 Ollama headless web-only bootstrap 已收敛到 `ProviderFactory`；vault/env 统一接入已在 v0.17.549..v0.17.556 完成（`Client::from_resolved_env(LocalIdentityTarget<'_>)` × 7 providers + `resolve_env_sync` 接入 `build_any_completion_model_for_args`）；provider crate 公开 `from_env()` 保留至 v0.18 弃用通告 |
+| Phase 5 Security / Permission / Diagnostics / Hardening | 100% | ~55% | `mcp/authz.rs` schema 已落地（v0.17.573：`McpAuthorizer` trait + `McpOperation` / `AuthzDecision` / `AuthzError` + 4 单测；仍需 server.rs wiring）；TUI direct provider bootstrap 与 Ollama headless web-only bootstrap 已收敛到 `ProviderFactory`；vault/env 统一接入已在 v0.17.549..v0.17.556 完成（`Client::from_resolved_env(LocalIdentityTarget<'_>)` × 7 providers + `resolve_env_sync` 接入 `build_any_completion_model_for_args`）；provider crate 公开 `from_env()` 保留至 v0.18 弃用通告 |
 
 **Wave 1 / Implementation Phase 1-5 总体**：约 50-65% 落地。设计完整且对外契约清晰，主要缺口是"trait 已定义、impl 未补齐"和"按 phase 拆分模块"的工程纪律。
 
