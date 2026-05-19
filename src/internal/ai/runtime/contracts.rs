@@ -73,6 +73,20 @@ pub enum DagStage {
     Test,
 }
 
+impl DagStage {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by
+    /// `apply_scheduler_mutation(StartStage)` when writing the `stage`
+    /// metadata field — keeping the string in one place protects
+    /// against drift between metadata strings and serialised payloads.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            DagStage::Execution => "execution",
+            DagStage::Test => "test",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerClearReason {
@@ -83,6 +97,30 @@ pub enum SchedulerClearReason {
     Rebuild,
 }
 
+impl SchedulerClearReason {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by audit
+    /// log emission so the `reason` field of a `ClearActiveRun` mutation
+    /// can be stringified without reaching for `serde_json::to_value`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SchedulerClearReason::Completed => "completed",
+            SchedulerClearReason::Cancelled => "cancelled",
+            SchedulerClearReason::Interrupted => "interrupted",
+            SchedulerClearReason::Failed => "failed",
+            SchedulerClearReason::Rebuild => "rebuild",
+        }
+    }
+
+    /// `true` when the clear reason represents a clean task completion
+    /// (the only variant that does NOT signal a failure or interruption).
+    /// Phase 3 routing uses this to decide whether to move on or
+    /// escalate.
+    pub fn is_clean_completion(&self) -> bool {
+        matches!(self, SchedulerClearReason::Completed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionStaleReason {
@@ -91,6 +129,23 @@ pub enum ProjectionStaleReason {
     CasConflict,
     Backpressure,
     ManualRepair,
+}
+
+impl ProjectionStaleReason {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values. Used by audit
+    /// log emission so the `reason` field of a `MarkProjectionStale`
+    /// mutation can be stringified without reaching for
+    /// `serde_json::to_value`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ProjectionStaleReason::RebuildRequired => "rebuild_required",
+            ProjectionStaleReason::DerivedRecordStale => "derived_record_stale",
+            ProjectionStaleReason::CasConflict => "cas_conflict",
+            ProjectionStaleReason::Backpressure => "backpressure",
+            ProjectionStaleReason::ManualRepair => "manual_repair",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +252,32 @@ pub enum FinalDecisionVerdict {
     Rejected,
     Cancelled,
     Abandon,
+}
+
+impl FinalDecisionVerdict {
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            FinalDecisionVerdict::Accepted => "accepted",
+            FinalDecisionVerdict::Rejected => "rejected",
+            FinalDecisionVerdict::Cancelled => "cancelled",
+            FinalDecisionVerdict::Abandon => "abandon",
+        }
+    }
+
+    /// `true` only for `Accepted` — the loop committed the change.
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, FinalDecisionVerdict::Accepted)
+    }
+
+    /// `true` when the verdict ended the workflow without committing
+    /// the change: `Rejected`, `Cancelled`, or `Abandon`. Distinguished
+    /// from `is_accepted()` so callers can route on "did this loop
+    /// produce an artifact?" without enumerating three variants.
+    pub fn is_uncommitted(&self) -> bool {
+        !self.is_accepted()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,5 +670,107 @@ mod tests {
                  which is outside the current stage plan",
             ),
         );
+    }
+
+    /// `DagStage::variant_name` and serde tag must agree — they're both
+    /// public surfaces and drift would silently break the `stage`
+    /// metadata field written by `apply_scheduler_mutation(StartStage)`.
+    #[test]
+    fn dag_stage_variant_name_matches_serde_tag() {
+        for (stage, expected) in [(DagStage::Execution, "execution"), (DagStage::Test, "test")] {
+            assert_eq!(stage.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&stage).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `SchedulerClearReason::variant_name` and serde tag must agree
+    /// for all 5 variants. `is_clean_completion()` must be the
+    /// `Completed`-only predicate.
+    #[test]
+    fn scheduler_clear_reason_variant_name_and_clean_completion() {
+        for (reason, expected) in [
+            (SchedulerClearReason::Completed, "completed"),
+            (SchedulerClearReason::Cancelled, "cancelled"),
+            (SchedulerClearReason::Interrupted, "interrupted"),
+            (SchedulerClearReason::Failed, "failed"),
+            (SchedulerClearReason::Rebuild, "rebuild"),
+        ] {
+            assert_eq!(reason.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+
+        assert!(SchedulerClearReason::Completed.is_clean_completion());
+        for reason in [
+            SchedulerClearReason::Cancelled,
+            SchedulerClearReason::Interrupted,
+            SchedulerClearReason::Failed,
+            SchedulerClearReason::Rebuild,
+        ] {
+            assert!(
+                !reason.is_clean_completion(),
+                "{reason:?} must NOT be a clean completion",
+            );
+        }
+    }
+
+    /// `ProjectionStaleReason::variant_name` must match serde tags for
+    /// all 5 variants — same drift-detection logic as the other enums.
+    #[test]
+    fn projection_stale_reason_variant_name_matches_serde_tag() {
+        for (reason, expected) in [
+            (ProjectionStaleReason::RebuildRequired, "rebuild_required"),
+            (
+                ProjectionStaleReason::DerivedRecordStale,
+                "derived_record_stale",
+            ),
+            (ProjectionStaleReason::CasConflict, "cas_conflict"),
+            (ProjectionStaleReason::Backpressure, "backpressure"),
+            (ProjectionStaleReason::ManualRepair, "manual_repair"),
+        ] {
+            assert_eq!(reason.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `FinalDecisionVerdict::variant_name` for all 4 variants +
+    /// `is_accepted` / `is_uncommitted` partition.
+    #[test]
+    fn final_decision_verdict_variant_name_and_partition() {
+        for (verdict, expected) in [
+            (FinalDecisionVerdict::Accepted, "accepted"),
+            (FinalDecisionVerdict::Rejected, "rejected"),
+            (FinalDecisionVerdict::Cancelled, "cancelled"),
+            (FinalDecisionVerdict::Abandon, "abandon"),
+        ] {
+            assert_eq!(verdict.variant_name(), expected);
+            assert_eq!(
+                serde_json::to_string(&verdict).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+
+        // Partition: is_accepted XOR is_uncommitted across all 4 variants.
+        assert!(FinalDecisionVerdict::Accepted.is_accepted());
+        assert!(!FinalDecisionVerdict::Accepted.is_uncommitted());
+        for verdict in [
+            FinalDecisionVerdict::Rejected,
+            FinalDecisionVerdict::Cancelled,
+            FinalDecisionVerdict::Abandon,
+        ] {
+            assert!(!verdict.is_accepted(), "{verdict:?} must NOT be accepted",);
+            assert!(
+                verdict.is_uncommitted(),
+                "{verdict:?} must flag as uncommitted",
+            );
+        }
     }
 }
