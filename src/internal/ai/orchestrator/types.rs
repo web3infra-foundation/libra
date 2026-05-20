@@ -69,6 +69,20 @@ pub enum TaskKind {
     Gate,
 }
 
+impl TaskKind {
+    /// Every variant of [`TaskKind`] in declaration order
+    /// (`Implementation`, `Analysis`, `Gate`). Useful for tests
+    /// that sweep every kind plus future routing logic that needs
+    /// to fan out across task types.
+    ///
+    /// Mirrors the v0.17.660+ `*::all()` pattern: the fixed-length
+    /// array forces a future variant (e.g. `Review`) to extend this
+    /// list in the same patch.
+    pub fn all() -> [Self; 3] {
+        [Self::Implementation, Self::Analysis, Self::Gate]
+    }
+}
+
 /// The verification stage represented by a gate task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +91,18 @@ pub enum GateStage {
     Integration,
     Security,
     Release,
+}
+
+impl GateStage {
+    /// Every variant of [`GateStage`] in declaration order
+    /// (`Fast`, `Integration`, `Security`, `Release`). The
+    /// declaration order is also the **escalation order** — Fast
+    /// gates run first and have the lowest cost, Release gates run
+    /// last and have the highest cost. Callers that need to iterate
+    /// gates in escalation order can use `all()` directly.
+    pub fn all() -> [Self; 4] {
+        [Self::Fast, Self::Integration, Self::Security, Self::Release]
+    }
 }
 
 /// Contract for a compiled task.
@@ -925,5 +951,55 @@ mod tests {
             OrchestratorError::ProjectionError("schema drift".to_string()).to_string(),
             "projection error: schema drift",
         );
+    }
+
+    #[test]
+    fn task_kind_all_enumerates_every_variant_in_declaration_order() {
+        let kinds = TaskKind::all();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(
+            kinds,
+            [TaskKind::Implementation, TaskKind::Analysis, TaskKind::Gate]
+        );
+
+        for kind in &TaskKind::all() {
+            let expected_tag = match kind {
+                TaskKind::Implementation => "\"implementation\"",
+                TaskKind::Analysis => "\"analysis\"",
+                TaskKind::Gate => "\"gate\"",
+            };
+            let serialised = serde_json::to_string(kind).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {kind:?}");
+            let back: TaskKind = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, *kind);
+        }
+    }
+
+    #[test]
+    fn gate_stage_all_enumerates_every_variant_in_escalation_order() {
+        let stages = GateStage::all();
+        assert_eq!(stages.len(), 4);
+        assert_eq!(
+            stages,
+            [
+                GateStage::Fast,
+                GateStage::Integration,
+                GateStage::Security,
+                GateStage::Release,
+            ]
+        );
+
+        for stage in &GateStage::all() {
+            let expected_tag = match stage {
+                GateStage::Fast => "\"fast\"",
+                GateStage::Integration => "\"integration\"",
+                GateStage::Security => "\"security\"",
+                GateStage::Release => "\"release\"",
+            };
+            let serialised = serde_json::to_string(stage).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {stage:?}");
+            let back: GateStage = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, *stage);
+        }
     }
 }
