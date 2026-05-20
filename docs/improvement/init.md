@@ -714,7 +714,7 @@ EXAMPLES:
 
 #### `tests/command/init_test.rs`（核心路径）
 
-> **先决清理**：当前 `tests/command/init_test.rs` 实际是过期的 `init` 实现拷贝，**没有任何 `#[test]` / `#[tokio::test]` 用例**。本批不能在这个文件上“继续补几条断言”了，必须先把它重写为真实测试文件，或拆出 helper 后新建真正的测试用例。
+> **先决清理已完成**：`tests/command/init_test.rs` 已重写为真实测试文件，含 **11 个 `#[test]` / `#[tokio::test]` 用例**（覆盖 `init --vault false/true` 种子密钥与签名状态、`init_status_shows_root_libraignore_as_untracked`、`init_preserves_existing_root_libraignore`、`init_bare_does_not_create_root_libraignore`、`vault true` 配置/环境身份 fallback、跨仓库不继承本地身份、bare / worktree 重新初始化的 `RepoStateInvalid` 错误码、无效 `--object-format` 的 sha256 建议、`init_vault_true_ignores_commit_use_config_only_strictness`）。后续补 helper 或断言可直接基于此文件。
 
 - success message 改为过去时（`Initialized empty Libra repository in ...`）
 - `--vault false` 输出 `signing: disabled`
