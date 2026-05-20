@@ -85,6 +85,26 @@ impl DagStage {
             DagStage::Test => "test",
         }
     }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case stage tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed
+    /// rather than substituting a default stage.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "execution" => Some(Self::Execution),
+            "test" => Some(Self::Test),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`DagStage`] in declaration order. Lets the
+    /// round-trip regression sweep every variant.
+    pub fn all() -> [Self; 2] {
+        [Self::Execution, Self::Test]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +130,34 @@ impl SchedulerClearReason {
             SchedulerClearReason::Failed => "failed",
             SchedulerClearReason::Rebuild => "rebuild",
         }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            "interrupted" => Some(Self::Interrupted),
+            "failed" => Some(Self::Failed),
+            "rebuild" => Some(Self::Rebuild),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`SchedulerClearReason`] in declaration order.
+    /// Lets the round-trip regression sweep every variant.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Completed,
+            Self::Cancelled,
+            Self::Interrupted,
+            Self::Failed,
+            Self::Rebuild,
+        ]
     }
 
     /// `true` when the clear reason represents a clean task completion
@@ -777,6 +825,42 @@ mod tests {
                 "{reason:?} must NOT be a clean completion",
             );
         }
+    }
+
+    /// `DagStage::from_variant_name` round-trips every variant via
+    /// `all()` and rejects unknown / kebab-case input.
+    #[test]
+    fn dag_stage_from_variant_name_round_trips_every_variant_and_rejects_unknowns() {
+        for stage in DagStage::all() {
+            assert_eq!(
+                DagStage::from_variant_name(stage.variant_name()),
+                Some(stage),
+                "round-trip mismatch for {stage:?}",
+            );
+        }
+        assert_eq!(DagStage::from_variant_name("Execution"), None);
+        assert_eq!(DagStage::from_variant_name("planning"), None);
+        assert_eq!(DagStage::from_variant_name(""), None);
+    }
+
+    /// `SchedulerClearReason::from_variant_name` round-trips every
+    /// variant via `all()` and rejects unknown / kebab-case input.
+    #[test]
+    fn scheduler_clear_reason_from_variant_name_round_trips_every_variant_and_rejects_unknowns() {
+        for reason in SchedulerClearReason::all() {
+            assert_eq!(
+                SchedulerClearReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+        assert_eq!(SchedulerClearReason::from_variant_name("Done"), None);
+        // Hyphenated form of a real tag must be rejected.
+        assert_eq!(
+            SchedulerClearReason::from_variant_name("clean-completion"),
+            None,
+        );
+        assert_eq!(SchedulerClearReason::from_variant_name(""), None);
     }
 
     /// `ProjectionStaleReason::variant_name` must match serde tags for
