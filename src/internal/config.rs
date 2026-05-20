@@ -17,7 +17,7 @@
 //!
 //! Cross-cutting helpers in this module:
 //! - [`resolve_env`] / [`resolve_env_for_target`]: cascading env-var resolution
-//!   (process env > local repo config > global config).
+//!   (local repo config > global config > process env).
 //! - [`is_sensitive_key`] / [`is_vault_internal_key`]: heuristics that drive the
 //!   encrypt-by-default policy in `libra config`.
 //! - [`encrypt_value`] / [`decrypt_value`]: thin wrappers over the vault module.
@@ -855,9 +855,9 @@ pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
 /// Resolve an environment variable by priority chain.
 ///
 /// Functional scope:
-/// 1. System environment variable (`std::env::var`)
-/// 2. Local config (`vault.env.<name>` in `.libra/libra.db`)
-/// 3. Global config (`vault.env.<name>` in `~/.libra/config.db`)
+/// 1. Local config (`vault.env.<name>` in `.libra/libra.db`)
+/// 2. Global config (`vault.env.<name>` in `~/.libra/config.db`)
+/// 3. System environment variable (`std::env::var`)
 ///
 /// Boundary conditions:
 /// - `name` is the raw env var name (e.g. `"GEMINI_API_KEY"`).
@@ -873,17 +873,16 @@ pub async fn resolve_env(name: &str) -> Result<Option<String>> {
 /// closures threaded through `Fn(&str) -> Option<String>` lookup helpers).
 ///
 /// Functional scope:
-/// - Checks `std::env::var(name)` first — the common fast path that does not
-///   need a tokio runtime.
-/// - When the env var is unset, spawns a private std-thread that owns a
-///   single-purpose tokio runtime, drives the async [`resolve_env_for_target`]
-///   call against [`LocalIdentityTarget::CurrentRepo`], and returns the
-///   resolved value to the caller. This mirrors the pattern in
+/// - Spawns a private std-thread that owns a single-purpose tokio runtime,
+///   drives the async [`resolve_env_for_target`] call against
+///   [`LocalIdentityTarget::CurrentRepo`], and returns the resolved value to
+///   the caller. This preserves the vault-first contract even for synchronous
+///   constructors. It mirrors the pattern in
 ///   `src/utils/client_storage.rs::resolve_env_sync` and is intentionally
 ///   isolated from any caller-owned tokio runtime.
 ///
-/// Returns `Ok(None)` only when the process env, the local repo's
-/// `.libra/libra.db`, and the global `~/.libra/config.db` all lack the value.
+/// Returns `Ok(None)` only when the local repo's `.libra/libra.db`, the
+/// global `~/.libra/config.db`, and the process env all lack the value.
 /// Returns `Err` when the worker thread crashed before sending OR when the
 /// underlying async resolver returned an error (e.g. corrupt SQLite,
 /// schema-mismatch propagation that the vault-init fix in v0.17.515 did not
@@ -894,10 +893,6 @@ pub async fn resolve_env(name: &str) -> Result<Option<String>> {
 /// Prefer the async [`resolve_env`] when the caller is already inside an
 /// async context — that avoids the per-call thread spawn.
 pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
-    if let Ok(val) = std::env::var(name) {
-        return Ok(Some(val));
-    }
-
     let owned = name.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -924,20 +919,27 @@ pub async fn resolve_env_for_target(
     name: &str,
     local_target: LocalIdentityTarget<'_>,
 ) -> Result<Option<String>> {
-    // 1. System environment variable — per-process override (12-Factor)
-    if let Ok(val) = std::env::var(name) {
-        return Ok(Some(val));
-    }
-
     let vault_key = format!("vault.env.{name}");
 
-    // 2. Local config (vault.env.*)
+    // 1. Local config (vault.env.*)
     if let Some(value) = local_env_value_for_target(local_target, &vault_key).await? {
         return Ok(Some(value));
     }
 
-    // 3. Global config — lowest priority
-    global_env_value(name, &vault_key).await
+    // 2. Global config
+    if let Some(value) = global_env_value(name, &vault_key).await? {
+        return Ok(Some(value));
+    }
+
+    // 3. System environment variable — fallback for users who have not moved a
+    // credential into `vault.env.*` yet.
+    match std::env::var(name) {
+        Ok(val) => Ok(Some(val)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!(
+            "{name} is set in the environment but is not valid Unicode"
+        )),
+    }
 }
 
 /// Resolve the global config database path.
@@ -1159,8 +1161,9 @@ async fn local_config_entry_for_target(
 ) -> Result<Option<ConfigKvEntry>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = crate::utils::util::try_get_storage_path(None)
-                .context("failed to resolve current repository storage")?;
+            let Ok(storage) = crate::utils::util::try_get_storage_path(None) else {
+                return Ok(None);
+            };
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_entry_from_db_path(&db_path, key).await
         }

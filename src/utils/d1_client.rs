@@ -6,7 +6,7 @@
 //!
 //! Authentication uses a Cloudflare account ID, API token, and D1 database ID,
 //! resolved through [`resolve_env`](crate::internal::config::resolve_env) so they
-//! can come from process env, local repo `vault.env.*` config, or global config.
+//! can come from local repo `vault.env.*` config, global config, or process env.
 //! The default client speaks HTTPS to `api.cloudflare.com`; the constructor enforces
 //! `https_only(true)`. Tests can inject a different API base URL through
 //! [`D1Client::new_with_api_base_url`].
@@ -124,9 +124,9 @@ impl D1Client {
     /// vault-stored secrets are picked up automatically.
     ///
     /// Resolution order per variable:
-    /// 1. System environment variable (`std::env::var`)
-    /// 2. Local vault config (`vault.env.<VAR>`)
-    /// 3. Global vault config (`~/.libra/config.db`)
+    /// 1. Local vault config (`vault.env.<VAR>`)
+    /// 2. Global vault config (`~/.libra/config.db`)
+    /// 3. System environment variable (`std::env::var`)
     ///
     /// Required variables:
     /// - `LIBRA_D1_ACCOUNT_ID`: Cloudflare Account ID
@@ -164,11 +164,14 @@ impl D1Client {
             Ok(Some(value)) if !value.is_empty() => Ok(value),
             Ok(Some(_)) | Ok(None) => Err(D1Error {
                 code: missing_code,
-                message: format!("{name} not set (env or vault)"),
+                message: format!(
+                    "{name} is not configured; set vault.env.{name} with `libra config set \
+                     vault.env.{name} <value>` or export {name}"
+                ),
             }),
             Err(err) => Err(D1Error {
                 code: resolution_error_code,
-                message: format!("failed to resolve {name} from env or config: {err}"),
+                message: format!("failed to resolve {name} from vault config or env: {err}"),
             }),
         }
     }
@@ -1839,7 +1842,7 @@ mod tests {
     use super::*;
     use crate::{
         internal::config::ConfigKv,
-        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+        utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
     };
 
     /// RAII guard that removes an env var on construction and restores it on drop.
@@ -1973,6 +1976,44 @@ mod tests {
         let client = rt
             .block_on(D1Client::from_env())
             .expect("local config values should initialize D1 client");
+        assert_eq!(client.account_id, "account-from-config");
+        assert_eq!(client.api_token, "token-from-config");
+        assert_eq!(client.database_id, "db-from-config");
+    }
+
+    /// Scenario: D1 credentials are security-sensitive. If both Vault and the
+    /// process environment provide values, the client must use Vault so shell
+    /// state cannot override the configured account/token/database selection.
+    #[test]
+    #[serial]
+    fn d1_client_from_env_prefers_local_config_over_process_env() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _account = ScopedEnvVar::set("LIBRA_D1_ACCOUNT_ID", "account-from-env");
+        let _token = ScopedEnvVar::set("LIBRA_D1_API_TOKEN", "token-from-env");
+        let _database = ScopedEnvVar::set("LIBRA_D1_DATABASE_ID", "db-from-env");
+
+        rt.block_on(async {
+            ConfigKv::set(
+                "vault.env.LIBRA_D1_ACCOUNT_ID",
+                "account-from-config",
+                false,
+            )
+            .await
+            .unwrap();
+            ConfigKv::set("vault.env.LIBRA_D1_API_TOKEN", "token-from-config", false)
+                .await
+                .unwrap();
+            ConfigKv::set("vault.env.LIBRA_D1_DATABASE_ID", "db-from-config", false)
+                .await
+                .unwrap();
+        });
+
+        let client = rt
+            .block_on(D1Client::from_env())
+            .expect("local config values should take priority over env");
         assert_eq!(client.account_id, "account-from-config");
         assert_eq!(client.api_token, "token-from-config");
         assert_eq!(client.database_id, "db-from-config");

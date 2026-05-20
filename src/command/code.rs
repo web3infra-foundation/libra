@@ -30,7 +30,7 @@
 //! ## Provider Dispatch
 //!
 //! The `--provider` flag selects the AI backend. Each provider follows the same pattern:
-//! 1. Create a client from environment variables (API keys).
+//! 1. Create a client from explicit env-file values, Vault, or environment API keys.
 //! 2. Instantiate a completion model with the selected (or default) model name.
 //! 3. Pass the model into the shared `run_tui_with_model` function.
 //!
@@ -449,8 +449,8 @@ pub struct CodeArgs {
 
     /// Load provider environment variables from a dotenv-style file.
     ///
-    /// Values in this file take precedence over already exported process
-    /// environment variables for provider bootstrap.
+    /// Values in this explicit file take precedence over Vault and already
+    /// exported process environment variables for provider bootstrap.
     #[arg(long = "env-file", value_name = "PATH")]
     pub env_file: Option<PathBuf>,
 
@@ -1015,12 +1015,11 @@ fn provider_env_value_with_lookup(
 ///
 /// Env resolution flows through [`provider_env_value_with_lookup`] for
 /// **every** provider, not just Deepseek / Kimi as before. The precedence is
-/// `--env-file` first then process env (documented on `--env-file` itself),
-/// and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`
-/// flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process
-/// env via `from_env()`; this widens them to consult `--env-file` first as
-/// well, so a value defined in the env-file now wins over a stale process-env
-/// value for those providers.
+/// explicit `--env-file` values first, then the shared vault-first resolver
+/// (`vault.env.<name>` local, `vault.env.<name>` global, process env). This
+/// applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS` flag.
+/// Gemini / OpenAI / Anthropic / Zhipu used to read only from process env via
+/// `from_env()`; this widens them to consult `--env-file` and vault config.
 ///
 /// The function returns the resolved model name AND the effective provider
 /// name string so the caller can tag usage / UI metadata against the agent's
@@ -1047,9 +1046,9 @@ fn build_any_completion_model_for_args(
     String,
 )> {
     build_any_completion_model_for_args_with_lookup(args, env_file, working_dir, |key| {
-        // Vault-aware fallback chain: try process env first (cheap), then
-        // fall back to the libra config DB (repo-local + global
-        // `vault.env.<name>`) via the sync resolver. Phase 5 from_env →
+        // Vault-aware fallback chain: prefer the libra config DB (repo-local +
+        // global `vault.env.<name>`) and then fall back to process env via the
+        // sync resolver. Phase 5 from_env →
         // resolve_env call-site cutover: users who configured an API key
         // once via `libra config --global add vault.env.GEMINI_API_KEY <…>`
         // no longer need to re-export it in every shell.
@@ -1241,7 +1240,10 @@ fn build_any_completion_model_for_args_with_lookup(
                      (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
                     )
                 } else {
-                    CliError::auth(format!("{env_var} is not set"))
+                    CliError::auth(format!(
+                        "{env_var} is not configured; set vault.env.{env_var} with `libra \
+                         config set vault.env.{env_var} <key>` or export {env_var}"
+                    ))
                 }
             }
             ProviderFactoryError::BuildFailed { reason, .. } => CliError::io(reason),
@@ -1352,7 +1354,7 @@ fn resolve_agent_binding_override(
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
 ///
 /// # Side Effects
-/// - Reads provider credentials from environment variables and optional dotenv
+/// - Reads provider credentials from Vault, environment variables, and optional dotenv
 ///   files.
 /// - Registers local file, shell, planning, and MCP bridge tools for the agent.
 /// - May start web/MCP background services and a managed Codex app-server.
@@ -4673,7 +4675,7 @@ no_cache_unknown_network = true
                 "expected {expected_env} in missing-key error for {provider:?}, got: {msg}"
             );
             assert!(
-                msg.contains("is not set") || msg.contains("is required"),
+                msg.contains("is not configured") || msg.contains("is required"),
                 "missing-key error should be readable and actionable for {provider:?}, got: {msg}"
             );
         }

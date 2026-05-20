@@ -669,7 +669,10 @@ impl CloudError {
                     .with_stable_code(StableErrorCode::AuthMissingCredentials)
                     .with_detail("missing_keys", missing_keys)
                     .with_detail("raw_detail", detail)
-                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
+                    .with_hint(
+                        "set the missing variables as vault.env.* with `libra config set`, or \
+                         export them in the environment before retrying.",
+                    )
             }
             CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
@@ -1749,7 +1752,7 @@ async fn resolve_cloud_env(
         .await
         .map_err(|e| {
             CloudError::Generic(format!(
-                "failed to resolve '{name}' from env or config: {e}"
+                "failed to resolve '{name}' from vault config or env: {e}"
             ))
         })
 }

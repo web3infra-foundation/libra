@@ -285,20 +285,23 @@ error machinery.
 
 ## Environment Variables
 
-Cloud operations require the following environment variables (or equivalent `vault.env.*` config entries):
+Cloud operations require the following keys. Libra reads repo-local `vault.env.*`
+entries first, then global `vault.env.*`, then the matching environment
+variables. If all layers are missing for a required key, the command reports the
+key and asks you to configure it before retrying.
 
 ### D1 (required for all operations)
 
-| Variable | Description |
-|----------|-------------|
+| Key | Description |
+|-----|-------------|
 | `LIBRA_D1_ACCOUNT_ID` | Cloudflare account ID |
 | `LIBRA_D1_API_TOKEN` | Cloudflare API token with D1 access |
 | `LIBRA_D1_DATABASE_ID` | D1 database UUID |
 
 ### R2 (required for sync and full restore)
 
-| Variable | Description |
-|----------|-------------|
+| Key | Description |
+|-----|-------------|
 | `LIBRA_STORAGE_ENDPOINT` | S3-compatible endpoint URL |
 | `LIBRA_STORAGE_BUCKET` | Bucket name |
 | `LIBRA_STORAGE_ACCESS_KEY` | Access key ID |
@@ -353,7 +356,7 @@ Note: Neither Git nor jj have a built-in cloud backup command. They rely on push
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-CLI-002` | Missing required environment variables (lists which ones) |
+| `LBR-CLI-002` | Missing required Vault/env credential keys (lists which ones) |
 | `LBR-CLI-002` | Batch size must be at least 1 |
 | `LBR-CLI-002` | Neither `--repo-id` nor `--name` provided for restore |
 | `LBR-CLI-003` | Repository with given name not found in D1 |

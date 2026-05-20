@@ -140,9 +140,9 @@ impl Client {
     /// also exporting them into the process environment.
     ///
     /// Priority order:
-    /// 1. Process env var
-    /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
-    /// 3. Global config
+    /// 1. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
+    /// 2. Global config
+    /// 3. Process env var
     ///
     /// `MOONSHOT_BASE_URL` falls back to the canonical Kimi cn endpoint when
     /// no layer supplies it.
@@ -150,7 +150,10 @@ impl Client {
         let api_key = resolve_env_for_target("MOONSHOT_API_KEY", local_target)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!("MOONSHOT_API_KEY is not set in env, repo vault, or global config")
+                anyhow::anyhow!(
+                    "MOONSHOT_API_KEY is not configured; set vault.env.MOONSHOT_API_KEY with \
+                     `libra config set vault.env.MOONSHOT_API_KEY <key>` or export MOONSHOT_API_KEY"
+                )
             })?;
         let base_url = resolve_env_for_target("MOONSHOT_BASE_URL", local_target)
             .await?

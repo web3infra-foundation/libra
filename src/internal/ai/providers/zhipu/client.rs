@@ -82,9 +82,8 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "ZHIPU_API_KEY is not set in env, repo vault, or global config \
-                     (set the environment variable or run `libra config --global add \
-                     vault.env.ZHIPU_API_KEY <key>`)"
+                    "ZHIPU_API_KEY is not configured; set vault.env.ZHIPU_API_KEY with \
+                     `libra config set vault.env.ZHIPU_API_KEY <key>` or export ZHIPU_API_KEY"
                 )
             })?;
         let base_url = resolve_env_for_target("ZHIPU_BASE_URL", local_target)

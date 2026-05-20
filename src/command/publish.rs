@@ -664,8 +664,10 @@ fn publish_status_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, and LIBRA_D1_DATABASE_ID for cloud \
-             comparison, or omit --site-id/publish.site_id to inspect only the local template.",
+            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, and \
+             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
+             variables for cloud comparison. Omit --site-id/publish.site_id to inspect only \
+             the local template.",
         )
 }
 
@@ -1044,8 +1046,9 @@ async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncO
             CliError::fatal(format!("failed to initialize publish R2 storage: {source}"))
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint(
-                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_BUCKET, \
-                     LIBRA_STORAGE_ACCESS_KEY, and LIBRA_STORAGE_SECRET_KEY.",
+                    "set vault.env.LIBRA_STORAGE_ENDPOINT, vault.env.LIBRA_STORAGE_BUCKET, \
+                     vault.env.LIBRA_STORAGE_ACCESS_KEY, and vault.env.LIBRA_STORAGE_SECRET_KEY \
+                     with `libra config set`, or export the matching variables.",
                 )
         })?;
 
@@ -1919,8 +1922,9 @@ fn publish_sync_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, LIBRA_D1_DATABASE_ID, and \
-             publish.site_id before running 'libra publish sync'.",
+            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, \
+             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
+             variables, and set publish.site_id before running 'libra publish sync'.",
         )
 }
 
@@ -4307,7 +4311,7 @@ mod tests {
                     "failed to initialize D1 client for publish status ref comparison",
                     D1Error {
                         code: 1001,
-                        message: "LIBRA_D1_ACCOUNT_ID not set (env or vault)".to_string(),
+                        message: "LIBRA_D1_ACCOUNT_ID is not configured".to_string(),
                     },
                 ))
             },

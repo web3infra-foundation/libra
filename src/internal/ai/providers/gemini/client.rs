@@ -82,9 +82,9 @@ impl Client {
     }
 
     /// Constructs a Gemini client whose `GEMINI_API_KEY` is resolved through
-    /// the libra-aware lookup chain: process env → local `.libra/libra.db`
+    /// the libra-aware lookup chain: local `.libra/libra.db`
     /// (`vault.env.GEMINI_API_KEY`, when `local_target` selects a repo) →
-    /// global `~/.libra/config.db` (same key).
+    /// global `~/.libra/config.db` (same key) → process env.
     ///
     /// Differs from [`Self::from_env`] in two ways:
     ///
@@ -119,9 +119,8 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "GEMINI_API_KEY is not set in env, repo vault, or global config \
-                     (set the environment variable or run `libra config --global add \
-                     vault.env.GEMINI_API_KEY <key>`)"
+                    "GEMINI_API_KEY is not configured; set vault.env.GEMINI_API_KEY with \
+                     `libra config set vault.env.GEMINI_API_KEY <key>` or export GEMINI_API_KEY"
                 )
             })?;
         let provider = GeminiProvider::new(api_key);

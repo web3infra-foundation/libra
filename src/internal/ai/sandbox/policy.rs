@@ -86,6 +86,152 @@ pub struct SandboxEnforcementParseError {
     value: String,
 }
 
+/// Wire-protocol selector for a [`NetworkService`] allowlist entry.
+///
+/// Pre-positioned for Phase 7 (`docs/improvement/sandbox.md` §7.1) of the
+/// sandbox network-three-state work. Until the full
+/// `NetworkAccess::Allowlist { services }` migration lands this type is
+/// only used by the new [`NetworkService`] schema and its validators
+/// — it doesn't yet appear on the sandbox-policy wire envelope, but
+/// shipping the schema early lets the `.libra/sandbox.toml` parser and
+/// the future proxy stub be implemented against a stable contract.
+///
+/// `Tcp` is the default to match the sandbox.md spec
+/// ("默认 tcp"); callers that need UDP-only allowlists (e.g. DNS, QUIC)
+/// set `protocol = Some(NetworkProtocol::Udp)` on the service.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkProtocol {
+    /// TCP — the default for `https://`, `git://`, `ssh://` services.
+    #[default]
+    Tcp,
+    /// UDP — used by DNS, QUIC, and proprietary peer-to-peer
+    /// transports.
+    Udp,
+}
+
+/// One entry in a sandbox network allowlist.
+///
+/// Pre-positioned for Phase 7 (`docs/improvement/sandbox.md` §7.1).
+/// The shape matches the `.libra/sandbox.toml` `[[sandbox.network.services]]`
+/// section:
+///
+/// ```toml
+/// [[sandbox.network.services]]
+/// host = "registry.npmjs.org"
+/// ports = [443]
+/// ```
+///
+/// Field semantics (mirrors sandbox.md §7.1):
+/// - `host`: hostname or `*.subdomain` wildcard. Bare `"*"` (catch-all)
+///   and the empty string are rejected by [`Self::validate`] because
+///   they would silently turn an allowlist into a full-network grant.
+/// - `ports`: empty = "every port allowed by the proxy". A non-empty
+///   list restricts to the supplied ports. High-sensitivity ports
+///   (22 / SSH, 3389 / RDP) are rejected by `validate` unless the
+///   caller listed them explicitly — this catches a config that omits
+///   `ports` for an entry whose hostname matches an SSH bastion, etc.
+/// - `protocol`: `None` means "Tcp (the default)"; callers needing UDP
+///   set `Some(NetworkProtocol::Udp)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NetworkService {
+    /// Hostname or `*.subdomain` wildcard; never bare `"*"` or empty.
+    pub host: String,
+    /// Allowed destination ports. Empty = any port on the host.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    /// Wire protocol; `None` = TCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<NetworkProtocol>,
+}
+
+/// Validation error produced by [`NetworkService::validate`].
+///
+/// Each variant carries enough context to let
+/// `.libra/sandbox.toml` parsers surface an actionable error to the
+/// user without re-formatting the failure shape.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkServiceValidationError {
+    /// `host` was the empty string. The allowlist parser must reject
+    /// these because an empty host trivially matches nothing under
+    /// the proxy and would otherwise be silently dropped.
+    #[error("network service host must not be empty")]
+    EmptyHost,
+    /// `host` was the bare wildcard `"*"`. Treated as a config error
+    /// because it turns an allowlist into a catch-all grant — the
+    /// user almost certainly meant `NetworkAccess::Full`.
+    #[error(
+        "network service host must not be the bare wildcard '*'; use NetworkAccess::Full for a catch-all grant"
+    )]
+    BareWildcardHost,
+    /// `ports` was empty but `host` matched a high-sensitivity port
+    /// pattern (22 / SSH, 3389 / RDP). The validator demands those
+    /// ports be listed explicitly so the user can't open SSH access
+    /// by accidentally writing `{ host = "bastion.example.com" }`
+    /// without `ports`.
+    #[error(
+        "network service '{host}' allows high-sensitivity port {port} via empty ports list; \
+         list the ports explicitly to opt in"
+    )]
+    HighSensitivityPortRequiresExplicitList { host: String, port: u16 },
+}
+
+/// High-sensitivity ports that must NEVER be granted via an empty
+/// `ports` list. Port 22 = SSH; port 3389 = RDP. The sandbox.md
+/// spec at §7.1 line 336 mandates these be listed explicitly.
+const HIGH_SENSITIVITY_PORTS: &[u16] = &[22, 3389];
+
+impl NetworkService {
+    /// Validate this service entry against the rules in
+    /// `docs/improvement/sandbox.md` §7.1:
+    ///
+    /// - `host` must not be empty.
+    /// - `host` must not be the bare wildcard `"*"`.
+    /// - If `ports` is empty, the entry implicitly allows every port
+    ///   — including the high-sensitivity SSH (22) / RDP (3389)
+    ///   ports. The validator rejects the empty-ports form so the
+    ///   user has to opt in explicitly.
+    ///
+    /// Returns `Ok(())` for a well-formed entry, or the matching
+    /// [`NetworkServiceValidationError`] variant otherwise.
+    pub fn validate(&self) -> Result<(), NetworkServiceValidationError> {
+        if self.host.is_empty() {
+            return Err(NetworkServiceValidationError::EmptyHost);
+        }
+        if self.host == "*" {
+            return Err(NetworkServiceValidationError::BareWildcardHost);
+        }
+        if self.ports.is_empty()
+            && let Some(&port) = HIGH_SENSITIVITY_PORTS.first()
+        {
+            // Empty `ports` means "any port", which silently includes
+            // the high-sensitivity ports tracked in
+            // [`HIGH_SENSITIVITY_PORTS`]. Force the caller to list
+            // ports explicitly so an entry that omits `ports` for
+            // (say) a hostname that resolves to an SSH bastion
+            // can't open port 22 by accident. The error surfaces the
+            // first sensitive port from the canonical list — that's
+            // enough to point the user at the rule, and listing the
+            // ports explicitly satisfies the validator regardless of
+            // which sensitive port the host actually exposes.
+            return Err(
+                NetworkServiceValidationError::HighSensitivityPortRequiresExplicitList {
+                    host: self.host.clone(),
+                    port,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Effective protocol — `Tcp` when `protocol` is `None`. Avoids
+    /// callers having to `unwrap_or(Tcp)` at every dispatch site once
+    /// Phase 7.4's proxy starts routing per-service.
+    pub fn effective_protocol(&self) -> NetworkProtocol {
+        self.protocol.unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkAccess {
@@ -564,5 +710,141 @@ mod tests {
                 .expect("canonical as_str() must round-trip through FromStr");
             assert_eq!(parsed, variant);
         }
+    }
+
+    /// `NetworkProtocol` must round-trip through serde as kebab-case
+    /// (`"tcp"` / `"udp"`), default to `Tcp`, and `Hash` + `Eq` must
+    /// hold so callers can index allowlists by protocol.
+    #[test]
+    fn network_protocol_serde_round_trip_and_defaults_to_tcp() {
+        assert_eq!(NetworkProtocol::default(), NetworkProtocol::Tcp);
+        for (variant, expected) in [
+            (NetworkProtocol::Tcp, "\"tcp\""),
+            (NetworkProtocol::Udp, "\"udp\""),
+        ] {
+            let serialised = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialised, expected, "round-trip for {variant:?}");
+            let back: NetworkProtocol = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    /// `NetworkService::validate()` must reject the empty-host and
+    /// bare-wildcard host shapes — both turn an allowlist into a
+    /// silent grant. Pin the error variants explicitly so a future
+    /// permissiveness in the validator fails the test rather than
+    /// shipping an allowlist parser that accepts `host = ""`.
+    #[test]
+    fn network_service_validate_rejects_empty_and_bare_wildcard_hosts() {
+        let empty = NetworkService {
+            host: String::new(),
+            ports: vec![443],
+            protocol: None,
+        };
+        assert_eq!(
+            empty.validate(),
+            Err(NetworkServiceValidationError::EmptyHost),
+        );
+
+        let wildcard = NetworkService {
+            host: "*".to_string(),
+            ports: vec![443],
+            protocol: None,
+        };
+        assert_eq!(
+            wildcard.validate(),
+            Err(NetworkServiceValidationError::BareWildcardHost),
+        );
+    }
+
+    /// An empty `ports` list silently allows every destination port,
+    /// which includes high-sensitivity ports (22 / SSH, 3389 / RDP).
+    /// `validate()` must reject the empty-ports form so users have to
+    /// opt in to those ports explicitly. Pin both the rejection AND
+    /// the offending port surfaced in the error so a future relaxation
+    /// of the list cannot drop SSH protection silently.
+    #[test]
+    fn network_service_validate_rejects_empty_ports_when_high_sensitivity_implied() {
+        let no_ports = NetworkService {
+            host: "bastion.example.com".to_string(),
+            ports: vec![],
+            protocol: None,
+        };
+        let err = no_ports
+            .validate()
+            .expect_err("empty ports must be rejected");
+        match err {
+            NetworkServiceValidationError::HighSensitivityPortRequiresExplicitList {
+                host,
+                port,
+            } => {
+                assert_eq!(host, "bastion.example.com");
+                // Port 22 is the first high-sensitivity port returned
+                // by the validator; the exact port asserted is part
+                // of the rejection's diagnostic shape so the user can
+                // see which gate fired.
+                assert_eq!(port, 22);
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// Well-formed services pass validation: explicit hostname,
+    /// non-empty ports list, protocol either set or defaulted.
+    #[test]
+    fn network_service_validate_accepts_well_formed_entries() {
+        let https = NetworkService {
+            host: "registry.npmjs.org".to_string(),
+            ports: vec![443],
+            protocol: None,
+        };
+        assert_eq!(https.validate(), Ok(()));
+        assert_eq!(https.effective_protocol(), NetworkProtocol::Tcp);
+
+        let ssh_explicit = NetworkService {
+            host: "github.com".to_string(),
+            ports: vec![22, 443],
+            protocol: Some(NetworkProtocol::Tcp),
+        };
+        assert_eq!(ssh_explicit.validate(), Ok(()));
+
+        let quic = NetworkService {
+            host: "*.example.com".to_string(),
+            ports: vec![443],
+            protocol: Some(NetworkProtocol::Udp),
+        };
+        assert_eq!(quic.validate(), Ok(()));
+        assert_eq!(quic.effective_protocol(), NetworkProtocol::Udp);
+    }
+
+    /// `NetworkService` must round-trip through serde with both the
+    /// minimal form (`{host, ports}`, protocol omitted) and the
+    /// fully-specified form. The minimal form is what
+    /// `.libra/sandbox.toml` will produce; pin the parser-friendly
+    /// shape so a future `serde(default)` change doesn't silently
+    /// require `protocol` in the TOML.
+    #[test]
+    fn network_service_serde_round_trips_minimal_and_explicit_forms() {
+        let minimal = NetworkService {
+            host: "registry.npmjs.org".to_string(),
+            ports: vec![443],
+            protocol: None,
+        };
+        let serialised = serde_json::to_string(&minimal).unwrap();
+        assert!(
+            !serialised.contains("protocol"),
+            "minimal form must skip protocol when None; got {serialised}",
+        );
+        let back: NetworkService = serde_json::from_str(&serialised).unwrap();
+        assert_eq!(back, minimal);
+
+        let explicit = NetworkService {
+            host: "*.example.com".to_string(),
+            ports: vec![443],
+            protocol: Some(NetworkProtocol::Udp),
+        };
+        let serialised = serde_json::to_string(&explicit).unwrap();
+        let back: NetworkService = serde_json::from_str(&serialised).unwrap();
+        assert_eq!(back, explicit);
     }
 }

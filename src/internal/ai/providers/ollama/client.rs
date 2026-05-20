@@ -131,9 +131,9 @@ impl Client {
 
     /// Vault-aware async constructor: resolves `OLLAMA_BASE_URL` and
     /// (when the base URL points at `https://ollama.com`) `OLLAMA_API_KEY`
-    /// through the libra-aware lookup chain: process env → local
-    /// `.libra/libra.db` (`vault.env.<name>`, when `local_target` selects
-    /// a repo) → global `~/.libra/config.db`.
+    /// through the libra-aware lookup chain: local `.libra/libra.db`
+    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
+    /// `~/.libra/config.db` → process env.
     ///
     /// Differs from the other migrated providers in two ways:
     ///

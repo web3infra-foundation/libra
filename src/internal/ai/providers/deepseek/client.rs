@@ -126,9 +126,9 @@ impl Client {
     /// the process environment.
     ///
     /// Priority order:
-    /// 1. Process env var
-    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
-    /// 3. Global config
+    /// 1. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 2. Global config
+    /// 3. Process env var
     ///
     /// DeepSeek does not expose a base-URL env override. Tests that need a
     /// stub endpoint should keep using [`Client::with_base_url`].
@@ -136,7 +136,10 @@ impl Client {
         let api_key = resolve_env_for_target("DEEPSEEK_API_KEY", local_target)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!("DEEPSEEK_API_KEY is not set in env, repo vault, or global config")
+                anyhow::anyhow!(
+                    "DEEPSEEK_API_KEY is not configured; set vault.env.DEEPSEEK_API_KEY with \
+                     `libra config set vault.env.DEEPSEEK_API_KEY <key>` or export DEEPSEEK_API_KEY"
+                )
             })?;
         let provider = DeepSeekProvider::new(api_key);
         Ok(Self::new("https://api.deepseek.com", provider))

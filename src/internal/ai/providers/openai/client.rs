@@ -79,9 +79,9 @@ impl Client {
 
     /// Vault-aware async constructor: resolves `OPENAI_API_KEY` (required)
     /// and `OPENAI_BASE_URL` (optional override) through the libra-aware
-    /// lookup chain: process env → local `.libra/libra.db`
-    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
-    /// `~/.libra/config.db`.
+    /// lookup chain: local `.libra/libra.db` (`vault.env.<name>`, when
+    /// `local_target` selects a repo) → global `~/.libra/config.db` →
+    /// process env.
     ///
     /// Mirrors the [`super::super::deepseek`] and [`super::super::gemini`]
     /// `from_resolved_env` signatures — same `LocalIdentityTarget<'_>`
@@ -104,9 +104,8 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "OPENAI_API_KEY is not set in env, repo vault, or global config \
-                     (set the environment variable or run `libra config --global add \
-                     vault.env.OPENAI_API_KEY <key>`)"
+                    "OPENAI_API_KEY is not configured; set vault.env.OPENAI_API_KEY with \
+                     `libra config set vault.env.OPENAI_API_KEY <key>` or export OPENAI_API_KEY"
                 )
             })?;
         let base_url = resolve_env_for_target("OPENAI_BASE_URL", local_target)
