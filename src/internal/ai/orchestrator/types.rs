@@ -60,6 +60,60 @@ pub enum TaskNodeStatus {
     Skipped,
 }
 
+impl TaskNodeStatus {
+    /// Every variant of [`TaskNodeStatus`] in declaration order
+    /// (`Pending`, `Running`, `Completed`, `Failed`, `Skipped`).
+    /// Useful for exhaustive iteration in tests, e.g. confirming
+    /// the lowercase serde wire tags survive a serde round-trip.
+    /// Mirrors the v0.17.660+ `*::all()` pattern: the fixed-length
+    /// array forces a future variant to extend `all()` plus the
+    /// `is_terminal` / `is_completed` / `is_failed` partition arms
+    /// in the same patch.
+    ///
+    /// The enum intentionally does NOT derive `Copy` even though it
+    /// holds no payload — many call sites already
+    /// `clone()` a stored `TaskNodeStatus` and adding `Copy` would
+    /// trip `clippy::clone_on_copy` across the orchestrator. The
+    /// added cost is a noop `Clone::clone` over a single-byte tag,
+    /// which the compiler inlines.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Pending,
+            Self::Running,
+            Self::Completed,
+            Self::Failed,
+            Self::Skipped,
+        ]
+    }
+
+    /// `true` when the task node has reached a terminal status
+    /// (`Completed`, `Failed`, or `Skipped`). Pending / Running tasks
+    /// are still in-flight from the scheduler's perspective and the
+    /// orchestrator must continue waiting on them.
+    ///
+    /// Mirrors `AttemptWriteOutcome::is_terminal` from v0.17.661 so
+    /// the DAG scheduler and the per-attempt formal-write helpers
+    /// share a consistent "is this work done?" predicate naming
+    /// convention.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Skipped)
+    }
+
+    /// `true` only for the clean-completion status. Distinct from
+    /// `is_terminal()` because `Failed` and `Skipped` are terminal
+    /// but should NOT be treated as success by orchestration logic.
+    pub fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// `true` only for the failed status. Distinct from
+    /// `is_terminal()` so the orchestrator can decide retry vs
+    /// escalation without re-enumerating the variants.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed)
+    }
+}
+
 /// High-level type of an execution task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -691,6 +745,52 @@ mod tests {
             scope_out: vec![],
             checks: vec![],
             contract: TaskContract::default(),
+        }
+    }
+
+    /// `TaskNodeStatus::all()` must enumerate every variant in
+    /// declaration order, with each variant cleanly partitioned
+    /// across the three predicates `is_terminal` / `is_completed`
+    /// / `is_failed`. The exhaustive `match` in the cross-check
+    /// forces a future sixth variant to be added alongside `all()`
+    /// and the partition arms in the same patch.
+    #[test]
+    fn task_node_status_all_partitions_terminal_completed_failed_across_every_variant() {
+        let statuses = TaskNodeStatus::all();
+        assert_eq!(statuses.len(), 5);
+        assert_eq!(
+            statuses,
+            [
+                TaskNodeStatus::Pending,
+                TaskNodeStatus::Running,
+                TaskNodeStatus::Completed,
+                TaskNodeStatus::Failed,
+                TaskNodeStatus::Skipped,
+            ]
+        );
+
+        for status in &TaskNodeStatus::all() {
+            let (expected_terminal, expected_completed, expected_failed) = match status {
+                TaskNodeStatus::Pending | TaskNodeStatus::Running => (false, false, false),
+                TaskNodeStatus::Completed => (true, true, false),
+                TaskNodeStatus::Failed => (true, false, true),
+                TaskNodeStatus::Skipped => (true, false, false),
+            };
+            assert_eq!(
+                status.is_terminal(),
+                expected_terminal,
+                "is_terminal mismatch for {status:?}",
+            );
+            assert_eq!(
+                status.is_completed(),
+                expected_completed,
+                "is_completed mismatch for {status:?}",
+            );
+            assert_eq!(
+                status.is_failed(),
+                expected_failed,
+                "is_failed mismatch for {status:?}",
+            );
         }
     }
 
