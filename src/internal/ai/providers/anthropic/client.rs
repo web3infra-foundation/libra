@@ -77,20 +77,21 @@ impl Provider for AnthropicProvider {
 pub type Client = GenericClient<AnthropicProvider>;
 
 impl Client {
-    /// Creates an Anthropic client from environment variables.
+    /// Creates an Anthropic client from Vault or environment variables.
     ///
     /// Functional scope:
-    /// - Reads `ANTHROPIC_API_KEY` (required).
-    /// - Falls back to `https://api.anthropic.com` when `ANTHROPIC_BASE_URL` is unset.
+    /// - Reads `vault.env.ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY` (required).
+    /// - Falls back to `https://api.anthropic.com` when neither
+    ///   `vault.env.ANTHROPIC_BASE_URL` nor `ANTHROPIC_BASE_URL` is set.
     ///
     /// Boundary conditions:
-    /// - Returns `std::env::VarError::NotPresent` when `ANTHROPIC_API_KEY` is missing
-    ///   so callers can surface a friendly "no API key" message.
+    /// - Returns an actionable error when `ANTHROPIC_API_KEY` is missing across
+    ///   Vault and process env.
     /// - `ANTHROPIC_BASE_URL`, when set, is forwarded verbatim — no scheme validation.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-        let base_url = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("ANTHROPIC_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("ANTHROPIC_BASE_URL")?
+            .unwrap_or_else(|| "https://api.anthropic.com".to_string());
 
         let provider = AnthropicProvider::new(api_key);
         Ok(Self::new(&base_url, provider))

@@ -115,20 +115,20 @@ const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 pub type Client = GenericClient<KimiProvider>;
 
 impl Client {
-    /// Creates a Kimi client from environment variables.
+    /// Creates a Kimi client from Vault or environment variables.
     ///
-    /// Reads `MOONSHOT_API_KEY` for authentication. The base URL defaults to
-    /// `https://api.moonshot.cn/v1` and can be overridden with
-    /// `MOONSHOT_BASE_URL` (useful for the international endpoint or a
-    /// self-hosted proxy).
+    /// Reads `vault.env.MOONSHOT_API_KEY` first, then `MOONSHOT_API_KEY`.
+    /// The base URL defaults to `https://api.moonshot.cn/v1` and can be
+    /// overridden with `vault.env.MOONSHOT_BASE_URL` / `MOONSHOT_BASE_URL`
+    /// (useful for the international endpoint or a self-hosted proxy).
     ///
     /// # Errors
     ///
-    /// Returns [`std::env::VarError`] if `MOONSHOT_API_KEY` is not set.
-    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
-        let api_key = std::env::var("MOONSHOT_API_KEY")?;
-        let base_url =
-            std::env::var("MOONSHOT_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    /// Returns an actionable error if `MOONSHOT_API_KEY` is not configured.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("MOONSHOT_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("MOONSHOT_BASE_URL")?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let provider = KimiProvider::new(api_key);
         Ok(Self::new(&base_url, provider))

@@ -64,14 +64,15 @@ impl Provider for OpenAIProvider {
 pub type Client = GenericClient<OpenAIProvider>;
 
 impl Client {
-    /// Creates an OpenAI client from environment variables.
+    /// Creates an OpenAI client from Vault or environment variables.
     ///
-    /// Reads the `OPENAI_API_KEY` environment variable.
-    /// Also supports `OPENAI_BASE_URL` for custom endpoints.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("OPENAI_API_KEY")?;
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    /// Reads `vault.env.OPENAI_API_KEY` first, then `OPENAI_API_KEY`.
+    /// Also supports `vault.env.OPENAI_BASE_URL` / `OPENAI_BASE_URL` for
+    /// custom endpoints.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("OPENAI_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("OPENAI_BASE_URL")?
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
         let provider = OpenAIProvider::new(api_key);
         Ok(Self::new(&base_url, provider))

@@ -910,6 +910,26 @@ pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
         .map_err(|_| anyhow::anyhow!("resolve_env_sync worker for '{name}' exited unexpectedly"))?
 }
 
+/// Synchronously resolve a required secret/config value with the same
+/// vault-first priority as [`resolve_env_sync`].
+///
+/// This is used by legacy synchronous `from_env()` constructors that now need
+/// to honor `vault.env.*` without changing their call sites to async.
+pub fn resolve_required_env_sync(name: &str) -> anyhow::Result<String> {
+    resolve_env_sync(name)?.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+        anyhow!(
+            "{name} is not configured; set vault.env.{name} with `libra config set \
+             vault.env.{name} <value>` or export {name}"
+        )
+    })
+}
+
+/// Synchronously resolve an optional value with the same vault-first priority
+/// as [`resolve_env_sync`], treating empty/whitespace values as absent.
+pub fn resolve_optional_env_sync(name: &str) -> anyhow::Result<Option<String>> {
+    Ok(resolve_env_sync(name)?.filter(|value| !value.trim().is_empty()))
+}
+
 /// Resolve an environment variable using an explicit local config target.
 ///
 /// Same priority chain as [`resolve_env`] but lets callers point at a

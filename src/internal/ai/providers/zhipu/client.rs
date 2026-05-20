@@ -53,14 +53,15 @@ impl Provider for ZhipuProvider {
 pub type Client = GenericClient<ZhipuProvider>;
 
 impl Client {
-    /// Creates a Zhipu client from environment variables.
+    /// Creates a Zhipu client from Vault or environment variables.
     ///
-    /// Reads the `ZHIPU_API_KEY` environment variable.
-    /// Also supports `ZHIPU_BASE_URL` for custom endpoints.
-    pub fn from_env() -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("ZHIPU_API_KEY")?;
-        let base_url = std::env::var("ZHIPU_BASE_URL")
-            .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
+    /// Reads `vault.env.ZHIPU_API_KEY` first, then `ZHIPU_API_KEY`.
+    /// Also supports `vault.env.ZHIPU_BASE_URL` / `ZHIPU_BASE_URL` for
+    /// custom endpoints.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("ZHIPU_API_KEY")?;
+        let base_url = crate::internal::config::resolve_optional_env_sync("ZHIPU_BASE_URL")?
+            .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
 
         let provider = ZhipuProvider::new(api_key);
         Ok(Self::new(&base_url, provider))

@@ -104,16 +104,16 @@ fn normalize_api_key(api_key: &str) -> String {
 pub type Client = GenericClient<DeepSeekProvider>;
 
 impl Client {
-    /// Creates a DeepSeek client from environment variables.
+    /// Creates a DeepSeek client from Vault or environment variables.
     ///
-    /// Reads the `DEEPSEEK_API_KEY` environment variable and uses the default
-    /// base URL (`https://api.deepseek.com`).
+    /// Reads `vault.env.DEEPSEEK_API_KEY` first, then `DEEPSEEK_API_KEY`, and
+    /// uses the default base URL (`https://api.deepseek.com`).
     ///
     /// # Errors
     ///
-    /// Returns [`std::env::VarError`] if `DEEPSEEK_API_KEY` is not set.
-    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
-        let api_key = std::env::var("DEEPSEEK_API_KEY")?;
+    /// Returns an actionable error if `DEEPSEEK_API_KEY` is not configured.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("DEEPSEEK_API_KEY")?;
         let base_url = "https://api.deepseek.com".to_string();
 
         let provider = DeepSeekProvider::new(api_key);

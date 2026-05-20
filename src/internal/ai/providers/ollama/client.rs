@@ -92,9 +92,18 @@ fn build_ollama_client(base_url: &str, api_key: Option<String>) -> Client {
 
 fn api_key_for_base_url(base_url: &str) -> Option<String> {
     is_ollama_cloud_base_url(base_url)
-        .then(|| std::env::var("OLLAMA_API_KEY").ok())
+        .then(|| {
+            crate::internal::config::resolve_optional_env_sync("OLLAMA_API_KEY")
+                .map_err(|error| {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "failed to resolve OLLAMA_API_KEY from Vault or environment"
+                    );
+                    error
+                })
+                .ok()
+        })
         .flatten()
-        .filter(|key| !key.trim().is_empty())
 }
 
 fn is_ollama_cloud_base_url(base_url: &str) -> bool {
@@ -118,14 +127,24 @@ fn compact_tool_schema_from_env() -> bool {
 }
 
 impl Client {
-    /// Creates an Ollama client from environment variables.
+    /// Creates an Ollama client from Vault or environment variables.
     ///
-    /// Reads the optional `OLLAMA_BASE_URL` environment variable (defaults to
-    /// `http://127.0.0.1:11434/v1`). When the base URL points at
-    /// `https://ollama.com`, `OLLAMA_API_KEY` is used as a bearer token.
+    /// Reads optional `vault.env.OLLAMA_BASE_URL` / `OLLAMA_BASE_URL`
+    /// (defaults to `http://127.0.0.1:11434/v1`). When the base URL points at
+    /// `https://ollama.com`, `vault.env.OLLAMA_API_KEY` / `OLLAMA_API_KEY` is
+    /// used as a bearer token.
     pub fn from_env() -> Self {
-        let base_url =
-            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = crate::internal::config::resolve_optional_env_sync("OLLAMA_BASE_URL")
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "failed to resolve OLLAMA_BASE_URL from Vault or environment"
+                );
+                error
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         build_ollama_client(&base_url, api_key_for_base_url(&base_url))
     }
 

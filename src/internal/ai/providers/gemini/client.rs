@@ -11,7 +11,7 @@
 //! `GeminiProvider` and exposes convenience constructors. The base URL
 //! defaults to `https://generativelanguage.googleapis.com`.
 
-use std::{env, fmt};
+use std::fmt;
 
 use crate::internal::ai::client::{Client as HttpClient, Provider};
 
@@ -61,19 +61,19 @@ impl Provider for GeminiProvider {
 pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
-    /// Creates a Gemini Client from environment variables.
+    /// Creates a Gemini Client from Vault or environment variables.
     ///
-    /// Functional scope: reads `GEMINI_API_KEY` and points at the public
-    /// `generativelanguage.googleapis.com` endpoint.
+    /// Functional scope: reads `vault.env.GEMINI_API_KEY` first, then
+    /// `GEMINI_API_KEY`, and points at the public `generativelanguage.googleapis.com`
+    /// endpoint.
     ///
-    /// Boundary conditions: returns `env::VarError::NotPresent` when
-    /// `GEMINI_API_KEY` is unset so callers can render a friendly "no API key"
-    /// message; the CLI deliberately does not expose a base-URL override —
-    /// Gemini's public API has no stable proxy contract for end users.
-    /// Test-only consumers that need to point at a localhost stub should
-    /// use [`Client::with_base_url`].
-    pub fn from_env() -> Result<Self, env::VarError> {
-        let api_key = env::var("GEMINI_API_KEY")?;
+    /// Boundary conditions: returns an actionable error when `GEMINI_API_KEY`
+    /// is unset across Vault and process env; the CLI deliberately does not
+    /// expose a base-URL override — Gemini's public API has no stable proxy
+    /// contract for end users. Test-only consumers that need to point at a
+    /// localhost stub should use [`Client::with_base_url`].
+    pub fn from_env() -> anyhow::Result<Self> {
+        let api_key = crate::internal::config::resolve_required_env_sync("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);
         Ok(Self::new(
             "https://generativelanguage.googleapis.com",
