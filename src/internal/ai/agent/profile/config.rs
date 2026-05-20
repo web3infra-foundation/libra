@@ -63,6 +63,23 @@ pub struct AgentsConfig {
     #[serde(default)]
     pub goal: GoalConfig,
 
+    /// `[code.sub_agents]` — the CEX-S2-12 flag-gated sub-agent
+    /// runtime. Defaults to `enabled = false` so existing
+    /// single-Agent installs are byte-equivalent pre/post upgrade.
+    /// Schema-only landing today: the runtime that consumes this
+    /// flag (single sub-agent behind flag + hook dispatch) is the
+    /// substantive CEX-S2-12 work and stays in its own card. Adding
+    /// the flag now lets future runtime code branch on
+    /// `cfg.sub_agents.enabled` without an extra schema patch.
+    ///
+    /// Distinct from [`multi_agent`](Self::multi_agent): that flag is
+    /// the OC-Phase 5 user-facing multi-agent mode (`/agents` slash
+    /// command, model bindings, etc.); `sub_agents` is the
+    /// CEX-S2-12 runtime gate for explorer/worker/reviewer sub-agent
+    /// types. Both keys can coexist and both default to disabled.
+    #[serde(default)]
+    pub sub_agents: SubAgentsConfig,
+
     /// Per-agent declarations keyed by agent name. The TOML form is
     /// `[code.agents.<name>]`; deserialisation maps the table key
     /// straight into the BTreeMap key so iteration order is stable
@@ -108,6 +125,42 @@ fn default_max_subagent_depth() -> u32 {
 }
 fn default_max_concurrent_subagents() -> u32 {
     1
+}
+
+/// `[code.sub_agents]` — CEX-S2-12 sub-agent runtime gate.
+///
+/// Defaults to disabled per S2-INV-08 (Step 2 default off + flag-off
+/// rollback): a fresh install must observe byte-equivalent behaviour
+/// to Step 1, and any sub-agent attempt with `enabled = false` is a
+/// programmer error that fails closed at the dispatcher layer (the
+/// CEX-S2-12 dispatcher itself doesn't exist yet — this card only
+/// lands the schema).
+///
+/// `max_parallel = 2` matches the CEX-S2-14 scheduler-side observer
+/// budget; CEX-S2-12 enforces `max_parallel = 1` regardless (single
+/// sub-agent behind flag). The field is parsed here so a later
+/// CEX-S2-14 patch doesn't need to touch the config schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubAgentsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_sub_agents_max_parallel")]
+    pub max_parallel: u32,
+}
+
+impl Default for SubAgentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_parallel: default_sub_agents_max_parallel(),
+        }
+    }
+}
+
+fn default_sub_agents_max_parallel() -> u32 {
+    2
 }
 
 /// `[code.goal]`. Mirrors the doc's defaults: feature off, ask before
@@ -341,6 +394,11 @@ pub enum AgentsConfigValidationError {
     MultiAgentMustBePositive { field: &'static str, value: u32 },
 
     #[error(
+        "sub_agents.max_parallel must be at least 1 when sub_agents.enabled is true (got {value})"
+    )]
+    SubAgentsMaxParallelMustBePositive { value: u32 },
+
+    #[error(
         "budget.warn_session_cost_usd ({warn}) must be strictly less than max_session_cost_usd ({max})"
     )]
     SessionCostWarnNotBelowMax { warn: f64, max: f64 },
@@ -412,6 +470,17 @@ impl AgentsConfig {
                     value: 0,
                 });
             }
+        }
+
+        // sub_agents.max_parallel must be >= 1 when the flag is on.
+        // Schema-only landing: the runtime that consumes this flag is
+        // CEX-S2-12 (single sub-agent behind flag); the validation
+        // here is the public contract surface so a future patch that
+        // wires the dispatcher cannot ship with the flag enabled but
+        // capped at zero.
+        if self.sub_agents.enabled && self.sub_agents.max_parallel == 0 {
+            errors
+                .push(AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 });
         }
 
         // goal.auto_continue_on_resume value enum.
@@ -594,6 +663,10 @@ max_steps = 20
         assert!(!cfg.multi_agent.enabled);
         assert_eq!(cfg.multi_agent.max_subagent_depth, 1);
         assert_eq!(cfg.multi_agent.max_concurrent_subagents, 1);
+        // CEX-S2-12 sub_agents flag — default off, max_parallel = 2 per
+        // the scheduler-side observer budget in CEX-S2-14.
+        assert!(!cfg.sub_agents.enabled);
+        assert_eq!(cfg.sub_agents.max_parallel, 2);
         assert!(!cfg.goal.enabled);
         assert_eq!(cfg.goal.auto_continue_on_resume, "ask");
         assert_eq!(cfg.goal.max_continuation_loops, 50);
@@ -601,6 +674,87 @@ max_steps = 20
         assert!(cfg.agents.is_empty());
         assert!(cfg.compaction.is_none());
         assert!(cfg.budget.max_session_cost_usd.is_none());
+    }
+
+    /// `[code.sub_agents]` parses from TOML with both fields explicit
+    /// + the default empty form. Round-trips through `to_toml_string`.
+    #[test]
+    fn sub_agents_section_parses_and_round_trips() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = true
+max_parallel = 3
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        assert!(cfg.sub_agents.enabled);
+        assert_eq!(cfg.sub_agents.max_parallel, 3);
+        cfg.validate()
+            .expect("enabled + max_parallel >= 1 must validate");
+
+        // Round-trip: serialise then re-parse.
+        let serialised = cfg.to_toml_string().expect("to_toml");
+        let reparsed = AgentsConfig::from_toml_str(&serialised).expect("re-parse");
+        assert_eq!(reparsed.sub_agents, cfg.sub_agents);
+    }
+
+    /// `sub_agents.enabled = true` with `max_parallel = 0` must fail
+    /// validation per the schema contract — a flag-gated runtime
+    /// capped at zero would be a programmer error that should be
+    /// caught at config load, not after the dispatcher tries to spawn
+    /// the first sub-agent.
+    #[test]
+    fn sub_agents_max_parallel_must_be_positive_when_enabled() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = true
+max_parallel = 0
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        let err = cfg
+            .validate()
+            .expect_err("max_parallel = 0 with enabled = true must fail");
+        assert!(
+            err.errors.iter().any(|e| matches!(
+                e,
+                AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 }
+            )),
+            "expected SubAgentsMaxParallelMustBePositive, got {:?}",
+            err.errors,
+        );
+    }
+
+    /// `sub_agents.enabled = false` with `max_parallel = 0` must NOT
+    /// fail validation — the gate is off, so the cap is dormant and
+    /// the user shouldn't be forced to fix a stale leftover value
+    /// just to keep the flag turned off.
+    #[test]
+    fn sub_agents_max_parallel_zero_is_allowed_when_disabled() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = false
+max_parallel = 0
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        cfg.validate()
+            .expect("disabled + max_parallel = 0 must validate (gate is off)");
+    }
+
+    /// `deny_unknown_fields` on `SubAgentsConfig` catches typo'd keys
+    /// (`enable` vs `enabled`, `max_parallels` vs `max_parallel`) at
+    /// load time rather than silently accepting them.
+    #[test]
+    fn sub_agents_section_rejects_unknown_keys() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = true
+max_parallels = 3
+"#;
+        let err = AgentsConfig::from_toml_str(toml_str).expect_err("typo'd key must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("max_parallels") || message.contains("unknown field"),
+            "expected error to mention the unknown field, got: {message}",
+        );
     }
 
     #[test]
