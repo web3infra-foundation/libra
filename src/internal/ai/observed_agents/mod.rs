@@ -231,4 +231,42 @@ mod registry_tests {
             }
         }
     }
+
+    /// Every adapter returned by `agent_for` must declare at least one
+    /// protected directory, and the directory name must start with `.`
+    /// (Libra's convention for hidden agent storage roots:
+    /// `.claude`, `.gemini`, `.cursor`, …). The list is consumed by
+    /// `rewind` / `clean` to leave the agent's local storage alone
+    /// during destructive worktree operations — an empty list would
+    /// mean those operations silently scrub the agent's state.
+    ///
+    /// Pin both invariants per kind so:
+    ///   * a future variant added without populating `protected_dirs`
+    ///     fails this test (vs. silently making `rewind` destructive
+    ///     for that kind).
+    ///   * a future refactor that drops the leading `.` from one of
+    ///     the directory names (e.g. `claude` instead of `.claude`)
+    ///     fails here (vs. having `rewind` either match nothing
+    ///     because Unix tooling treats dotfiles specially, or
+    ///     accidentally scrubbing a top-level non-hidden directory
+    ///     with the same name).
+    #[test]
+    fn agent_for_protected_dirs_are_dot_prefixed_and_non_empty() {
+        for kind in AgentKind::all() {
+            let agent = agent_for(*kind);
+            let dirs = agent.protected_dirs();
+            assert!(
+                !dirs.is_empty(),
+                "agent_for({kind:?}) returned an adapter with empty protected_dirs; \
+                 rewind / clean would scrub the agent's local storage",
+            );
+            for dir in dirs {
+                assert!(
+                    dir.starts_with('.'),
+                    "agent_for({kind:?}) protected_dir '{dir}' must start with '.' \
+                     (Libra's hidden-agent-storage convention)",
+                );
+            }
+        }
+    }
 }
