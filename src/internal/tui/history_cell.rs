@@ -850,12 +850,14 @@ fn summarize_tool_output_failure(output: &ToolOutput) -> String {
     }
 }
 
-fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option<String> {
-    // MCP tool results carry structured JSON. Render the full value as a
-    // Markdown code block so confirmations and structured tool results stay
-    // readable in the transcript.
+fn summarize_tool_output_success(
+    tool_name: &str,
+    output: &ToolOutput,
+) -> Option<ToolOutputSummary> {
+    // MCP tool results carry structured JSON. Render them as readable text so
+    // the transcript shows normal answers instead of raw JSON syntax.
     if let ToolOutput::Mcp { result } = output {
-        return json_markdown_block(result);
+        return human_json_output(result).map(ToolOutputSummary::full);
     }
 
     let text = output.as_text()?.trim();
@@ -863,15 +865,14 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
         return None;
     }
 
-    // If the output looks like JSON, render the full pretty-printed JSON
-    // rather than a partial preview. This keeps request_user_input answers
-    // and other structured confirmations complete.
-    if let Some(json_markdown) = json_markdown_from_text(text) {
-        return Some(json_markdown);
+    // If the output looks like JSON, render the full value as readable text
+    // rather than a partial preview or a raw JSON code block.
+    if let Some(json_summary) = human_json_from_text(text) {
+        return Some(ToolOutputSummary::full(json_summary));
     }
 
     if tool_name == "request_user_input" {
-        return Some(text.to_string());
+        return Some(ToolOutputSummary::full(text.to_string()));
     }
 
     if tool_name != "shell" {
@@ -890,24 +891,194 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
     if lines.is_empty() {
         None
     } else {
-        Some(lines.join(" | "))
+        Some(ToolOutputSummary::brief(lines.join(" | ")))
     }
 }
 
-fn json_markdown_block(value: &Value) -> Option<String> {
-    let pretty = serde_json::to_string_pretty(value).ok()?;
-    Some(format!("```json\n{pretty}\n```"))
-}
-
-/// Detect JSON-shaped tool output and return a full pretty-printed Markdown
-/// code block so structured confirmations are not truncated.
-fn json_markdown_from_text(text: &str) -> Option<String> {
+fn human_json_from_text(text: &str) -> Option<String> {
     let trimmed = text.trim_start();
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return None;
     }
     let value: Value = serde_json::from_str(trimmed).ok()?;
-    json_markdown_block(&value)
+    human_json_output(&value)
+}
+
+fn human_json_output(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(object) = value.as_object()
+        && object.is_empty()
+    {
+        return None;
+    }
+    if let Some(array) = value.as_array()
+        && array.is_empty()
+    {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(object) = value.as_object()
+        && let Some(answers) = object.get("answers").and_then(Value::as_object)
+    {
+        lines.push("Answers".to_string());
+        for (question_id, answer) in answers {
+            push_answer_entry(question_id, answer, 0, &mut lines);
+        }
+        for (key, value) in object {
+            if key != "answers" {
+                push_human_json_entry(key, value, 0, &mut lines);
+            }
+        }
+    } else {
+        push_human_json_value(None, value, 0, &mut lines);
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(redact_internal_workspace_paths(&lines.join("\n")))
+    }
+}
+
+fn push_answer_entry(question_id: &str, value: &Value, indent: usize, lines: &mut Vec<String>) {
+    if let Some(object) = value.as_object()
+        && let Some(answers) = object.get("answers").and_then(Value::as_array)
+    {
+        let answer = format_flat_array(answers).unwrap_or_else(|| "(skipped)".to_string());
+        lines.push(format!("{}{}: {}", " ".repeat(indent), question_id, answer));
+        for (key, value) in object {
+            if key != "answers" {
+                push_human_json_entry(key, value, indent + 2, lines);
+            }
+        }
+        return;
+    }
+
+    push_human_json_entry(question_id, value, indent, lines);
+}
+
+fn push_human_json_value(
+    label: Option<&str>,
+    value: &Value,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    if let Some(flat) = format_flat_value(value) {
+        match label {
+            Some(label) => lines.push(format!("{}{}: {}", " ".repeat(indent), label, flat)),
+            None => lines.push(format!("{}{}", " ".repeat(indent), flat)),
+        }
+        return;
+    }
+
+    match value {
+        Value::Object(object) => {
+            if object.is_empty() {
+                if let Some(label) = label {
+                    lines.push(format!("{}{}: (empty)", " ".repeat(indent), label));
+                }
+                return;
+            }
+            if let Some(label) = label {
+                lines.push(format!("{}{}:", " ".repeat(indent), label));
+            }
+            let child_indent = if label.is_some() { indent + 2 } else { indent };
+            for (key, value) in object {
+                push_human_json_entry(key, value, child_indent, lines);
+            }
+        }
+        Value::Array(array) => {
+            if array.is_empty() {
+                if let Some(label) = label {
+                    lines.push(format!("{}{}: (none)", " ".repeat(indent), label));
+                }
+                return;
+            }
+            if let Some(flat) = format_flat_array(array) {
+                if let Some(label) = label {
+                    lines.push(format!("{}{}: {}", " ".repeat(indent), label, flat));
+                } else {
+                    lines.push(format!("{}{}", " ".repeat(indent), flat));
+                }
+                return;
+            }
+            if let Some(label) = label {
+                lines.push(format!("{}{}:", " ".repeat(indent), label));
+            }
+            for item in array {
+                push_human_json_array_item(item, indent + 2, lines);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn push_human_json_entry(key: &str, value: &Value, indent: usize, lines: &mut Vec<String>) {
+    push_human_json_value(Some(key), value, indent, lines);
+}
+
+fn push_human_json_array_item(value: &Value, indent: usize, lines: &mut Vec<String>) {
+    let prefix = format!("{}- ", " ".repeat(indent));
+    if let Some(flat) = format_flat_value(value) {
+        lines.push(format!("{prefix}{flat}"));
+        return;
+    }
+
+    match value {
+        Value::Object(object) => {
+            if object.is_empty() {
+                lines.push(format!("{prefix}(empty)"));
+                return;
+            }
+            let mut entries = object.iter();
+            if let Some((key, value)) = entries.next() {
+                if let Some(flat) = format_flat_value(value) {
+                    lines.push(format!("{prefix}{key}: {flat}"));
+                } else {
+                    lines.push(format!("{prefix}{key}:"));
+                    push_human_json_value(None, value, indent + 4, lines);
+                }
+            }
+            for (key, value) in entries {
+                push_human_json_entry(key, value, indent + 2, lines);
+            }
+        }
+        Value::Array(array) => {
+            if let Some(flat) = format_flat_array(array) {
+                lines.push(format!("{prefix}{flat}"));
+            } else {
+                lines.push(format!("{}-", " ".repeat(indent)));
+                for item in array {
+                    push_human_json_array_item(item, indent + 2, lines);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn format_flat_array(array: &[Value]) -> Option<String> {
+    if array.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(array.len());
+    for value in array {
+        parts.push(format_flat_value(value)?);
+    }
+    Some(parts.join(", "))
+}
+
+fn format_flat_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("null".to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
@@ -961,7 +1132,10 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
             _ => None,
         };
         let output = match &entry.status {
-            ToolCallEntryStatus::Success(Some(output)) => Some(output.as_str()),
+            ToolCallEntryStatus::Success(Some(output)) => Some(ToolEntryOutput {
+                text: output.text.as_str(),
+                keep_full_text: output.keep_full_text,
+            }),
             _ => None,
         };
 
@@ -2478,7 +2652,10 @@ mod tests {
             joined.contains("visible_after_truncation_limit"),
             "expected full JSON output, got:\n{joined}"
         );
-        assert!(!joined.contains("[json]"), "should not show JSON code label:\n{joined}");
+        assert!(
+            !joined.contains("[json]"),
+            "should not show JSON code label:\n{joined}"
+        );
         assert!(
             !joined.contains("\"items\""),
             "should not render raw JSON keys, got:\n{joined}"

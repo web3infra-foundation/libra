@@ -11,7 +11,7 @@
 **已确认落地的基线（基于 init 改造后的实际代码）：**
 
 - `init` 已完成执行层与渲染层拆分：
-  - 纯执行入口 `run_init(args: InitArgs) -> Result<InitOutput, InitError>` 已交付（`init.rs:447`），内部调用 `run_init_internal()`（`init.rs:463`）并禁用 progress
+  - 纯执行入口 `run_init(args: InitArgs) -> Result<InitOutput, InitError>` 已交付（`init.rs:448`），内部调用 `run_init_internal()`（`init.rs:464`）并禁用 progress
   - 顶层渲染入口 `execute_safe(args, output) -> CliResult<()>` 负责 human / JSON / machine 渲染
   - `render_init_result()` 独立处理 human 模式的 stdout 输出
 - **clone 已完成 `run_init()` 切换**：[src/command/clone.rs](../../src/command/clone.rs) 已调用 `command::init::run_init()`，不再调用 `init::execute_safe()`
@@ -192,7 +192,7 @@ clone 已调用 `run_init()` 并捕获返回值，用于填充 `CloneOutput`。
 **`run_init()` 函数签名（已存在）：**
 
 ```rust
-// src/command/init.rs:447 — current location of `run_init`
+// src/command/init.rs:448 — current location of `run_init`
 pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError>
 ```
 
