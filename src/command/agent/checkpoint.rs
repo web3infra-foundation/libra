@@ -431,15 +431,18 @@ async fn lookup_truncation_support(
     };
     let kind: String = r.try_get_by("agent_kind").unwrap_or_default();
     let metadata_json: String = r.try_get_by("metadata_json").unwrap_or_default();
-    // The string comparison goes through `AgentKind::ClaudeCode.as_db_str()`
-    // rather than a literal "claude_code" so a refactor that renames the
-    // db tag fails to compile here. ClaudeCode is the only kind that
-    // implements `TranscriptTruncator` today; when Gemini or another kind
-    // grows the capability, extend this check to use a registry lookup
-    // (e.g. AgentKind::from_db_str(&kind).map(agent_for)) rather than
-    // adding a second literal.
-    use crate::internal::ai::observed_agents::AgentKind;
-    if kind != AgentKind::ClaudeCode.as_db_str() {
+    // Dispatch the truncator-support probe through the v0.17.677
+    // capability registry instead of a literal "claude_code" match.
+    // Mirrors the dispatch path in
+    // `truncate_agent_transcript_for_checkpoint_with_conn` — both
+    // sites must answer "would the truncator fire?" the same way so
+    // the dry-run preview matches what `--apply` actually does (Codex
+    // round-3 follow-up at the top of this fn).
+    use crate::internal::ai::observed_agents::{AgentKind, truncator_for};
+    let truncator_available = AgentKind::from_db_str(&kind)
+        .and_then(truncator_for)
+        .is_some();
+    if !truncator_available {
         return Ok(false);
     }
     let has_transcript_path = serde_json::from_str::<serde_json::Value>(&metadata_json)
@@ -461,8 +464,7 @@ async fn truncate_agent_transcript_for_checkpoint_with_conn(
     checkpoint_id: &str,
 ) -> TranscriptTruncationOutcome {
     use crate::internal::ai::observed_agents::{
-        ClaudeCodeObservedAgent, TranscriptTruncator, rfc3339_boundary_for_unix_seconds,
-        write_truncated_transcript,
+        rfc3339_boundary_for_unix_seconds, write_truncated_transcript,
     };
 
     let backend = conn.get_database_backend();
@@ -517,17 +519,23 @@ async fn truncate_agent_transcript_for_checkpoint_with_conn(
     };
     let path = std::path::PathBuf::from(&path_str);
 
-    // String comparison routed through `AgentKind::ClaudeCode.as_db_str()`
-    // so a future rename of the db tag fails to compile here rather than
-    // silently making every checkpoint look unsupported. See the matching
-    // comment in `lookup_truncation_support`; when a second kind grows
-    // `TranscriptTruncator`, replace the literal arm with a registry lookup.
-    use crate::internal::ai::observed_agents::AgentKind;
-    if agent_kind != AgentKind::ClaudeCode.as_db_str() {
+    // Dispatch the truncator through the v0.17.677 capability registry
+    // instead of a hard-coded `kind == "claude_code"` literal. The
+    // registry handles three failure shapes:
+    //   * `AgentKind::from_db_str` fails for unknown tags (schema
+    //     mismatch — unsupported kind for this row).
+    //   * `truncator_for` returns `None` for kinds whose adapter
+    //     doesn't implement `TranscriptTruncator` (the six non-Claude
+    //     kinds today). Adding a second truncator implementation is a
+    //     single-arm change in `observed_agents::mod.rs::truncator_for`
+    //     and the new kind is dispatched here automatically.
+    use crate::internal::ai::observed_agents::{AgentKind, truncator_for};
+    let Some(parsed_kind) = AgentKind::from_db_str(&agent_kind) else {
         return TranscriptTruncationOutcome::SkippedUnsupportedKind { agent_kind };
-    }
-
-    let agent = ClaudeCodeObservedAgent::new();
+    };
+    let Some(agent) = truncator_for(parsed_kind) else {
+        return TranscriptTruncationOutcome::SkippedUnsupportedKind { agent_kind };
+    };
     // Capture the file size at read time so `write_truncated_transcript`
     // (and the NoChange early-return below) can detect a concurrent
     // writer that grew the file before our rename. Codex round-1 P2 +
