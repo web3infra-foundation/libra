@@ -2736,11 +2736,15 @@ mod tests {
             "expected nested object to keep two-space JSON indentation: {rendered:#?}"
         );
         assert!(
-            rendered.iter().any(|line| line == "    \"key\": \"9e0414b625957df8834d25dc612959b3851ac4e\","),
+            rendered
+                .iter()
+                .any(|line| line == "    \"key\": \"9e0414b625957df8834d25dc612959b3851ac4e\","),
             "expected nested object field to keep four-space JSON indentation: {rendered:#?}"
         );
         assert!(
-            rendered.iter().any(|line| line == "      \"change_type\": \"modify\","),
+            rendered
+                .iter()
+                .any(|line| line == "      \"change_type\": \"modify\","),
             "expected nested array object field to keep six-space JSON indentation: {rendered:#?}"
         );
     }

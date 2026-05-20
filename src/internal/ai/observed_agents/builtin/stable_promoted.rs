@@ -192,4 +192,28 @@ mod tests {
         };
         assert!(agent.read_transcript(&ctx).unwrap().is_none());
     }
+
+    /// Companion to `promoted_specs_cover_every_v1_preview_kind`. The
+    /// prior test asserts ClaudeCode / Gemini are absent from
+    /// `STABLE_PROMOTED_SPECS`, implicitly assuming they have dedicated
+    /// adapter structs elsewhere. Removing `ClaudeCodeObservedAgent`
+    /// or `GeminiObservedAgent` would not fail that test by itself,
+    /// so an entire `AgentKind` could end up with no adapter at all.
+    ///
+    /// Pin the partition directly: instantiate each dedicated struct
+    /// and verify it reports the expected `AgentKind`. A future refactor
+    /// that drops either dedicated type fails this test rather than
+    /// silently leaving the kind unserviced.
+    #[test]
+    fn dedicated_stable_adapters_exist_and_report_their_kind() {
+        use super::super::{ClaudeCodeObservedAgent, GeminiObservedAgent};
+
+        let claude = ClaudeCodeObservedAgent::new();
+        assert_eq!(claude.provider_kind(), AgentKind::ClaudeCode);
+        assert_eq!(claude.stability(), AgentStability::Stable);
+
+        let gemini = GeminiObservedAgent::new();
+        assert_eq!(gemini.provider_kind(), AgentKind::Gemini);
+        assert_eq!(gemini.stability(), AgentStability::Stable);
+    }
 }
