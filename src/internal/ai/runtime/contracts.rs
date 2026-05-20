@@ -167,6 +167,40 @@ impl ProjectionStaleReason {
             ProjectionStaleReason::ManualRepair => "manual_repair",
         }
     }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse an
+    /// audit string back into the enum. Returns `None` for unknown
+    /// tags — callers that read a stale-reason from a persisted
+    /// audit log row should treat that as a schema mismatch and fail
+    /// closed rather than silently substituting a default.
+    ///
+    /// Accepts only the snake_case canonical wire form so a future
+    /// kebab-case migration on the audit pipeline cannot accidentally
+    /// round-trip through this helper. The pattern mirrors
+    /// `AgentKind::from_db_str` introduced in v0.17.676.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "rebuild_required" => Some(Self::RebuildRequired),
+            "derived_record_stale" => Some(Self::DerivedRecordStale),
+            "cas_conflict" => Some(Self::CasConflict),
+            "backpressure" => Some(Self::Backpressure),
+            "manual_repair" => Some(Self::ManualRepair),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`ProjectionStaleReason`] in declaration
+    /// order. Useful for exhaustive iteration in tests and the
+    /// `variant_name` ↔ `from_variant_name` round-trip guard below.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::RebuildRequired,
+            Self::DerivedRecordStale,
+            Self::CasConflict,
+            Self::Backpressure,
+            Self::ManualRepair,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -911,6 +945,43 @@ mod tests {
                 format!("\"{expected}\""),
             );
         }
+    }
+
+    /// `from_variant_name` is the inverse of `variant_name` —
+    /// `from_variant_name(reason.variant_name()) == Some(reason)`
+    /// for every variant. Pin both directions across every variant
+    /// using `all()` so a future rename of one side fails the
+    /// round-trip here rather than silently desynchronising the
+    /// audit reader from the audit writer.
+    #[test]
+    fn projection_stale_reason_from_variant_name_round_trips_every_variant() {
+        for reason in ProjectionStaleReason::all() {
+            assert_eq!(
+                ProjectionStaleReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+    }
+
+    /// `from_variant_name` must reject unknown tags and the
+    /// kebab-case form. Mirrors `AgentKind::from_db_str`'s
+    /// snake_case-only contract — the audit pipeline writes snake_case,
+    /// so any other shape is by definition a schema mismatch.
+    #[test]
+    fn projection_stale_reason_from_variant_name_rejects_unknowns_and_kebab_form() {
+        // Unknown tag.
+        assert_eq!(
+            ProjectionStaleReason::from_variant_name("not-a-real-reason"),
+            None,
+        );
+        // Kebab-case variant of a real tag must be rejected.
+        assert_eq!(
+            ProjectionStaleReason::from_variant_name("rebuild-required"),
+            None,
+        );
+        // Empty input.
+        assert_eq!(ProjectionStaleReason::from_variant_name(""), None);
     }
 
     /// `FinalDecisionVerdict::variant_name` for all 4 variants +
