@@ -91,10 +91,9 @@ impl Client {
     /// 1. The lookup honours the `libra config --global add
     ///    vault.env.GEMINI_API_KEY <…>` setting, so users who configured the
     ///    key once via the CLI no longer need to re-export it in every shell.
-    /// 2. The error surface is `anyhow::Error` rather than `env::VarError`,
-    ///    so callers can attach context (which key was missing, whether the
-    ///    config DB was unreachable, …) and surface the underlying chain via
-    ///    `format!("{error:#}")` instead of the bare "not present" tag.
+    /// 2. The error surface is `anyhow::Error`, so callers can attach context
+    ///    (which key was missing, whether the config DB was unreachable, …)
+    ///    and surface the underlying chain via `format!("{error:#}")`.
     ///
     /// The `local_target` argument mirrors the
     /// [`super::super::deepseek::client::Client::from_resolved_env`]

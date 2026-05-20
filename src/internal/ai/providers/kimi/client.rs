@@ -5,9 +5,9 @@
 //! injects Bearer-token authentication into every outgoing request.
 //!
 //! The default base URL is `https://api.moonshot.cn/v1`; a custom URL can be
-//! supplied via [`Client::with_base_url`] or the `MOONSHOT_BASE_URL`
-//! environment variable. Authentication uses `MOONSHOT_API_KEY`, matching the
-//! official Kimi platform documentation.
+//! supplied via [`Client::with_base_url`], `vault.env.MOONSHOT_BASE_URL`, or
+//! the `MOONSHOT_BASE_URL` environment variable. Authentication uses
+//! `MOONSHOT_API_KEY`, matching the official Kimi platform documentation.
 
 use std::fmt;
 
@@ -109,7 +109,7 @@ const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 ///
 /// A type alias for the generic [`crate::internal::ai::client::Client`]
 /// parameterized with [`KimiProvider`]. Use [`Client::from_env`] to construct
-/// from the `MOONSHOT_API_KEY` environment variable, or
+/// from `vault.env.MOONSHOT_API_KEY` / the `MOONSHOT_API_KEY` environment variable, or
 /// [`Client::with_api_key`] / [`Client::with_base_url`] for programmatic
 /// construction.
 pub type Client = GenericClient<KimiProvider>;

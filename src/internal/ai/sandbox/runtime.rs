@@ -199,6 +199,20 @@ pub enum SandboxTransformError {
     UnsupportedPlatform,
     #[error("sandbox enforcement failed: {reason}")]
     EnforcementFailed { reason: String },
+    /// `NetworkAccess::Allowlist` was requested but the
+    /// per-allowlist proxy is unavailable, and
+    /// [`SandboxEnforcement::Required`] forbids degrading to
+    /// `Denied`. Surfaced ahead of Phase 7's full proxy wire-up so
+    /// the runtime has a stable error shape to fail closed with — see
+    /// `docs/improvement/sandbox.md` §7.4 line 341.
+    ///
+    /// `reason` carries an actionable hint (which proxy backend was
+    /// expected, why it didn't start, etc.) so users can recover
+    /// without having to re-derive the failure from the surrounding
+    /// transform context. Audit consumers may surface this verbatim
+    /// in the `ToolInvocation[E]` evidence record.
+    #[error("network enforcement failed: {reason}")]
+    NetworkEnforcementFailed { reason: String },
     #[error(transparent)]
     InvalidPolicy(#[from] SandboxPolicyError),
 }
@@ -1164,6 +1178,17 @@ mod tests {
             }
             .to_string(),
             "sandbox enforcement failed: process spawn refused",
+        );
+        // v0.17.683: NetworkEnforcementFailed is the network-side
+        // sibling of EnforcementFailed. Pin its Display so a future
+        // change to the message template doesn't silently shift the
+        // audit-record substring downstream consumers grep for.
+        assert_eq!(
+            SandboxTransformError::NetworkEnforcementFailed {
+                reason: "allowlist proxy unavailable in Required mode".to_string(),
+            }
+            .to_string(),
+            "network enforcement failed: allowlist proxy unavailable in Required mode",
         );
     }
 }

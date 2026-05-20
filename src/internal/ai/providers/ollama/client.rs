@@ -91,18 +91,18 @@ fn build_ollama_client(base_url: &str, api_key: Option<String>) -> Client {
 }
 
 fn api_key_for_base_url(base_url: &str) -> Option<String> {
-    is_ollama_cloud_base_url(base_url)
-        .then(|| {
-            crate::internal::config::resolve_optional_env_sync("OLLAMA_API_KEY")
-                .map_err(|error| {
-                    tracing::warn!(
-                        error = %format!("{error:#}"),
-                        "failed to resolve OLLAMA_API_KEY from Vault or environment"
-                    );
-                    error
-                })
-                .ok()
+    if !is_ollama_cloud_base_url(base_url) {
+        return None;
+    }
+    crate::internal::config::resolve_optional_env_sync("OLLAMA_API_KEY")
+        .map_err(|error| {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "failed to resolve OLLAMA_API_KEY from Vault or environment"
+            );
+            error
         })
+        .ok()
         .flatten()
 }
 

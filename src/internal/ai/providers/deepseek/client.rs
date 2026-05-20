@@ -221,6 +221,34 @@ mod tests {
         drop(global_guard);
     }
 
+    #[test]
+    #[serial]
+    fn from_env_prefers_global_vault_over_process_env() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", Some("ds-env-key"));
+        let global_dir = tempfile::tempdir().unwrap();
+        let global_db_path = global_dir.path().join("deepseek-global-config.db");
+        let global_db_string = global_db_path.to_string_lossy().into_owned();
+        let global_guard = TestEnvGuard::set("LIBRA_CONFIG_GLOBAL_DB", Some(&global_db_string));
+
+        let global_conn = rt
+            .block_on(crate::internal::db::create_database(&global_db_string))
+            .unwrap();
+        rt.block_on(crate::internal::config::ConfigKv::set_with_conn(
+            &global_conn,
+            "vault.env.DEEPSEEK_API_KEY",
+            "ds-vault-key",
+            false,
+        ))
+        .unwrap();
+
+        let client = Client::from_env().expect("from_env should read Vault before process env");
+        assert_eq!(client.provider.api_key(), "ds-vault-key");
+
+        drop(key_guard);
+        drop(global_guard);
+    }
+
     #[tokio::test]
     #[serial]
     async fn from_resolved_env_errors_when_no_layer_supplies_api_key() {

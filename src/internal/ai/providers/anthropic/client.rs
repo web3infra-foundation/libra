@@ -11,8 +11,8 @@
 //!
 //! The [`Client`] type alias combines the generic HTTP client with
 //! `AnthropicProvider` and exposes convenience constructors that read
-//! credentials from environment variables (`ANTHROPIC_API_KEY`) or accept
-//! them directly.
+//! credentials from Vault/environment (`ANTHROPIC_API_KEY`) or accept them
+//! directly.
 
 use std::fmt;
 

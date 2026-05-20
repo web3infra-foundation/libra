@@ -916,12 +916,14 @@ pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
 /// This is used by legacy synchronous `from_env()` constructors that now need
 /// to honor `vault.env.*` without changing their call sites to async.
 pub fn resolve_required_env_sync(name: &str) -> anyhow::Result<String> {
-    resolve_env_sync(name)?.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
-        anyhow!(
-            "{name} is not configured; set vault.env.{name} with `libra config set \
+    resolve_env_sync(name)?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "{name} is not configured; set vault.env.{name} with `libra config set \
              vault.env.{name} <value>` or export {name}"
-        )
-    })
+            )
+        })
 }
 
 /// Synchronously resolve an optional value with the same vault-first priority

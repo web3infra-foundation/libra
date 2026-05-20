@@ -10,7 +10,7 @@
 //! There are three ways to create a client:
 //!
 //! - [`Client::from_env`] -- reads `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`)
-//!   from environment variables. This is the recommended path for CLI usage.
+//!   from Vault or environment variables.
 //! - [`Client::with_api_key`] -- uses the default `https://api.openai.com/v1` base URL.
 //! - [`Client::with_base_url`] -- allows pointing at a custom or proxy endpoint while
 //!   still using OpenAI-compatible authentication.
