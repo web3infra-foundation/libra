@@ -540,4 +540,77 @@ mod tests {
         };
         assert_eq!(p.backend_name(), "loopback-only");
     }
+
+    /// End-to-end integration test that exercises the full
+    /// Phase 7 stub chain:
+    ///
+    ///   `policy::NetworkService` allowlist entries →
+    ///   `NetworkRequest` (built from those entries) →
+    ///   `NetworkProxy::evaluate` (via `select_network_proxy` dispatch)
+    ///
+    /// Validates that the validated allowlist entry shape (with
+    /// explicit ports and protocol) can be threaded through the
+    /// proxy dispatch surface without translation, and that the
+    /// `LoopbackOnlyProxy` stub correctly accepts a loopback target
+    /// drawn from a real-world allowlist line and rejects a remote
+    /// target with the same port. Pre-positions the chain so the
+    /// Phase 7.4 full proxy's allowlist-matching logic can replace
+    /// `LoopbackOnlyProxy` without touching this test.
+    #[test]
+    fn phase7_stub_proxy_chains_validated_allowlist_entry_to_proxy_decision() {
+        use crate::internal::ai::sandbox::policy::{NetworkProtocol, NetworkService};
+
+        // Build a well-formed allowlist entry — mimics a row from
+        // `.libra/sandbox.toml [[sandbox.network.services]]`. The
+        // entry passes validation (non-empty host, explicit ports).
+        let entry = NetworkService {
+            host: "localhost".to_string(),
+            ports: vec![8080, 8443],
+            protocol: Some(NetworkProtocol::Tcp),
+        };
+        entry
+            .validate()
+            .expect("well-formed allowlist entry must validate");
+
+        // Translate to a NetworkRequest for each declared port. In
+        // the v1 stub the LoopbackOnlyProxy ignores the policy's
+        // host-string matching and just checks `is_loopback_host`,
+        // but the chain has to compile and dispatch through the
+        // dyn surface to be useful for Phase 7.4's full proxy drop-in.
+        let live: &'static dyn NetworkProxy = &LoopbackOnlyProxy;
+        let selection = select_network_proxy(
+            NetworkAccessMode::Allowlist,
+            Some(live),
+            ProxyEnforcement::Required,
+        );
+        let NetworkProxySelection::Proxy(proxy) = selection else {
+            panic!("Allowlist with proxy must return Proxy(_)");
+        };
+
+        for port in &entry.ports {
+            let req = NetworkRequest {
+                host: entry.host.clone(),
+                port: *port,
+                protocol: entry.effective_protocol(),
+            };
+            assert!(
+                proxy.evaluate(&req).is_allow(),
+                "v1 stub must allow loopback target on declared port {port}",
+            );
+        }
+
+        // A non-loopback host with the same allowlist port must be
+        // rejected — proves the proxy isn't blindly trusting the
+        // request and is actually consulting `is_loopback_host`.
+        let remote = NetworkRequest {
+            host: "example.com".to_string(),
+            port: entry.ports[0],
+            protocol: entry.effective_protocol(),
+        };
+        let decision = proxy.evaluate(&remote);
+        assert!(
+            decision.is_deny(),
+            "v1 stub must reject remote host even on allowlist port",
+        );
+    }
 }

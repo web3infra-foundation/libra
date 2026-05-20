@@ -604,16 +604,10 @@ impl HistoryCell for ToolCallHistoryCell {
                 ));
             }
             for output in &entry.outputs {
-                let output = if self.group == ToolCallGroup::Input {
-                    output.trim().to_string()
-                } else {
-                    truncate_utf8(output.trim(), 240)
-                };
-                lines.extend(wrap_text(
-                    &output,
-                    "    ",
+                lines.extend(render_tool_output(
+                    output,
+                    self.group == ToolCallGroup::Input,
                     width,
-                    theme::text::muted().add_modifier(Modifier::DIM),
                 ));
             }
         }
@@ -629,6 +623,28 @@ impl HistoryCell for ToolCallHistoryCell {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+fn render_tool_output(text: &str, keep_full_text: bool, width: u16) -> Vec<Line<'static>> {
+    let style = theme::text::muted().add_modifier(Modifier::DIM);
+    let trimmed = text.trim();
+    if trimmed.starts_with("```") {
+        return render_markdown_lines(trimmed, width.saturating_sub(4))
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::styled("    ", style)];
+                spans.extend(line.spans);
+                Line::from(spans).style(line.style)
+            })
+            .collect();
+    }
+
+    let output = if keep_full_text {
+        trimmed.to_string()
+    } else {
+        truncate_utf8(trimmed, 240)
+    };
+    wrap_text(&output, "    ", width, style)
 }
 
 fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
@@ -767,25 +783,6 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-/// Pretty-print a JSON value with two-space indentation for use inside
-/// multi-line tool argument displays. Returns `None` for null / empty values.
-pub(super) fn format_arguments_pretty(value: &Value) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    if let Some(obj) = value.as_object()
-        && obj.is_empty()
-    {
-        return None;
-    }
-    if let Some(arr) = value.as_array()
-        && arr.is_empty()
-    {
-        return None;
-    }
-    serde_json::to_string_pretty(value).ok()
-}
-
 fn summarize_apply_patch(arguments: &Value) -> String {
     let patch_text = arguments
         .as_str()
@@ -826,10 +823,11 @@ fn summarize_tool_output_failure(output: &ToolOutput) -> String {
 }
 
 fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option<String> {
-    // MCP tool results carry structured JSON. Surface a pretty single-line
-    // preview so the TUI shows shape rather than `[object Object]`-style.
+    // MCP tool results carry structured JSON. Render the full value as a
+    // Markdown code block so confirmations and structured tool results stay
+    // readable in the transcript.
     if let ToolOutput::Mcp { result } = output {
-        return format_arguments_inline(result, 180);
+        return json_markdown_block(result);
     }
 
     let text = output.as_text()?.trim();
@@ -837,14 +835,15 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
         return None;
     }
 
-    if tool_name == "request_user_input" {
-        return full_json_from_text(text).or_else(|| Some(text.to_string()));
+    // If the output looks like JSON, render the full pretty-printed JSON
+    // rather than a partial preview. This keeps request_user_input answers
+    // and other structured confirmations complete.
+    if let Some(json_markdown) = json_markdown_from_text(text) {
+        return Some(json_markdown);
     }
 
-    // If the output looks like JSON, prefer a compact pretty-printed preview
-    // so reviewers see structure rather than a long unindented blob.
-    if let Some(json_preview) = json_preview_from_text(text, 180) {
-        return Some(json_preview);
+    if tool_name == "request_user_input" {
+        return Some(text.to_string());
     }
 
     if tool_name != "shell" {
@@ -867,31 +866,20 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
     }
 }
 
-/// Detect JSON-shaped tool output and return a pretty-printed preview of the
-/// first few lines so structure shows up nicely in the chat history.
-fn json_preview_from_text(text: &str, max_chars: usize) -> Option<String> {
-    let trimmed = text.trim_start();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return None;
-    }
-    let value: Value = serde_json::from_str(trimmed).ok()?;
-    let pretty = format_arguments_pretty(&value)?;
-    let preview = pretty
-        .lines()
-        .take(3)
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join(" ");
-    Some(truncate_chars(&collapse_whitespace(&preview), max_chars))
+fn json_markdown_block(value: &Value) -> Option<String> {
+    let pretty = serde_json::to_string_pretty(value).ok()?;
+    Some(format!("```json\n{pretty}\n```"))
 }
 
-fn full_json_from_text(text: &str) -> Option<String> {
+/// Detect JSON-shaped tool output and return a full pretty-printed Markdown
+/// code block so structured confirmations are not truncated.
+fn json_markdown_from_text(text: &str) -> Option<String> {
     let trimmed = text.trim_start();
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return None;
     }
     let value: Value = serde_json::from_str(trimmed).ok()?;
-    format_arguments_pretty(&value)
+    json_markdown_block(&value)
 }
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
@@ -2431,22 +2419,36 @@ mod tests {
     }
 
     #[test]
-    fn json_tool_output_is_previewed_in_summary() {
+    fn json_tool_output_renders_full_markdown_block() {
         // Use a non-`shell` tool so the only way the assertion below can pass
-        // is via the JSON-preview branch (the shell fallback would simply
+        // is via the JSON-output branch (the shell fallback would simply
         // forward the raw blob).
         let mut cell = ToolCallHistoryCell::new(
             "1".to_string(),
             "fetch_inventory".to_string(),
             json!({"limit": 1}),
         );
-        let json_blob = "{\n  \"items\": [\n    {\"id\": 1, \"name\": \"alpha\"}\n  ]\n}";
+        let json_blob = r#"{
+  "items": [
+    {"id": 1, "name": "alpha"}
+  ],
+  "padding": "this field keeps the marker beyond the old short preview limit this field keeps the marker beyond the old short preview limit this field keeps the marker beyond the old short preview limit",
+  "visible_after_truncation_limit": true
+}"#;
         cell.complete_call("1", Ok(ToolOutput::success(json_blob)));
         let rendered = to_strings(cell.display_lines(160));
         let joined = rendered.join("\n");
         assert!(
+            joined.contains("[json]"),
+            "expected Markdown JSON block, got:\n{joined}"
+        );
+        assert!(
             joined.contains("\"items\""),
-            "expected JSON preview, got:\n{joined}"
+            "expected formatted JSON, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("visible_after_truncation_limit"),
+            "expected full JSON output, got:\n{joined}"
         );
     }
 
@@ -2469,6 +2471,7 @@ mod tests {
 
         assert!(joined.contains("Input received"));
         assert!(joined.contains("Ask for input"));
+        assert!(joined.contains("[json]"));
         assert!(joined.contains("\"answers\": ["));
         assert!(joined.contains("\"Medium\""));
         assert!(joined.contains("visible-after-truncation-limit"));
