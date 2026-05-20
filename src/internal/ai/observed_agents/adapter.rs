@@ -49,6 +49,26 @@ impl AgentKind {
         }
     }
 
+    /// Inverse of [`as_db_str`](Self::as_db_str): parse a snake_case
+    /// database tag back into the enum. Returns `None` for unknown
+    /// input — the database surface uses strict snake_case only (no
+    /// hyphens, no case-insensitive matching), so downstream readers
+    /// cannot accidentally accept a CLI slug or a typo here. Mirrors
+    /// the `FinalDecisionVerdict::from_variant_name` /
+    /// `ProjectionStaleReason::from_variant_name` pattern (v0.17.659+).
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "claude_code" => Some(Self::ClaudeCode),
+            "cursor" => Some(Self::Cursor),
+            "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
+            "opencode" => Some(Self::OpenCode),
+            "copilot" => Some(Self::Copilot),
+            "factory_ai" => Some(Self::FactoryAi),
+            _ => None,
+        }
+    }
+
     /// Slug used on the CLI (`libra agent enable <slug>`). Hyphenated rather
     /// than snake_case to match the convention of other Libra subcommands.
     pub const fn as_cli_slug(self) -> &'static str {
@@ -285,6 +305,42 @@ mod tests {
         ] {
             assert_eq!(kind.as_db_str(), expected);
         }
+    }
+
+    /// `from_db_str` is the inverse of `as_db_str` — for every variant
+    /// `kind`, `AgentKind::from_db_str(kind.as_db_str()) == Some(kind)`.
+    /// Sweep via `all()` so a future variant lands round-trip coverage
+    /// automatically.
+    #[test]
+    fn agent_kind_from_db_str_round_trips_every_variant() {
+        for kind in AgentKind::all() {
+            assert_eq!(
+                AgentKind::from_db_str(kind.as_db_str()),
+                Some(*kind),
+                "round-trip mismatch for {kind:?}",
+            );
+        }
+    }
+
+    /// `from_db_str` accepts ONLY the snake_case wire form — it does
+    /// not fall through to CLI-slug aliases. A `agent_session.agent_kind`
+    /// row that somehow contains `"claude-code"` (the CLI slug shape)
+    /// should be rejected as a schema mismatch, not silently mapped to
+    /// `ClaudeCode`. Pinning the rejection here protects the
+    /// schema contract so a future "lenient" parser cannot quietly
+    /// accept CLI aliases at the db boundary.
+    #[test]
+    fn agent_kind_from_db_str_rejects_cli_slug_aliases_and_unknowns() {
+        // Hyphenated CLI-slug forms must NOT be accepted.
+        assert_eq!(AgentKind::from_db_str("claude-code"), None);
+        assert_eq!(AgentKind::from_db_str("factory-ai"), None);
+        // Aliases accepted by `from_cli_slug` must NOT be accepted here.
+        assert_eq!(AgentKind::from_db_str("claude"), None);
+        assert_eq!(AgentKind::from_db_str("github-copilot"), None);
+        assert_eq!(AgentKind::from_db_str("open-code"), None);
+        // Bare unknowns + empty input.
+        assert_eq!(AgentKind::from_db_str("unknown"), None);
+        assert_eq!(AgentKind::from_db_str(""), None);
     }
 
     /// `as_cli_slug` produces hyphenated strings (different from DB
