@@ -39,7 +39,8 @@ pub use policy::{
     sensitive_read_paths,
 };
 pub use proxy::{
-    LoopbackOnlyProxy, NetworkDecision, NetworkProxy, NetworkRequest, NoopProxy, is_loopback_host,
+    LoopbackOnlyProxy, NetworkAccessMode, NetworkDecision, NetworkProxy, NetworkProxySelection,
+    NetworkRequest, NoopProxy, ProxyEnforcement, is_loopback_host, select_network_proxy,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
