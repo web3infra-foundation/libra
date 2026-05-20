@@ -453,6 +453,16 @@ impl ProjectionFreshness {
             ProjectionFreshness::Fresh | ProjectionFreshness::StaleReadOnly
         )
     }
+
+    /// Every variant of [`ProjectionFreshness`] in declaration order
+    /// (`Fresh`, `StaleReadOnly`, `Unavailable`). The declaration
+    /// order is also the **degradation order** — `Fresh` is the
+    /// healthy state, `StaleReadOnly` is reduced-capability,
+    /// `Unavailable` is fully degraded. Mirrors the v0.17.660+
+    /// `*::all()` enumerator pattern.
+    pub fn all() -> [Self; 3] {
+        [Self::Fresh, Self::StaleReadOnly, Self::Unavailable]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +471,22 @@ pub enum ApprovalMediationState {
     LegacyInteractive,
     RuntimeMediatedInteractive,
     RuntimeMediatedNever,
+}
+
+impl ApprovalMediationState {
+    /// Every variant of [`ApprovalMediationState`] in declaration
+    /// order (`LegacyInteractive`, `RuntimeMediatedInteractive`,
+    /// `RuntimeMediatedNever`). The declaration order tracks the
+    /// runtime-mediation migration path: callers move from
+    /// `LegacyInteractive` to one of the `RuntimeMediated*` states
+    /// once the per-tool approval runtime is wired up.
+    pub fn all() -> [Self; 3] {
+        [
+            Self::LegacyInteractive,
+            Self::RuntimeMediatedInteractive,
+            Self::RuntimeMediatedNever,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,6 +689,79 @@ mod tests {
             };
             let serialised = serde_json::to_value(reason).unwrap();
             assert_eq!(serialised, json!(expected));
+        }
+    }
+
+    /// `ProjectionFreshness::all()` enumerates every variant in
+    /// declaration order (Fresh → StaleReadOnly → Unavailable,
+    /// also the degradation order). Cross-checks the snake_case
+    /// wire tag and the existing capability predicates per variant.
+    #[test]
+    fn projection_freshness_all_enumerates_every_variant_in_degradation_order() {
+        let modes = ProjectionFreshness::all();
+        assert_eq!(modes.len(), 3);
+        assert_eq!(
+            modes,
+            [
+                ProjectionFreshness::Fresh,
+                ProjectionFreshness::StaleReadOnly,
+                ProjectionFreshness::Unavailable,
+            ]
+        );
+
+        for mode in &ProjectionFreshness::all() {
+            let (expected_tag, allows_write, allows_resume) = match mode {
+                ProjectionFreshness::Fresh => ("\"fresh\"", true, true),
+                ProjectionFreshness::StaleReadOnly => ("\"stale_read_only\"", false, true),
+                ProjectionFreshness::Unavailable => ("\"unavailable\"", false, false),
+            };
+            let serialised = serde_json::to_string(mode).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {mode:?}");
+            assert_eq!(
+                mode.allows_scheduler_write(),
+                allows_write,
+                "allows_scheduler_write mismatch for {mode:?}",
+            );
+            assert_eq!(
+                mode.allows_final_decision_write(),
+                allows_write,
+                "allows_final_decision_write mismatch for {mode:?}",
+            );
+            assert_eq!(
+                mode.allows_resume_read(),
+                allows_resume,
+                "allows_resume_read mismatch for {mode:?}",
+            );
+        }
+    }
+
+    /// `ApprovalMediationState::all()` enumerates the three migration
+    /// states and pins the snake_case wire tags. The declaration
+    /// order is also the runtime-mediation migration sequence —
+    /// pinning it here makes the order part of the public API.
+    #[test]
+    fn approval_mediation_state_all_enumerates_every_variant_with_snake_case_tag() {
+        let states = ApprovalMediationState::all();
+        assert_eq!(states.len(), 3);
+        assert_eq!(
+            states,
+            [
+                ApprovalMediationState::LegacyInteractive,
+                ApprovalMediationState::RuntimeMediatedInteractive,
+                ApprovalMediationState::RuntimeMediatedNever,
+            ]
+        );
+
+        for state in &ApprovalMediationState::all() {
+            let expected_tag = match state {
+                ApprovalMediationState::LegacyInteractive => "\"legacy_interactive\"",
+                ApprovalMediationState::RuntimeMediatedInteractive => {
+                    "\"runtime_mediated_interactive\""
+                }
+                ApprovalMediationState::RuntimeMediatedNever => "\"runtime_mediated_never\"",
+            };
+            let serialised = serde_json::to_string(state).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {state:?}");
         }
     }
 
