@@ -629,6 +629,16 @@ pub enum TaskRuntimeNoteLevel {
     Error,
 }
 
+impl TaskRuntimeNoteLevel {
+    /// Every variant of [`TaskRuntimeNoteLevel`] in declaration order
+    /// (`Info`, `Error`). Useful for exhaustive iteration in tests
+    /// and for log-level filtering callsites that need to fan out
+    /// across both severities.
+    pub fn all() -> [Self; 2] {
+        [Self::Info, Self::Error]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskWorkspaceBackend {
@@ -644,6 +654,15 @@ impl TaskWorkspaceBackend {
             Self::Copy => "copy worktree",
             Self::Fuse => "FUSE worktree",
         }
+    }
+
+    /// Every variant of [`TaskWorkspaceBackend`] in declaration order
+    /// (`Shared`, `Copy`, `Fuse`). Mirrors the v0.17.660+ `*::all()`
+    /// pattern: the fixed-length array forces a future variant to
+    /// extend `all()`, the `label` match arms, and any
+    /// backend-selection logic in the same patch.
+    pub fn all() -> [Self; 3] {
+        [Self::Shared, Self::Copy, Self::Fuse]
     }
 }
 
@@ -771,6 +790,43 @@ mod tests {
             scope_out: vec![],
             checks: vec![],
             contract: TaskContract::default(),
+        }
+    }
+
+    /// `TaskRuntimeNoteLevel::all()` enumerates every variant in
+    /// declaration order. Pinned without serde / wire tag because
+    /// the enum is runtime-only (not serialised in audit rows).
+    #[test]
+    fn task_runtime_note_level_all_enumerates_both_variants() {
+        assert_eq!(
+            TaskRuntimeNoteLevel::all(),
+            [TaskRuntimeNoteLevel::Info, TaskRuntimeNoteLevel::Error],
+        );
+    }
+
+    /// `TaskWorkspaceBackend::all()` enumerates every variant and
+    /// pins each variant's `label()` text. The cross-check forces a
+    /// future variant to extend `all()`, the `label` arm, and this
+    /// assertion together.
+    #[test]
+    fn task_workspace_backend_all_pins_every_variant_and_label() {
+        let backends = TaskWorkspaceBackend::all();
+        assert_eq!(backends.len(), 3);
+        assert_eq!(
+            backends,
+            [
+                TaskWorkspaceBackend::Shared,
+                TaskWorkspaceBackend::Copy,
+                TaskWorkspaceBackend::Fuse,
+            ]
+        );
+        for backend in &TaskWorkspaceBackend::all() {
+            let expected_label = match backend {
+                TaskWorkspaceBackend::Shared => "shared workspace",
+                TaskWorkspaceBackend::Copy => "copy worktree",
+                TaskWorkspaceBackend::Fuse => "FUSE worktree",
+            };
+            assert_eq!(backend.label(), expected_label);
         }
     }
 
