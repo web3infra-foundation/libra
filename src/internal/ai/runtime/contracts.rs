@@ -98,6 +98,27 @@ pub enum SchedulerClearReason {
 }
 
 impl SchedulerClearReason {
+    /// Every variant of [`SchedulerClearReason`] in declaration order.
+    ///
+    /// Mirrors the v0.17.660 `RevisionKind::all()` /
+    /// v0.17.664 `TaskExecutionStatus::all()` /
+    /// v0.17.665 `WorkflowPhase::all()` pattern: the fixed-length
+    /// array forces a future variant to extend `all()` in the same
+    /// patch, which keeps `apply_scheduler_mutation(Clear { reason })`
+    /// match-arm coverage and audit-string mappings in lock-step with
+    /// the enum.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Completed,
+            Self::Cancelled,
+            Self::Interrupted,
+            Self::Failed,
+            Self::Rebuild,
+        ]
+    }
+}
+
+impl SchedulerClearReason {
     /// Stable lower-snake-case identifier matching the
     /// `#[serde(rename_all = "snake_case")]` tag values. Used by audit
     /// log emission so the `reason` field of a `ClearActiveRun` mutation
@@ -503,6 +524,40 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// `SchedulerClearReason::all()` must enumerate every variant in
+    /// declaration order. Exhaustive cross-check pins the snake_case
+    /// serialisation tag and asserts every variant from `all()`
+    /// matches its expected wire-format string — a future sixth
+    /// variant fails to compile here unless both `all()` and the
+    /// match arm are updated together.
+    #[test]
+    fn scheduler_clear_reason_all_enumerates_every_variant_in_declaration_order() {
+        let reasons = SchedulerClearReason::all();
+        assert_eq!(reasons.len(), 5);
+        assert_eq!(
+            reasons,
+            [
+                SchedulerClearReason::Completed,
+                SchedulerClearReason::Cancelled,
+                SchedulerClearReason::Interrupted,
+                SchedulerClearReason::Failed,
+                SchedulerClearReason::Rebuild,
+            ]
+        );
+
+        for reason in SchedulerClearReason::all() {
+            let expected = match reason {
+                SchedulerClearReason::Completed => "completed",
+                SchedulerClearReason::Cancelled => "cancelled",
+                SchedulerClearReason::Interrupted => "interrupted",
+                SchedulerClearReason::Failed => "failed",
+                SchedulerClearReason::Rebuild => "rebuild",
+            };
+            let serialised = serde_json::to_value(reason).unwrap();
+            assert_eq!(serialised, json!(expected));
+        }
+    }
 
     /// `WorkflowPhase::all()` must enumerate every variant in the
     /// declaration order, which is also the Code UI Phase Workflow's
