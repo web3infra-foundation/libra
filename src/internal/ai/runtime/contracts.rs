@@ -266,6 +266,34 @@ impl FinalDecisionVerdict {
         }
     }
 
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Audit readers that encounter an
+    /// unknown value must fail closed rather than substituting a
+    /// default verdict, since the verdict drives commit / abandon
+    /// routing downstream.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            "cancelled" => Some(Self::Cancelled),
+            "abandon" => Some(Self::Abandon),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`FinalDecisionVerdict`] in declaration order.
+    /// Lets the round-trip regression sweep every variant via `all()`,
+    /// so adding a fifth verdict lands round-trip coverage automatically.
+    pub fn all() -> [Self; 4] {
+        [
+            Self::Accepted,
+            Self::Rejected,
+            Self::Cancelled,
+            Self::Abandon,
+        ]
+    }
+
     /// `true` only for `Accepted` — the loop committed the change.
     pub fn is_accepted(&self) -> bool {
         matches!(self, FinalDecisionVerdict::Accepted)
@@ -772,5 +800,36 @@ mod tests {
                 "{verdict:?} must flag as uncommitted",
             );
         }
+    }
+
+    /// `FinalDecisionVerdict::from_variant_name` is the inverse of
+    /// `variant_name` — every variant round-trips through
+    /// `from_variant_name(v.variant_name()) == Some(v)`. Pin both
+    /// directions over `all()` so a future rename lands at this gate
+    /// rather than at the audit-reader callsite.
+    #[test]
+    fn final_decision_verdict_from_variant_name_round_trips_every_variant() {
+        for verdict in FinalDecisionVerdict::all() {
+            assert_eq!(
+                FinalDecisionVerdict::from_variant_name(verdict.variant_name()),
+                Some(verdict.clone()),
+                "round-trip mismatch for {verdict:?}",
+            );
+        }
+    }
+
+    /// Unknown / kebab-case / empty input must yield `None`. Pin the
+    /// rejection shape so a future "lenient" parser cannot silently
+    /// map an audit log row's typo back to a valid verdict.
+    #[test]
+    fn final_decision_verdict_from_variant_name_rejects_unknowns_and_kebab_form() {
+        assert_eq!(FinalDecisionVerdict::from_variant_name("approved"), None);
+        // Hyphenated form of a real tag must be rejected — the audit
+        // pipeline writes snake_case verbatim.
+        assert_eq!(
+            FinalDecisionVerdict::from_variant_name("not-accepted"),
+            None,
+        );
+        assert_eq!(FinalDecisionVerdict::from_variant_name(""), None);
     }
 }
