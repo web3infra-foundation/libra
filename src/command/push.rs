@@ -935,6 +935,7 @@ fn progress_output_config(output: &OutputConfig) -> OutputConfig {
     let mut config = output.clone();
     if config.is_json() {
         config.progress = ProgressMode::None;
+        config.progress_preference = crate::utils::output::ProgressPreference::None;
     }
     config
 }
@@ -943,6 +944,7 @@ fn silent_output_config(output: &OutputConfig) -> OutputConfig {
     let mut config = output.clone();
     config.quiet = true;
     config.progress = ProgressMode::None;
+    config.progress_preference = crate::utils::output::ProgressPreference::None;
     config
 }
 

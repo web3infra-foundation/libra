@@ -115,6 +115,21 @@ fn test_diff_human_worktree_diff_emits_scan_progress() {
     );
 }
 
+#[test]
+fn test_diff_progress_none_suppresses_scan_progress() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--progress=none", "diff", "--name-only"], repo.path());
+    assert_cli_success(&output, "diff with progress disabled");
+
+    assert!(
+        output.stderr.is_empty(),
+        "explicit --progress=none should suppress scan progress, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_diff_empty_output_does_not_initialize_pager() {

@@ -1,5 +1,7 @@
 //! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -7,9 +9,6 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 
 use clap::Parser;
 use colored::Colorize;
@@ -207,9 +206,14 @@ fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
             eprintln!("{event}");
         }
         // OutputConfig resolves `--progress=auto` to None when stderr is not a
-        // TTY. `diff` still emits this one-line startup signal so large ignored
-        // trees do not look hung in captured/non-interactive runs.
-        ProgressMode::None => eprintln!("Scanning working tree ..."),
+        // TTY. `diff` still emits this one-line startup signal for auto mode so
+        // large ignored trees do not look hung in captured/non-interactive runs.
+        ProgressMode::None
+            if output.progress_preference != crate::utils::output::ProgressPreference::None =>
+        {
+            eprintln!("Scanning working tree ...")
+        }
+        ProgressMode::None => {}
     }
 }
 
@@ -330,8 +334,64 @@ fn index_entry_matches_worktree_stat(entry: &IndexEntry, metadata: &std::fs::Met
 
     entry.ctime == ctime
         && entry.mtime == mtime
+        && entry.dev == index_dev_from_metadata(metadata)
+        && entry.ino == index_ino_from_metadata(metadata)
         && entry.size == size
+        && entry.uid == index_uid_from_metadata(metadata)
+        && entry.gid == index_gid_from_metadata(metadata)
         && entry.mode == index_mode_from_metadata(metadata)
+}
+
+fn index_dev_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.dev() as u32
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_ino_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.ino() as u32
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_uid_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.uid()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_gid_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.gid()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
 }
 
 fn index_mode_from_metadata(metadata: &std::fs::Metadata) -> u32 {
@@ -907,16 +967,16 @@ mod test {
 
         let mut index = Index::new();
         index.add(
-            IndexEntry::new_from_file(
-                Path::new("tracked.txt"),
-                indexed_hash,
-                temp_path.path(),
-            )
-            .unwrap(),
+            IndexEntry::new_from_file(Path::new("tracked.txt"), indexed_hash, temp_path.path())
+                .unwrap(),
         );
 
-        let blobs = get_files_blobs(&[PathBuf::from("tracked.txt")], &index, IgnorePolicy::Respect)
-            .unwrap();
+        let blobs = get_files_blobs(
+            &[PathBuf::from("tracked.txt")],
+            &index,
+            IgnorePolicy::Respect,
+        )
+        .unwrap();
 
         assert_eq!(blobs, vec![(PathBuf::from("tracked.txt"), indexed_hash)]);
     }

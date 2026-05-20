@@ -79,6 +79,7 @@ pub async fn convert_from_git_repository(
     let child_output = OutputConfig {
         quiet: true,
         progress: ProgressMode::None,
+        progress_preference: crate::utils::output::ProgressPreference::None,
         json_format: None,
         pager: false,
         ..Default::default()

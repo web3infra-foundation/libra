@@ -359,6 +359,7 @@ pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()
     if args.quiet {
         effective_output.quiet = true;
         effective_output.progress = ProgressMode::None;
+        effective_output.progress_preference = crate::utils::output::ProgressPreference::None;
     }
 
     let progress = if effective_output.is_json() || effective_output.quiet {
