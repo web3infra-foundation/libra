@@ -85,6 +85,29 @@ impl DagStage {
             DagStage::Test => "test",
         }
     }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into a [`DagStage`]. Returns `None`
+    /// for unknown / kebab-case / empty input so audit readers that
+    /// encounter a typo fail closed rather than silently picking a
+    /// stage (Execution and Test route to different code paths
+    /// downstream).
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "execution" => Some(Self::Execution),
+            "test" => Some(Self::Test),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`DagStage`] in declaration order
+    /// (`Execution`, `Test`). Matches the
+    /// `current_plan_heads[ordinal]` ordering convention pinned by
+    /// `SchedulerState::EXECUTION_HEAD_ORDINAL` / `TEST_HEAD_ORDINAL`
+    /// in `projection/scheduler.rs`.
+    pub fn all() -> [Self; 2] {
+        [Self::Execution, Self::Test]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +153,25 @@ impl SchedulerClearReason {
             SchedulerClearReason::Interrupted => "interrupted",
             SchedulerClearReason::Failed => "failed",
             SchedulerClearReason::Rebuild => "rebuild",
+        }
+    }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case / empty input. Mirrors the v0.17.684
+    /// `ProjectionStaleReason::from_variant_name` and v0.17.685
+    /// `FinalDecisionVerdict::from_variant_name` patterns — both
+    /// halves of the audit round-trip must be available for the
+    /// reader to validate persisted reason strings without
+    /// silently substituting a default.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            "interrupted" => Some(Self::Interrupted),
+            "failed" => Some(Self::Failed),
+            "rebuild" => Some(Self::Rebuild),
+            _ => None,
         }
     }
 
@@ -1013,6 +1055,48 @@ mod tests {
         );
         // Empty input.
         assert_eq!(ProjectionStaleReason::from_variant_name(""), None);
+    }
+
+    /// `DagStage::from_variant_name` is the inverse of
+    /// `variant_name` — Execution / Test must round-trip through
+    /// both directions. Mirrors the v0.17.685
+    /// `FinalDecisionVerdict::from_variant_name` round-trip
+    /// pattern.
+    #[test]
+    fn dag_stage_from_variant_name_round_trips_both_variants() {
+        for stage in DagStage::all() {
+            assert_eq!(
+                DagStage::from_variant_name(stage.variant_name()),
+                Some(stage),
+                "round-trip mismatch for {stage:?}",
+            );
+        }
+        // Unknown / kebab-case / empty must return None — Execution
+        // and Test route to different code paths, so silent
+        // misclassification would be a correctness bug.
+        assert_eq!(DagStage::from_variant_name("validation"), None);
+        assert_eq!(DagStage::from_variant_name("EXECUTION"), None);
+        assert_eq!(DagStage::from_variant_name(""), None);
+    }
+
+    /// `SchedulerClearReason::from_variant_name` is the inverse of
+    /// `variant_name` — every variant round-trips through both
+    /// directions. Uses the existing `all()` enumerator added in
+    /// v0.17.670 so adding a sixth reason lands round-trip coverage
+    /// automatically.
+    #[test]
+    fn scheduler_clear_reason_from_variant_name_round_trips_every_variant() {
+        for reason in SchedulerClearReason::all() {
+            assert_eq!(
+                SchedulerClearReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+        // Unknown / kebab-case / empty must fail closed.
+        assert_eq!(SchedulerClearReason::from_variant_name("aborted"), None,);
+        assert_eq!(SchedulerClearReason::from_variant_name("not-found"), None,);
+        assert_eq!(SchedulerClearReason::from_variant_name(""), None);
     }
 
     /// `FinalDecisionVerdict::from_variant_name` is the inverse of
