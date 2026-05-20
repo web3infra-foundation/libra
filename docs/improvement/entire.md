@@ -38,7 +38,7 @@
 
 | 现状 | 必须修正 |
 |------|---------|
-| `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | ✅ 已落地：`Commands::Agent(command::agent::AgentArgs)`（cli.rs:325）与 `Commands::Hooks(command::hooks::HooksArgs)`（cli.rs:337，`#[command(hide = true)]` 兼容层）已实现，并在 dispatch match 中接入（cli.rs:1095 / :1096） |
+| `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | ✅ 已落地：`Commands::Agent(command::agent::AgentArgs)`（cli.rs:409）与 `Commands::Hooks(command::hooks::HooksArgs)`（cli.rs:421，`#[command(hide = true)]` 兼容层）已实现，并在 dispatch match 中接入（cli.rs:1185 / :1186） |
 | `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
 | [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
 | `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | 部分落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)），`branch`（create / delete）与 `switch`（create）已检查；`restore`/`reset` 命令对锁定分支的拦截属于行为变更，留作独立切片 |
