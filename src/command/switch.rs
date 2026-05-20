@@ -891,6 +891,37 @@ mod tests {
     use super::*;
     use crate::command::restore::RestoreArgs;
 
+    /// `is_internal_switch_target` is the helper that
+    /// `resolve_switch_branch_target` and `resolve_tracked_remote_target`
+    /// both call before letting a `switch <ref>` / `switch --track
+    /// <remote>/<ref>` proceed. It must match exactly the
+    /// `is_libra_internal_branch` set
+    /// (`intent`, `agent-traces` — but NOT `main`), so the integration
+    /// tests at `tests/command/switch_error_test.rs` continue to fire
+    /// for both `intent` and `agent-traces` and the long-standing
+    /// `switch main` user workflow keeps working even after the
+    /// v0.17.659 refactor that widened the helper from a literal
+    /// `name == INTENT_BRANCH` check.
+    ///
+    /// Pin the partition at the unit level so a future refactor that
+    /// e.g. accidentally re-uses `is_locked_branch` here (which would
+    /// also block `main`) fails this test rather than the slow
+    /// `run_libra_command`-driven CLI sweep.
+    #[test]
+    fn is_internal_switch_target_blocks_intent_and_agent_traces_only() {
+        assert!(is_internal_switch_target(repo_branch::INTENT_BRANCH));
+        assert!(is_internal_switch_target(repo_branch::AGENT_TRACES_BRANCH));
+        // `main` must NOT match — `switch main` and `switch --track
+        // origin/main` are standard user operations.
+        assert!(!is_internal_switch_target(repo_branch::DEFAULT_BRANCH));
+        // Lookalike branch names must not collide via prefix / substring
+        // matches; the helper is a literal equality check.
+        assert!(!is_internal_switch_target("intent-feature"));
+        assert!(!is_internal_switch_target("agent-traces-feature"));
+        assert!(!is_internal_switch_target("feature/intent"));
+        assert!(!is_internal_switch_target(""));
+    }
+
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`SwitchError`]. These strings are used directly as
     /// the `CliError` message via `From<SwitchError> for CliError` and
