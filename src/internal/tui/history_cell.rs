@@ -366,8 +366,30 @@ impl ToolCallGroup {
 enum ToolCallEntryStatus {
     Preview,
     Running,
-    Success(Option<String>),
+    Success(Option<ToolOutputSummary>),
     Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct ToolOutputSummary {
+    text: String,
+    keep_full_text: bool,
+}
+
+impl ToolOutputSummary {
+    fn brief(text: String) -> Self {
+        Self {
+            text,
+            keep_full_text: false,
+        }
+    }
+
+    fn full(text: String) -> Self {
+        Self {
+            text,
+            keep_full_text: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,7 +405,13 @@ struct ToolEntryRun<'a> {
     action: &'a str,
     details: Vec<&'a str>,
     failures: Vec<&'a str>,
-    outputs: Vec<&'a str>,
+    outputs: Vec<ToolEntryOutput<'a>>,
+}
+
+#[derive(Debug)]
+struct ToolEntryOutput<'a> {
+    text: &'a str,
+    keep_full_text: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -605,8 +633,8 @@ impl HistoryCell for ToolCallHistoryCell {
             }
             for output in &entry.outputs {
                 lines.extend(render_tool_output(
-                    output,
-                    self.group == ToolCallGroup::Input,
+                    output.text,
+                    output.keep_full_text || self.group == ToolCallGroup::Input,
                     width,
                 ));
             }
@@ -2419,7 +2447,7 @@ mod tests {
     }
 
     #[test]
-    fn json_tool_output_renders_full_markdown_block() {
+    fn json_tool_output_renders_readable_full_text() {
         // Use a non-`shell` tool so the only way the assertion below can pass
         // is via the JSON-output branch (the shell fallback would simply
         // forward the raw blob).
@@ -2439,21 +2467,26 @@ mod tests {
         let rendered = to_strings(cell.display_lines(160));
         let joined = rendered.join("\n");
         assert!(
-            joined.contains("[json]"),
-            "expected Markdown JSON block, got:\n{joined}"
+            joined.contains("items:"),
+            "expected readable JSON output, got:\n{joined}"
         );
         assert!(
-            joined.contains("\"items\""),
-            "expected formatted JSON, got:\n{joined}"
+            joined.contains("id: 1"),
+            "expected object fields without JSON quotes, got:\n{joined}"
         );
         assert!(
             joined.contains("visible_after_truncation_limit"),
             "expected full JSON output, got:\n{joined}"
         );
+        assert!(!joined.contains("[json]"), "should not show JSON code label:\n{joined}");
+        assert!(
+            !joined.contains("\"items\""),
+            "should not render raw JSON keys, got:\n{joined}"
+        );
     }
 
     #[test]
-    fn request_user_input_success_renders_complete_answer_json() {
+    fn request_user_input_success_renders_readable_answers() {
         let mut cell = ToolCallHistoryCell::new(
             "1".to_string(),
             "request_user_input".to_string(),
@@ -2471,13 +2504,14 @@ mod tests {
 
         assert!(joined.contains("Input received"));
         assert!(joined.contains("Ask for input"));
-        assert!(joined.contains("[json]"));
-        assert!(joined.contains("\"answers\": ["));
-        assert!(joined.contains("\"Medium\""));
+        assert!(joined.contains("Answers"));
+        assert!(joined.contains("risk_profile: Medium"));
         assert!(joined.contains("visible-after-truncation-limit"));
+        assert!(!joined.contains("[json]"));
+        assert!(!joined.contains("\"answers\""));
         assert!(
             !joined.contains("{ \"answers\": { \"risk_profile\": {"),
-            "input confirmations should render full JSON, got:\n{joined}"
+            "input confirmations should render readable output, got:\n{joined}"
         );
     }
 

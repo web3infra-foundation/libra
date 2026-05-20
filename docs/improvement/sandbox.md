@@ -118,7 +118,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - 危险 writable root 拒绝：`/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock`
 
 **运行时层** [src/internal/ai/sandbox/runtime.rs](../../src/internal/ai/sandbox/runtime.rs)
-- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs::create_seatbelt_command_args，当前位于 :506；`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 通过 `include_str!` 嵌入，runtime.rs:512-513）
+- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs::create_seatbelt_command_args，当前位于 :520；`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 通过 `include_str!` 嵌入，runtime.rs:526-527）
 - Linux：调用外部 `libra-linux-sandbox` 可执行文件，支持 seccomp 或 bwrap 两种模式，经 `LIBRA_LINUX_SANDBOX_EXE` 与 `LIBRA_USE_LINUX_SANDBOX_BWRAP` 控制
 - Windows：`SandboxTransformError::WindowsSandboxNotImplemented`，与 Claude Code 当前状态对齐
 - 网络控制：沙箱策略联动 `LIBRA_SANDBOX_NETWORK_DISABLED` 环境变量和 Seatbelt 网络策略
@@ -127,7 +127,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `AskForApproval` 四档（Never / OnFailure / OnRequest / UnlessTrusted）
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
-- 沙箱拒绝关键词触发升级重试提示（mod.rs::is_likely_sandbox_denied，当前位于 mod.rs:1763；调用点在 mod.rs:1033）
+- 沙箱拒绝关键词触发升级重试提示（mod.rs::is_likely_sandbox_denied，当前位于 mod.rs:1769；调用点在 mod.rs:1039）
 - 每次命令执行前注入私有 0o700 tmp，并在执行后清理 `TMPDIR` / `TEMP` / `TMP` 指向目录
 - 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs](../../src/internal/ai/tools/handlers/shell.rs)）
 
@@ -193,7 +193,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 已新增 `enforcement: Required | PreferStrict | BestEffort`；当前默认保持 `BestEffort`，避免未显式配置的既有运行环境突然失败
    - `Required` 语义：内部 sandbox policy 需要 OS 后端时，若无法构造有效 sandbox，则返回 `SandboxTransformError::EnforcementFailed`
    - 与现有 `SandboxPermissions::RequireEscalated` 解耦：后者表达"这次调用合法地需要无沙箱"，前者表达"系统配置强制要求沙箱生效"；当前实现仍允许显式 escalated 调用绕过内部策略校验
-2. **修改降级路径**（`runtime.rs::SandboxManager::transform` 内的 `EnforcementFailed` 返回；当前位于 runtime.rs:302 和 :350 两处）
+2. **修改降级路径**（`runtime.rs::SandboxManager::transform` 内的 `EnforcementFailed` 返回；当前位于 runtime.rs:316 和 :364 两处）
    - 已改为根据 `enforcement` 决策：
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }` 返回给调用方
     - `PreferStrict` → 已在 shell approval 路径复用 `ExecApprovalRequest` 弹用户确认；拒绝时不得裸跑
