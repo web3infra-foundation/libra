@@ -175,6 +175,7 @@ pub struct Sha256(pub String);
 /// distillation downstream (Step 3.D) can consume `AgentEvidence` directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AnchorScope {
     Session,
     AgentRun,
