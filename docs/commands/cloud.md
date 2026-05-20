@@ -14,7 +14,7 @@ libra cloud status [--verbose]
 
 `libra cloud` provides backup and restore capabilities using Cloudflare D1 (serverless SQLite) for object indexes and metadata, and Cloudflare R2 (S3-compatible object storage) for git objects. This enables full repository backup to the cloud with incremental sync support.
 
-The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. Before selecting work, sync reconciles the local `.libra/objects` store into `object_index` so older loose or packed objects are not skipped. On each default sync, objects are selected when they are locally unsynced, missing from D1, or missing from R2, making repeated syncs efficient while still repairing stale local sync flags after cloud-side data loss or a bucket/database change. A `--force` flag allows re-syncing all indexed local objects. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
+The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. Before selecting work, sync reconciles the local `.libra/objects` store into `object_index` so older loose or packed objects are not skipped. On each default sync, objects are selected when they are locally unsynced or missing from D1, making repeated syncs efficient while still repairing stale local sync flags after a D1 database change. A `--force` flag allows re-syncing all indexed local objects and is the recovery path for R2 bucket-side data loss. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
 
 Each repository is identified by a UUID (`libra.repoid` config key) and optionally a human-readable project name (`cloud.name` config key or directory name). The project name is registered in a D1 `repositories` table for lookup during restore.
 
@@ -28,7 +28,7 @@ Sync local repository to cloud. Uploads objects to R2 and indexes to D1.
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Sync all indexed local objects, regardless of local/remote sync state. Useful for deliberately re-upserting every object. |
+| `--force` | Sync all indexed local objects, regardless of local/D1 sync state. Useful for deliberately re-upserting every object or recovering after R2 bucket-side data loss. |
 | `--batch-size <N>` | Number of objects to process per batch. Default: `50`. Must be at least 1. Smaller batches produce more frequent progress output; larger batches reduce overhead. |
 
 ```bash

@@ -433,6 +433,16 @@ impl ProjectionFreshness {
             ProjectionFreshness::Fresh | ProjectionFreshness::StaleReadOnly
         )
     }
+
+    /// Every variant of [`ProjectionFreshness`] in declaration order
+    /// (`Fresh`, `StaleReadOnly`, `Unavailable`). The fixed-length
+    /// array makes the enumeration size part of the public API — a
+    /// future fourth tier requires extending this list in the same
+    /// patch, which forces the three `allows_*` predicates to be
+    /// revisited together.
+    pub fn all() -> [Self; 3] {
+        [Self::Fresh, Self::StaleReadOnly, Self::Unavailable]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +451,21 @@ pub enum ApprovalMediationState {
     LegacyInteractive,
     RuntimeMediatedInteractive,
     RuntimeMediatedNever,
+}
+
+impl ApprovalMediationState {
+    /// Every variant of [`ApprovalMediationState`] in declaration
+    /// order (`LegacyInteractive`, `RuntimeMediatedInteractive`,
+    /// `RuntimeMediatedNever`). Mirrors the v0.17.660+ `*::all()`
+    /// pattern: the fixed-length array forces a future variant to
+    /// extend this list in the same patch.
+    pub fn all() -> [Self; 3] {
+        [
+            Self::LegacyInteractive,
+            Self::RuntimeMediatedInteractive,
+            Self::RuntimeMediatedNever,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -976,5 +1001,64 @@ mod tests {
             None,
         );
         assert_eq!(FinalDecisionVerdict::from_variant_name(""), None);
+    }
+
+    /// `ProjectionFreshness::all()` enumerates every variant in
+    /// declaration order. Cross-check each variant's three
+    /// `allows_*` predicates so a future fourth tier extends `all()`
+    /// and the predicate arms together.
+    #[test]
+    fn projection_freshness_all_enumerates_every_variant_and_pins_predicates() {
+        let variants = ProjectionFreshness::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                ProjectionFreshness::Fresh,
+                ProjectionFreshness::StaleReadOnly,
+                ProjectionFreshness::Unavailable,
+            ]
+        );
+        for variant in ProjectionFreshness::all() {
+            let (scheduler, decision, resume) = match variant {
+                ProjectionFreshness::Fresh => (true, true, true),
+                ProjectionFreshness::StaleReadOnly => (false, false, true),
+                ProjectionFreshness::Unavailable => (false, false, false),
+            };
+            assert_eq!(variant.allows_scheduler_write(), scheduler);
+            assert_eq!(variant.allows_final_decision_write(), decision);
+            assert_eq!(variant.allows_resume_read(), resume);
+        }
+    }
+
+    /// `ApprovalMediationState::all()` enumerates every variant in
+    /// declaration order. Pin the wire serialisation alongside so a
+    /// future variant extending `all()` is forced to extend the
+    /// serde tag mapping in the same patch.
+    #[test]
+    fn approval_mediation_state_all_enumerates_every_variant_and_pins_wire_tags() {
+        let variants = ApprovalMediationState::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                ApprovalMediationState::LegacyInteractive,
+                ApprovalMediationState::RuntimeMediatedInteractive,
+                ApprovalMediationState::RuntimeMediatedNever,
+            ]
+        );
+        for variant in &ApprovalMediationState::all() {
+            let expected_tag = match variant {
+                ApprovalMediationState::LegacyInteractive => "\"legacy_interactive\"",
+                ApprovalMediationState::RuntimeMediatedInteractive => {
+                    "\"runtime_mediated_interactive\""
+                }
+                ApprovalMediationState::RuntimeMediatedNever => "\"runtime_mediated_never\"",
+            };
+            let serialised = serde_json::to_string(variant).unwrap();
+            assert_eq!(serialised, expected_tag);
+            let back: ApprovalMediationState = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(&back, variant);
+        }
     }
 }

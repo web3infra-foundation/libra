@@ -937,8 +937,7 @@ pub(crate) async fn run_cloud_sync(
     // Initialize R2 storage.
     let r2_storage = create_r2_storage(&repo_id).await?;
     let unsynced_objects =
-        select_objects_for_cloud_sync(local_objects, ctx.force, &d1_client, &r2_storage, &repo_id)
-            .await?;
+        select_objects_for_cloud_sync(local_objects, ctx.force, &d1_client, &repo_id).await?;
 
     let total_unsynced = unsynced_objects.len();
 
@@ -1098,7 +1097,6 @@ async fn select_objects_for_cloud_sync(
     local_objects: Vec<object_index::Model>,
     force: bool,
     d1_client: &D1Client,
-    r2_storage: &RemoteStorage,
     repo_id: &str,
 ) -> CloudResult<Vec<object_index::Model>> {
     if force {
@@ -1115,7 +1113,7 @@ async fn select_objects_for_cloud_sync(
 
     let mut selected = Vec::new();
     for object in local_objects {
-        if object_needs_cloud_sync(&object, &remote_d1_oids, r2_storage).await {
+        if object_needs_cloud_sync(&object, &remote_d1_oids) {
             selected.push(object);
         }
     }
@@ -1123,23 +1121,8 @@ async fn select_objects_for_cloud_sync(
     Ok(selected)
 }
 
-async fn object_needs_cloud_sync(
-    object: &object_index::Model,
-    remote_d1_oids: &HashSet<String>,
-    r2_storage: &RemoteStorage,
-) -> bool {
-    if object.is_synced == 0 || !remote_d1_oids.contains(&object.o_id) {
-        return true;
-    }
-
-    let Ok(bytes) = hex::decode(&object.o_id) else {
-        return true;
-    };
-    let Ok(hash) = ObjectHash::from_bytes(&bytes) else {
-        return true;
-    };
-
-    !r2_storage.exist(&hash).await
+fn object_needs_cloud_sync(object: &object_index::Model, remote_d1_oids: &HashSet<String>) -> bool {
+    object.is_synced == 0 || !remote_d1_oids.contains(&object.o_id)
 }
 
 /// Sync a single object: R2 first (idempotent), then D1
@@ -2813,43 +2796,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_sync_reselects_synced_rows_missing_from_remote_state() {
-        let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+    async fn cloud_sync_reselects_synced_rows_missing_from_remote_d1() {
         let present_data = b"present remotely";
         let present_hash = ObjectHash::from_type_and_data(ObjectType::Blob, present_data);
-        remote
-            .put(&present_hash, present_data, ObjectType::Blob)
-            .await
-            .expect("test object should upload to in-memory remote");
 
         let mut remote_d1_oids = HashSet::from([present_hash.to_string()]);
         let present = test_object_index_model(present_hash, present_data.len() as i64, 1);
         assert!(
-            !object_needs_cloud_sync(&present, &remote_d1_oids, &remote).await,
-            "synced rows present in both D1 and R2 should remain skipped"
+            !object_needs_cloud_sync(&present, &remote_d1_oids),
+            "synced rows present in D1 should remain skipped"
         );
 
         let missing_d1_data = b"missing d1";
         let missing_d1_hash = ObjectHash::from_type_and_data(ObjectType::Blob, missing_d1_data);
         let missing_d1 = test_object_index_model(missing_d1_hash, missing_d1_data.len() as i64, 1);
         assert!(
-            object_needs_cloud_sync(&missing_d1, &remote_d1_oids, &remote).await,
+            object_needs_cloud_sync(&missing_d1, &remote_d1_oids),
             "local is_synced=1 must not hide rows absent from D1"
-        );
-
-        let missing_r2_data = b"missing r2";
-        let missing_r2_hash = ObjectHash::from_type_and_data(ObjectType::Blob, missing_r2_data);
-        remote_d1_oids.insert(missing_r2_hash.to_string());
-        let missing_r2 = test_object_index_model(missing_r2_hash, missing_r2_data.len() as i64, 1);
-        assert!(
-            object_needs_cloud_sync(&missing_r2, &remote_d1_oids, &remote).await,
-            "local is_synced=1 must not hide rows absent from R2"
         );
 
         let unsynced = test_object_index_model(present_hash, present_data.len() as i64, 0);
         assert!(
-            object_needs_cloud_sync(&unsynced, &remote_d1_oids, &remote).await,
+            object_needs_cloud_sync(&unsynced, &remote_d1_oids),
             "locally unsynced rows should still be selected"
+        );
+
+        remote_d1_oids.clear();
+        assert!(
+            object_needs_cloud_sync(&present, &remote_d1_oids),
+            "an empty remote object_index must cause a full D1 repair pass"
         );
     }
 
