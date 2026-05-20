@@ -101,12 +101,25 @@ pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
             ".docker",
             ".npmrc",
             ".pypirc",
+            // Database / object-store credential files commonly used by
+            // CLIs that AI tooling may shell out to. Adding these matches
+            // the per-cloud / per-package credential coverage already
+            // present for .aws / .azure / .npmrc and prevents a Shell
+            // tool that runs `cat ~/.pgpass` from leaking Postgres
+            // passwords, `cat ~/.my.cnf` from leaking MySQL passwords,
+            // and `cat ~/.s3cfg` from leaking s3cmd / s3tools tokens.
+            ".pgpass",
+            ".my.cnf",
+            ".s3cfg",
             ".cargo/credentials",
             ".cargo/credentials.toml",
             ".gem/credentials",
             ".config/gcloud",
             ".config/gh",
             ".config/hub",
+            // Git credential helper store and per-user libsecret cache
+            // (when running on Linux with the libsecret helper).
+            ".config/git/credentials",
             ".kube",
             ".config/libra/vault",
             ".mozilla/firefox",
@@ -404,6 +417,37 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("/home/tester/.mozilla/firefox")));
         assert!(paths.contains(&PathBuf::from("/home/tester/Library/Cookies")));
         assert!(paths.contains(&PathBuf::from("/etc/shadow")));
+    }
+
+    /// v0.17.669 extends `sensitive_read_paths` with three database /
+    /// object-store credential files (`~/.pgpass`, `~/.my.cnf`,
+    /// `~/.s3cfg`) and the libsecret-style git credential helper store
+    /// (`~/.config/git/credentials`). The original credential coverage
+    /// already protected `.aws` / `.azure` / `.npmrc`, but a Shell
+    /// tool that ran `cat ~/.pgpass` or `cat ~/.my.cnf` would have
+    /// leaked Postgres / MySQL passwords because those files were
+    /// outside the deny set. Pin the four additions so a refactor
+    /// that drops any of them fails this test.
+    #[test]
+    fn sensitive_read_paths_cover_database_and_git_credential_files() {
+        let paths = sensitive_read_paths(Some(Path::new("/home/tester")));
+
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.pgpass")),
+            "Postgres credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.my.cnf")),
+            "MySQL credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.s3cfg")),
+            "s3cmd / s3tools credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.config/git/credentials")),
+            "git credential-store cache must be deny-listed",
+        );
     }
 
     #[test]
