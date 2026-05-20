@@ -100,6 +100,21 @@ fn test_diff_reports_tracked_files_inside_ignored_directories() {
     );
 }
 
+#[test]
+fn test_diff_human_worktree_diff_emits_scan_progress() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--name-only"], repo.path());
+    assert_cli_success(&output, "human worktree diff with scan progress");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Scanning working tree"),
+        "expected worktree scan progress on stderr, got: {stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_diff_empty_output_does_not_initialize_pager() {
