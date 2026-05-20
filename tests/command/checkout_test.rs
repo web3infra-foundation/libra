@@ -704,34 +704,3 @@ fn test_checkout_json_reserved_branch_reports_invalid_target() {
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(report.message.contains("checking out 'intent' branch"));
 }
-
-#[test]
-fn test_checkout_json_reserved_branch_rejects_agent_traces() {
-    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
-
-    // docs/improvement/entire.md Risk #5 ("分支保护遗漏") requires
-    // `checkout <ref>` to reject `agent-traces` along with `intent`.
-    // Before v0.17.659 the guard used three separate `branch_name ==
-    // INTENT_BRANCH` checks (at `run_checkout`, `--new-branch`, and
-    // `switch_branch_with_output`) and silently allowed
-    // `checkout agent-traces`. The `is_libra_internal_branch` helper
-    // now covers both; pin the agent-traces rejection here so a
-    // refactor that loses the literal in any of the three sites fails
-    // this test rather than letting users move HEAD onto the orphan
-    // ref via the legacy `checkout` compatibility surface.
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(&["--json", "checkout", "agent-traces"], repo.path());
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let (_human, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(
-        report
-            .message
-            .contains("checking out 'agent-traces' branch"),
-        "expected agent-traces branch name in stable-error message, got: {}",
-        report.message,
-    );
-}

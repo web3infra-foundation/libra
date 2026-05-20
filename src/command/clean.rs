@@ -146,9 +146,15 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
         IgnorePolicy::Respect
     };
 
-    // Collect all workdir files and apply ignore policy
-    let workdir_files =
-        util::list_workdir_files().map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
+    // Collect workdir files and apply ignore policy. The default path can prune ignored
+    // directories; -x/-X must still inspect ignored files because those modes target them.
+    let workdir_files = match policy {
+        IgnorePolicy::Respect => util::list_workdir_files(),
+        IgnorePolicy::IncludeIgnored | IgnorePolicy::OnlyIgnored => {
+            util::list_workdir_files_unfiltered()
+        }
+    }
+    .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
     let filtered_files = ignore::filter_workdir_paths(workdir_files, policy, &index);
 
     // Find untracked files
@@ -268,6 +274,11 @@ fn find_untracked_dirs(index: &Index, policy: IgnorePolicy) -> Result<Vec<PathBu
             if path.is_dir() {
                 let name = path.file_name().unwrap_or_default();
                 if name == ".git" || name == util::ROOT_DIR {
+                    continue;
+                }
+                if policy == IgnorePolicy::Respect
+                    && ignore::should_ignore(relative, IgnorePolicy::Respect, index)
+                {
                     continue;
                 }
                 subdirs.push(path.clone());

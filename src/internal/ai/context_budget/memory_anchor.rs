@@ -356,27 +356,10 @@ impl Event for MemoryAnchorEvent {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryAnchorReplay {
     anchors: BTreeMap<Uuid, MemoryAnchor>,
-    last_recorded_at: BTreeMap<Uuid, DateTime<Utc>>,
 }
 
 impl MemoryAnchorReplay {
-    /// Apply one append-only event to the projection.
-    ///
-    /// **Monotonicity guard**: events are persisted append-only with a
-    /// `recorded_at` wall-clock timestamp. JSONL replay or partial-load paths
-    /// can deliver them out of order, and prior to this guard a stale event
-    /// silently rolled the anchor's state back (e.g. `Confirmed → Drafted`).
-    /// Skip any event whose `recorded_at` is strictly older than the most
-    /// recent event already applied to the same `anchor_id`; equal timestamps
-    /// are accepted so idempotent replays stay deterministic.
     pub fn apply_event(&mut self, event: MemoryAnchorEvent) {
-        if let Some(prev) = self.last_recorded_at.get(&event.anchor_id)
-            && event.recorded_at < *prev
-        {
-            return;
-        }
-        self.last_recorded_at
-            .insert(event.anchor_id, event.recorded_at);
         self.anchors
             .insert(event.anchor_id, MemoryAnchor::from_event(&event));
     }

@@ -65,6 +65,41 @@ fn test_diff_machine_output_is_single_line_json() {
     assert_eq!(parsed["data"]["files_changed"], 1);
 }
 
+#[test]
+fn test_diff_reports_tracked_files_inside_ignored_directories() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join(".libraignore"), "target/\n").unwrap();
+    fs::create_dir_all(repo.path().join("target")).unwrap();
+    fs::write(repo.path().join("target/tracked.txt"), "tracked\n").unwrap();
+
+    let add = run_libra_command(
+        &["add", "-f", ".libraignore", "target/tracked.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&add, "force-add tracked file under ignored directory");
+    let commit = run_libra_command(
+        &[
+            "commit",
+            "-m",
+            "track ignored directory file",
+            "--no-verify",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit ignored directory fixture");
+
+    fs::write(repo.path().join("target/tracked.txt"), "tracked\nupdated\n").unwrap();
+    fs::write(repo.path().join("target/untracked.txt"), "ignored\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--name-only"], repo.path());
+    assert_cli_success(&output, "diff ignored directory tracked file");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "target/tracked.txt"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_diff_empty_output_does_not_initialize_pager() {

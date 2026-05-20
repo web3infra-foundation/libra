@@ -67,18 +67,6 @@ impl RevisionKind {
             Self::TestPlan => "test_plan",
         }
     }
-
-    /// Every variant of [`RevisionKind`] in declaration order.
-    ///
-    /// Useful for exhaustive iteration in tests (assert a property holds
-    /// for *every* kind without hand-listing the variants) and validation
-    /// loops that need to walk the kind space. The array length is part
-    /// of the API contract — when a new variant lands, this must be
-    /// extended in the same patch, which forces callers to update their
-    /// match arms / assertions for the new variant.
-    pub fn all() -> [Self; 3] {
-        [Self::Intent, Self::ExecutionPlan, Self::TestPlan]
-    }
 }
 
 /// The parent reference and ordinal of a new revision in a chain.
@@ -118,22 +106,6 @@ impl RevisionChainEntry {
         self.revision > 1 && self.previous_id.is_some()
     }
 
-    /// `true` for the degenerate "revision 1 with a parent" case — a forced
-    /// re-derive that branched from another persisted entry at rev 1.
-    ///
-    /// This is the third partition of [`audit_label`](Self::audit_label):
-    /// neither [`is_first`](Self::is_first) nor
-    /// [`is_continuation`](Self::is_continuation) fires for this state,
-    /// because the entry has a `previous_id` (so it isn't a head) yet sits
-    /// at `revision == 1` (so it isn't a normal continuation). `is_fork`
-    /// closes that gap so callers can branch on the forked-chain code path
-    /// without inspecting the raw fields.
-    ///
-    /// Mirrors the `(forked from …)` branch in `audit_label`.
-    pub fn is_fork(&self) -> bool {
-        self.revision == 1 && self.previous_id.is_some()
-    }
-
     /// Stable single-line audit label for this entry, suitable for
     /// `tracing` field values or grep pipelines that join revision events
     /// across phases.
@@ -146,11 +118,10 @@ impl RevisionChainEntry {
     /// <kind_label> rev <n> (forked from <previous_id>) for logical_id <uuid>
     /// ```
     ///
-    /// The three forms correspond to [`is_first`](Self::is_first) (head),
-    /// [`is_continuation`](Self::is_continuation) (rev>1 with parent), and
-    /// [`is_fork`](Self::is_fork) — the degenerate "revision 1 with a
-    /// parent" case ([`first_continuation_and_fork_flag_chain_position_correctly`]
-    /// test describes when this happens) which represents a forced re-derive.
+    /// The three forms correspond to `is_first()` (head), `is_continuation()`
+    /// (rev>1 with parent), and the degenerate "revision 1 with a parent"
+    /// case ([`first_and_continuation_flag_chain_position_correctly`] test
+    /// describes when this happens) which represents a forced re-derive.
     pub fn audit_label(&self) -> String {
         let kind = self.kind.label();
         match (&self.previous_id, self.revision) {
@@ -390,46 +361,13 @@ mod tests {
         assert_eq!(RevisionKind::TestPlan.label(), "test_plan");
     }
 
-    /// `RevisionKind::all()` must enumerate every variant of the enum in
-    /// declaration order, return a non-empty list, and stay in sync with
-    /// the enum itself: adding a new variant requires extending `all()`
-    /// in the same patch. The body uses an exhaustive `match` to force a
-    /// compile error if the enum grows but `all()` was not updated, so
-    /// the contract is enforced at build time rather than test time.
+    /// `is_first()` and `is_continuation()` are mutually exclusive on
+    /// well-formed chains: revision 1 + no parent is "first", revision >=2
+    /// + parent set is "continuation". Tests both directions plus the
+    ///   degenerate case (revision 1 with a parent — represents a forced
+    ///   re-derive and is NOT continuation by our convention).
     #[test]
-    fn all_enumerates_every_variant_in_declaration_order() {
-        let kinds = RevisionKind::all();
-        assert_eq!(kinds.len(), 3);
-        assert_eq!(
-            kinds,
-            [
-                RevisionKind::Intent,
-                RevisionKind::ExecutionPlan,
-                RevisionKind::TestPlan,
-            ]
-        );
-
-        // Exhaustive cross-check: every label() result must match the
-        // expected per-variant string. The `match` is exhaustive so a
-        // future fourth variant fails to compile unless `all()` is also
-        // updated and this arm gets a new branch.
-        for kind in RevisionKind::all() {
-            let expected = match kind {
-                RevisionKind::Intent => "intent",
-                RevisionKind::ExecutionPlan => "execution_plan",
-                RevisionKind::TestPlan => "test_plan",
-            };
-            assert_eq!(kind.label(), expected);
-        }
-    }
-
-    /// `is_first()`, `is_continuation()`, and `is_fork()` partition the
-    /// well-formed chain-position space: revision 1 + no parent is "first",
-    /// revision >=2 + parent set is "continuation", and revision 1 + parent
-    /// set is the degenerate "forked" case (a forced re-derive). Each of
-    /// the three predicates must fire for exactly one of the three shapes.
-    #[test]
-    fn first_continuation_and_fork_flag_chain_position_correctly() {
+    fn first_and_continuation_flag_chain_position_correctly() {
         let logical_id = Uuid::new_v4();
 
         let first = RevisionChainEntry {
@@ -440,7 +378,6 @@ mod tests {
         };
         assert!(first.is_first());
         assert!(!first.is_continuation());
-        assert!(!first.is_fork());
 
         let continuation = RevisionChainEntry {
             kind: RevisionKind::ExecutionPlan,
@@ -450,12 +387,10 @@ mod tests {
         };
         assert!(!continuation.is_first());
         assert!(continuation.is_continuation());
-        assert!(!continuation.is_fork());
 
-        // Degenerate: revision 1 with a parent set — neither `is_first`
-        // nor `is_continuation` fires; `is_fork` is the dedicated detector
-        // so callers can branch into a "first link of a forked chain"
-        // code path without inspecting the raw fields.
+        // Degenerate: revision 1 with a parent set — neither flag fires
+        // continuation, so the caller can branch into a "first link of a
+        // forked chain" code path.
         let forked = RevisionChainEntry {
             kind: RevisionKind::TestPlan,
             previous_id: Some("plan-prev".to_string()),
@@ -464,50 +399,6 @@ mod tests {
         };
         assert!(!forked.is_first());
         assert!(!forked.is_continuation());
-        assert!(forked.is_fork());
-    }
-
-    /// `is_fork()` must align with the `(forked from ...)` branch of
-    /// `audit_label()`: whenever `is_fork()` returns `true`, the rendered
-    /// label must use the "forked from" wording, and vice versa. This
-    /// pins the predicate to the documented third partition of
-    /// `audit_label` so future label refactors can't silently desynchronise.
-    #[test]
-    fn is_fork_matches_audit_label_forked_branch() {
-        let logical_id = Uuid::new_v4();
-
-        let forked = RevisionChainEntry {
-            kind: RevisionKind::TestPlan,
-            previous_id: Some("plan-prev".to_string()),
-            revision: 1,
-            logical_id,
-        };
-        assert!(forked.is_fork());
-        let label = forked.audit_label();
-        assert!(
-            label.contains("forked from plan-prev"),
-            "is_fork() implies (forked from …) audit label, got {label}"
-        );
-
-        // For the non-fork shapes, the audit label must NOT contain
-        // "forked from".
-        let head = RevisionChainEntry {
-            kind: RevisionKind::Intent,
-            previous_id: None,
-            revision: 1,
-            logical_id,
-        };
-        assert!(!head.is_fork());
-        assert!(!head.audit_label().contains("forked from"));
-
-        let continuation = RevisionChainEntry {
-            kind: RevisionKind::ExecutionPlan,
-            previous_id: Some("plan-prev".to_string()),
-            revision: 2,
-            logical_id,
-        };
-        assert!(!continuation.is_fork());
-        assert!(!continuation.audit_label().contains("forked from"));
     }
 
     /// `RevisionChainEntry` must derive `Clone` so observer / audit

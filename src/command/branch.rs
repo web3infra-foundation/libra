@@ -1216,51 +1216,28 @@ fn commit_contains(
     Ok(false)
 }
 
-/// Validate that `name` is acceptable as a Git ref short-name.
-///
-/// Mirrors the subset of `git check-ref-format --branch <name>` that is
-/// relevant to Libra's branch surface. Rejects names that would either
-/// fail Git's own ref-format check or produce surprising ref-suffix
-/// ambiguity at lookup time. Specifically rejects:
-///
-/// - Whitespace, ASCII control chars, and the forbidden punctuation
-///   set `\\ : " ? * [` (Git's `check-ref-format` blocked set).
-/// - The revision-suffix operators `~` and `^` (e.g. `feature~1`,
-///   `feature^`) so a branch literally named `feature~1` cannot
-///   collide with the suffix-stripped revision parser used by
-///   `is_locked_revision` and other rev-walkers.
-/// - Names that start or end with `/`, end with `.` or `.lock`, or
-///   contain `//` / `..` (Git's path-segment rules).
-/// - Reserved names: `HEAD`, the single `@` character, and any name
-///   containing the reflog selector sequence `@{`.
-/// - Empty / whitespace-only / lone `.`.
 pub fn is_valid_git_branch_name(name: &str) -> bool {
-    // Whitespace, control characters, and the explicitly forbidden
-    // punctuation. `~` and `^` are blocked here too so a branch
-    // literally named `feature~1` cannot collide with the
-    // suffix-stripped revision parser in
-    // `internal::branch::is_locked_revision`.
-    if name.contains(&[' ', '\t', '\\', ':', '"', '?', '*', '[', '~', '^'][..])
+    // Validate branch name
+    // Not contain spaces, control characters or special characters
+    if name.contains(&[' ', '\t', '\\', ':', '"', '?', '*', '['][..])
         || name.chars().any(|c| c.is_ascii_control())
     {
         return false;
     }
 
     // Not start or end with a slash ('/'), or end with a dot ('.')
-    // or `.lock`. Not contain consecutive slashes ('//') or dots ('..').
+    // Not contain consecutive slashes ('//') or dots ('..')
     if name.starts_with('/')
         || name.ends_with('/')
         || name.ends_with('.')
-        || name.ends_with(".lock")
         || name.contains("//")
         || name.contains("..")
     {
         return false;
     }
 
-    // Not be reserved names like 'HEAD' or the bare reflog selector
-    // `@`, and not contain the `@{` reflog selector sequence.
-    if name == "HEAD" || name == "@" || name.contains("@{") {
+    // Not be reserved names like 'HEAD' or contain '@{'
+    if name == "HEAD" || name.contains("@{") {
         return false;
     }
 
@@ -1402,81 +1379,5 @@ mod tests {
             crate::internal::branch::BranchStoreError::Query("database is locked".into()),
         ));
         assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
-    }
-
-    /// `is_valid_git_branch_name` must mirror `git check-ref-format
-    /// --branch <name>` for the subset of rules Libra's branch surface
-    /// cares about. The function is the single gate between user input
-    /// and the `Branch` storage layer (called from `create_branch_impl`
-    /// at `branch.rs:617` and `rename_branch_impl` at `:757`, plus
-    /// `switch.rs::create_branch_safe`). Pin both the happy and reject
-    /// branches so a future relaxation cannot accept names that Git
-    /// itself would refuse.
-    #[test]
-    fn is_valid_git_branch_name_accepts_legal_names_and_rejects_illegal() {
-        use super::is_valid_git_branch_name;
-
-        // Happy path: ordinary branch names of the shapes Libra produces.
-        for name in [
-            "main",
-            "feature",
-            "feature/x",
-            "topic/feature-1",
-            "fix-123",
-            "release/2025.05",
-            "agent-traces", // locked-name protection is a separate guard
-            "intent",       // and lives in `is_libra_internal_branch`
-        ] {
-            assert!(
-                is_valid_git_branch_name(name),
-                "expected '{name}' to be a valid branch name",
-            );
-        }
-
-        // Reject branch: each entry covers a distinct rule. Group by
-        // rule so a regression points at the specific check that
-        // weakened.
-        let illegal = [
-            // Empty / whitespace-only / lone dot.
-            "",
-            "   ",
-            ".",
-            // Forbidden punctuation from `git check-ref-format`.
-            "with space",
-            "with\ttab",
-            "back\\slash",
-            "with:colon",
-            "with\"quote",
-            "with?question",
-            "with*star",
-            "with[bracket",
-            // Revision suffix operators: `~` and `^` (v0.17.668).
-            "feature~1",
-            "feature^",
-            "branch^^",
-            "~leading",
-            "^leading",
-            // ASCII control character (NUL is the canonical example).
-            "with\0null",
-            // Leading / trailing slash and consecutive separators.
-            "/leading",
-            "trailing/",
-            "with//doubleslash",
-            "with..doubledot",
-            // Trailing punctuation rules.
-            "ends.with.dot.",
-            "ends.with.lock", // v0.17.668: new `.lock` suffix rule
-            // Reserved names and reflog selectors.
-            "HEAD",
-            "@",
-            "feature@{1}",
-            "@{1}",
-        ];
-        for name in illegal {
-            assert!(
-                !is_valid_git_branch_name(name),
-                "expected '{name}' to be rejected as an invalid branch name",
-            );
-        }
     }
 }

@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, IsTerminal},
     path::PathBuf,
     rc::Rc,
@@ -279,6 +279,26 @@ fn get_files_blobs(
         .collect()
 }
 
+fn get_worktree_diff_files(index: &Index) -> Result<Vec<PathBuf>, DiffError> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+
+    for file in util::list_workdir_files().map_err(|e| DiffError::WorkdirList(e.to_string()))? {
+        if seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+
+    for file in index.tracked_files() {
+        let absolute = util::workdir_to_absolute(&file);
+        if absolute.is_file() && seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+
+    Ok(files)
+}
+
 /// Returns (path, hash) pairs from the index's stored entries (stage 0).
 /// Unlike `get_files_blobs`, this uses the hash already recorded in the index
 /// rather than reading the current file on disk, which is essential for
@@ -317,8 +337,7 @@ async fn resolve_diff_side(
                 worktree_entries: HashMap::new(),
             })
         } else {
-            let files =
-                util::list_workdir_files().map_err(|e| DiffError::WorkdirList(e.to_string()))?;
+            let files = get_worktree_diff_files(index)?;
             let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
             Ok(DiffSide {
                 label: "working tree".to_string(),

@@ -100,22 +100,6 @@ impl AttemptWriteOutcome {
                 | TaskExecutionStatus::TimedOut
         )
     }
-
-    /// `true` when the attempt ended in the canonical clean terminal
-    /// status [`TaskExecutionStatus::Completed`]. This is the positive
-    /// half of the partition that [`is_failure`](Self::is_failure) and
-    /// [`is_terminal`](Self::is_terminal) already cover:
-    ///
-    /// ```text
-    /// is_completed()  ==  is_terminal() && !is_failure()
-    /// ```
-    ///
-    /// Provided as a named predicate so call sites that want to gate on
-    /// "the attempt succeeded" express that intent directly instead of
-    /// composing the negation through `is_failure()`.
-    pub fn is_completed(&self) -> bool {
-        matches!(self.status, TaskExecutionStatus::Completed)
-    }
 }
 
 /// Inputs for [`write_attempt_start`]: the identity of the attempt being
@@ -264,44 +248,6 @@ mod tests {
             !in_flight.is_terminal(),
             "Interrupted is the in-flight marker; must not be terminal",
         );
-    }
-
-    /// `is_completed()` must fire only for `Completed` and must equal
-    /// `is_terminal() && !is_failure()` for every status. Pin the
-    /// equivalence so the three predicates stay aligned even if one is
-    /// refactored later.
-    #[test]
-    fn is_completed_fires_only_for_completed_and_matches_terminal_xor_failure() {
-        let task_id = Uuid::new_v4();
-        let run_id = Uuid::new_v4();
-
-        for status in [
-            TaskExecutionStatus::Completed,
-            TaskExecutionStatus::Failed,
-            TaskExecutionStatus::Cancelled,
-            TaskExecutionStatus::TimedOut,
-            TaskExecutionStatus::Interrupted,
-        ] {
-            let label = format!("{status:?}");
-            let expected_completed = matches!(status, TaskExecutionStatus::Completed);
-            let outcome = AttemptWriteOutcome {
-                task_id,
-                run_id,
-                status,
-                summary: None,
-            };
-            assert_eq!(
-                outcome.is_completed(),
-                expected_completed,
-                "is_completed() must be {expected_completed} for {label}",
-            );
-            // The partition equivalence must hold for every status.
-            assert_eq!(
-                outcome.is_completed(),
-                outcome.is_terminal() && !outcome.is_failure(),
-                "is_completed() must equal (is_terminal && !is_failure) for {label}",
-            );
-        }
     }
 
     /// `is_failure() && is_terminal()` must hold for all three real

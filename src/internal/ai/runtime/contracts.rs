@@ -85,29 +85,6 @@ impl DagStage {
             DagStage::Test => "test",
         }
     }
-
-    /// Inverse of [`variant_name`](Self::variant_name): parse a
-    /// snake_case audit tag back into a [`DagStage`]. Returns `None`
-    /// for unknown / kebab-case / empty input so audit readers that
-    /// encounter a typo fail closed rather than silently picking a
-    /// stage (Execution and Test route to different code paths
-    /// downstream).
-    pub fn from_variant_name(value: &str) -> Option<Self> {
-        match value {
-            "execution" => Some(Self::Execution),
-            "test" => Some(Self::Test),
-            _ => None,
-        }
-    }
-
-    /// Every variant of [`DagStage`] in declaration order
-    /// (`Execution`, `Test`). Matches the
-    /// `current_plan_heads[ordinal]` ordering convention pinned by
-    /// `SchedulerState::EXECUTION_HEAD_ORDINAL` / `TEST_HEAD_ORDINAL`
-    /// in `projection/scheduler.rs`.
-    pub fn all() -> [Self; 2] {
-        [Self::Execution, Self::Test]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,27 +95,6 @@ pub enum SchedulerClearReason {
     Interrupted,
     Failed,
     Rebuild,
-}
-
-impl SchedulerClearReason {
-    /// Every variant of [`SchedulerClearReason`] in declaration order.
-    ///
-    /// Mirrors the v0.17.660 `RevisionKind::all()` /
-    /// v0.17.664 `TaskExecutionStatus::all()` /
-    /// v0.17.665 `WorkflowPhase::all()` pattern: the fixed-length
-    /// array forces a future variant to extend `all()` in the same
-    /// patch, which keeps `apply_scheduler_mutation(Clear { reason })`
-    /// match-arm coverage and audit-string mappings in lock-step with
-    /// the enum.
-    pub fn all() -> [Self; 5] {
-        [
-            Self::Completed,
-            Self::Cancelled,
-            Self::Interrupted,
-            Self::Failed,
-            Self::Rebuild,
-        ]
-    }
 }
 
 impl SchedulerClearReason {
@@ -153,25 +109,6 @@ impl SchedulerClearReason {
             SchedulerClearReason::Interrupted => "interrupted",
             SchedulerClearReason::Failed => "failed",
             SchedulerClearReason::Rebuild => "rebuild",
-        }
-    }
-
-    /// Inverse of [`variant_name`](Self::variant_name): parse a
-    /// snake_case audit tag back into the enum. Returns `None` for
-    /// unknown / kebab-case / empty input. Mirrors the v0.17.684
-    /// `ProjectionStaleReason::from_variant_name` and v0.17.685
-    /// `FinalDecisionVerdict::from_variant_name` patterns — both
-    /// halves of the audit round-trip must be available for the
-    /// reader to validate persisted reason strings without
-    /// silently substituting a default.
-    pub fn from_variant_name(value: &str) -> Option<Self> {
-        match value {
-            "completed" => Some(Self::Completed),
-            "cancelled" => Some(Self::Cancelled),
-            "interrupted" => Some(Self::Interrupted),
-            "failed" => Some(Self::Failed),
-            "rebuild" => Some(Self::Rebuild),
-            _ => None,
         }
     }
 
@@ -208,40 +145,6 @@ impl ProjectionStaleReason {
             ProjectionStaleReason::Backpressure => "backpressure",
             ProjectionStaleReason::ManualRepair => "manual_repair",
         }
-    }
-
-    /// Inverse of [`variant_name`](Self::variant_name): parse an
-    /// audit string back into the enum. Returns `None` for unknown
-    /// tags — callers that read a stale-reason from a persisted
-    /// audit log row should treat that as a schema mismatch and fail
-    /// closed rather than silently substituting a default.
-    ///
-    /// Accepts only the snake_case canonical wire form so a future
-    /// kebab-case migration on the audit pipeline cannot accidentally
-    /// round-trip through this helper. The pattern mirrors
-    /// `AgentKind::from_db_str` introduced in v0.17.676.
-    pub fn from_variant_name(value: &str) -> Option<Self> {
-        match value {
-            "rebuild_required" => Some(Self::RebuildRequired),
-            "derived_record_stale" => Some(Self::DerivedRecordStale),
-            "cas_conflict" => Some(Self::CasConflict),
-            "backpressure" => Some(Self::Backpressure),
-            "manual_repair" => Some(Self::ManualRepair),
-            _ => None,
-        }
-    }
-
-    /// Every variant of [`ProjectionStaleReason`] in declaration
-    /// order. Useful for exhaustive iteration in tests and the
-    /// `variant_name` ↔ `from_variant_name` round-trip guard below.
-    pub fn all() -> [Self; 5] {
-        [
-            Self::RebuildRequired,
-            Self::DerivedRecordStale,
-            Self::CasConflict,
-            Self::Backpressure,
-            Self::ManualRepair,
-        ]
     }
 }
 
@@ -363,37 +266,6 @@ impl FinalDecisionVerdict {
         }
     }
 
-    /// Inverse of [`variant_name`](Self::variant_name): parse a
-    /// snake_case audit tag back into the enum. Returns `None` for
-    /// unknown / kebab-case input — mirrors the v0.17.684
-    /// `ProjectionStaleReason::from_variant_name` and v0.17.676
-    /// `AgentKind::from_db_str` patterns. Audit readers that
-    /// encounter an unknown value must fail closed rather than
-    /// substituting a default verdict, since the verdict drives
-    /// commit / abandon routing downstream.
-    pub fn from_variant_name(value: &str) -> Option<Self> {
-        match value {
-            "accepted" => Some(Self::Accepted),
-            "rejected" => Some(Self::Rejected),
-            "cancelled" => Some(Self::Cancelled),
-            "abandon" => Some(Self::Abandon),
-            _ => None,
-        }
-    }
-
-    /// Every variant of [`FinalDecisionVerdict`] in declaration
-    /// order. Lets the round-trip regression sweep every variant via
-    /// `all()`, so adding a fifth verdict lands round-trip coverage
-    /// automatically.
-    pub fn all() -> [Self; 4] {
-        [
-            Self::Accepted,
-            Self::Rejected,
-            Self::Cancelled,
-            Self::Abandon,
-        ]
-    }
-
     /// `true` only for `Accepted` — the loop committed the change.
     pub fn is_accepted(&self) -> bool {
         matches!(self, FinalDecisionVerdict::Accepted)
@@ -453,16 +325,6 @@ impl ProjectionFreshness {
             ProjectionFreshness::Fresh | ProjectionFreshness::StaleReadOnly
         )
     }
-
-    /// Every variant of [`ProjectionFreshness`] in declaration order
-    /// (`Fresh`, `StaleReadOnly`, `Unavailable`). The declaration
-    /// order is also the **degradation order** — `Fresh` is the
-    /// healthy state, `StaleReadOnly` is reduced-capability,
-    /// `Unavailable` is fully degraded. Mirrors the v0.17.660+
-    /// `*::all()` enumerator pattern.
-    pub fn all() -> [Self; 3] {
-        [Self::Fresh, Self::StaleReadOnly, Self::Unavailable]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,22 +333,6 @@ pub enum ApprovalMediationState {
     LegacyInteractive,
     RuntimeMediatedInteractive,
     RuntimeMediatedNever,
-}
-
-impl ApprovalMediationState {
-    /// Every variant of [`ApprovalMediationState`] in declaration
-    /// order (`LegacyInteractive`, `RuntimeMediatedInteractive`,
-    /// `RuntimeMediatedNever`). The declaration order tracks the
-    /// runtime-mediation migration path: callers move from
-    /// `LegacyInteractive` to one of the `RuntimeMediated*` states
-    /// once the per-tool approval runtime is wired up.
-    pub fn all() -> [Self; 3] {
-        [
-            Self::LegacyInteractive,
-            Self::RuntimeMediatedInteractive,
-            Self::RuntimeMediatedNever,
-        ]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,30 +354,6 @@ pub enum WorkflowPhase {
     Execution,
     Validation,
     Decision,
-}
-
-impl WorkflowPhase {
-    /// Every variant of [`WorkflowPhase`] in declaration order, which is
-    /// also the Code UI Phase Workflow execution order
-    /// (Intent → Planning → Execution → Validation → Decision; see
-    /// `docs/improvement/agent.md` Part B).
-    ///
-    /// Useful for tests and validation loops that need to assert a
-    /// property for every phase, and for ordered traversal of the
-    /// workflow pipeline. The fixed-length array makes the enumeration
-    /// size part of the public API: adding a new phase requires
-    /// extending this list in the same patch, which forces every
-    /// caller that pattern-matches on `WorkflowPhase` to be reviewed
-    /// for the new variant.
-    pub fn all() -> [Self; 5] {
-        [
-            Self::Intent,
-            Self::Planning,
-            Self::Execution,
-            Self::Validation,
-            Self::Decision,
-        ]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,30 +386,6 @@ pub enum TaskExecutionStatus {
     Cancelled,
     TimedOut,
     Interrupted,
-}
-
-impl TaskExecutionStatus {
-    /// Every variant of [`TaskExecutionStatus`] in declaration order.
-    ///
-    /// Useful for exhaustive iteration in tests and validation loops —
-    /// see e.g. [`crate::internal::ai::runtime::phase2::AttemptWriteOutcome`]'s
-    /// `is_completed_fires_only_for_completed_and_matches_terminal_xor_failure`
-    /// test which sweeps every status through the `is_completed` /
-    /// `is_terminal` / `is_failure` partition invariant. The fixed-length
-    /// array type makes the enumeration size part of the public API:
-    /// adding a new variant requires extending this list in the same
-    /// patch, which forces every caller's match arms and partition
-    /// helpers (currently `AttemptWriteOutcome::is_terminal`,
-    /// `is_failure`, `is_completed`) to be reconsidered.
-    pub fn all() -> [Self; 5] {
-        [
-            Self::Completed,
-            Self::Failed,
-            Self::Cancelled,
-            Self::TimedOut,
-            Self::Interrupted,
-        ]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,182 +455,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    /// `SchedulerClearReason::all()` must enumerate every variant in
-    /// declaration order. Exhaustive cross-check pins the snake_case
-    /// serialisation tag and asserts every variant from `all()`
-    /// matches its expected wire-format string — a future sixth
-    /// variant fails to compile here unless both `all()` and the
-    /// match arm are updated together.
-    #[test]
-    fn scheduler_clear_reason_all_enumerates_every_variant_in_declaration_order() {
-        let reasons = SchedulerClearReason::all();
-        assert_eq!(reasons.len(), 5);
-        assert_eq!(
-            reasons,
-            [
-                SchedulerClearReason::Completed,
-                SchedulerClearReason::Cancelled,
-                SchedulerClearReason::Interrupted,
-                SchedulerClearReason::Failed,
-                SchedulerClearReason::Rebuild,
-            ]
-        );
-
-        for reason in SchedulerClearReason::all() {
-            let expected = match reason {
-                SchedulerClearReason::Completed => "completed",
-                SchedulerClearReason::Cancelled => "cancelled",
-                SchedulerClearReason::Interrupted => "interrupted",
-                SchedulerClearReason::Failed => "failed",
-                SchedulerClearReason::Rebuild => "rebuild",
-            };
-            let serialised = serde_json::to_value(reason).unwrap();
-            assert_eq!(serialised, json!(expected));
-        }
-    }
-
-    /// `ProjectionFreshness::all()` enumerates every variant in
-    /// declaration order (Fresh → StaleReadOnly → Unavailable,
-    /// also the degradation order). Cross-checks the snake_case
-    /// wire tag and the existing capability predicates per variant.
-    #[test]
-    fn projection_freshness_all_enumerates_every_variant_in_degradation_order() {
-        let modes = ProjectionFreshness::all();
-        assert_eq!(modes.len(), 3);
-        assert_eq!(
-            modes,
-            [
-                ProjectionFreshness::Fresh,
-                ProjectionFreshness::StaleReadOnly,
-                ProjectionFreshness::Unavailable,
-            ]
-        );
-
-        for mode in &ProjectionFreshness::all() {
-            let (expected_tag, allows_write, allows_resume) = match mode {
-                ProjectionFreshness::Fresh => ("\"fresh\"", true, true),
-                ProjectionFreshness::StaleReadOnly => ("\"stale_read_only\"", false, true),
-                ProjectionFreshness::Unavailable => ("\"unavailable\"", false, false),
-            };
-            let serialised = serde_json::to_string(mode).unwrap();
-            assert_eq!(serialised, expected_tag, "wire tag mismatch for {mode:?}");
-            assert_eq!(
-                mode.allows_scheduler_write(),
-                allows_write,
-                "allows_scheduler_write mismatch for {mode:?}",
-            );
-            assert_eq!(
-                mode.allows_final_decision_write(),
-                allows_write,
-                "allows_final_decision_write mismatch for {mode:?}",
-            );
-            assert_eq!(
-                mode.allows_resume_read(),
-                allows_resume,
-                "allows_resume_read mismatch for {mode:?}",
-            );
-        }
-    }
-
-    /// `ApprovalMediationState::all()` enumerates the three migration
-    /// states and pins the snake_case wire tags. The declaration
-    /// order is also the runtime-mediation migration sequence —
-    /// pinning it here makes the order part of the public API.
-    #[test]
-    fn approval_mediation_state_all_enumerates_every_variant_with_snake_case_tag() {
-        let states = ApprovalMediationState::all();
-        assert_eq!(states.len(), 3);
-        assert_eq!(
-            states,
-            [
-                ApprovalMediationState::LegacyInteractive,
-                ApprovalMediationState::RuntimeMediatedInteractive,
-                ApprovalMediationState::RuntimeMediatedNever,
-            ]
-        );
-
-        for state in &ApprovalMediationState::all() {
-            let expected_tag = match state {
-                ApprovalMediationState::LegacyInteractive => "\"legacy_interactive\"",
-                ApprovalMediationState::RuntimeMediatedInteractive => {
-                    "\"runtime_mediated_interactive\""
-                }
-                ApprovalMediationState::RuntimeMediatedNever => "\"runtime_mediated_never\"",
-            };
-            let serialised = serde_json::to_string(state).unwrap();
-            assert_eq!(serialised, expected_tag, "wire tag mismatch for {state:?}");
-        }
-    }
-
-    /// `WorkflowPhase::all()` must enumerate every variant in the
-    /// declaration order, which is also the Code UI Phase Workflow's
-    /// execution order. Exhaustive cross-check pins the snake_case
-    /// serialisation tag for each variant.
-    #[test]
-    fn workflow_phase_all_enumerates_every_variant_in_pipeline_order() {
-        let phases = WorkflowPhase::all();
-        assert_eq!(phases.len(), 5);
-        assert_eq!(
-            phases,
-            [
-                WorkflowPhase::Intent,
-                WorkflowPhase::Planning,
-                WorkflowPhase::Execution,
-                WorkflowPhase::Validation,
-                WorkflowPhase::Decision,
-            ]
-        );
-
-        for phase in WorkflowPhase::all() {
-            let expected = match phase {
-                WorkflowPhase::Intent => "intent",
-                WorkflowPhase::Planning => "planning",
-                WorkflowPhase::Execution => "execution",
-                WorkflowPhase::Validation => "validation",
-                WorkflowPhase::Decision => "decision",
-            };
-            let serialised = serde_json::to_value(phase).unwrap();
-            assert_eq!(serialised, json!(expected));
-        }
-    }
-
-    /// `TaskExecutionStatus::all()` must enumerate every variant in
-    /// declaration order and return a fixed-length array. The body
-    /// uses an exhaustive `match` to force a compile error if a new
-    /// variant lands without extending `all()` — the test stays in
-    /// lock-step with the enum without relying on a runtime check.
-    #[test]
-    fn task_execution_status_all_enumerates_every_variant_in_declaration_order() {
-        let statuses = TaskExecutionStatus::all();
-        assert_eq!(statuses.len(), 5);
-        assert_eq!(
-            statuses,
-            [
-                TaskExecutionStatus::Completed,
-                TaskExecutionStatus::Failed,
-                TaskExecutionStatus::Cancelled,
-                TaskExecutionStatus::TimedOut,
-                TaskExecutionStatus::Interrupted,
-            ]
-        );
-
-        // Exhaustive cross-check: every variant returned by `all()` must
-        // serialise to a stable snake_case tag. The match is exhaustive
-        // so a future sixth variant fails to compile here unless
-        // `all()` is also updated and this arm gets a new branch.
-        for status in TaskExecutionStatus::all() {
-            let expected = match status {
-                TaskExecutionStatus::Completed => "completed",
-                TaskExecutionStatus::Failed => "failed",
-                TaskExecutionStatus::Cancelled => "cancelled",
-                TaskExecutionStatus::TimedOut => "timed_out",
-                TaskExecutionStatus::Interrupted => "interrupted",
-            };
-            let serialised = serde_json::to_value(&status).unwrap();
-            assert_eq!(serialised, json!(expected));
-        }
-    }
 
     #[test]
     fn selected_plan_set_preserves_execution_then_test_order() {
@@ -1117,116 +739,6 @@ mod tests {
                 format!("\"{expected}\""),
             );
         }
-    }
-
-    /// `from_variant_name` is the inverse of `variant_name` —
-    /// `from_variant_name(reason.variant_name()) == Some(reason)`
-    /// for every variant. Pin both directions across every variant
-    /// using `all()` so a future rename of one side fails the
-    /// round-trip here rather than silently desynchronising the
-    /// audit reader from the audit writer.
-    #[test]
-    fn projection_stale_reason_from_variant_name_round_trips_every_variant() {
-        for reason in ProjectionStaleReason::all() {
-            assert_eq!(
-                ProjectionStaleReason::from_variant_name(reason.variant_name()),
-                Some(reason.clone()),
-                "round-trip mismatch for {reason:?}",
-            );
-        }
-    }
-
-    /// `from_variant_name` must reject unknown tags and the
-    /// kebab-case form. Mirrors `AgentKind::from_db_str`'s
-    /// snake_case-only contract — the audit pipeline writes snake_case,
-    /// so any other shape is by definition a schema mismatch.
-    #[test]
-    fn projection_stale_reason_from_variant_name_rejects_unknowns_and_kebab_form() {
-        // Unknown tag.
-        assert_eq!(
-            ProjectionStaleReason::from_variant_name("not-a-real-reason"),
-            None,
-        );
-        // Kebab-case variant of a real tag must be rejected.
-        assert_eq!(
-            ProjectionStaleReason::from_variant_name("rebuild-required"),
-            None,
-        );
-        // Empty input.
-        assert_eq!(ProjectionStaleReason::from_variant_name(""), None);
-    }
-
-    /// `DagStage::from_variant_name` is the inverse of
-    /// `variant_name` — Execution / Test must round-trip through
-    /// both directions. Mirrors the v0.17.685
-    /// `FinalDecisionVerdict::from_variant_name` round-trip
-    /// pattern.
-    #[test]
-    fn dag_stage_from_variant_name_round_trips_both_variants() {
-        for stage in DagStage::all() {
-            assert_eq!(
-                DagStage::from_variant_name(stage.variant_name()),
-                Some(stage),
-                "round-trip mismatch for {stage:?}",
-            );
-        }
-        // Unknown / kebab-case / empty must return None — Execution
-        // and Test route to different code paths, so silent
-        // misclassification would be a correctness bug.
-        assert_eq!(DagStage::from_variant_name("validation"), None);
-        assert_eq!(DagStage::from_variant_name("EXECUTION"), None);
-        assert_eq!(DagStage::from_variant_name(""), None);
-    }
-
-    /// `SchedulerClearReason::from_variant_name` is the inverse of
-    /// `variant_name` — every variant round-trips through both
-    /// directions. Uses the existing `all()` enumerator added in
-    /// v0.17.670 so adding a sixth reason lands round-trip coverage
-    /// automatically.
-    #[test]
-    fn scheduler_clear_reason_from_variant_name_round_trips_every_variant() {
-        for reason in SchedulerClearReason::all() {
-            assert_eq!(
-                SchedulerClearReason::from_variant_name(reason.variant_name()),
-                Some(reason.clone()),
-                "round-trip mismatch for {reason:?}",
-            );
-        }
-        // Unknown / kebab-case / empty must fail closed.
-        assert_eq!(SchedulerClearReason::from_variant_name("aborted"), None,);
-        assert_eq!(SchedulerClearReason::from_variant_name("not-found"), None,);
-        assert_eq!(SchedulerClearReason::from_variant_name(""), None);
-    }
-
-    /// `FinalDecisionVerdict::from_variant_name` is the inverse of
-    /// `variant_name` — every variant round-trips through
-    /// `from_variant_name(v.variant_name()) == Some(v)`. Pin both
-    /// directions over `all()` so a future rename lands at this gate
-    /// rather than at the audit-reader callsite.
-    #[test]
-    fn final_decision_verdict_from_variant_name_round_trips_every_variant() {
-        for verdict in FinalDecisionVerdict::all() {
-            assert_eq!(
-                FinalDecisionVerdict::from_variant_name(verdict.variant_name()),
-                Some(verdict.clone()),
-                "round-trip mismatch for {verdict:?}",
-            );
-        }
-    }
-
-    /// Unknown / kebab-case / empty input must yield `None`. Pin the
-    /// rejection shape so a future "lenient" parser cannot silently
-    /// map an audit log row's typo back to a valid verdict.
-    #[test]
-    fn final_decision_verdict_from_variant_name_rejects_unknowns_and_kebab_form() {
-        assert_eq!(FinalDecisionVerdict::from_variant_name("approved"), None);
-        // Hyphenated form of a real tag must be rejected — the audit
-        // pipeline writes snake_case verbatim.
-        assert_eq!(
-            FinalDecisionVerdict::from_variant_name("not-accepted"),
-            None,
-        );
-        assert_eq!(FinalDecisionVerdict::from_variant_name(""), None);
     }
 
     /// `FinalDecisionVerdict::variant_name` for all 4 variants +

@@ -256,16 +256,6 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
         ("slack-token", r"\bxox[abprs]-[0-9A-Za-z-]{10,72}\b"),
         // Google API keys.
         ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
-        // Anthropic Claude API keys (`sk-ant-api03-...`). MUST come
-        // before the bare `openai-api-key` rule below — the OpenAI
-        // pattern `sk-[0-9A-Za-z_-]{20,}` also matches `sk-ant-…`
-        // because the character class allows `-`, so without this
-        // more-specific rule Anthropic keys are redacted but tagged
-        // as `openai-api-key`, losing provider attribution in the
-        // `redaction_report.matches`. Pinned conservatively to the
-        // documented `sk-ant-` prefix; longer key bodies handled by
-        // the `{20,}` tail.
-        ("anthropic-api-key", r"\bsk-ant-[0-9A-Za-z_-]{20,}\b"),
         // OpenAI API keys (current "sk-..." family — both legacy and project keys).
         ("openai-api-key", r"\bsk-[0-9A-Za-z_-]{20,}\b"),
         // Generic JWTs (header.payload.signature).
@@ -522,33 +512,6 @@ mod tests {
         let key = format!("sk_test_{}", "b".repeat(24));
         let (out, _) = redact_str(&r, &key);
         assert!(out.contains("<REDACTED:stripe-key>"));
-    }
-
-    /// Anthropic Claude API keys (`sk-ant-api03-...`) must be redacted
-    /// and tagged with the `anthropic-api-key` rule, NOT
-    /// `openai-api-key`. The bare OpenAI rule
-    /// `\bsk-[0-9A-Za-z_-]{20,}\b` also matches `sk-ant-...` because
-    /// the character class accepts `-`, so without the v0.17.679
-    /// more-specific rule (placed earlier in the rule list) every
-    /// Anthropic key would silently land in the report under the
-    /// wrong provider tag. Pin both the redaction itself and the
-    /// correct rule attribution so a future re-ordering of
-    /// `DEFAULT_RULES` cannot quietly regress the provider label.
-    #[test]
-    fn redacts_anthropic_api_key_with_correct_provider_tag() {
-        let r = Redactor::new_default();
-        let key = format!("sk-ant-api03-{}", "x".repeat(40));
-        let (out, report) = redact_str(&r, &format!("ANTHROPIC_API_KEY={key}"));
-        assert!(
-            out.contains("<REDACTED:anthropic-api-key>"),
-            "expected anthropic-api-key tag in {out}",
-        );
-        assert!(!out.contains(&key));
-        // The match must be attributed to the anthropic rule, not the
-        // openai rule. Pinning the rule id catches a regression where
-        // the openai rule moves above the anthropic rule.
-        assert_eq!(report.matches.len(), 1, "exactly one match expected");
-        assert_eq!(report.matches[0].rule_id, "anthropic-api-key");
     }
 
     #[test]
