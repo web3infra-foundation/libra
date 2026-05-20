@@ -1,6 +1,6 @@
 {
   "name": "libra-publish-worker",
-  "version": "0.17.651",
+  "version": "0.17.652",
   "private": true,
   "description": "Libra publish — Cloudflare Worker (Next.js + OpenNext) reading D1/R2 publish snapshots",
   "scripts": {
@@ -43,6 +43,6 @@
   },
   "packageManager": "pnpm@10.0.0",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.13.0 <23 || >=23.4.0"
   }
 }

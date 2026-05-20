@@ -18,7 +18,7 @@
 - `Pager::with_config(out_config)` 集成已实现（`blame.rs:210`）
 - `--quiet` 已实现（`blame.rs:177` 静默早退；模块 doc-comment 第 12 行说明 quiet/JSON/paged-text 三态）
 - `-L, --line-range` 已实现，支持 "10"、"10,20"、"10,+5" 格式
-- 基于内容相等性的 blame 算法已实现（BFS 历史回溯；入口在 `blame_file()`，blame.rs:221 起的文档注释描述算法步骤）
+- 基于内容相等性的 blame 算法已实现（BFS 历史回溯；入口在 `run_blame()`，blame.rs:232；blame.rs:216-231 的文档注释描述算法步骤与边界条件）
 - SHA-1 和 SHA-256 双格式支持已测试
 - `run_blame()` + `BlameOutput` 已落地，`--json` / `--machine` 可返回逐行结构化结果
 - `BlameError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
