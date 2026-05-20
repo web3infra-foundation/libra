@@ -256,6 +256,12 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
         ("slack-token", r"\bxox[abprs]-[0-9A-Za-z-]{10,72}\b"),
         // Google API keys.
         ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        // Anthropic API keys (`sk-ant-…`). MUST come BEFORE the bare
+        // `sk-…` OpenAI rule below — the OpenAI pattern is a strict
+        // superset of the Anthropic shape (both start `sk-`), so without
+        // this earlier rule Anthropic keys would be silently mistagged
+        // as `openai-api-key`.
+        ("anthropic-api-key", r"\bsk-ant-[0-9A-Za-z_-]{20,}\b"),
         // OpenAI API keys (current "sk-..." family — both legacy and project keys).
         ("openai-api-key", r"\bsk-[0-9A-Za-z_-]{20,}\b"),
         // Generic JWTs (header.payload.signature).
@@ -493,6 +499,28 @@ mod tests {
     }
 
     // ── Phase 3.2 expanded rules ─────────────────────────────────────────
+
+    #[test]
+    fn redacts_anthropic_api_key_with_correct_tag() {
+        // Anthropic keys share the `sk-` prefix with OpenAI keys, so the
+        // more-specific `sk-ant-…` rule must fire first to give the right
+        // provider tag. If this regresses (rule order swapped or the
+        // `anthropic-api-key` rule is removed), the placeholder would be
+        // `<REDACTED:openai-api-key>` and downstream provenance would lose
+        // the Anthropic attribution.
+        let r = Redactor::new_default();
+        let key = format!("sk-ant-{}", "a".repeat(40));
+        let (out, report) = redact_str(&r, &format!("ANTHROPIC_API_KEY={key}"));
+        assert!(out.contains("<REDACTED:anthropic-api-key>"));
+        assert!(!out.contains("<REDACTED:openai-api-key>"));
+        assert!(!out.contains(&key));
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|m| m.rule_id == "anthropic-api-key")
+        );
+    }
 
     #[test]
     fn redacts_stripe_secret_key() {
