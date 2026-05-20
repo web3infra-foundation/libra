@@ -46,3 +46,4 @@ test-results/
 playwright-report/
 .next-types/
 cloudflare-env.d.ts
+.omo

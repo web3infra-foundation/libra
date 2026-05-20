@@ -146,6 +146,38 @@ impl ProjectionStaleReason {
             ProjectionStaleReason::ManualRepair => "manual_repair",
         }
     }
+
+    /// Inverse of [`variant_name`](Self::variant_name): parse a
+    /// snake_case audit tag back into the enum. Returns `None` for
+    /// unknown / kebab-case input. Mirrors the
+    /// [`FinalDecisionVerdict::from_variant_name`] pattern — audit
+    /// readers that encounter an unknown value must fail closed
+    /// rather than substituting a default, since the reason drives
+    /// scheduler stale-repair routing.
+    pub fn from_variant_name(value: &str) -> Option<Self> {
+        match value {
+            "rebuild_required" => Some(Self::RebuildRequired),
+            "derived_record_stale" => Some(Self::DerivedRecordStale),
+            "cas_conflict" => Some(Self::CasConflict),
+            "backpressure" => Some(Self::Backpressure),
+            "manual_repair" => Some(Self::ManualRepair),
+            _ => None,
+        }
+    }
+
+    /// Every variant of [`ProjectionStaleReason`] in declaration
+    /// order. Lets the round-trip regression sweep every variant via
+    /// `all()`, so adding a sixth reason lands round-trip coverage
+    /// automatically.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::RebuildRequired,
+            Self::DerivedRecordStale,
+            Self::CasConflict,
+            Self::Backpressure,
+            Self::ManualRepair,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,6 +799,35 @@ mod tests {
                 format!("\"{expected}\""),
             );
         }
+    }
+
+    /// Round-trip every variant through
+    /// `from_variant_name(v.variant_name()) == Some(v)`. Pin both
+    /// directions over `all()` so a future rename lands at this gate
+    /// rather than at the scheduler-audit callsite.
+    #[test]
+    fn projection_stale_reason_from_variant_name_round_trips_every_variant() {
+        for reason in ProjectionStaleReason::all() {
+            assert_eq!(
+                ProjectionStaleReason::from_variant_name(reason.variant_name()),
+                Some(reason.clone()),
+                "round-trip mismatch for {reason:?}",
+            );
+        }
+    }
+
+    /// Unknown / kebab-case / empty input must yield `None`. Pin the
+    /// rejection shape so a future "lenient" parser cannot silently
+    /// map an audit log row's typo back to a valid reason.
+    #[test]
+    fn projection_stale_reason_from_variant_name_rejects_unknowns_and_kebab_form() {
+        assert_eq!(ProjectionStaleReason::from_variant_name("Stale"), None);
+        // Hyphenated form of a real tag must be rejected.
+        assert_eq!(
+            ProjectionStaleReason::from_variant_name("rebuild-required"),
+            None,
+        );
+        assert_eq!(ProjectionStaleReason::from_variant_name(""), None);
     }
 
     /// `FinalDecisionVerdict::variant_name` for all 4 variants +

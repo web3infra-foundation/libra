@@ -6,7 +6,7 @@
 //! - `libra cloud status` - Show sync status
 
 use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
+    collections::{BTreeMap, HashSet, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -921,22 +921,24 @@ pub(crate) async fn run_cloud_sync(
         )));
     }
 
-    // Query unsynced objects.
-    let query = if ctx.force {
-        object_index::Entity::find().filter(object_index::Column::RepoId.eq(&repo_id))
-    } else {
-        object_index::Entity::find()
-            .filter(object_index::Column::RepoId.eq(&repo_id))
-            .filter(object_index::Column::IsSynced.eq(0))
-    };
+    // Initialize local storage before selecting sync work. Older repositories
+    // can contain valid loose/packed objects that predate object_index writes,
+    // so cloud sync first reconciles the local object store into object_index.
+    let objects_path = path::objects();
+    let local_storage = LocalStorage::new(objects_path);
+    reconcile_local_object_index(&db_conn, &repo_id, &local_storage).await?;
 
-    let unsynced_objects = query
+    let local_objects = object_index::Entity::find()
+        .filter(object_index::Column::RepoId.eq(&repo_id))
         .all(&db_conn)
         .await
         .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
 
     // Initialize R2 storage.
     let r2_storage = create_r2_storage(&repo_id).await?;
+    let unsynced_objects =
+        select_objects_for_cloud_sync(local_objects, ctx.force, &d1_client, &r2_storage, &repo_id)
+            .await?;
 
     let total_unsynced = unsynced_objects.len();
 
@@ -967,10 +969,6 @@ pub(crate) async fn run_cloud_sync(
     }
 
     progress.on_object_total(total_unsynced);
-
-    // Initialize local storage for reading objects.
-    let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
 
     let mut synced_count = 0usize;
     let mut failed_count = 0usize;
@@ -1038,6 +1036,110 @@ pub(crate) async fn run_cloud_sync(
         metadata,
         agent_capture,
     })
+}
+
+async fn reconcile_local_object_index(
+    db_conn: &sea_orm::DatabaseConnection,
+    repo_id: &str,
+    local_storage: &LocalStorage,
+) -> CloudResult<usize> {
+    let existing_rows = object_index::Entity::find()
+        .filter(object_index::Column::RepoId.eq(repo_id))
+        .all(db_conn)
+        .await
+        .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
+    let mut existing_oids = existing_rows
+        .into_iter()
+        .map(|row| row.o_id)
+        .collect::<HashSet<_>>();
+
+    let mut hashes = local_storage
+        .search("")
+        .await
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    hashes.sort_by_key(|hash| hash.to_string());
+
+    let mut inserted = 0usize;
+    for hash in hashes {
+        let o_id = hash.to_string();
+        if existing_oids.contains(&o_id) {
+            continue;
+        }
+
+        let (data, obj_type) = local_storage.get(&hash).await.map_err(|e| {
+            CloudError::Generic(format!(
+                "Failed to read local object {o_id} while reconciling object index: {e}"
+            ))
+        })?;
+        let entry = object_index::ActiveModel {
+            o_id: Set(o_id.clone()),
+            o_type: Set(obj_type.to_string()),
+            o_size: Set(data.len() as i64),
+            repo_id: Set(repo_id.to_string()),
+            created_at: Set(chrono::Utc::now().timestamp()),
+            is_synced: Set(0),
+            ..Default::default()
+        };
+        entry
+            .insert(db_conn)
+            .await
+            .map_err(|e| CloudError::Generic(format!("Failed to insert object index: {e}")))?;
+        existing_oids.insert(o_id);
+        inserted += 1;
+    }
+
+    Ok(inserted)
+}
+
+async fn select_objects_for_cloud_sync(
+    local_objects: Vec<object_index::Model>,
+    force: bool,
+    d1_client: &D1Client,
+    r2_storage: &RemoteStorage,
+    repo_id: &str,
+) -> CloudResult<Vec<object_index::Model>> {
+    if force {
+        return Ok(local_objects);
+    }
+
+    let remote_d1_oids = d1_client
+        .get_object_indexes(repo_id)
+        .await
+        .map_err(|e| CloudError::D1(format!("Failed to query D1: {}", e.message)))?
+        .into_iter()
+        .map(|row| row.o_id)
+        .collect::<HashSet<_>>();
+
+    let mut selected = Vec::new();
+    for object in local_objects {
+        if object_needs_cloud_sync(&object, &remote_d1_oids, r2_storage).await {
+            selected.push(object);
+        }
+    }
+
+    Ok(selected)
+}
+
+async fn object_needs_cloud_sync(
+    object: &object_index::Model,
+    remote_d1_oids: &HashSet<String>,
+    r2_storage: &RemoteStorage,
+) -> bool {
+    if object.is_synced == 0 || !remote_d1_oids.contains(&object.o_id) {
+        return true;
+    }
+
+    let Ok(bytes) = hex::decode(&object.o_id) else {
+        return true;
+    };
+    let Ok(hash) = ObjectHash::from_bytes(&bytes) else {
+        return true;
+    };
+
+    !r2_storage.exist(&hash).await
 }
 
 /// Sync a single object: R2 first (idempotent), then D1
@@ -2402,6 +2504,18 @@ mod tests {
         }
     }
 
+    fn test_object_index_model(hash: ObjectHash, size: i64, is_synced: i32) -> object_index::Model {
+        object_index::Model {
+            id: 0,
+            o_id: hash.to_string(),
+            o_type: "blob".to_string(),
+            o_size: size,
+            repo_id: "test-repo".to_string(),
+            created_at: 0,
+            is_synced,
+        }
+    }
+
     struct ClearedEnvVarGuard {
         key: String,
         previous: Option<OsString>,
@@ -2647,6 +2761,96 @@ mod tests {
         assert!(output.agent_capture.sessions_failed.is_none());
         assert!(output.agent_capture.checkpoints_synced.is_none());
         assert!(output.agent_capture.checkpoints_failed.is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cloud_sync_reconciles_loose_objects_missing_from_object_index() {
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        let db_conn = db::get_db_conn_instance().await;
+        let storage = LocalStorage::new(path::objects());
+        let data = b"object written before object_index existed";
+        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+        storage
+            .put(&hash, data, ObjectType::Blob)
+            .await
+            .expect("test object should be written directly to local storage");
+
+        let before = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq("repo-reconcile"))
+            .filter(object_index::Column::OId.eq(hash.to_string()))
+            .one(&db_conn)
+            .await
+            .unwrap();
+        assert!(before.is_none());
+
+        let inserted = reconcile_local_object_index(&db_conn, "repo-reconcile", &storage)
+            .await
+            .expect("reconcile should index loose local objects");
+        assert_eq!(inserted, 1);
+
+        let row = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq("repo-reconcile"))
+            .filter(object_index::Column::OId.eq(hash.to_string()))
+            .one(&db_conn)
+            .await
+            .unwrap()
+            .expect("reconciled object should be indexed");
+        assert_eq!(row.o_type, "blob");
+        assert_eq!(row.o_size, data.len() as i64);
+        assert_eq!(row.is_synced, 0);
+
+        let inserted_again = reconcile_local_object_index(&db_conn, "repo-reconcile", &storage)
+            .await
+            .expect("reconcile should be idempotent");
+        assert_eq!(inserted_again, 0);
+    }
+
+    #[tokio::test]
+    async fn cloud_sync_reselects_synced_rows_missing_from_remote_state() {
+        let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+        let present_data = b"present remotely";
+        let present_hash = ObjectHash::from_type_and_data(ObjectType::Blob, present_data);
+        remote
+            .put(&present_hash, present_data, ObjectType::Blob)
+            .await
+            .expect("test object should upload to in-memory remote");
+
+        let mut remote_d1_oids = HashSet::from([present_hash.to_string()]);
+        let present = test_object_index_model(present_hash, present_data.len() as i64, 1);
+        assert!(
+            !object_needs_cloud_sync(&present, &remote_d1_oids, &remote).await,
+            "synced rows present in both D1 and R2 should remain skipped"
+        );
+
+        let missing_d1_data = b"missing d1";
+        let missing_d1_hash = ObjectHash::from_type_and_data(ObjectType::Blob, missing_d1_data);
+        let missing_d1 = test_object_index_model(missing_d1_hash, missing_d1_data.len() as i64, 1);
+        assert!(
+            object_needs_cloud_sync(&missing_d1, &remote_d1_oids, &remote).await,
+            "local is_synced=1 must not hide rows absent from D1"
+        );
+
+        let missing_r2_data = b"missing r2";
+        let missing_r2_hash = ObjectHash::from_type_and_data(ObjectType::Blob, missing_r2_data);
+        remote_d1_oids.insert(missing_r2_hash.to_string());
+        let missing_r2 = test_object_index_model(missing_r2_hash, missing_r2_data.len() as i64, 1);
+        assert!(
+            object_needs_cloud_sync(&missing_r2, &remote_d1_oids, &remote).await,
+            "local is_synced=1 must not hide rows absent from R2"
+        );
+
+        let unsynced = test_object_index_model(present_hash, present_data.len() as i64, 0);
+        assert!(
+            object_needs_cloud_sync(&unsynced, &remote_d1_oids, &remote).await,
+            "locally unsynced rows should still be selected"
+        );
     }
 
     /// Scenario: metadata restore into a freshly initialized repo where local refs
