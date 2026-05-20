@@ -114,6 +114,38 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     }
 }
 
+/// Return the static [`TranscriptTruncator`] adapter for the supplied
+/// kind, or `None` when the adapter does not implement that optional
+/// capability.
+///
+/// Companion to [`agent_for`] for the
+/// `libra agent checkpoint rewind --apply` dispatch path. As of
+/// v0.17.677 only [`ClaudeCodeObservedAgent`] implements the
+/// truncator trait — the other six kinds return `None` so the caller
+/// can branch cleanly without inspecting the source-of-truth match.
+///
+/// Adding a second truncator capability is a two-step process:
+/// 1. Implement `TranscriptTruncator` on the adapter struct.
+/// 2. Add a `match` arm here returning `Some(&STATIC_INSTANCE)`.
+///
+/// The exhaustive match below makes step 2 a compile-time obligation
+/// — a new variant added to `AgentKind` without a corresponding arm
+/// here fails to build, which prevents the silent
+/// "adapter exists but its truncator isn't wired" bug class.
+pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator> {
+    static CLAUDE_CODE_TRUNCATOR: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
+
+    match kind {
+        AgentKind::ClaudeCode => Some(&CLAUDE_CODE_TRUNCATOR),
+        AgentKind::Cursor
+        | AgentKind::Codex
+        | AgentKind::Gemini
+        | AgentKind::OpenCode
+        | AgentKind::Copilot
+        | AgentKind::FactoryAi => None,
+    }
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;
@@ -157,6 +189,46 @@ mod registry_tests {
                 ),
                 "agent_for({kind:?}) must return the same &'static reference on every call",
             );
+        }
+    }
+
+    /// `truncator_for` is the optional-capability companion to
+    /// `agent_for`. It returns `Some(&dyn TranscriptTruncator)` for
+    /// kinds whose adapter implements `TranscriptTruncator`, `None`
+    /// otherwise. Today only `ClaudeCode` qualifies; the other six
+    /// kinds must return `None`. Pin the per-kind expectation so a
+    /// future second truncator implementation lands a passing arm
+    /// here (and a refactor that drops the ClaudeCode arm fails the
+    /// test rather than silently disabling
+    /// `libra agent checkpoint rewind --apply`).
+    #[test]
+    fn truncator_for_returns_some_only_for_claude_code_today() {
+        for kind in AgentKind::all() {
+            let truncator = truncator_for(*kind);
+            let should_have_truncator = matches!(*kind, AgentKind::ClaudeCode);
+            assert_eq!(
+                truncator.is_some(),
+                should_have_truncator,
+                "truncator_for({kind:?}) returned {:?}; expected Some={should_have_truncator}",
+                truncator.is_some(),
+            );
+        }
+    }
+
+    /// When `truncator_for` returns `Some`, the returned adapter's
+    /// `provider_kind` must match the requested kind — the same
+    /// kind-round-trip invariant `agent_for` enforces on the broader
+    /// adapter surface.
+    #[test]
+    fn truncator_for_some_arm_reports_matching_kind() {
+        for kind in AgentKind::all() {
+            if let Some(truncator) = truncator_for(*kind) {
+                assert_eq!(
+                    truncator.provider_kind(),
+                    *kind,
+                    "truncator_for({kind:?}) returned adapter with wrong kind",
+                );
+            }
         }
     }
 }
