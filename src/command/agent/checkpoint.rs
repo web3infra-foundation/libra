@@ -431,7 +431,15 @@ async fn lookup_truncation_support(
     };
     let kind: String = r.try_get_by("agent_kind").unwrap_or_default();
     let metadata_json: String = r.try_get_by("metadata_json").unwrap_or_default();
-    if kind != "claude_code" {
+    // The string comparison goes through `AgentKind::ClaudeCode.as_db_str()`
+    // rather than a literal "claude_code" so a refactor that renames the
+    // db tag fails to compile here. ClaudeCode is the only kind that
+    // implements `TranscriptTruncator` today; when Gemini or another kind
+    // grows the capability, extend this check to use a registry lookup
+    // (e.g. AgentKind::from_db_str(&kind).map(agent_for)) rather than
+    // adding a second literal.
+    use crate::internal::ai::observed_agents::AgentKind;
+    if kind != AgentKind::ClaudeCode.as_db_str() {
         return Ok(false);
     }
     let has_transcript_path = serde_json::from_str::<serde_json::Value>(&metadata_json)
@@ -509,7 +517,13 @@ async fn truncate_agent_transcript_for_checkpoint_with_conn(
     };
     let path = std::path::PathBuf::from(&path_str);
 
-    if agent_kind != "claude_code" {
+    // String comparison routed through `AgentKind::ClaudeCode.as_db_str()`
+    // so a future rename of the db tag fails to compile here rather than
+    // silently making every checkpoint look unsupported. See the matching
+    // comment in `lookup_truncation_support`; when a second kind grows
+    // `TranscriptTruncator`, replace the literal arm with a registry lookup.
+    use crate::internal::ai::observed_agents::AgentKind;
+    if agent_kind != AgentKind::ClaudeCode.as_db_str() {
         return TranscriptTruncationOutcome::SkippedUnsupportedKind { agent_kind };
     }
 
