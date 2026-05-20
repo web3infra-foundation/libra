@@ -244,6 +244,30 @@ impl NetworkAccess {
     pub fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
+
+    /// Symmetric companion to [`is_enabled`](Self::is_enabled). `true`
+    /// when network access is `Restricted` — the default that the
+    /// sandbox runtime treats as "deny all outbound except loopback".
+    ///
+    /// Provided as a positive predicate so call sites that want to
+    /// gate on "is the network locked down?" can express that intent
+    /// directly instead of negating `is_enabled`. The
+    /// `!is_enabled() == is_restricted()` invariant is pinned by the
+    /// regression test.
+    pub fn is_restricted(self) -> bool {
+        matches!(self, Self::Restricted)
+    }
+
+    /// Every variant of [`NetworkAccess`] in declaration order
+    /// (`Restricted`, `Enabled`). Useful for tests that need to sweep
+    /// every mode (e.g. confirming both serialise to the kebab-case
+    /// wire tag) without hand-listing the variants. The fixed-length
+    /// array forces a future variant (e.g. `Denied`/`Allowlist`/`Full`
+    /// from Phase 7) to be added to this list in the same patch,
+    /// which keeps every enumeration site aligned with the enum.
+    pub fn all() -> [Self; 2] {
+        [Self::Restricted, Self::Enabled]
+    }
 }
 
 pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
@@ -846,5 +870,38 @@ mod tests {
         let serialised = serde_json::to_string(&explicit).unwrap();
         let back: NetworkService = serde_json::from_str(&serialised).unwrap();
         assert_eq!(back, explicit);
+    }
+
+    /// `NetworkAccess::is_restricted` is the positive predicate
+    /// companion of `is_enabled`. Pin the partition invariant
+    /// `!is_enabled() == is_restricted()` across every variant via
+    /// `all()` so a future variant (e.g. Phase 7's `Denied` /
+    /// `Allowlist` / `Full`) fails to compile here unless `all()`
+    /// and the predicates are extended together. Also pins both
+    /// kebab-case wire tags via serde to catch a rename that could
+    /// desynchronise the default-`Restricted` contract.
+    #[test]
+    fn network_access_predicates_partition_and_wire_tags_round_trip() {
+        let modes = NetworkAccess::all();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes, [NetworkAccess::Restricted, NetworkAccess::Enabled]);
+        assert_eq!(NetworkAccess::default(), NetworkAccess::Restricted);
+
+        for mode in NetworkAccess::all() {
+            // Partition: exactly one predicate fires per variant.
+            assert_eq!(
+                mode.is_enabled(),
+                !mode.is_restricted(),
+                "is_enabled / is_restricted must partition for {mode:?}",
+            );
+            let expected_tag = match mode {
+                NetworkAccess::Restricted => "\"restricted\"",
+                NetworkAccess::Enabled => "\"enabled\"",
+            };
+            let serialised = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serialised, expected_tag);
+            let back: NetworkAccess = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, mode);
+        }
     }
 }
