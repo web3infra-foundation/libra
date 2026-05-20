@@ -30,11 +30,16 @@ use super::runtime::hardening::{SafetyDecision, SafetyDisposition};
 
 mod command_safety;
 pub mod policy;
+pub mod proxy;
 pub mod runtime;
 
 pub use policy::{
-    NetworkAccess, SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
-    WritableRoot, sensitive_read_paths,
+    NetworkAccess, NetworkProtocol, NetworkService, NetworkServiceValidationError,
+    SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError, WritableRoot,
+    sensitive_read_paths,
+};
+pub use proxy::{
+    LoopbackOnlyProxy, NetworkDecision, NetworkProxy, NetworkRequest, NoopProxy, is_loopback_host,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
