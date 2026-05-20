@@ -49,6 +49,18 @@ impl SandboxEnforcement {
     pub fn requires_effective_sandbox(self) -> bool {
         matches!(self, Self::Required)
     }
+
+    /// Every variant of [`SandboxEnforcement`] in declaration order
+    /// (`Required`, `PreferStrict`, `BestEffort`). The fixed-length
+    /// array makes the enumeration size part of the public API — a
+    /// future fourth tier requires extending this list in the same
+    /// patch, which forces the [`as_str`](Self::as_str) match arms,
+    /// the [`FromStr`](std::str::FromStr) parser, and the
+    /// [`SandboxEnforcementParseError`] expected-list error message
+    /// to all be revisited.
+    pub fn all() -> [Self; 3] {
+        [Self::Required, Self::PreferStrict, Self::BestEffort]
+    }
 }
 
 impl std::str::FromStr for SandboxEnforcement {
@@ -517,5 +529,40 @@ mod tests {
              proxy, or rerun with explicit escalated permissions if host-level access is \
              intentional",
         );
+    }
+
+    /// `SandboxEnforcement::all()` enumerates every variant in
+    /// declaration order, cross-checks each variant's `as_str()`
+    /// against an exhaustive match (so a future fourth tier fails to
+    /// compile here unless `all()` is also extended), and round-trips
+    /// every canonical string through `FromStr`. Mirrors the
+    /// v0.17.660+ `*::all()` + round-trip pattern.
+    #[test]
+    fn sandbox_enforcement_all_enumerates_every_variant_and_round_trips() {
+        let variants = SandboxEnforcement::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                SandboxEnforcement::Required,
+                SandboxEnforcement::PreferStrict,
+                SandboxEnforcement::BestEffort,
+            ]
+        );
+
+        for variant in SandboxEnforcement::all() {
+            let canonical = variant.as_str();
+            let expected_canonical = match variant {
+                SandboxEnforcement::Required => "required",
+                SandboxEnforcement::PreferStrict => "prefer_strict",
+                SandboxEnforcement::BestEffort => "best_effort",
+            };
+            assert_eq!(canonical, expected_canonical);
+
+            let parsed: SandboxEnforcement = canonical
+                .parse()
+                .expect("canonical as_str() must round-trip through FromStr");
+            assert_eq!(parsed, variant);
+        }
     }
 }
