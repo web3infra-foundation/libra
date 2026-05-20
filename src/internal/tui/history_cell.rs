@@ -604,8 +604,13 @@ impl HistoryCell for ToolCallHistoryCell {
                 ));
             }
             for output in &entry.outputs {
+                let output = if self.group == ToolCallGroup::Input {
+                    output.trim().to_string()
+                } else {
+                    truncate_utf8(output.trim(), 240)
+                };
                 lines.extend(wrap_text(
-                    &truncate_utf8(output.trim(), 240),
+                    &output,
                     "    ",
                     width,
                     theme::text::muted().add_modifier(Modifier::DIM),
@@ -832,6 +837,10 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
         return None;
     }
 
+    if tool_name == "request_user_input" {
+        return full_json_from_text(text).or_else(|| Some(text.to_string()));
+    }
+
     // If the output looks like JSON, prefer a compact pretty-printed preview
     // so reviewers see structure rather than a long unindented blob.
     if let Some(json_preview) = json_preview_from_text(text, 180) {
@@ -874,6 +883,15 @@ fn json_preview_from_text(text: &str, max_chars: usize) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(truncate_chars(&collapse_whitespace(&preview), max_chars))
+}
+
+fn full_json_from_text(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    format_arguments_pretty(&value)
 }
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
@@ -2429,6 +2447,34 @@ mod tests {
         assert!(
             joined.contains("\"items\""),
             "expected JSON preview, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn request_user_input_success_renders_complete_answer_json() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "request_user_input".to_string(),
+            json!({"questions":[{"id":"risk_profile","prompt":"Risk profile?"}]}),
+        );
+        cell.complete_call(
+            "1",
+            Ok(ToolOutput::success(
+                r#"{"answers":{"risk_profile":{"answers":["Medium"],"comment":"selected from confirmation prompt"}},"final_marker":"visible-after-truncation-limit"}"#,
+            )),
+        );
+
+        let rendered = to_strings(cell.display_lines(120));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Input received"));
+        assert!(joined.contains("Ask for input"));
+        assert!(joined.contains("\"answers\": ["));
+        assert!(joined.contains("\"Medium\""));
+        assert!(joined.contains("visible-after-truncation-limit"));
+        assert!(
+            !joined.contains("{ \"answers\": { \"risk_profile\": {"),
+            "input confirmations should render full JSON, got:\n{joined}"
         );
     }
 

@@ -88,10 +88,12 @@ impl NetworkDecision {
 /// so the rest of the system can be wired without depending on the
 /// network crate stack.
 ///
-/// Implementors must be `Send + Sync` so the sandbox runtime can
-/// share a single instance across worker threads via
-/// `&'static dyn NetworkProxy`.
-pub trait NetworkProxy: Send + Sync {
+/// Implementors must be `Send + Sync + Debug` so the sandbox
+/// runtime can share a single instance across worker threads via
+/// `&'static dyn NetworkProxy`, and so [`NetworkProxySelection`]
+/// (and other diagnostic envelopes that carry a proxy reference)
+/// can derive `Debug` without bespoke impls per backend.
+pub trait NetworkProxy: Send + Sync + std::fmt::Debug {
     /// Stable identifier for this proxy implementation. Used by
     /// `libra sandbox status` to surface which proxy is wired up;
     /// also serialised into the audit record so downstream readers
@@ -170,6 +172,141 @@ pub fn is_loopback_host(host: &str) -> bool {
     host.parse::<IpAddr>()
         .map(|addr| addr.is_loopback())
         .unwrap_or(false)
+}
+
+/// Caller-facing decision returned by [`select_network_proxy`].
+///
+/// Encodes the three-way outcome of the `(NetworkAccess-style mode,
+/// proxy-startup result, SandboxEnforcement)` decision tree from
+/// `docs/improvement/sandbox.md` §7.4 lines 340-343 without forcing
+/// callers to import `SandboxTransformError` (the transform layer
+/// converts `Reject` into `NetworkEnforcementFailed` at the boundary).
+///
+/// Variants:
+/// - [`Proxy`](Self::Proxy): the runtime should route outbound
+///   connections through the contained `&'static dyn NetworkProxy`.
+/// - [`DegradeToDenied`](Self::DegradeToDenied): the requested
+///   allowlist proxy is unavailable but the enforcement tier allows
+///   degrading silently or with a warning — the runtime should fall
+///   back to `NoopProxy` (deny all) and surface the reason as a
+///   tracing warning. The `reason` field is the human-readable
+///   degradation message.
+/// - [`Reject`](Self::Reject): the proxy is unavailable AND the
+///   enforcement tier forbids degrading. The runtime should emit
+///   `SandboxTransformError::NetworkEnforcementFailed { reason }`.
+#[derive(Debug)]
+pub enum NetworkProxySelection {
+    /// Use this proxy for outbound network requests in this transform.
+    Proxy(&'static dyn NetworkProxy),
+    /// Allowlist requested but unavailable; the enforcement tier
+    /// permits silent or warned degradation to deny-all. `reason`
+    /// is meant to be emitted as a `tracing::warn!` event.
+    DegradeToDenied { reason: String },
+    /// Allowlist requested but unavailable AND the enforcement tier
+    /// forbids degrading. Caller maps this to
+    /// `SandboxTransformError::NetworkEnforcementFailed { reason }`.
+    Reject { reason: String },
+}
+
+/// What kind of network policy the caller is asking for.
+///
+/// Pre-positions the Phase 7 (`docs/improvement/sandbox.md` §7.1)
+/// `NetworkAccess::{Denied, Allowlist, Full}` migration without
+/// touching the existing 2-state `NetworkAccess` enum. Once Phase 7
+/// lands, this type collapses into the three-state `NetworkAccess`
+/// itself (or stays as a thin wrapper) — either way the
+/// `select_network_proxy` decision tree implementation here doesn't
+/// change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkAccessMode {
+    /// Deny all outbound except loopback. Routes through `NoopProxy`.
+    Denied,
+    /// Allow a fixed allowlist via a per-host proxy. Routes through
+    /// the supplied `allowlist_proxy` when available, otherwise
+    /// degrades per `SandboxEnforcement`.
+    Allowlist,
+    /// Allow unrestricted outbound. Routes through `LoopbackOnlyProxy`
+    /// in the v1 stub — the full proxy will be a transparent
+    /// pass-through. `Full` requires `DangerFullAccess` or explicit
+    /// approval.
+    Full,
+}
+
+/// `SandboxEnforcement` analogue local to the proxy module.
+///
+/// Duplicated so the proxy module can stay decoupled from
+/// `sandbox::policy` for testing. The caller maps from
+/// `policy::SandboxEnforcement` at the transform boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyEnforcement {
+    /// Must use a real allowlist proxy in `Allowlist` mode; fail
+    /// closed if the proxy is unavailable.
+    Required,
+    /// Prefer the allowlist proxy; on unavailability, degrade to
+    /// deny-all with a visible warning.
+    PreferStrict,
+    /// Prefer the allowlist proxy; on unavailability, silently
+    /// degrade to deny-all.
+    BestEffort,
+}
+
+/// Resolve which [`NetworkProxy`] the sandbox runtime should use for
+/// an outbound request based on the three inputs from
+/// `docs/improvement/sandbox.md` §7.4 lines 340-343:
+///
+/// 1. The requested mode (`Denied` / `Allowlist` / `Full`).
+/// 2. Whether the per-allowlist proxy has started
+///    (`allowlist_proxy = Some(_)` vs `None`).
+/// 3. The enforcement tier (`Required` / `PreferStrict` /
+///    `BestEffort`).
+///
+/// Output `NetworkProxySelection` variants map per the doc:
+///
+/// | mode      | allowlist_proxy | enforcement     | result                          |
+/// |-----------|-----------------|-----------------|---------------------------------|
+/// | Denied    | n/a             | n/a             | Proxy(NoopProxy)                |
+/// | Allowlist | Some(p)         | n/a             | Proxy(p)                        |
+/// | Allowlist | None            | Required        | Reject (NetworkEnforcementFailed)|
+/// | Allowlist | None            | PreferStrict    | DegradeToDenied + visible warn  |
+/// | Allowlist | None            | BestEffort      | DegradeToDenied (silent)        |
+/// | Full      | n/a             | n/a             | Proxy(LoopbackOnlyProxy)        |
+///
+/// `Full` returns `LoopbackOnlyProxy` in this v1 stub because the
+/// full transparent-pass-through proxy is deferred. Once it ships
+/// the arm becomes `Proxy(FullProxy)`.
+pub fn select_network_proxy(
+    mode: NetworkAccessMode,
+    allowlist_proxy: Option<&'static dyn NetworkProxy>,
+    enforcement: ProxyEnforcement,
+) -> NetworkProxySelection {
+    static NOOP: NoopProxy = NoopProxy;
+    static LOOPBACK_ONLY: LoopbackOnlyProxy = LoopbackOnlyProxy;
+
+    match mode {
+        NetworkAccessMode::Denied => NetworkProxySelection::Proxy(&NOOP),
+        NetworkAccessMode::Allowlist => match allowlist_proxy {
+            Some(proxy) => NetworkProxySelection::Proxy(proxy),
+            None => match enforcement {
+                ProxyEnforcement::Required => NetworkProxySelection::Reject {
+                    reason: "NetworkAccess::Allowlist requested but the per-allowlist proxy is \
+                             unavailable; SandboxEnforcement::Required forbids degrading to Denied"
+                        .to_string(),
+                },
+                ProxyEnforcement::PreferStrict => NetworkProxySelection::DegradeToDenied {
+                    reason: "NetworkAccess::Allowlist requested but proxy unavailable; \
+                             degrading to Denied under SandboxEnforcement::PreferStrict — \
+                             this event must be surfaced as a visible warning in sandbox status"
+                        .to_string(),
+                },
+                ProxyEnforcement::BestEffort => NetworkProxySelection::DegradeToDenied {
+                    reason: "NetworkAccess::Allowlist requested but proxy unavailable; \
+                             silently degrading to Denied under SandboxEnforcement::BestEffort"
+                        .to_string(),
+                },
+            },
+        },
+        NetworkAccessMode::Full => NetworkProxySelection::Proxy(&LOOPBACK_ONLY),
+    }
 }
 
 #[cfg(test)]
@@ -287,5 +424,120 @@ mod tests {
         // proves the dyn dispatch hit both implementations.
         assert_eq!(allowed, 1);
         assert_eq!(denied, 1);
+    }
+
+    /// `select_network_proxy(Denied, _, _)` must always route to a
+    /// proxy that denies everything, regardless of the supplied
+    /// allowlist proxy or enforcement tier. Pin the denial across
+    /// the entire enforcement / proxy-availability matrix so a
+    /// future refactor that accidentally lets a `Some(proxy)` leak
+    /// into the `Denied` arm fails this test.
+    #[test]
+    fn select_network_proxy_denied_mode_always_returns_a_denying_proxy() {
+        let live: &'static dyn NetworkProxy = &LoopbackOnlyProxy;
+        for enforcement in [
+            ProxyEnforcement::Required,
+            ProxyEnforcement::PreferStrict,
+            ProxyEnforcement::BestEffort,
+        ] {
+            for proxy in [None, Some(live)] {
+                let selection = select_network_proxy(NetworkAccessMode::Denied, proxy, enforcement);
+                let NetworkProxySelection::Proxy(p) = selection else {
+                    panic!(
+                        "Denied mode must return Proxy(_); got {selection:?} \
+                         (enforcement={enforcement:?}, proxy={})",
+                        proxy.is_some()
+                    );
+                };
+                // The returned proxy must deny a real-world host.
+                let decision = p.evaluate(&request("example.com", 443));
+                assert!(decision.is_deny(), "Denied mode proxy must deny outbound");
+            }
+        }
+    }
+
+    /// `select_network_proxy(Allowlist, Some(p), _)` must route to
+    /// the supplied proxy regardless of enforcement tier — when the
+    /// proxy is available, the enforcement tier never matters.
+    #[test]
+    fn select_network_proxy_allowlist_with_proxy_routes_to_supplied_backend() {
+        let live: &'static dyn NetworkProxy = &LoopbackOnlyProxy;
+        let live_name = live.backend_name();
+        for enforcement in [
+            ProxyEnforcement::Required,
+            ProxyEnforcement::PreferStrict,
+            ProxyEnforcement::BestEffort,
+        ] {
+            let selection =
+                select_network_proxy(NetworkAccessMode::Allowlist, Some(live), enforcement);
+            let NetworkProxySelection::Proxy(p) = selection else {
+                panic!("Allowlist with proxy must return Proxy(_); enforcement={enforcement:?}");
+            };
+            assert_eq!(
+                p.backend_name(),
+                live_name,
+                "must route to the supplied proxy",
+            );
+        }
+    }
+
+    /// `select_network_proxy(Allowlist, None, Required)` must
+    /// return `Reject` — the caller maps this to
+    /// `SandboxTransformError::NetworkEnforcementFailed`.
+    #[test]
+    fn select_network_proxy_allowlist_without_proxy_under_required_returns_reject() {
+        let selection = select_network_proxy(
+            NetworkAccessMode::Allowlist,
+            None,
+            ProxyEnforcement::Required,
+        );
+        match selection {
+            NetworkProxySelection::Reject { reason } => {
+                assert!(
+                    reason.contains("Required"),
+                    "reject reason must mention Required enforcement, got: {reason}",
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// `select_network_proxy(Allowlist, None, PreferStrict | BestEffort)`
+    /// must return `DegradeToDenied`. The reason text must mention
+    /// the enforcement tier so audit consumers can tell whether the
+    /// degradation was visible-warning (PreferStrict) or silent
+    /// (BestEffort).
+    #[test]
+    fn select_network_proxy_allowlist_without_proxy_under_soft_enforcement_degrades() {
+        for (enforcement, expected_text) in [
+            (ProxyEnforcement::PreferStrict, "PreferStrict"),
+            (ProxyEnforcement::BestEffort, "BestEffort"),
+        ] {
+            let selection = select_network_proxy(NetworkAccessMode::Allowlist, None, enforcement);
+            match selection {
+                NetworkProxySelection::DegradeToDenied { reason } => {
+                    assert!(
+                        reason.contains(expected_text),
+                        "degrade reason must mention {expected_text}; got: {reason}",
+                    );
+                }
+                other => panic!("expected DegradeToDenied for {enforcement:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// `Full` mode currently routes to `LoopbackOnlyProxy` (v1 stub).
+    /// Pin the assertion so when the full pass-through proxy lands,
+    /// this test fails and forces the implementer to update the
+    /// expected backend name — that's exactly the kind of arm change
+    /// audit consumers need to be aware of.
+    #[test]
+    fn select_network_proxy_full_mode_routes_to_loopback_only_in_v1_stub() {
+        let selection =
+            select_network_proxy(NetworkAccessMode::Full, None, ProxyEnforcement::BestEffort);
+        let NetworkProxySelection::Proxy(p) = selection else {
+            panic!("Full mode must return Proxy(_); got {selection:?}");
+        };
+        assert_eq!(p.backend_name(), "loopback-only");
     }
 }
