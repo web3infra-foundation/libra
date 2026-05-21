@@ -1329,4 +1329,195 @@ mod tests {
         assert!(output.cleanup_root_removed);
         assert!(!cleanup_root.exists());
     }
+
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`WorktreeError`]. The 12 variants compress into 5 stable
+    /// codes via the matchgroup at `:223-236` (CliInvalidTarget for
+    /// InvalidTarget / NoSuchWorktree / MainWorktree / LockedWorktree;
+    /// ConflictOperationBlocked for OperationBlocked / DirtyWorktree;
+    /// RepoCorrupt for StateCorrupt / StateRepair; IoReadFailed for
+    /// StateRead / IoRead; IoWriteFailed for StateWrite / IoWrite).
+    /// A future refactor that re-routed any of the 12 (e.g.
+    /// promoting StateCorrupt from RepoCorrupt to IoReadFailed)
+    /// would silently change client retry classification unless
+    /// every variant has its own guard.
+    ///
+    /// Continuation of the v0.17.701..v0.17.707 surface-contract
+    /// sweep. Per the prioritised backlog, worktree.rs was the
+    /// largest HIGH-priority gap on the typed-error pin list.
+    #[test]
+    fn worktree_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            WorktreeError::InvalidTarget("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            WorktreeError::OperationBlocked("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            WorktreeError::NoSuchWorktree {
+                path: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            WorktreeError::MainWorktree {
+                action: "remove",
+                path: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            WorktreeError::LockedWorktree {
+                action: "remove",
+                path: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            WorktreeError::DirtyWorktree {
+                path: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            WorktreeError::StateRead {
+                path: PathBuf::from("/ignored"),
+                source: io::Error::new(io::ErrorKind::PermissionDenied, "ignored"),
+            }
+            .stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            WorktreeError::StateWrite {
+                path: PathBuf::from("/ignored"),
+                source: io::Error::new(io::ErrorKind::PermissionDenied, "ignored"),
+            }
+            .stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            WorktreeError::StateCorrupt {
+                path: PathBuf::from("/ignored"),
+                source: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            WorktreeError::StateRepair {
+                source: io::Error::new(io::ErrorKind::PermissionDenied, "ignored"),
+            }
+            .stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            WorktreeError::IoRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            WorktreeError::IoWrite("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+    }
+
+    /// Pin the `Display` format for every variant of
+    /// [`WorktreeError`]. Four variants share a verbatim-echo body
+    /// (InvalidTarget / OperationBlocked / IoRead / IoWrite — see
+    /// the match group at `:253-256`) so distinct payload strings
+    /// are used to keep this pin meaningful: if a future refactor
+    /// accidentally collapsed two verbatim-echo arms into a single
+    /// match, the assertions would still differentiate them via
+    /// payload.
+    #[test]
+    fn worktree_error_display_pins_each_variant() {
+        assert_eq!(
+            WorktreeError::InvalidTarget("invalid target msg".to_string()).to_string(),
+            "invalid target msg",
+        );
+        assert_eq!(
+            WorktreeError::OperationBlocked("operation blocked msg".to_string()).to_string(),
+            "operation blocked msg",
+        );
+        assert_eq!(
+            WorktreeError::NoSuchWorktree {
+                path: "feature".to_string(),
+            }
+            .to_string(),
+            "no such worktree: feature",
+        );
+        assert_eq!(
+            WorktreeError::MainWorktree {
+                action: "delete",
+                path: "/repo".to_string(),
+            }
+            .to_string(),
+            "cannot delete main worktree: /repo",
+        );
+        assert_eq!(
+            WorktreeError::LockedWorktree {
+                action: "move",
+                path: "feature".to_string(),
+            }
+            .to_string(),
+            "cannot move locked worktree: feature",
+        );
+        assert_eq!(
+            WorktreeError::DirtyWorktree {
+                path: "feature".to_string(),
+            }
+            .to_string(),
+            "cannot delete dirty worktree 'feature' (uncommitted changes)",
+        );
+        let state_read = WorktreeError::StateRead {
+            path: PathBuf::from("/repo/.libra/worktrees.json"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(
+            state_read
+                .to_string()
+                .starts_with("failed to read worktree state '/repo/.libra/worktrees.json': "),
+            "unexpected: {state_read}",
+        );
+        let state_write = WorktreeError::StateWrite {
+            path: PathBuf::from("/repo/.libra/worktrees.json"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(
+            state_write
+                .to_string()
+                .starts_with("failed to write worktree state '/repo/.libra/worktrees.json': "),
+            "unexpected: {state_write}",
+        );
+        assert_eq!(
+            WorktreeError::StateCorrupt {
+                path: PathBuf::from("/repo/.libra/worktrees.json"),
+                source: "missing version".to_string(),
+            }
+            .to_string(),
+            "worktree state '/repo/.libra/worktrees.json' is corrupt: missing version",
+        );
+        let state_repair = WorktreeError::StateRepair {
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(
+            state_repair
+                .to_string()
+                .starts_with("failed to repair worktree state invariant: "),
+            "unexpected: {state_repair}",
+        );
+        assert_eq!(
+            WorktreeError::IoRead("io read msg".to_string()).to_string(),
+            "io read msg",
+        );
+        assert_eq!(
+            WorktreeError::IoWrite("io write msg".to_string()).to_string(),
+            "io write msg",
+        );
+    }
 }
