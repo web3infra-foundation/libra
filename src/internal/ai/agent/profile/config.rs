@@ -1269,6 +1269,11 @@ permission = { write = "deny", read = "allow", shell = "ask" }
              (got 0)",
         );
         assert_eq!(
+            AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 }
+                .to_string(),
+            "sub_agents.max_parallel must be at least 1 when sub_agents.enabled is true (got 0)",
+        );
+        assert_eq!(
             AgentsConfigValidationError::SessionCostWarnNotBelowMax {
                 warn: 9.0,
                 max: 5.0,
