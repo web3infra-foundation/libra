@@ -1092,6 +1092,111 @@ mod tests {
         );
     }
 
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`ResetError`]. The [`StableErrorCode`] is what `--json`
+    /// consumers branch on; ResetError has 19 variants spread across
+    /// repo-state (RepoNotFound / RepoStateInvalid / RepoCorrupt),
+    /// I/O (IoReadFailed / IoWriteFailed), and CLI input
+    /// (CliInvalidArguments / CliInvalidTarget) buckets. A future
+    /// refactor that flips even a single mapping silently changes
+    /// client retry classification.
+    ///
+    /// The existing scattered per-variant tests (HeadUnborn,
+    /// HeadRead, WorktreeRead, RevisionRead, RevisionCorrupt) keep
+    /// their narrative role of documenting one mapping at a time;
+    /// this single test owns the exhaustive surface contract so
+    /// adding a new variant trips both this list and the
+    /// `stable_code()` impl's exhaustive match.
+    #[test]
+    fn reset_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            ResetError::NotInRepo.stable_code(),
+            StableErrorCode::RepoNotFound,
+        );
+        assert_eq!(
+            ResetError::InvalidRevision("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::HeadUnborn.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            ResetError::HeadRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::HeadCorrupt("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::IndexLoad("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::IndexSave("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::HeadUpdate("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::WorktreeRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::WorktreeRestore("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::RevisionRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::RevisionCorrupt("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::InvalidPathspecEncoding("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecWithSoft("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecWithHard.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecNotMatched("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::LockedTarget("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        // Rollback delegates to its primary error's stable_code via
+        // recursion; pinning the delegation surfaces a future change
+        // that would (e.g.) shadow the primary code with the rollback
+        // code instead.
+        let rollback = ResetError::Rollback {
+            primary: Box::new(ResetError::HeadUnborn),
+            rollback: Box::new(ResetError::IndexSave("ignored".to_string())),
+        };
+        assert_eq!(rollback.stable_code(), StableErrorCode::RepoStateInvalid);
+    }
+
     #[test]
     fn test_reset_mode_detection() {
         let args = ResetArgs::try_parse_from(["reset", "--soft"]).unwrap();
