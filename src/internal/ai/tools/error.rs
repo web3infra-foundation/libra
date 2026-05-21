@@ -98,6 +98,20 @@ mod tests {
             ToolError::PathReserved(PathBuf::from(".libra/HEAD")).to_string(),
             "Path reserved for repository metadata: .libra/HEAD",
         );
+        // The Io variant deserves a pin here even though
+        // `test_tool_error_from_io` also formats it — the test name
+        // promises every variant, and Io is the only one whose inner
+        // is not a String or PathBuf, so a Display template change
+        // (e.g. dropping `IO ` or swapping the colon for a dash)
+        // could break callers that grep stdout for this exact string.
+        assert_eq!(
+            ToolError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+            .to_string(),
+            "IO error: denied",
+        );
         assert_eq!(
             ToolError::ParseError("expected object".to_string()).to_string(),
             "Failed to parse arguments: expected object",
