@@ -374,6 +374,7 @@ enum ToolCallEntryStatus {
 struct ToolOutputSummary {
     text: String,
     keep_full_text: bool,
+    is_markdown: bool,
 }
 
 impl ToolOutputSummary {
@@ -381,6 +382,7 @@ impl ToolOutputSummary {
         Self {
             text,
             keep_full_text: false,
+            is_markdown: false,
         }
     }
 
@@ -388,6 +390,15 @@ impl ToolOutputSummary {
         Self {
             text,
             keep_full_text: true,
+            is_markdown: false,
+        }
+    }
+
+    fn markdown_full(text: String) -> Self {
+        Self {
+            text,
+            keep_full_text: true,
+            is_markdown: true,
         }
     }
 }
@@ -412,6 +423,7 @@ struct ToolEntryRun<'a> {
 struct ToolEntryOutput<'a> {
     text: &'a str,
     keep_full_text: bool,
+    is_markdown: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -635,6 +647,7 @@ impl HistoryCell for ToolCallHistoryCell {
                 lines.extend(render_tool_output(
                     output.text,
                     output.keep_full_text || self.group == ToolCallGroup::Input,
+                    output.is_markdown,
                     width,
                 ));
             }
@@ -653,10 +666,15 @@ impl HistoryCell for ToolCallHistoryCell {
     }
 }
 
-fn render_tool_output(text: &str, keep_full_text: bool, width: u16) -> Vec<Line<'static>> {
+fn render_tool_output(
+    text: &str,
+    keep_full_text: bool,
+    is_markdown: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let style = theme::text::muted().add_modifier(Modifier::DIM);
     let trimmed = text.trim();
-    if trimmed.starts_with("```") {
+    if is_markdown || trimmed.starts_with("```") {
         return render_markdown_lines(trimmed, width.saturating_sub(4))
             .into_iter()
             .map(|line| {
@@ -854,10 +872,11 @@ fn summarize_tool_output_success(
     tool_name: &str,
     output: &ToolOutput,
 ) -> Option<ToolOutputSummary> {
-    // MCP tool results carry structured JSON. Render them as readable text so
-    // the transcript shows normal answers instead of raw JSON syntax.
+    // MCP tool results carry structured JSON. Render them as readable markdown
+    // so the transcript shows formatted answers instead of raw JSON syntax.
+    // Storage paths persist the original JSON via ToolOutput::into_response.
     if let ToolOutput::Mcp { result } = output {
-        return human_json_output(result).map(ToolOutputSummary::full);
+        return human_json_output(result).map(ToolOutputSummary::markdown_full);
     }
 
     let text = output.as_text()?.trim();
@@ -865,10 +884,10 @@ fn summarize_tool_output_success(
         return None;
     }
 
-    // If the output looks like JSON, render the full value as readable text
-    // rather than a partial preview or a raw JSON code block.
+    // If the output looks like JSON, render the full value as markdown rather
+    // than a partial preview or a raw JSON code block.
     if let Some(json_summary) = human_json_from_text(text) {
-        return Some(ToolOutputSummary::full(json_summary));
+        return Some(ToolOutputSummary::markdown_full(json_summary));
     }
 
     if tool_name == "request_user_input" {
@@ -904,6 +923,12 @@ fn human_json_from_text(text: &str) -> Option<String> {
     human_json_output(&value)
 }
 
+/// Render a JSON value as developer-readable markdown.
+///
+/// The TUI surface uses this to display JSON-shaped tool output (MCP results
+/// and any text that parses as JSON). Storage paths continue to persist the
+/// original JSON via `ToolOutput::into_response` — only the on-screen rendering
+/// is converted here.
 fn human_json_output(value: &Value) -> Option<String> {
     if value.is_null() {
         return None;
@@ -923,7 +948,7 @@ fn human_json_output(value: &Value) -> Option<String> {
     if let Some(object) = value.as_object()
         && let Some(answers) = object.get("answers").and_then(Value::as_object)
     {
-        lines.push("Answers".to_string());
+        lines.push("### Answers".to_string());
         for (question_id, answer) in answers {
             push_answer_entry(question_id, answer, 0, &mut lines);
         }
@@ -948,7 +973,12 @@ fn push_answer_entry(question_id: &str, value: &Value, indent: usize, lines: &mu
         && let Some(answers) = object.get("answers").and_then(Value::as_array)
     {
         let answer = format_flat_array(answers).unwrap_or_else(|| "(skipped)".to_string());
-        lines.push(format!("{}{}: {}", " ".repeat(indent), question_id, answer));
+        lines.push(format!(
+            "{}- **{}**: {}",
+            " ".repeat(indent),
+            question_id,
+            answer
+        ));
         for (key, value) in object {
             if key != "answers" {
                 push_human_json_entry(key, value, indent + 2, lines);
@@ -966,10 +996,12 @@ fn push_human_json_value(
     indent: usize,
     lines: &mut Vec<String>,
 ) {
+    let pad = " ".repeat(indent);
+
     if let Some(flat) = format_flat_value(value) {
         match label {
-            Some(label) => lines.push(format!("{}{}: {}", " ".repeat(indent), label, flat)),
-            None => lines.push(format!("{}{}", " ".repeat(indent), flat)),
+            Some(label) => lines.push(format!("{pad}- **{label}**: {flat}")),
+            None => lines.push(format!("{pad}{flat}")),
         }
         return;
     }
@@ -978,14 +1010,16 @@ fn push_human_json_value(
         Value::Object(object) => {
             if object.is_empty() {
                 if let Some(label) = label {
-                    lines.push(format!("{}{}: (empty)", " ".repeat(indent), label));
+                    lines.push(format!("{pad}- **{label}**: _(empty)_"));
                 }
                 return;
             }
-            if let Some(label) = label {
-                lines.push(format!("{}{}:", " ".repeat(indent), label));
-            }
-            let child_indent = if label.is_some() { indent + 2 } else { indent };
+            let child_indent = if let Some(label) = label {
+                lines.push(format!("{pad}- **{label}**:"));
+                indent + 2
+            } else {
+                indent
+            };
             for (key, value) in object {
                 push_human_json_entry(key, value, child_indent, lines);
             }
@@ -993,23 +1027,25 @@ fn push_human_json_value(
         Value::Array(array) => {
             if array.is_empty() {
                 if let Some(label) = label {
-                    lines.push(format!("{}{}: (none)", " ".repeat(indent), label));
+                    lines.push(format!("{pad}- **{label}**: _(none)_"));
                 }
                 return;
             }
             if let Some(flat) = format_flat_array(array) {
-                if let Some(label) = label {
-                    lines.push(format!("{}{}: {}", " ".repeat(indent), label, flat));
-                } else {
-                    lines.push(format!("{}{}", " ".repeat(indent), flat));
+                match label {
+                    Some(label) => lines.push(format!("{pad}- **{label}**: {flat}")),
+                    None => lines.push(format!("{pad}{flat}")),
                 }
                 return;
             }
-            if let Some(label) = label {
-                lines.push(format!("{}{}:", " ".repeat(indent), label));
-            }
+            let child_indent = if let Some(label) = label {
+                lines.push(format!("{pad}- **{label}**:"));
+                indent + 2
+            } else {
+                indent
+            };
             for item in array {
-                push_human_json_array_item(item, indent + 2, lines);
+                push_human_json_array_item(item, child_indent, lines);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
@@ -1021,24 +1057,24 @@ fn push_human_json_entry(key: &str, value: &Value, indent: usize, lines: &mut Ve
 }
 
 fn push_human_json_array_item(value: &Value, indent: usize, lines: &mut Vec<String>) {
-    let prefix = format!("{}- ", " ".repeat(indent));
+    let pad = " ".repeat(indent);
     if let Some(flat) = format_flat_value(value) {
-        lines.push(format!("{prefix}{flat}"));
+        lines.push(format!("{pad}- {flat}"));
         return;
     }
 
     match value {
         Value::Object(object) => {
             if object.is_empty() {
-                lines.push(format!("{prefix}(empty)"));
+                lines.push(format!("{pad}- _(empty)_"));
                 return;
             }
             let mut entries = object.iter();
             if let Some((key, value)) = entries.next() {
                 if let Some(flat) = format_flat_value(value) {
-                    lines.push(format!("{prefix}{key}: {flat}"));
+                    lines.push(format!("{pad}- **{key}**: {flat}"));
                 } else {
-                    lines.push(format!("{prefix}{key}:"));
+                    lines.push(format!("{pad}- **{key}**:"));
                     push_human_json_value(None, value, indent + 4, lines);
                 }
             }
@@ -1048,9 +1084,9 @@ fn push_human_json_array_item(value: &Value, indent: usize, lines: &mut Vec<Stri
         }
         Value::Array(array) => {
             if let Some(flat) = format_flat_array(array) {
-                lines.push(format!("{prefix}{flat}"));
+                lines.push(format!("{pad}- {flat}"));
             } else {
-                lines.push(format!("{}-", " ".repeat(indent)));
+                lines.push(format!("{pad}-"));
                 for item in array {
                     push_human_json_array_item(item, indent + 2, lines);
                 }
@@ -1135,6 +1171,7 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
             ToolCallEntryStatus::Success(Some(output)) => Some(ToolEntryOutput {
                 text: output.text.as_str(),
                 keep_full_text: output.keep_full_text,
+                is_markdown: output.is_markdown,
             }),
             _ => None,
         };
@@ -2296,6 +2333,7 @@ mod tests {
     use super::{
         AssistantHistoryCell, HistoryCell, OrchestratorResultHistoryCell, PlanSummaryHistoryCell,
         PlanUpdateHistoryCell, ThinkingHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        human_json_output,
     };
     use crate::internal::ai::{
         intentspec::{
@@ -2659,6 +2697,91 @@ mod tests {
         assert!(
             !joined.contains("\"items\""),
             "should not render raw JSON keys, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn human_json_output_emits_markdown_for_nested_objects() {
+        let value = json!({
+            "items": [
+                {"id": 1, "name": "alpha"}
+            ],
+            "tags": ["a", "b", "c"],
+            "ok": true
+        });
+        let rendered = human_json_output(&value).expect("non-empty markdown");
+
+        // Bold-key bullets with nested list indentation (CommonMark-friendly).
+        assert!(
+            rendered.contains("- **items**:"),
+            "expected bullet-bold key for objects, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("  - **id**: 1"),
+            "expected nested bullet for object entries, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("- **tags**: a, b, c"),
+            "expected primitive arrays joined inline, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("- **ok**: true"),
+            "expected primitive booleans inline, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn human_json_output_emits_answers_heading() {
+        let value = json!({
+            "answers": {
+                "risk_profile": {"answers": ["Medium"]}
+            }
+        });
+        let rendered = human_json_output(&value).expect("non-empty markdown");
+        assert!(
+            rendered.contains("### Answers"),
+            "expected markdown H3 heading for the Answers branch, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("- **risk_profile**: Medium"),
+            "expected bold question id with answer, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn json_tool_output_renders_with_markdown_bullets() {
+        // Confirms the rendered terminal output is going through the markdown
+        // pipeline (bullets become '•') rather than wrap_text (which would
+        // keep the literal '-' marker).
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "fetch_inventory".to_string(),
+            json!({"limit": 1}),
+        );
+        cell.complete_call(
+            "1",
+            Ok(ToolOutput::success(
+                r#"{"status":"ok","items":[{"id":1,"name":"alpha"}]}"#,
+            )),
+        );
+        let rendered = to_strings(cell.display_lines(120));
+        let joined = rendered.join("\n");
+
+        assert!(
+            joined.contains("• status: ok"),
+            "expected markdown bullet for primitive field, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("• items:"),
+            "expected markdown bullet for nested array, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("• id: 1"),
+            "expected nested object entries to render through markdown pipeline, got:\n{joined}"
+        );
+        assert!(
+            !joined.contains("- **items**"),
+            "raw markdown markup should not leak through to terminal output, got:\n{joined}"
         );
     }
 
