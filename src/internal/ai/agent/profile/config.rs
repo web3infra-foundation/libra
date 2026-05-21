@@ -148,6 +148,9 @@ pub struct SubAgentsConfig {
 
     #[serde(default = "default_sub_agents_max_parallel")]
     pub max_parallel: u32,
+
+    #[serde(default)]
+    pub auto_merge: AutoMergeConfig,
 }
 
 impl Default for SubAgentsConfig {
@@ -155,12 +158,36 @@ impl Default for SubAgentsConfig {
         Self {
             enabled: false,
             max_parallel: default_sub_agents_max_parallel(),
+            auto_merge: AutoMergeConfig::default(),
         }
     }
 }
 
 fn default_sub_agents_max_parallel() -> u32 {
     2
+}
+
+/// `[code.sub_agents.auto_merge]` — CEX-S2-15 auto-merge feature flag.
+///
+/// Defaults to disabled per CEX-S2-15 acceptance criterion (4):
+/// auto-merge of human-gated `MergeCandidate` instances may only be
+/// enabled after a 30-day operator-collected fixture demonstrates
+/// `conflict_rate < 5%` and `rollback_rate < 1%`. This card lands only
+/// the schema gate — the CEX-S2-15 ValidatorEngine + risk-score
+/// pipeline that consumes the flag does not exist yet.
+///
+/// Modelled as a structured subsection rather than a bare
+/// `auto_merge: bool` on [`SubAgentsConfig`] because CEX-S2-15 will
+/// need companion knobs (window length, minimum sample size, …) and
+/// adding fields inside an existing table is additive — widening a
+/// scalar field to a table later would be a breaking schema change.
+/// Landing the table shape now keeps the future CEX-S2-15 patch
+/// confined to validator wiring.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoMergeConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// `[code.goal]`. Mirrors the doc's defaults: feature off, ask before
@@ -399,6 +426,11 @@ pub enum AgentsConfigValidationError {
     SubAgentsMaxParallelMustBePositive { value: u32 },
 
     #[error(
+        "sub_agents.auto_merge.enabled requires sub_agents.enabled = true (cannot auto-merge when the sub-agent runtime gate is off)"
+    )]
+    AutoMergeRequiresSubAgentsEnabled,
+
+    #[error(
         "budget.warn_session_cost_usd ({warn}) must be strictly less than max_session_cost_usd ({max})"
     )]
     SessionCostWarnNotBelowMax { warn: f64, max: f64 },
@@ -481,6 +513,17 @@ impl AgentsConfig {
         if self.sub_agents.enabled && self.sub_agents.max_parallel == 0 {
             errors
                 .push(AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 });
+        }
+
+        // auto_merge.enabled cannot be true while the parent sub_agents
+        // gate is off — that would be a programmer error declaring a
+        // dormant sub-feature enabled on a dormant runtime. Schema-only
+        // landing: the CEX-S2-15 ValidatorEngine + risk-score pipeline
+        // that actually consumes `auto_merge.enabled` does not exist
+        // yet, but the contract surface must reject the misconfigured
+        // combination at config load.
+        if self.sub_agents.auto_merge.enabled && !self.sub_agents.enabled {
+            errors.push(AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled);
         }
 
         // goal.auto_continue_on_resume value enum.
@@ -667,6 +710,9 @@ max_steps = 20
         // the scheduler-side observer budget in CEX-S2-14.
         assert!(!cfg.sub_agents.enabled);
         assert_eq!(cfg.sub_agents.max_parallel, 2);
+        // CEX-S2-15 auto_merge subsection — default off until the 30-day
+        // conflict_rate/rollback_rate fixture is collected.
+        assert!(!cfg.sub_agents.auto_merge.enabled);
         assert!(!cfg.goal.enabled);
         assert_eq!(cfg.goal.auto_continue_on_resume, "ask");
         assert_eq!(cfg.goal.max_continuation_loops, 50);
@@ -753,6 +799,95 @@ max_parallels = 3
         let message = err.to_string();
         assert!(
             message.contains("max_parallels") || message.contains("unknown field"),
+            "expected error to mention the unknown field, got: {message}",
+        );
+    }
+
+    /// `[code.sub_agents.auto_merge]` parses with `enabled = true` when
+    /// the parent `sub_agents` gate is also on, and round-trips through
+    /// `to_toml_string`. Mirrors `sub_agents_section_parses_and_round_trips`
+    /// to lock the auto_merge subsection as part of the public schema.
+    #[test]
+    fn sub_agents_auto_merge_parses_and_round_trips() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = true
+
+[code.sub_agents.auto_merge]
+enabled = true
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        assert!(cfg.sub_agents.enabled);
+        assert!(cfg.sub_agents.auto_merge.enabled);
+        cfg.validate()
+            .expect("auto_merge enabled with parent enabled must validate");
+
+        // Round-trip: serialise then re-parse — the nested table shape
+        // must survive without flattening into a scalar.
+        let serialised = cfg.to_toml_string().expect("to_toml");
+        let reparsed = AgentsConfig::from_toml_str(&serialised).expect("re-parse");
+        assert_eq!(reparsed.sub_agents, cfg.sub_agents);
+    }
+
+    /// `auto_merge.enabled = true` while `sub_agents.enabled = false`
+    /// is a programmer error: enabling a sub-feature gate on a dormant
+    /// runtime never executes anything, so it must fail at config load
+    /// rather than silently no-op.
+    #[test]
+    fn sub_agents_auto_merge_requires_parent_enabled() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = false
+
+[code.sub_agents.auto_merge]
+enabled = true
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        let err = cfg
+            .validate()
+            .expect_err("auto_merge enabled with parent disabled must fail");
+        assert!(
+            err.errors.iter().any(|e| matches!(
+                e,
+                AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled
+            )),
+            "expected AutoMergeRequiresSubAgentsEnabled, got {:?}",
+            err.errors,
+        );
+    }
+
+    /// `auto_merge.enabled = false` (default) with `sub_agents.enabled
+    /// = false` is the dormant baseline — both gates off must validate
+    /// cleanly so a fresh install never has to touch the sub_agents
+    /// table just to keep everything off.
+    #[test]
+    fn sub_agents_auto_merge_default_is_allowed_when_parent_disabled() {
+        let toml_str = r#"
+[code.sub_agents]
+enabled = false
+
+[code.sub_agents.auto_merge]
+enabled = false
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
+        cfg.validate()
+            .expect("disabled + auto_merge disabled must validate (both gates off)");
+    }
+
+    /// `deny_unknown_fields` on `AutoMergeConfig` catches typo'd keys
+    /// (`enable` vs `enabled`) at load time rather than silently
+    /// accepting them — important because the auto-merge gate must
+    /// fail loud rather than appearing on by accident.
+    #[test]
+    fn sub_agents_auto_merge_rejects_unknown_keys() {
+        let toml_str = r#"
+[code.sub_agents.auto_merge]
+enable = true
+"#;
+        let err = AgentsConfig::from_toml_str(toml_str).expect_err("typo'd key must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("enable") || message.contains("unknown field"),
             "expected error to mention the unknown field, got: {message}",
         );
     }
@@ -1162,6 +1297,11 @@ permission = { write = "deny", read = "allow", shell = "ask" }
             .to_string(),
             "budget.per_agent.unknown references an agent that is not declared under \
              [code.agents.unknown]",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled.to_string(),
+            "sub_agents.auto_merge.enabled requires sub_agents.enabled = true (cannot auto-merge \
+             when the sub-agent runtime gate is off)",
         );
     }
 }
