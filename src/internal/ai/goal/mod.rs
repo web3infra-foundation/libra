@@ -35,6 +35,7 @@
 //! external `ObservedAgent` capture path.
 
 pub mod event;
+pub mod prompt;
 pub mod spec;
 pub mod state;
 pub mod supervisor;
@@ -45,6 +46,7 @@ pub use event::{
     GoalEvent, GoalEventEnvelope, GoalProgressRecord, validate_completion_claim_shape,
     validate_completion_report_shape,
 };
+pub use prompt::{DefaultGoalContinuationPromptBuilder, GoalContinuationPromptBuilder};
 pub use spec::{
     GoalActor, GoalBudget, GoalCriterion, GoalEvidencePolicy, GoalSpec, GoalSpecError,
     MAX_OBJECTIVE_LEN,
@@ -55,8 +57,9 @@ pub use state::{
     GoalVerificationRecord, MAX_REPLAY_REJECTIONS, PendingGoalClaim, apply, replay,
 };
 pub use supervisor::{
-    DefaultGoalContinuationPromptBuilder, GoalContinuationPromptBuilder, GoalEventClock,
-    GoalLoopDecision, GoalStopPolicy, GoalSupervisor, GoalSupervisorStep, GoalTurnOutcome,
+    GoalEventClock, GoalLoopDecision, GoalStopPolicy, GoalSupervisedRun, GoalSupervisor,
+    GoalSupervisorStep, GoalTurnOutcome, goal_turn_outcome_from_tool_loop_turn,
+    run_goal_supervised_tool_loop,
 };
 pub use verifier::{
     DeterministicGoalVerifier, GoalVerifier, GoalVerifierContext, GoalVerifyOutcome,

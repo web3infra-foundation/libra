@@ -51,11 +51,20 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::internal::ai::{
+    agent::runtime::tool_loop::{
+        ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop_with_history_and_observer,
+    },
+    completion::{AssistantContent, CompletionModel, CompletionUsage, Message},
+    tools::ToolRegistry,
+};
+
 use super::{
     event::{
         GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalEvent, GoalEventEnvelope,
         GoalProgressRecord,
     },
+    prompt::{GoalContinuationPromptBuilder, trimmed_excerpt},
     spec::GoalActor,
     state::GoalState,
     verifier::{GoalVerifier, GoalVerifierContext, GoalVerifyOutcome},
@@ -190,134 +199,26 @@ pub struct GoalSupervisorStep {
     pub decision: GoalLoopDecision,
 }
 
-/// Continuation-prompt formatter. Default implementation
-/// [`DefaultGoalContinuationPromptBuilder`] is sufficient for
-/// OC-Phase 6; the trait shape lets P6.7 E2E tests plug a fake
-/// builder for byte-stable golden assertions, and lets future
-/// localisation work (CN/EN bilingual prompts) layer in without
-/// touching the supervisor.
-pub trait GoalContinuationPromptBuilder {
-    fn build(&self, state: &GoalState, outcome: &GoalTurnOutcome) -> String;
+/// Result from running one Goal-bound supervisor loop around the
+/// normal tool loop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalSupervisedRun {
+    pub state: GoalState,
+    pub events: Vec<GoalEventEnvelope>,
+    pub decision: GoalLoopDecision,
+    pub final_text: String,
+    pub history: Vec<Message>,
+    pub loops_run: u32,
 }
 
-/// Default continuation-prompt builder. The wording is opinionated
-/// but stable: it lists the objective, the still-missing required
-/// criteria, recent context (rejection reason / failed tool / final
-/// text the model just gave), and the minimum next step. Phrased so
-/// the model is nudged back into the completion protocol rather
-/// than told what to do verbatim.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultGoalContinuationPromptBuilder;
-
-impl GoalContinuationPromptBuilder for DefaultGoalContinuationPromptBuilder {
-    fn build(&self, state: &GoalState, outcome: &GoalTurnOutcome) -> String {
-        let mut out = String::new();
-        out.push_str("Goal still active.\n");
-        out.push_str(&format!("Objective: {}\n", state.spec.objective));
-
-        // Missing required criteria — the verifier will reject any
-        // claim that doesn't cover these, so surface them every turn.
-        let missing_required: Vec<&str> = state
-            .spec
-            .acceptance_criteria
-            .iter()
-            .filter(|c| c.required && !state.completed_criteria.contains(c.id.as_str()))
-            .map(|c| c.id.as_str())
-            .collect();
-        if missing_required.is_empty() {
-            out.push_str("All required criteria already satisfied; ");
-            out.push_str("call `submit_goal_complete` when the workspace evidence is in place.\n");
-        } else {
-            out.push_str("Required criteria still pending: ");
-            out.push_str(&missing_required.join(", "));
-            out.push('\n');
-        }
-
-        // Outcome-specific nudge.
-        match outcome {
-            GoalTurnOutcome::Progressing {
-                last_assistant_text,
-            } => {
-                if let Some(text) = last_assistant_text
-                    && !text.trim().is_empty()
-                {
-                    out.push_str(&format!("Last assistant note: {}\n", trimmed_excerpt(text)));
-                }
-                out.push_str(
-                    "Continue the work — call tools or `update_goal_progress` to record \
-                     progress, then `submit_goal_complete` when you have evidence for every \
-                     required criterion.\n",
-                );
-            }
-            GoalTurnOutcome::FinalTextWithoutClaim { text } => {
-                out.push_str(&format!("Last assistant text: {}\n", trimmed_excerpt(text)));
-                out.push_str(
-                    "Final text alone does not complete a Goal. Call `submit_goal_complete` \
-                     with the full evidence list, or `update_goal_progress` if work remains.\n",
-                );
-            }
-            GoalTurnOutcome::ProgressUpdate { record } => {
-                out.push_str(&format!(
-                    "Recorded progress: {}\n",
-                    trimmed_excerpt(&record.summary)
-                ));
-                out.push_str("Drive the next step toward the remaining criteria.\n");
-            }
-            GoalTurnOutcome::CompletionClaim { .. } => {
-                // Verifier rejected — `step()` already appended the
-                // CompletionRejected event, so the missing list and
-                // reason live in `state.blockers`.
-                if let Some(blocker) = state.blockers.last()
-                    && let GoalBlockReason::CompletionRejected { missing, reason } = &blocker.reason
-                {
-                    out.push_str(&format!(
-                        "Verifier rejected the last claim: {}\nMissing: {}\n",
-                        reason,
-                        missing.join(", "),
-                    ));
-                }
-                out.push_str(
-                    "Address the missing items, then call `submit_goal_complete` again \
-                     with the full evidence list.\n",
-                );
-            }
-            // The remaining variants either lead to AwaitUser /
-            // Cancelled / Completed (where no continuation prompt
-            // is built) or are caller-internal signals that hit a
-            // Blocked event the supervisor records. The
-            // continuation prompt for the *next* turn (after the
-            // user resolves the blocker) is built from the new
-            // `state.blockers` and lands on the `Progressing` arm
-            // above. Default to a generic nudge here so a caller
-            // that asks for a prompt anyway gets something useful.
-            _ => {
-                if let Some(blocker) = state.blockers.last() {
-                    out.push_str(&format!("Outstanding blocker: {:?}\n", blocker.reason,));
-                }
-                out.push_str("Resume by addressing the outstanding blocker.\n");
-            }
-        }
-
-        out
-    }
-}
-
-/// Trim and excerpt a long piece of text so the continuation prompt
-/// stays bounded. The doc forbids stuffing raw transcripts back into
-/// Goal events / prompts (opencode.md:619-625), and the supervisor's
-/// generated prompt counts as one of those entry points.
-fn trimmed_excerpt(text: &str) -> String {
-    const MAX_EXCERPT_BYTES: usize = 320;
-    let trimmed = text.trim();
-    if trimmed.len() <= MAX_EXCERPT_BYTES {
-        return trimmed.to_string();
-    }
-    let mut end = MAX_EXCERPT_BYTES;
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &trimmed[..end])
-}
+// The `GoalContinuationPromptBuilder` trait, the default impl
+// (`DefaultGoalContinuationPromptBuilder`), and the shared
+// `trimmed_excerpt` helper now live in `super::prompt` so the
+// supervisor's decision tree reads as a sequence of state-machine
+// rules rather than a 110-line prose template. The supervisor still
+// uses `trimmed_excerpt` for its `FinalTextWithoutClaim` synthetic-
+// progress arm (the doc's rule 4 path), so it's imported back via
+// the `use super::prompt::{...}` line at the top of this file.
 
 /// Goal-mode supervisor. Holds the stop policy + verifier + prompt
 /// builder; [`step`](Self::step) is the one entry point that turns a
@@ -629,6 +530,160 @@ where
     }
 }
 
+/// Run `run_tool_loop` under a Goal supervisor until the Goal reaches
+/// a terminal or pause boundary. A plain assistant final answer never
+/// releases the session to idle while the Goal is active: it is folded
+/// into `ProgressRecorded`, then the continuation prompt re-enters
+/// the normal tool loop.
+pub async fn run_goal_supervised_tool_loop<M, O, V, P>(
+    model: &M,
+    mut history: Vec<Message>,
+    initial_prompt: impl Into<String>,
+    registry: &ToolRegistry,
+    mut config: ToolLoopConfig,
+    observer: &mut O,
+    mut state: GoalState,
+    supervisor: &GoalSupervisor<V, P>,
+    verifier_ctx: &dyn GoalVerifierContext,
+    clock: &dyn GoalEventClock,
+) -> Result<GoalSupervisedRun, crate::internal::ai::completion::CompletionError>
+where
+    M: CompletionModel,
+    M::Response: CompletionUsage,
+    O: ToolLoopObserver,
+    V: GoalVerifier,
+    P: GoalContinuationPromptBuilder,
+{
+    ensure_goal_terminal_tool(&mut config, "submit_goal_complete");
+    let max_loops = state.spec.budget.max_continuation_loops.max(1);
+    let mut prompt = initial_prompt.into();
+    let mut events = Vec::new();
+    let mut loops_run = 0u32;
+    let mut final_text = String::new();
+
+    loop {
+        loops_run = loops_run.saturating_add(1);
+        let turn = run_tool_loop_with_history_and_observer(
+            model,
+            history,
+            prompt,
+            registry,
+            config.clone(),
+            observer,
+        )
+        .await?;
+        final_text = turn.final_text.clone();
+        history = turn.history.clone();
+        let outcome = goal_turn_outcome_from_tool_loop_turn(&turn);
+        let step = supervisor.step(&state, outcome, verifier_ctx, clock);
+        apply_supervisor_events(&mut state, &step.events);
+        events.extend(step.events.clone());
+
+        match step.decision {
+            GoalLoopDecision::Continue {
+                prompt: next_prompt,
+            } => {
+                if loops_run >= max_loops {
+                    let cap_step = supervisor.step(
+                        &state,
+                        GoalTurnOutcome::LoopLimitReached { loops_run },
+                        verifier_ctx,
+                        clock,
+                    );
+                    apply_supervisor_events(&mut state, &cap_step.events);
+                    events.extend(cap_step.events.clone());
+                    return Ok(GoalSupervisedRun {
+                        state,
+                        events,
+                        decision: cap_step.decision,
+                        final_text,
+                        history,
+                        loops_run,
+                    });
+                }
+                prompt = next_prompt;
+            }
+            decision => {
+                return Ok(GoalSupervisedRun {
+                    state,
+                    events,
+                    decision,
+                    final_text,
+                    history,
+                    loops_run,
+                });
+            }
+        }
+    }
+}
+
+fn ensure_goal_terminal_tool(config: &mut ToolLoopConfig, tool_name: &str) {
+    let terminal_tools = config.terminal_tools.get_or_insert_with(Vec::new);
+    if !terminal_tools.iter().any(|name| name == tool_name) {
+        terminal_tools.push(tool_name.to_string());
+    }
+}
+
+fn apply_supervisor_events(state: &mut GoalState, events: &[GoalEventEnvelope]) {
+    for envelope in events {
+        let _ = super::state::apply(state, envelope);
+    }
+}
+
+pub fn goal_turn_outcome_from_tool_loop_turn(turn: &ToolLoopTurn) -> GoalTurnOutcome {
+    if let Some(claim) = latest_submit_goal_complete_claim(turn) {
+        return GoalTurnOutcome::CompletionClaim { claim };
+    }
+    if let Some(record) = latest_update_goal_progress_record(turn) {
+        return GoalTurnOutcome::ProgressUpdate { record };
+    }
+    if !turn.final_text.trim().is_empty() {
+        return GoalTurnOutcome::FinalTextWithoutClaim {
+            text: turn.final_text.clone(),
+        };
+    }
+    GoalTurnOutcome::Progressing {
+        last_assistant_text: None,
+    }
+}
+
+fn latest_submit_goal_complete_claim(turn: &ToolLoopTurn) -> Option<GoalCompletionClaim> {
+    latest_assistant_tool_arguments(turn, "submit_goal_complete")
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn latest_update_goal_progress_record(turn: &ToolLoopTurn) -> Option<GoalProgressRecord> {
+    latest_assistant_tool_arguments(turn, "update_goal_progress")
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn latest_assistant_tool_arguments(
+    turn: &ToolLoopTurn,
+    tool_name: &str,
+) -> Option<serde_json::Value> {
+    turn.history.iter().rev().find_map(|message| {
+        let Message::Assistant { content, .. } = message else {
+            return None;
+        };
+        content.iter().rev().find_map(|item| {
+            let AssistantContent::ToolCall(call) = item else {
+                return None;
+            };
+            if call.function.name != tool_name {
+                return None;
+            }
+            normalize_tool_arguments_value(&call.function.arguments)
+        })
+    })
+}
+
+fn normalize_tool_arguments_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(raw) => serde_json::from_str(raw).ok(),
+        other => Some(other.clone()),
+    }
+}
+
 /// Helper for the family of outcomes that all map to a single
 /// `Blocked { reason }` event + `AwaitUser { question }`. Keeps the
 /// match arms readable.
@@ -676,9 +731,9 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::goal::{
-        DeterministicGoalVerifier, GoalActor, GoalBudget, GoalCompletionClaim, GoalCriterion,
-        GoalEvidencePolicy, GoalEvidenceRef, GoalEvidenceTarget, GoalSpec, GoalStatus,
-        GoalVerificationRecord, RecentToolCall,
+        DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor, GoalBudget,
+        GoalCompletionClaim, GoalCriterion, GoalEvidencePolicy, GoalEvidenceRef,
+        GoalEvidenceTarget, GoalSpec, GoalStatus, GoalVerificationRecord, RecentToolCall,
     };
 
     fn fixture_now() -> DateTime<Utc> {
