@@ -190,4 +190,65 @@ mod tests {
             "Goal objective failed validation: empty objective",
         );
     }
+
+    /// Pins the HTTP `status()` mapping for every variant. The wire
+    /// contract surface includes both the human message (pinned in
+    /// `tui_control_error_display_pins_each_variant`) and the status
+    /// code — a future refactor that flips a 409 to a 500 (or adds a
+    /// new variant defaulting to 500 by accident) would silently
+    /// change client retry / error-classification behaviour. Listing
+    /// every variant here keeps the parallel surface honest.
+    #[test]
+    fn tui_control_error_status_pins_each_variant() {
+        assert_eq!(TuiControlError::Busy.status(), 409);
+        assert_eq!(TuiControlError::InteractionNotActive.status(), 409);
+        assert_eq!(TuiControlError::UnsupportedInteractionKind.status(), 422);
+        assert_eq!(TuiControlError::ControllerConflict.status(), 409);
+        assert_eq!(
+            TuiControlError::Internal("ignored".to_string()).status(),
+            500,
+        );
+        assert_eq!(TuiControlError::GoalAlreadyActive.status(), 409);
+        assert_eq!(TuiControlError::GoalNotActive.status(), 409);
+        assert_eq!(
+            TuiControlError::GoalInvalidObjective("ignored".to_string()).status(),
+            422,
+        );
+    }
+
+    /// Pins the stable `code()` mapping for every variant. Clients
+    /// (HTTP and automation) key off these SCREAMING_SNAKE_CASE codes
+    /// rather than parsing the human message; a typo or renaming
+    /// `SESSION_BUSY` → `BUSY_SESSION` would silently break every
+    /// consumer that branches on the code. Pinning every variant
+    /// turns a rename into a test failure.
+    #[test]
+    fn tui_control_error_code_pins_each_variant() {
+        assert_eq!(TuiControlError::Busy.code(), "SESSION_BUSY");
+        assert_eq!(
+            TuiControlError::InteractionNotActive.code(),
+            "INTERACTION_NOT_ACTIVE",
+        );
+        assert_eq!(
+            TuiControlError::UnsupportedInteractionKind.code(),
+            "UNSUPPORTED_INTERACTION_KIND",
+        );
+        assert_eq!(
+            TuiControlError::ControllerConflict.code(),
+            "CONTROLLER_CONFLICT",
+        );
+        assert_eq!(
+            TuiControlError::Internal("ignored".to_string()).code(),
+            "TUI_CONTROL_INTERNAL",
+        );
+        assert_eq!(
+            TuiControlError::GoalAlreadyActive.code(),
+            "GOAL_ALREADY_ACTIVE",
+        );
+        assert_eq!(TuiControlError::GoalNotActive.code(), "GOAL_NOT_ACTIVE");
+        assert_eq!(
+            TuiControlError::GoalInvalidObjective("ignored".to_string()).code(),
+            "GOAL_INVALID_OBJECTIVE",
+        );
+    }
 }
