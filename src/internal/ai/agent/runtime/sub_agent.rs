@@ -256,14 +256,30 @@ pub struct DenyByDefaultPermissionAsker;
 impl PermissionAsker for DenyByDefaultPermissionAsker {
     fn ask<'a>(
         &'a self,
-        _request: PermissionAskRequest<'a>,
+        request: PermissionAskRequest<'a>,
     ) -> futures::future::BoxFuture<'a, PermissionReply> {
+        // Log the denied escalation so operators have a discoverable
+        // trace of "my sub-agent needs permission X" without needing
+        // an interactive prompt. The TUI follow-up that wires a
+        // real PermissionAsker replaces this asker entirely; the
+        // trace is the diagnostic bridge until then.
+        tracing::warn!(
+            permission = request.permission,
+            patterns = ?request.patterns,
+            thread_id = request.thread_id,
+            session_id = %request.session_id,
+            source = ?request.source,
+            "DenyByDefaultPermissionAsker rejecting permission escalation; \
+             add the rule to [code.agents.<name>.permission] in .libra/agents.toml \
+             to grant it without an interactive prompt",
+        );
         Box::pin(async {
             PermissionReply::Reject {
                 feedback: Some(
                     "permission escalation rejected by the default deny-all asker; \
-                     wire an interactive PermissionAsker via libra-code session bootstrap \
-                     to enable LlmInitiated sub-agent permission grants"
+                     either pre-grant the permission via [code.agents.<name>.permission] \
+                     in .libra/agents.toml, or wire an interactive PermissionAsker via \
+                     libra-code session bootstrap"
                         .to_string(),
                 ),
             }
