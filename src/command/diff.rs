@@ -788,4 +788,55 @@ mod test {
         assert_eq!(blob.len(), 1);
         assert_eq!(blob[0].0, PathBuf::from("not_ignore"));
     }
+
+    /// Pin the `stable_code()` routing for every [`DiffError`] variant
+    /// via the `From<DiffError> for CliError` impl. There is no
+    /// `stable_code()` method on the enum itself — the routing lives
+    /// entirely in the `From` impl, and previous tests did not pin it
+    /// at all. The routing groups several pairs under the same code
+    /// (e.g. `ObjectLoad` + `IndexLoad` -> `RepoCorrupt`;
+    /// `WorkdirList` + `FileRead` -> `IoReadFailed`), so a silent
+    /// accidental rerouting between groups would not register.
+    #[test]
+    fn diff_error_stable_code_pins_each_variant() {
+        fn code_of(err: DiffError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        assert_eq!(code_of(DiffError::NotInRepo), StableErrorCode::RepoNotFound);
+        assert_eq!(
+            code_of(DiffError::InvalidRevision("HEAD~99".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(DiffError::ObjectLoad {
+                kind: "tree",
+                object_id: "abc123".to_string(),
+                detail: "corrupt object".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(DiffError::IndexLoad("checksum mismatch".to_string())),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(DiffError::WorkdirList("EACCES".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(DiffError::FileRead {
+                path: "src/missing.rs".to_string(),
+                detail: "ENOENT".to_string(),
+            }),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(DiffError::OutputWrite {
+                path: "/tmp/output.diff".to_string(),
+                detail: "EROFS".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+    }
 }
