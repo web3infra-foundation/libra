@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.769"
+version = "0.17.770"
 edition = "2024"
 
 [features]
@@ -117,6 +117,9 @@ libfuse-fs = "0.1.13"
 pager = "0.16.1"
 libc = "0.2"
 rfuse3 = { version = "0.0.8", features = ["tokio-runtime", "unprivileged"] }
+
+[target.'cfg(target_os = "linux")'.dependencies] # Linux-only seccomp BPF compiler
+seccompiler = { version = "0.5.0", features = ["json"] }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }

@@ -34,6 +34,8 @@ pub mod evidence;
 pub mod policy;
 pub mod proxy;
 pub mod runtime;
+#[cfg(target_os = "linux")]
+pub mod seccomp_compile;
 
 pub use policy::{
     NetworkAccess, NetworkProtocol, NetworkService, NetworkServiceValidationError,

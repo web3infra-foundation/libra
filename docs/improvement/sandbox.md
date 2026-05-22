@@ -177,7 +177,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | 已落地：macOS Seatbelt 拒读默认敏感路径 + 自定义 deny_read；Linux bwrap 把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效 | ✅ | 阶段 4 已落地 |
 | G4 | 默认拒绝 + 域名白名单的网络策略 | `NetworkAccess::{Denied, Allowlist { services }, Full}` 三态已落地（v0.17.723）；Linux 在 `Denied` 时 `--unshare-net` 已生效；per-allowlist 代理后端 `AllowlistProxy`（v0.17.737）按 host / port / protocol + `*.suffix` 通配匹配，未匹配请求显式 `Deny(...)` 携带原始 host/port/protocol；`allowlist_proxy_from_policy` 在 `transform` 中按 `SandboxEnforcement` 决策（`Required` 失效即 `NetworkEnforcementFailed`，`PreferStrict` / `BestEffort` degrade-to-denied 并带显式原因） | ✅ | 阶段 7 三态枚举 + 代理后端均已落地 |
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已落地：`run_command_spec` 前后注入并清理私有 tmp；清理失败通过 `SandboxEvidenceSink::TmpdirCleanupFailed` 结构化记录（v0.17.720） | ✅ | 阶段 5 已落地 |
-| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；默认回退路径 `~/.libra/seccomp.bpf`（可按 `template/seccomp-default.json` 编译） | ★ | 阶段 2 wiring 已落地；回退文件默认识别已生效 |
+| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；Linux 下 `template/seccomp-default.json` 现在可通过 `seccomp_compile::compile_bundled_seccomp_policy()` 即时编译成 BPF 字节（v0.17.770，`seccompiler` crate 0.5.0 + Linux-only `#[cfg(target_os = "linux")]` 门控）；`ensure_compiled_seccomp_policy_at(path)` 提供首次启动幂等地落盘到 `~/.libra/seccomp.bpf` 的 helper | ✅ | 阶段 2 + on-the-fly compile 均已落地 |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
 | G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
