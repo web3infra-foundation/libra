@@ -42,7 +42,8 @@ pub use policy::{
 };
 pub use proxy::{
     LoopbackOnlyProxy, NetworkAccessMode, NetworkDecision, NetworkProxy, NetworkProxySelection,
-    NetworkRequest, NoopProxy, ProxyEnforcement, is_loopback_host, select_network_proxy,
+    NetworkRequest, NoopProxy, ProxyEnforcement, allowlist_proxy_from_policy, is_loopback_host,
+    select_network_proxy,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
@@ -1273,9 +1274,7 @@ fn build_command_from_spec(
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<(tokio::process::Command, Option<u64>), String> {
     let sandbox_policy_cwd = spec.cwd.clone();
-    let linux_sandbox_exe = sandbox_runtime
-        .and_then(|config| config.linux_sandbox_exe.clone())
-        .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+    let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
     let use_linux_sandbox_bwrap = sandbox_runtime
         .map(|config| config.use_linux_sandbox_bwrap)
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
@@ -1432,12 +1431,10 @@ fn prefer_strict_sandbox_fallback_reason(
 
     #[cfg(target_os = "linux")]
     {
-        let linux_sandbox_exe = sandbox_runtime
-            .and_then(|config| config.linux_sandbox_exe.clone())
-            .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
-        if linux_sandbox_exe.is_none() {
+        let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
+        if linux_sandbox_exe.is_none() && locate_bwrap_binary_for_prefer_strict().is_none() {
             return Ok(Some(
-                "sandbox enforcement is prefer_strict, but Linux sandbox helper is not configured and the built-in bwrap sandbox is not available yet; approve to run outside Libra's internal sandbox".to_string(),
+                "sandbox enforcement is prefer_strict, but Linux sandbox helper is not configured and the built-in bwrap sandbox is not available; approve to run outside Libra's internal sandbox".to_string(),
             ));
         }
     }
@@ -1450,6 +1447,60 @@ fn prefer_strict_sandbox_fallback_reason(
     }
 
     Ok(None)
+}
+
+fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> Option<PathBuf> {
+    let candidate = sandbox_runtime
+        .and_then(|config| config.linux_sandbox_exe.clone())
+        .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+
+    #[cfg(target_os = "linux")]
+    {
+        if candidate.as_ref().is_some_and(is_executable_file) {
+            return candidate;
+        }
+        return None;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        candidate.filter(|path| path.is_file())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn locate_bwrap_binary_for_prefer_strict() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("LIBRA_BWRAP_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.is_absolute() && is_executable_file(&path) {
+            return Some(path);
+        }
+        return None;
+    }
+
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join("bwrap");
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 fn sandbox_policy_needs_internal_backend(policy: &SandboxPolicy) -> bool {
@@ -2842,6 +2893,7 @@ mod tests {
     #[serial(sandbox_env)]
     async fn prefer_strict_missing_linux_helper_requires_fallback_approval() {
         let _env_guard = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let _bwrap_guard = EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/tmp/libra-never-exists");
         let temp = tempfile::tempdir().expect("tempdir for prefer-strict fallback test");
         let marker = temp.path().join("should-not-run");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3156,6 +3208,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: this test helper is only used from tests serialized by
+            // `#[serial(sandbox_env)]`, so no sibling test mutates this env var
+            // concurrently.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
             // SAFETY: this test helper is only used from tests serialized by

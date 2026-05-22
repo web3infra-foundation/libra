@@ -11,7 +11,11 @@ use serde::Serialize;
 
 use crate::{
     info_println,
-    internal::ai::sandbox::{SandboxEnforcement, SandboxPolicy},
+    internal::ai::sandbox::{
+        NetworkAccess, NetworkAccessMode, NetworkProtocol, NetworkProxy, NetworkProxySelection,
+        NetworkService, ProxyEnforcement, SandboxEnforcement, SandboxPolicy,
+        allowlist_proxy_from_policy, select_network_proxy,
+    },
     utils::{
         error::{CliError, CliResult},
         output::{OutputConfig, emit_json_data},
@@ -91,11 +95,17 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
         .collect();
     let helper_path = env_path(LINUX_SANDBOX_EXE_ENV);
     let helper_exists = helper_path.as_deref().is_some_and(executable_file_exists);
-    let bwrap_available = path_executable_available("bwrap");
+    let bwrap_available = locate_bwrap_binary_for_status().is_some();
     let bwrap_requested = env_flag_enabled(LINUX_SANDBOX_BWRAP_ENV);
     let seatbelt_available = executable_file_exists(Path::new(MACOS_SEATBELT_EXECUTABLE));
     let mut warnings = Vec::new();
     let enforcement = env_sandbox_enforcement(&mut warnings);
+    let (network_mode, allowlist, proxy_backend, network_warning) =
+        describe_network_access(&policy, enforcement);
+    if let Some(reason) = network_warning {
+        warnings.push(reason);
+    }
+
     let sandbox_type = match env::consts::OS {
         "macos" if seatbelt_available => "macos-seatbelt",
         "macos" => {
@@ -105,29 +115,43 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
             );
             "none"
         }
-        "linux" if helper_exists => "linux-seccomp",
+        "linux" if helper_exists || bwrap_available => {
+            if !helper_exists {
+                if let Some(path) = &helper_path {
+                    warnings.push(format!(
+                        "linux sandbox helper '{}' is not executable; using built-in bwrap sandbox instead",
+                        path.display()
+                    ));
+                } else {
+                    warnings.push(
+                        "linux sandbox helper is not configured; using built-in bwrap as internal sandbox backend".to_string(),
+                    );
+                }
+            }
+            "linux-seccomp"
+        }
         "linux" => {
             if let Some(path) = &helper_path {
                 if enforcement.requires_effective_sandbox() {
                     warnings.push(format!(
-                        "linux sandbox helper '{}' is not executable; AI shell commands that require Libra's internal sandbox will fail",
+                        "linux sandbox helper '{}' is not executable and built-in bwrap is not available; AI shell commands that require Libra's internal sandbox will fail",
                         path.display()
                     ));
                 } else {
                     warnings.push(format!(
-                        "linux sandbox helper '{}' is not executable; AI shell commands cannot enter the configured helper sandbox",
+                        "linux sandbox helper '{}' is not executable and built-in bwrap is not available; AI shell commands currently fall back to no OS sandbox",
                         path.display()
                     ));
                 }
             } else {
                 if enforcement.requires_effective_sandbox() {
                     warnings.push(
-                        "linux sandbox helper is not configured; AI shell commands that require Libra's internal sandbox will fail"
+                        "linux sandbox helper is not configured and bwrap is unavailable; AI shell commands that require Libra's internal sandbox will fail"
                             .to_string(),
                     );
                 } else {
                     warnings.push(
-                        "linux sandbox helper is not configured; AI shell commands currently fall back to no OS sandbox"
+                        "linux sandbox helper is not configured and bwrap is unavailable; AI shell commands currently fall back to no OS sandbox"
                             .to_string(),
                     );
                 }
@@ -149,6 +173,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
             "none"
         }
     };
+
     if bwrap_requested && !bwrap_available {
         warnings.push(
             "LIBRA_USE_LINUX_SANDBOX_BWRAP is enabled but bwrap is not available on PATH"
@@ -163,14 +188,10 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
         effective_enforcement: enforcement.as_str(),
         writable_roots,
         network: SandboxNetworkStatus {
-            mode: if policy.has_full_network_access() {
-                "full"
-            } else {
-                "denied"
-            },
-            allowlist: Vec::new(),
+            mode: network_mode,
+            allowlist,
         },
-        proxy_backend: "none",
+        proxy_backend,
         bwrap_available,
         bwrap_requested,
         seatbelt_available,
@@ -259,10 +280,116 @@ fn env_sandbox_enforcement(warnings: &mut Vec<String>) -> SandboxEnforcement {
     }
 }
 
-fn path_executable_available(binary: &str) -> bool {
-    env::var_os("PATH").is_some_and(|path| {
-        env::split_paths(&path).any(|entry| executable_file_exists(&entry.join(binary)))
-    })
+#[cfg(not(target_os = "linux"))]
+fn locate_bwrap_binary_for_status() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn locate_bwrap_binary_for_status() -> Option<PathBuf> {
+    if let Some(override_path) = env::var_os("LIBRA_BWRAP_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.is_absolute() && executable_file_exists(&path) {
+            return Some(path);
+        }
+        return None;
+    }
+
+    let path_env = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_env) {
+        let candidate = dir.join("bwrap");
+        if executable_file_exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn describe_network_access(
+    policy: &SandboxPolicy,
+    enforcement: SandboxEnforcement,
+) -> (&'static str, Vec<String>, &'static str, Option<String>) {
+    let network_access = current_network_access(policy);
+    let mode = match network_access {
+        NetworkAccess::Denied => NetworkAccessMode::Denied,
+        NetworkAccess::Allowlist { .. } => NetworkAccessMode::Allowlist,
+        NetworkAccess::Full => NetworkAccessMode::Full,
+    };
+    let mode_name = match network_access {
+        NetworkAccess::Denied => "denied",
+        NetworkAccess::Allowlist { .. } => "allowlist",
+        NetworkAccess::Full => "full",
+    };
+    let (allowlist_proxy, allowlist_proxy_error) = match allowlist_proxy_from_policy(policy) {
+        Ok(proxy) => (proxy, None),
+        Err(reason) => (None, Some(reason)),
+    };
+
+    let proxy = match (mode, allowlist_proxy_error) {
+        (NetworkAccessMode::Allowlist, Some(reason)) => match enforcement {
+            SandboxEnforcement::Required => NetworkProxySelection::Reject {
+                reason: format!(
+                    "NetworkAccess::Allowlist requested but the per-allowlist proxy is unavailable: {reason}; SandboxEnforcement::Required forbids degrading to Denied",
+                ),
+            },
+            SandboxEnforcement::PreferStrict => NetworkProxySelection::DegradeToDenied {
+                reason: format!(
+                    "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; degrading to Denied under SandboxEnforcement::PreferStrict",
+                ),
+            },
+            SandboxEnforcement::BestEffort => NetworkProxySelection::DegradeToDenied {
+                reason: format!(
+                    "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; silently degrading to Denied under SandboxEnforcement::BestEffort",
+                ),
+            },
+        },
+        (_, _) => select_network_proxy(
+            mode,
+            allowlist_proxy
+                .as_ref()
+                .map(|proxy| proxy as &dyn NetworkProxy),
+            enforcement.into(),
+        ),
+    };
+    let (proxy_backend, network_warning) = match proxy {
+        NetworkProxySelection::Proxy(proxy) => (proxy.backend_name(), None),
+        NetworkProxySelection::DegradeToDenied { reason } => ("none", Some(reason)),
+        NetworkProxySelection::Reject { reason } => ("none", Some(reason)),
+    };
+    let allowlist = network_access
+        .allowlist_services()
+        .unwrap_or_default()
+        .iter()
+        .map(format_network_service)
+        .collect();
+    (mode_name, allowlist, proxy_backend, network_warning)
+}
+
+fn current_network_access(policy: &SandboxPolicy) -> NetworkAccess {
+    match policy {
+        SandboxPolicy::DangerFullAccess => NetworkAccess::Full,
+        SandboxPolicy::ReadOnly => NetworkAccess::Denied,
+        SandboxPolicy::ExternalSandbox { network_access }
+        | SandboxPolicy::WorkspaceWrite { network_access, .. } => network_access.clone(),
+    }
+}
+
+fn format_network_service(service: &NetworkService) -> String {
+    let ports = if service.ports.is_empty() {
+        "any".to_string()
+    } else {
+        service
+            .ports
+            .iter()
+            .map(|port| port.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let protocol = match service.protocol.unwrap_or(NetworkProtocol::Tcp) {
+        NetworkProtocol::Tcp => "tcp",
+        NetworkProtocol::Udp => "udp",
+    };
+    format!("{}:{ports}:{protocol}", service.host)
 }
 
 fn executable_file_exists(path: &Path) -> bool {
@@ -280,5 +407,15 @@ fn executable_file_exists(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+impl From<SandboxEnforcement> for ProxyEnforcement {
+    fn from(value: SandboxEnforcement) -> Self {
+        match value {
+            SandboxEnforcement::Required => ProxyEnforcement::Required,
+            SandboxEnforcement::PreferStrict => ProxyEnforcement::PreferStrict,
+            SandboxEnforcement::BestEffort => ProxyEnforcement::BestEffort,
+        }
     }
 }

@@ -7,9 +7,9 @@
 //! that filters connections by SNI / Host header against the
 //! allowlist. The full proxy (built on `hyper` + `hickory-resolver`)
 //! is a follow-up batch; this module ships the **trait surface plus
-//! two reference implementations** so:
+//! three reference implementations** so:
 //!
-//! 1. The sandbox runtime can route through a `&'static dyn
+//! 1. The sandbox runtime can route through a `&'a dyn
 //!    NetworkProxy` without knowing whether the active proxy is the
 //!    real one or a stub.
 //! 2. Tests and the `Denied`-mode fallback can use [`NoopProxy`]
@@ -20,13 +20,13 @@
 //!    everything else — which approximates the v1 "loopback-only"
 //!    contract while the real proxy is being built.
 //!
-//! Both implementations are zero-sized so the sandbox runtime can
-//! borrow them through `&'static dyn NetworkProxy` without any heap
-//! allocation.
+//! All implementations are `dyn`-safe and implement `Debug` so the
+//! sandbox runtime can reuse one diagnostic envelope type for all
+//! backends.
 
 use std::net::IpAddr;
 
-use crate::internal::ai::sandbox::policy::NetworkProtocol;
+use super::{NetworkAccess, NetworkProtocol, NetworkService, SandboxPolicy};
 
 /// One outbound connection request handed to a [`NetworkProxy`]
 /// before the sandbox runtime forwards it.
@@ -90,7 +90,7 @@ impl NetworkDecision {
 ///
 /// Implementors must be `Send + Sync + Debug` so the sandbox
 /// runtime can share a single instance across worker threads via
-/// `&'static dyn NetworkProxy`, and so [`NetworkProxySelection`]
+/// `&'a dyn NetworkProxy`, and so [`NetworkProxySelection`]
 /// (and other diagnostic envelopes that carry a proxy reference)
 /// can derive `Debug` without bespoke impls per backend.
 pub trait NetworkProxy: Send + Sync + std::fmt::Debug {
@@ -160,6 +160,54 @@ impl NetworkProxy for LoopbackOnlyProxy {
     }
 }
 
+/// Proxy implementation that enforces configured host / port / protocol
+/// allowlist entries.
+///
+/// This is the v1 stub for `Allowlist` mode: it performs static
+/// policy matching and explicit denial when a request does not match
+/// any allowlist entry. The stub does not perform DNS or full socket
+/// forwarding, but it does make the allowlist semantics visible at
+/// decision time.
+#[derive(Debug, Clone)]
+pub struct AllowlistProxy {
+    services: Vec<NetworkService>,
+}
+
+impl AllowlistProxy {
+    pub fn new(services: &[NetworkService]) -> Self {
+        Self {
+            services: services.to_vec(),
+        }
+    }
+
+    pub fn services(&self) -> &[NetworkService] {
+        self.services.as_slice()
+    }
+}
+
+impl NetworkProxy for AllowlistProxy {
+    fn backend_name(&self) -> &'static str {
+        "allowlist"
+    }
+
+    fn evaluate(&self, request: &NetworkRequest) -> NetworkDecision {
+        for service in &self.services {
+            let host_match = host_matches_service(&request.host, &service.host);
+            let protocol_match = service.effective_protocol() == request.protocol;
+            let port_match = service.ports.is_empty() || service.ports.contains(&request.port);
+
+            if host_match && protocol_match && port_match {
+                return NetworkDecision::Allow;
+            }
+        }
+
+        NetworkDecision::Deny(format!(
+            "AllowlistProxy: outbound connection to {}:{} ({:?}) is not in allowlist",
+            request.host, request.port, request.protocol,
+        ))
+    }
+}
+
 /// `true` when `host` is the literal string `"localhost"` (case-
 /// insensitive) or parses as a loopback `IpAddr`.
 ///
@@ -174,6 +222,56 @@ pub fn is_loopback_host(host: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn host_matches_service(request_host: &str, configured_host: &str) -> bool {
+    let request_host = request_host.to_ascii_lowercase();
+    let configured_host = configured_host.to_ascii_lowercase();
+
+    if let Some(suffix) = configured_host.strip_prefix("*.") {
+        request_host.ends_with(suffix)
+            && request_host.len() > suffix.len()
+            && request_host.as_bytes()[request_host.len() - suffix.len() - 1] == b'.'
+    } else {
+        request_host == configured_host
+    }
+}
+
+/// Build an [`AllowlistProxy`] from sandbox policy when the policy is
+/// `NetworkAccess::Allowlist` and the configured services are usable.
+///
+/// `Ok(None)` is returned for non-allowlist policies. `Err` is returned when
+/// allowlist proxy construction is requested but not possible, so callers can
+/// surface actionable diagnostics (invalid services, empty service lists, etc.).
+pub fn allowlist_proxy_from_policy(
+    policy: &SandboxPolicy,
+) -> Result<Option<AllowlistProxy>, String> {
+    let services = match policy {
+        SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Allowlist { services },
+            ..
+        }
+        | SandboxPolicy::WorkspaceWrite {
+            network_access: NetworkAccess::Allowlist { services },
+            ..
+        } => services,
+        _ => return Ok(None),
+    };
+
+    if services.is_empty() {
+        return Err("NetworkAccess::Allowlist has no services configured".to_string());
+    }
+
+    for service in services {
+        if let Err(error) = service.validate() {
+            return Err(format!(
+                "allowlist service '{}' is invalid: {}",
+                service.host, error,
+            ));
+        }
+    }
+
+    Ok(Some(AllowlistProxy::new(services)))
+}
+
 /// Caller-facing decision returned by [`select_network_proxy`].
 ///
 /// Encodes the three-way outcome of the `(NetworkAccess-style mode,
@@ -184,7 +282,7 @@ pub fn is_loopback_host(host: &str) -> bool {
 ///
 /// Variants:
 /// - [`Proxy`](Self::Proxy): the runtime should route outbound
-///   connections through the contained `&'static dyn NetworkProxy`.
+///   connections through the contained `&'a dyn NetworkProxy`.
 /// - [`DegradeToDenied`](Self::DegradeToDenied): the requested
 ///   allowlist proxy is unavailable but the enforcement tier allows
 ///   degrading silently or with a warning — the runtime should fall
@@ -195,9 +293,9 @@ pub fn is_loopback_host(host: &str) -> bool {
 ///   enforcement tier forbids degrading. The runtime should emit
 ///   `SandboxTransformError::NetworkEnforcementFailed { reason }`.
 #[derive(Debug)]
-pub enum NetworkProxySelection {
+pub enum NetworkProxySelection<'a> {
     /// Use this proxy for outbound network requests in this transform.
-    Proxy(&'static dyn NetworkProxy),
+    Proxy(&'a dyn NetworkProxy),
     /// Allowlist requested but unavailable; the enforcement tier
     /// permits silent or warned degradation to deny-all. `reason`
     /// is meant to be emitted as a `tracing::warn!` event.
@@ -274,11 +372,11 @@ pub enum ProxyEnforcement {
 /// `Full` returns `LoopbackOnlyProxy` in this v1 stub because the
 /// full transparent-pass-through proxy is deferred. Once it ships
 /// the arm becomes `Proxy(FullProxy)`.
-pub fn select_network_proxy(
+pub fn select_network_proxy<'a>(
     mode: NetworkAccessMode,
-    allowlist_proxy: Option<&'static dyn NetworkProxy>,
+    allowlist_proxy: Option<&'a dyn NetworkProxy>,
     enforcement: ProxyEnforcement,
-) -> NetworkProxySelection {
+) -> NetworkProxySelection<'a> {
     static NOOP: NoopProxy = NoopProxy;
     static LOOPBACK_ONLY: LoopbackOnlyProxy = LoopbackOnlyProxy;
 
@@ -401,9 +499,111 @@ mod tests {
         }
     }
 
+    #[test]
+    fn allowlist_proxy_matches_exact_hosts_and_protocols() {
+        let services = vec![
+            NetworkService {
+                host: "registry.npmjs.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            },
+            NetworkService {
+                host: "*.pypi.org".to_string(),
+                ports: vec![443],
+                protocol: Some(NetworkProtocol::Tcp),
+            },
+            NetworkService {
+                host: "github.com".to_string(),
+                ports: vec![53],
+                protocol: Some(NetworkProtocol::Udp),
+            },
+        ];
+
+        let proxy = AllowlistProxy::new(&services);
+
+        for request in [
+            request("registry.npmjs.org", 443),
+            request("api.pypi.org", 443),
+            request("foo.pypi.org", 443),
+        ] {
+            assert!(
+                proxy.evaluate(&request).is_allow(),
+                "allowed host/port mismatch: {request:?}"
+            );
+        }
+
+        for request in [
+            request("registry.npmjs.org", 8443),
+            request("pypi.org", 443),
+            request("github.com", 443),
+            request("sub.github.com", 53),
+            request("sub.pypi.org", 8443),
+        ] {
+            assert!(
+                proxy.evaluate(&request).is_deny(),
+                "request should be denied: {request:?}",
+            );
+        }
+
+        let udp_mismatch = proxy.evaluate(&NetworkRequest {
+            host: "github.com".to_string(),
+            port: 53,
+            protocol: NetworkProtocol::Tcp,
+        });
+        assert!(udp_mismatch.is_deny(), "protocol mismatch should deny");
+    }
+
+    #[test]
+    fn allowlist_proxy_from_policy_handles_allowlist_and_ignores_invalid_shapes() {
+        let services = vec![NetworkService {
+            host: "registry.npmjs.org".to_string(),
+            ports: vec![443],
+            protocol: None,
+        }];
+
+        let allowlist_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Allowlist {
+                services: services.clone(),
+            },
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        assert!(
+            allowlist_proxy_from_policy(&allowlist_policy)
+                .expect("allowlist service list should be usable")
+                .is_some()
+        );
+
+        let denied_policy = SandboxPolicy::ReadOnly;
+        assert!(
+            allowlist_proxy_from_policy(&denied_policy)
+                .expect("non-allowlist policy should not produce a proxy")
+                .is_none()
+        );
+
+        let invalid_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: String::new(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            },
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let error = allowlist_proxy_from_policy(&invalid_policy)
+            .expect_err("invalid host should be rejected by service validation");
+        assert!(error.contains("allowlist service '' is invalid"));
+    }
+
     /// The proxy trait must be object-safe so the sandbox runtime can
-    /// borrow either implementation through a `&'static dyn
-    /// NetworkProxy`. This test exercises the dyn-safe path
+    /// borrow implementations through a dyn reference. This test
+    /// exercises the dyn-safe path explicitly so a future trait change
+    /// that adds a non-object-safe method (e.g. a generic) fails to
+    /// compile here rather than at the sandbox-runtime callsite.
     /// explicitly so a future trait change that adds a non-object-safe
     /// method (e.g. a generic) fails to compile here rather than at
     /// the sandbox-runtime callsite.
@@ -565,22 +765,20 @@ mod tests {
         // entry passes validation (non-empty host, explicit ports).
         let entry = NetworkService {
             host: "localhost".to_string(),
-            ports: vec![8080, 8443],
+            ports: vec![8080],
             protocol: Some(NetworkProtocol::Tcp),
         };
         entry
             .validate()
             .expect("well-formed allowlist entry must validate");
 
-        // Translate to a NetworkRequest for each declared port. In
-        // the v1 stub the LoopbackOnlyProxy ignores the policy's
-        // host-string matching and just checks `is_loopback_host`,
-        // but the chain has to compile and dispatch through the
-        // dyn surface to be useful for Phase 7.4's full proxy drop-in.
-        let live: &'static dyn NetworkProxy = &LoopbackOnlyProxy;
+        // Translate to a NetworkRequest for each declared port through
+        // the concrete allowlist proxy and verify that matching and
+        // non-matching hosts are distinguished.
+        let live: AllowlistProxy = AllowlistProxy::new(std::slice::from_ref(&entry));
         let selection = select_network_proxy(
             NetworkAccessMode::Allowlist,
-            Some(live),
+            Some(&live),
             ProxyEnforcement::Required,
         );
         let NetworkProxySelection::Proxy(proxy) = selection else {
@@ -600,8 +798,8 @@ mod tests {
         }
 
         // A non-loopback host with the same allowlist port must be
-        // rejected — proves the proxy isn't blindly trusting the
-        // request and is actually consulting `is_loopback_host`.
+        // rejected — proves the proxy is actually matching host
+        // entries rather than accepting everything.
         let remote = NetworkRequest {
             host: "example.com".to_string(),
             port: entry.ports[0],
@@ -610,7 +808,7 @@ mod tests {
         let decision = proxy.evaluate(&remote);
         assert!(
             decision.is_deny(),
-            "v1 stub must reject remote host even on allowlist port",
+            "allowlist proxy must reject remote host even on allowlist port",
         );
     }
 }

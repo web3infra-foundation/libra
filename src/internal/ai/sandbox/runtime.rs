@@ -12,11 +12,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-#[cfg(test)]
-use super::NetworkAccess;
 #[cfg(target_os = "macos")]
 use super::sensitive_read_paths;
-use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
+use super::{
+    NetworkAccessMode, NetworkProxy, NetworkProxySelection, ProxyEnforcement, SandboxEnforcement,
+    SandboxPermissions, SandboxPolicy, SandboxPolicyError, allowlist_proxy_from_policy,
+    select_network_proxy,
+};
 #[cfg(unix)]
 use crate::utils::fuse;
 
@@ -397,8 +399,72 @@ impl SandboxManager {
             policy.validate_writable_roots_with_cwd(sandbox_policy_cwd)?;
         }
 
+        let network_access_mode = match policy {
+            Some(policy) => network_access_mode_for_policy(policy),
+            None => NetworkAccessMode::Full,
+        };
+        let (allowlist_proxy, allowlist_proxy_error) = match policy {
+            Some(policy) => match allowlist_proxy_from_policy(policy) {
+                Ok(proxy) => (proxy, None),
+                Err(reason) => (None, Some(reason)),
+            },
+            None => (None, None),
+        };
+
+        let network_proxy_selection = match network_access_mode {
+            NetworkAccessMode::Allowlist => {
+                if let Some(reason) = allowlist_proxy_error {
+                    match proxy_enforcement_from_sandbox(enforcement) {
+                        ProxyEnforcement::Required => NetworkProxySelection::Reject {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but the per-allowlist proxy is unavailable: {reason}; SandboxEnforcement::Required forbids degrading to Denied",
+                            ),
+                        },
+                        ProxyEnforcement::PreferStrict => NetworkProxySelection::DegradeToDenied {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; degrading to Denied under SandboxEnforcement::PreferStrict",
+                            ),
+                        },
+                        ProxyEnforcement::BestEffort => NetworkProxySelection::DegradeToDenied {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; silently degrading to Denied under SandboxEnforcement::BestEffort",
+                            ),
+                        },
+                    }
+                } else {
+                    select_network_proxy(
+                        network_access_mode,
+                        allowlist_proxy
+                            .as_ref()
+                            .map(|proxy| proxy as &dyn NetworkProxy),
+                        proxy_enforcement_from_sandbox(enforcement),
+                    )
+                }
+            }
+            _ => select_network_proxy(
+                network_access_mode,
+                allowlist_proxy
+                    .as_ref()
+                    .map(|proxy| proxy as &dyn NetworkProxy),
+                proxy_enforcement_from_sandbox(enforcement),
+            ),
+        };
+
+        let disable_network = match network_proxy_selection {
+            NetworkProxySelection::Reject { reason } => {
+                return Err(SandboxTransformError::NetworkEnforcementFailed { reason });
+            }
+            NetworkProxySelection::DegradeToDenied { reason } => {
+                tracing::warn!(reason = %reason, "degraded allowlist network to denied");
+                true
+            }
+            NetworkProxySelection::Proxy(_) => {
+                matches!(network_access_mode, NetworkAccessMode::Denied)
+            }
+        };
+
         let mut env = spec.env;
-        if policy.is_some_and(|sandbox_policy| !sandbox_policy.has_full_network_access()) {
+        if disable_network {
             env.insert(
                 LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR.to_string(),
                 "1".to_string(),
@@ -427,6 +493,7 @@ impl SandboxManager {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
                     let mut seatbelt_args = create_seatbelt_command_args(
                         command,
+                        network_access_mode,
                         policy,
                         sandbox_policy_cwd,
                         deny_read_paths,
@@ -480,6 +547,7 @@ impl SandboxManager {
                         };
                         let mut bwrap_args = create_bwrap_command_args_with_seccomp(
                             command,
+                            network_access_mode,
                             policy,
                             sandbox_policy_cwd,
                             deny_read_paths,
@@ -559,6 +627,39 @@ fn internal_sandbox_required(
     )
 }
 
+fn network_access_mode_for_policy(policy: &SandboxPolicy) -> NetworkAccessMode {
+    match policy {
+        SandboxPolicy::DangerFullAccess => NetworkAccessMode::Full,
+        SandboxPolicy::ReadOnly => NetworkAccessMode::Denied,
+        SandboxPolicy::ExternalSandbox { network_access, .. } => {
+            if network_access.is_full() {
+                NetworkAccessMode::Full
+            } else if network_access.is_allowlist() {
+                NetworkAccessMode::Allowlist
+            } else {
+                NetworkAccessMode::Denied
+            }
+        }
+        SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+            if network_access.is_full() {
+                NetworkAccessMode::Full
+            } else if network_access.is_allowlist() {
+                NetworkAccessMode::Allowlist
+            } else {
+                NetworkAccessMode::Denied
+            }
+        }
+    }
+}
+
+fn proxy_enforcement_from_sandbox(enforcement: SandboxEnforcement) -> ProxyEnforcement {
+    match enforcement {
+        SandboxEnforcement::Required => ProxyEnforcement::Required,
+        SandboxEnforcement::PreferStrict => ProxyEnforcement::PreferStrict,
+        SandboxEnforcement::BestEffort => ProxyEnforcement::BestEffort,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn create_linux_sandbox_command_args(
     command: Vec<String>,
@@ -582,12 +683,14 @@ fn create_linux_sandbox_command_args(
 
 pub fn create_bwrap_command_args(
     command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
 ) -> Vec<String> {
     create_bwrap_command_args_with_seccomp(
         command,
+        network_access_mode,
         sandbox_policy,
         sandbox_policy_cwd,
         deny_read_paths,
@@ -603,6 +706,7 @@ pub fn create_bwrap_command_args(
 /// [`install_seccomp_policy_pre_exec`].
 pub fn create_bwrap_command_args_with_seccomp(
     command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
@@ -617,7 +721,7 @@ pub fn create_bwrap_command_args_with_seccomp(
         args.push("--seccomp".to_string());
         args.push(fd.to_string());
     }
-    if sandbox_policy.has_full_network_access() {
+    if network_access_mode == NetworkAccessMode::Full {
         args.push("--share-net".to_string());
     } else {
         args.push("--unshare-net".to_string());
@@ -751,6 +855,7 @@ fn push_bwrap_mount(args: &mut Vec<String>, flag: &str, path: &Path) {
 #[cfg(target_os = "macos")]
 fn create_seatbelt_command_args(
     command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
@@ -764,7 +869,7 @@ fn create_seatbelt_command_args(
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (sensitive_read_policy, sensitive_read_params) =
         build_macos_sensitive_read_policy(home.as_deref(), deny_read_paths);
-    let network_policy = if sandbox_policy.has_full_network_access() {
+    let network_policy = if network_access_mode == NetworkAccessMode::Full {
         SEATBELT_NETWORK_POLICY
     } else {
         ""
@@ -890,7 +995,7 @@ fn macos_dir_params() -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::NetworkAccess, *};
 
     #[test]
     fn select_initial_uses_none_for_escalated_permissions() {
@@ -1010,6 +1115,152 @@ mod tests {
     }
 
     #[test]
+    fn transform_allowlist_network_required_fails_when_proxy_unavailable() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: Vec::new(),
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("allowlist required should fail when proxy unavailable");
+        let error = error.to_string();
+        assert!(error.contains("network enforcement failed:"));
+        assert!(error.contains(
+            "NetworkAccess::Allowlist requested but the per-allowlist proxy is unavailable"
+        ));
+        assert!(error.contains("NetworkAccess::Allowlist has no services configured"));
+    }
+
+    #[test]
+    fn transform_allowlist_network_required_fails_with_invalid_service_details() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![crate::internal::ai::sandbox::NetworkService {
+                        host: String::new(),
+                        ports: vec![443],
+                        protocol: None,
+                    }],
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("invalid allowlist service should fail before tool launch");
+        let error = error.to_string();
+        assert!(error.contains("network enforcement failed:"));
+        assert!(error.contains("allowlist service '' is invalid"));
+    }
+
+    #[test]
+    fn transform_allowlist_network_best_effort_degrades_to_disabled() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: Vec::new(),
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("best effort allowlist should degrade to denied when proxy unavailable");
+        assert_eq!(transformed.sandbox, SandboxType::None);
+        assert_eq!(
+            transformed.env.get(LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn transform_allowlist_network_required_uses_proxy_when_services_present() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![crate::internal::ai::sandbox::NetworkService {
+                        host: "registry.npmjs.org".to_string(),
+                        ports: vec![443],
+                        protocol: None,
+                    }],
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("allowlist with explicit services should use the allowlist proxy");
+        assert_eq!(
+            transformed.env.get(LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR),
+            None,
+        );
+    }
+
+    #[test]
     fn create_bwrap_command_args_denies_network_by_default_with_unshare_net() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
@@ -1019,7 +1270,13 @@ mod tests {
             exclude_slash_tmp: true,
         };
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--unshare-all".to_string()));
         assert!(args.contains(&"--unshare-net".to_string()));
@@ -1037,7 +1294,13 @@ mod tests {
             exclude_slash_tmp: true,
         };
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--share-net".to_string()));
         assert!(!args.contains(&"--unshare-net".to_string()));
@@ -1047,7 +1310,13 @@ mod tests {
     fn create_bwrap_command_args_includes_new_session_and_die_with_parent() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
 
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--new-session".to_string()));
         assert!(args.contains(&"--die-with-parent".to_string()));
@@ -1064,7 +1333,13 @@ mod tests {
         };
         let writable_root = cwd.join("src");
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert_mount(&args, "--bind", &writable_root);
         assert_mount(&args, "--ro-bind", &writable_root.join(".git"));
@@ -1076,7 +1351,13 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let secret = PathBuf::from("/home/tester/.ssh");
 
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[secret]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &[secret],
+        );
 
         assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
     }
@@ -1099,6 +1380,7 @@ mod tests {
 
         let with_seccomp = create_bwrap_command_args_with_seccomp(
             command(),
+            network_access_mode_for_policy(&policy),
             &policy,
             cwd,
             &[],
@@ -1121,8 +1403,14 @@ mod tests {
             "--seccomp must precede the command delimiter; got seccomp={seccomp_idx} delim={delim_idx}",
         );
 
-        let without_seccomp =
-            create_bwrap_command_args_with_seccomp(command(), &policy, cwd, &[], None);
+        let without_seccomp = create_bwrap_command_args_with_seccomp(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+            None,
+        );
         assert!(
             !without_seccomp.iter().any(|arg| arg == "--seccomp"),
             "--seccomp must be absent when fd is None",
@@ -1363,7 +1651,13 @@ mod tests {
     #[test]
     fn create_bwrap_command_args_appends_command_after_delimiter() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &[],
+        );
         let delimiter = args
             .iter()
             .position(|arg| arg == "--")
