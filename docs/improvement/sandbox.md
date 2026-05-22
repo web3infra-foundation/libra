@@ -9,7 +9,7 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::{Required, PreferStrict, BestEffort}`、Seatbelt 策略拼装、macOS 敏感路径拒读、Linux 外部 helper + **内建 bwrap 直调（v0.17.724）**、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理、`libra sandbox status` 自检与 `SandboxEvidenceSink` 结构化审计（v0.17.720..v0.17.726）（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort 兼容模式，`Required` 会拒绝降级，`PreferStrict` 会在 helper 缺失时要求审批确认后才允许裸跑**、**Linux bwrap 敏感路径遮蔽仍待审计**、**默认 seccomp BPF 策略仍待提供（v0.17.725 已落地 `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位；用户需自备编译后的 BPF 文件，缺省 `None`）**、**`NetworkAccess` 三态枚举已迁移（v0.17.723），但 per-allowlist 代理后端仍是 stub**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::{Required, PreferStrict, BestEffort}`、Seatbelt 策略拼装、macOS 敏感路径拒读、Linux 外部 helper + **内建 bwrap 直调（v0.17.724）**、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理、`libra sandbox status` 自检与 `SandboxEvidenceSink` 结构化审计（v0.17.720..v0.17.726）（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort 兼容模式，`Required` 会拒绝降级，`PreferStrict` 会在 helper 缺失时要求审批确认后才允许裸跑**、**Linux bwrap 敏感路径遮蔽仍待审计**、**默认 seccomp BPF 策略现在有回退文件（`~/.libra/seccomp.bpf`），文件存在时会自动启用**、**`NetworkAccess` 三态枚举已迁移（v0.17.723），但 per-allowlist 代理后端仍是 stub**。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
@@ -22,15 +22,15 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 审计结论
 
-- **阶段 1、阶段 2 已收口（v0.17.724 内建 bwrap 真实执行 + v0.17.725 `--seccomp <fd>` wiring），阶段 3 / 4 继续收口，阶段 5 与阶段 6 已收口，阶段 7 stub 链 + 三态 `NetworkAccess` 枚举迁移已落地（v0.17.723）**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + Linux 外部 helper / 内建 bwrap 双路径 + seccomp `--seccomp <fd>` wiring + 危险挂载拒绝 + per-command tmp + Phase 7 stub（`NetworkProtocol`/`NetworkService` schema + `NetworkProxy` trait + `NoopProxy`/`LoopbackOnlyProxy` stubs + `NetworkEnforcementFailed` transform variant + `select_network_proxy` 决策树）+ 结构化 `SandboxEvidenceSink`（v0.17.720..v0.17.726）已具备；默认 seccomp BPF 策略、per-allowlist 代理后端、默认强制隔离仍待落地”。
-- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读、Linux bwrap 参数构造层、内建 bwrap 真实执行、`--seccomp <fd>` 参数注入、`NetworkAccess` 三态枚举、per-command tmp、结构化 Evidence sink 均已进入主干；默认 seccomp BPF 策略与 per-allowlist 代理后端仍未进入主干实现。
+- **阶段 1、阶段 2 已收口（v0.17.724 内建 bwrap 真实执行 + v0.17.725 `--seccomp <fd>` wiring），阶段 3 / 4 继续收口，阶段 5 与阶段 6 已收口，阶段 7 stub 链 + 三态 `NetworkAccess` 枚举迁移已落地（v0.17.723）**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + Linux 外部 helper / 内建 bwrap 双路径 + seccomp `--seccomp <fd>` wiring + 危险挂载拒绝 + per-command tmp + Phase 7 stub（`NetworkProtocol`/`NetworkService` schema + `NetworkProxy` trait + `NoopProxy`/`LoopbackOnlyProxy` stubs + `NetworkEnforcementFailed` transform variant + `select_network_proxy` 决策树）+ 结构化 `SandboxEvidenceSink`（v0.17.720..v0.17.726）已具备；默认 seccomp BPF 回退策略（`~/.libra/seccomp.bpf`）已可提供，per-allowlist 代理后端与默认强制隔离仍待落地”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读、Linux bwrap 参数构造层、内建 bwrap 真实执行、`--seccomp <fd>` 参数注入、`NetworkAccess` 三态枚举、per-command tmp、结构化 Evidence sink 均已进入主干；默认 seccomp BPF 回退策略文件支持（`~/.libra/seccomp.bpf`）已补齐，per-allowlist 代理后端仍未进入主干实现。
 
 ### 分阶段状态（当前代码）
 
 | 阶段 | 目标 | 现状 |
 |---|---|---|
 | 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 已落地：`sandbox status`、`Required` 拒绝降级、`PreferStrict` 降级审批确认均已接线；默认仍保持 `BestEffort` 兼容模式 |
-| 阶段 2 | 内建 bwrap 直调 + seccomp | 已落地：v0.17.724 接入真实执行选择（`locate_bwrap_binary` 探测 `PATH` + `LIBRA_BWRAP_BINARY` 覆盖），v0.17.725 接入 `--seccomp <fd>` 参数 + `seccomp_policy_path` 配置位与 `pre_exec` FD 注入；默认仍不强制 BPF 策略（缺省 `None`），用户需自备编译后的 BPF 文件 |
+| 阶段 2 | 内建 bwrap 直调 + seccomp | 已落地：v0.17.724 接入真实执行选择（`locate_bwrap_binary` 探测 `PATH` + `LIBRA_BWRAP_BINARY` 覆盖），v0.17.725 接入 `--seccomp <fd>` 参数 + `seccomp_policy_path` 配置位与 `pre_exec` FD 注入；默认策略回退到 `~/.libra/seccomp.bpf`（文件存在时生效） |
 | 阶段 3 | `setsid` / `--new-session` | 已落地：sandbox 子进程 Unix `setsid()` 已落地；bwrap 参数构造已包含 `--new-session` / `--die-with-parent`，内建 bwrap 真实执行路径（v0.17.724）下两者均在生效路径中 |
 | 阶段 4 | 敏感路径拒读（`deny_read`） | 已落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 参数构造已把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效；剩余风险是默认 deny_read 清单仍较保守 |
 | 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
@@ -67,7 +67,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **Linux 静默降级已可关闭**：`SandboxManager::transform()` 在 `Required` 且内部 sandbox policy 需要 OS 后端时，不再允许 Linux helper 缺失后继续裸跑，而是返回 `SandboxTransformError::EnforcementFailed`。
 - **环境开关已接线**：`LIBRA_SANDBOX_ENFORCEMENT=required|prefer_strict|best_effort` 会影响 `libra code` 命令构造路径；无效值返回用户可读错误。
 - **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失 + `bwrap` 也不可用时告警会说明相关命令将失败。
-- **仍待收口**：v0.17.724 落地内建 bwrap 真实执行后，Linux required 模式不再唯一依赖外部 helper（无 helper 时自动选择 `bwrap`）；仍待落地的是默认 seccomp BPF 策略（v0.17.725 仅落地 `--seccomp <fd>` wiring，缺省 `None`）。
+- **仍待收口**：v0.17.724 落地内建 bwrap 真实执行后，Linux required 模式不再唯一依赖外部 helper（无 helper 时自动选择 `bwrap`）；仍待落地的是 per-allowlist 代理后端。
 
 ## 0.17.45 增量收口（2026-05-12）
 
@@ -177,7 +177,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | 已落地：macOS Seatbelt 拒读默认敏感路径 + 自定义 deny_read；Linux bwrap 把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效 | ✅ | 阶段 4 已落地 |
 | G4 | 默认拒绝 + 域名白名单的网络策略 | `NetworkAccess::{Denied, Allowlist { services }, Full}` 三态已落地（v0.17.723）；Linux 在 `Denied` 时 `--unshare-net` 已生效；per-allowlist 代理后端仍是 stub（`NoopProxy` / `LoopbackOnlyProxy`），真实 HTTPS/TCP 过滤待 Phase 7.4 | ★★ | 阶段 7 三态枚举已落地，代理后端待后续 |
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已落地：`run_command_spec` 前后注入并清理私有 tmp；清理失败通过 `SandboxEvidenceSink::TmpdirCleanupFailed` 结构化记录（v0.17.720） | ✅ | 阶段 5 已落地 |
-| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；默认 `None`（用户需自备编译后的 BPF），默认 restrictive 策略仍待提供 | ★ | 阶段 2 wiring 已落地；默认策略待后续 |
+| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；默认回退路径 `~/.libra/seccomp.bpf`（可按 `template/seccomp-default.json` 编译） | ★ | 阶段 2 wiring 已落地；回退文件默认识别已生效 |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
 | G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |

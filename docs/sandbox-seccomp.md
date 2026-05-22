@@ -7,12 +7,13 @@ convenience landed in v0.17.729 so users can opt in without
 editing `SandboxRuntimeConfig` in-process.
 
 > **Status**: opt-in. The default `LIBRA_SECCOMP_POLICY` is unset,
-> which keeps the pre-Phase-7 behaviour (no seccomp filter). Libra
-> does not ship a default restrictive policy because the
-> "correct" policy depends on the host distribution, the workloads
-> the agent is expected to run, and architecture-specific syscall
-> numbers. The recommendation below is a pragmatic baseline; tune
-> it for your environment.
+> which keeps the pre-Phase-7 behaviour (no seccomp filter) unless a
+> default file exists at `~/.libra/seccomp.bpf`. If present, that file is
+> used as a fallback when `LIBRA_SECCOMP_POLICY` is unset.
+>
+> Libra does not ship a precompiled BPF binary, so you still need to
+> compile one for your architecture. The recommendation below is a
+> pragmatic baseline; tune it for your environment.
 
 ## Quick start
 
@@ -48,6 +49,16 @@ Compile it once for your architecture and export
    LIBRA_LOG=info libra code --goal 'noop' --network deny
    # → look for `sandbox.evidence ...` lines and `--seccomp 200`
    #   in the bwrap arg vector.
+   ```
+
+5. If you compile to the fallback location, no env var is required:
+   ```sh
+   seccompiler-bin --target-arch "$(uname -m)" \
+       --input-file "$(libra repo-root)/template/seccomp-default.json" \
+       --output-file "$HOME/.libra/seccomp.bpf"
+
+   LIBRA_LOG=info libra code --goal 'noop' --network deny
+   # → fallback path is used automatically.
    ```
 
 ## Recommended baseline policy (bundled)
@@ -99,7 +110,12 @@ This lets a test or a CI harness pin a specific policy without
 the developer's local env override interfering.
 
 The runtime falls back to the env var only when the in-process
-field is `None` (which it is for every default code path).
+field is `None` (which it is for every default code path), and then
+to `~/.libra/seccomp.bpf` when present.
+
+`LIBRA_SECCOMP_POLICY` takes explicit precedence even when empty:
+an empty / whitespace-only env value disables seccomp (including the
+fallback file).
 
 ## Observability
 
@@ -121,6 +137,8 @@ proxy-backend / failure-paths sweep lands.
 
 ## Disabling
 
-`unset LIBRA_SECCOMP_POLICY` (or `export LIBRA_SECCOMP_POLICY=""`)
-reverts to the no-seccomp behaviour. The bwrap arg vector drops
-`--seccomp 200` and the `pre_exec` hook is not installed.
+`unset LIBRA_SECCOMP_POLICY` reverts to no env override and allows a
+fallback default at `~/.libra/seccomp.bpf` if present.
+`export LIBRA_SECCOMP_POLICY=""` still disables seccomp entirely.
+The bwrap arg vector drops `--seccomp 200` and the `pre_exec` hook is
+not installed when no path resolves.

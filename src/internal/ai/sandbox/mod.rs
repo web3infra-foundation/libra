@@ -86,7 +86,8 @@ pub struct SandboxRuntimeConfig {
     /// `--seccomp <fd>` to the bwrap args and
     /// [`runtime::install_seccomp_policy_pre_exec`] opens the
     /// file in the child to populate that FD. Default `None`
-    /// keeps the pre-patch behaviour (no seccomp filter). See
+    /// keeps Linux as opt-in unless `~/.libra/seccomp.bpf` exists and
+    /// no explicit `LIBRA_SECCOMP_POLICY` override is set. See
     /// `docs/improvement/sandbox.md` line 19 ("seccomp 注入") for
     /// the doc contract.
     pub seccomp_policy_path: Option<PathBuf>,
@@ -863,6 +864,7 @@ const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
 /// binary (output of `seccompiler --output bpf-bin` or
 /// equivalent). See `docs/sandbox-seccomp.md` for the recommended
 /// policy and compilation steps.
+const DEFAULT_SECCOMP_POLICY_PATH: &str = ".libra/seccomp.bpf";
 const SANDBOX_SECCOMP_POLICY_ENV: &str = "LIBRA_SECCOMP_POLICY";
 const SANDBOX_CONFIG_FILE: &str = "sandbox.toml";
 #[cfg(unix)]
@@ -1279,10 +1281,10 @@ fn build_command_from_spec(
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
     let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
-    let seccomp_env_path = resolve_seccomp_policy_env();
+    let fallback_seccomp_policy_path = resolve_seccomp_policy_path();
     let seccomp_policy_path = sandbox_runtime
         .and_then(|cfg| cfg.seccomp_policy_path.as_deref())
-        .or(seccomp_env_path.as_deref());
+        .or(fallback_seccomp_policy_path.as_deref());
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1499,6 +1501,20 @@ fn resolve_seccomp_policy_env() -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(trimmed))
     }
+}
+
+/// Resolve seccomp policy using explicit env override first,
+/// then defaulting to `~/.libra/seccomp.bpf` when the env
+/// var is not set at all. Empty / whitespace-only env values
+/// explicitly disable seccomp and therefore block defaulting.
+fn resolve_seccomp_policy_path() -> Option<PathBuf> {
+    if std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV).is_some() {
+        return resolve_seccomp_policy_env();
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(DEFAULT_SECCOMP_POLICY_PATH))
+        .filter(|path| path.is_file())
 }
 
 async fn request_exec_approval(
@@ -1939,6 +1955,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+    use crate::utils::test::ScopedEnvVar;
 
     #[test]
     fn sandbox_enforcement_env_defaults_to_best_effort() {
@@ -1974,13 +1991,21 @@ mod tests {
     /// an empty string sentinel. Pins the contract that env-var
     /// seccomp opt-in is the lowest-friction path for users who
     /// don't customise `SandboxRuntimeConfig` directly.
+    #[cfg_attr(target_os = "linux", serial)]
     #[test]
     fn seccomp_policy_env_resolves_path_only_when_non_empty() {
-        // SAFETY: test-only env mutation. The whole block runs
-        // single-threaded under the lib test harness and restores
-        // any prior value after each assertion so other tests
-        // remain isolated.
+        // SAFETY: test-only env mutation.
         let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
+        let _policy = match prior {
+            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
+            None => {
+                // SAFETY: test-only env cleanup before running the assertion.
+                unsafe {
+                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                }
+                None
+            }
+        };
         unsafe {
             std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
         }
@@ -2001,14 +2026,49 @@ mod tests {
             resolve_seccomp_policy_env().as_deref(),
             Some(std::path::Path::new("/etc/libra/seccomp.bpf")),
         );
+    }
 
-        unsafe {
-            if let Some(value) = prior {
-                std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, value);
-            } else {
-                std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+    #[cfg_attr(target_os = "linux", serial)]
+    #[test]
+    fn seccomp_policy_path_falls_back_to_default_and_obeys_explicit_disable() {
+        let temp = tempfile::tempdir().expect("tempdir for default seccomp path test");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let policy_path = temp.path().join(".libra").join("seccomp.bpf");
+        let _ = std::fs::create_dir_all(policy_path.parent().expect("policy parent dir exists"));
+        std::fs::write(&policy_path, b"placeholder bpf bytes").expect("write placeholder bpf");
+
+        let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
+        let _policy = match prior {
+            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
+            None => {
+                // SAFETY: test-only env cleanup before running the assertion.
+                unsafe {
+                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                }
+                None
             }
-        }
+        };
+        assert_eq!(
+            resolve_seccomp_policy_path().as_deref(),
+            Some(policy_path.as_path()),
+            "default policy path should be used when env var is unset",
+        );
+
+        let _policy_explicit = ScopedEnvVar::set(
+            SANDBOX_SECCOMP_POLICY_ENV,
+            policy_path.to_string_lossy().to_string(),
+        );
+        assert_eq!(
+            resolve_seccomp_policy_path().as_deref(),
+            Some(policy_path.as_path()),
+            "explicit env path should be preferred",
+        );
+
+        let _policy_disabled = ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, " ");
+        assert!(
+            resolve_seccomp_policy_path().is_none(),
+            "whitespace env value should disable seccomp even when default path exists",
+        );
     }
 
     #[test]
