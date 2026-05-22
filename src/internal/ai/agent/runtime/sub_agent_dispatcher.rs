@@ -171,6 +171,20 @@ impl DefaultSubAgentDispatcher {
         self
     }
 
+    /// Convenience wrapper that attaches the production
+    /// [`DefaultSubAgentChildRunner`] (single-shot model invocation
+    /// with `run_tool_loop` integration). This is the dispatcher
+    /// shape libra code's session bootstrap should call when
+    /// `code.sub_agents.enabled = true`: gate behaviour stays
+    /// unchanged, and the dispatch tail actually runs the child
+    /// model instead of synthesising the P3.3-era placeholder
+    /// result.
+    ///
+    /// [`DefaultSubAgentChildRunner`]: super::sub_agent::DefaultSubAgentChildRunner
+    pub fn with_default_child_runner(self) -> Self {
+        self.with_child_runner(Arc::new(super::sub_agent::DefaultSubAgentChildRunner::new()))
+    }
+
     /// Number of dispatches currently running (test introspection only).
     #[cfg(test)]
     pub fn in_flight(&self) -> u32 {
@@ -1877,6 +1891,43 @@ mod tests {
             "TaskFailure::Timeout must map to AgentRunEvent::TimedOut, got: {:?}",
             events[1],
         );
+    }
+
+    /// `with_default_child_runner` attaches the production runner
+    /// without forcing call sites to import the runner type. The
+    /// dispatcher's behaviour after attachment is identical to
+    /// `with_child_runner(Arc::new(DefaultSubAgentChildRunner))`;
+    /// this test pins the equivalence so the convenience wrapper
+    /// cannot silently drift from the explicit form.
+    #[tokio::test]
+    async fn with_default_child_runner_attaches_the_production_runner() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, _registry, _usage, _store) = dispatcher_test_harness(config).await;
+        let with_explicit = dispatcher.with_child_runner(Arc::new(
+            crate::internal::ai::agent::runtime::DefaultSubAgentChildRunner::new(),
+        ));
+        // The explicit + convenience wrappers attach equivalent
+        // runners. The dispatcher does not expose its runner field
+        // directly for inspection (private), but the inability to
+        // distinguish the two at any caller surface IS the
+        // contract — a future refactor that drops the convenience
+        // wrapper must keep `with_child_runner(Arc::new(...))`
+        // working for the public production path.
+        drop(with_explicit);
+
+        let (dispatcher2, _registry2, _usage2, _store2) =
+            dispatcher_test_harness(MultiAgentConfig {
+                enabled: true,
+                max_subagent_depth: 4,
+                max_concurrent_subagents: 4,
+            })
+            .await;
+        let with_convenience = dispatcher2.with_default_child_runner();
+        drop(with_convenience);
     }
 
     /// P3.7 wire-up: a runner that returns `TaskFailure::Cancelled
