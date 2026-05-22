@@ -105,6 +105,27 @@ pub trait ToolLoopObserver: Send {
         _result: &Result<ToolOutput, String>,
     ) {
     }
+
+    /// Called after a `task` tool call completes with a successful
+    /// `TaskResult` from the sub-agent dispatcher. The default impl
+    /// folds the child's usage into the parent's anonymous bucket
+    /// via [`Self::on_model_usage`], which keeps the totals accurate
+    /// even when the consumer ignores per-agent attribution.
+    /// Per-agent budget enforcement (OC-Phase 5 P5.3) overrides this
+    /// to route the usage through the budget tracker with
+    /// `agent_name = Some(...)` so `check_agent` fires correctly.
+    ///
+    /// `agent_name` is the sub-agent's spec name as resolved by the
+    /// dispatcher. `usage` is the accumulated `CompletionUsageSummary`
+    /// the runner's `ChildRunObserver` collected across every model
+    /// turn in the child loop (v0.17.762).
+    fn on_sub_agent_completed(
+        &mut self,
+        _agent_name: &str,
+        usage: &CompletionUsageSummary,
+    ) {
+        self.on_model_usage(usage);
+    }
 }
 
 /// Default observer used when callers do not provide one (the simple `run_tool_loop`
@@ -597,6 +618,7 @@ where
                         config.subagent_runtime.as_ref(),
                         &call.id,
                         &call.function.arguments,
+                        observer,
                     )
                     .await
                 } else {
@@ -877,10 +899,11 @@ fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, St
     }
 }
 
-async fn dispatch_task_tool_call(
+async fn dispatch_task_tool_call<O: ToolLoopObserver>(
     runtime: Option<&SubAgentToolLoopRuntime>,
     call_id: &str,
     arguments: &Value,
+    observer: &mut O,
 ) -> Result<ToolOutput, String> {
     let runtime =
         runtime.ok_or_else(|| "Tool 'task' is not available in this session".to_string())?;
@@ -891,7 +914,17 @@ async fn dispatch_task_tool_call(
         .dispatch(ctx, invocation, TaskEntryKind::LlmInitiated)
         .await
     {
-        Ok(result) => Ok(task_result_output(result)),
+        Ok(result) => {
+            // Surface the sub-agent's usage to the parent observer
+            // with attribution so OC-Phase 5 per-agent budget
+            // enforcement (`check_agent`) sees a non-default
+            // accumulation. The default observer impl folds this
+            // into the parent's anonymous `on_model_usage` bucket;
+            // a TUI observer override routes it through
+            // `BudgetTracker::accumulate(..., Some(agent_name))`.
+            observer.on_sub_agent_completed(&result.agent_name, &result.usage);
+            Ok(task_result_output(result))
+        }
         Err(failure) => Err(format!(
             "Task dispatch failed: {}",
             task_failure_label(&failure)
@@ -1594,6 +1627,7 @@ mod tests {
         ends: Vec<(String, String, bool)>,
         result_texts: Vec<String>,
         stream_events: Vec<CompletionStreamEvent>,
+        sub_agent_completions: Vec<(String, CompletionUsageSummary)>,
     }
 
     impl ToolLoopObserver for RecordingObserver {
@@ -1621,6 +1655,11 @@ mod tests {
                 tool_name.to_string(),
                 result.as_ref().is_ok_and(|o| o.is_success()),
             ));
+        }
+
+        fn on_sub_agent_completed(&mut self, agent_name: &str, usage: &CompletionUsageSummary) {
+            self.sub_agent_completions
+                .push((agent_name.to_string(), usage.clone()));
         }
     }
 
@@ -1953,7 +1992,15 @@ mod tests {
                         model_id: "default".to_string(),
                         final_text: "Found 3 TODOs in 2 files.".to_string(),
                         steps_used: 2,
-                        usage: CompletionUsageSummary::default(),
+                        // Stamp a recognisable non-default usage so
+                        // the observer's `on_sub_agent_completed`
+                        // assertion below can distinguish a forwarded
+                        // payload from a default-clone.
+                        usage: CompletionUsageSummary {
+                            input_tokens: 100,
+                            output_tokens: 42,
+                            ..CompletionUsageSummary::default()
+                        },
                     })
                 })
             }
@@ -2050,6 +2097,19 @@ mod tests {
             observer.ends,
             vec![("call_task_1".to_string(), "task".to_string(), true)]
         );
+        // OC-Phase 5 per-agent attribution: the new
+        // `on_sub_agent_completed` hook (v0.17.768) must fire with
+        // the sub-agent's resolved spec name and the
+        // dispatcher-returned usage envelope verbatim.
+        assert_eq!(
+            observer.sub_agent_completions.len(),
+            1,
+            "task tool success must fire exactly one on_sub_agent_completed callback"
+        );
+        let (sub_name, sub_usage) = &observer.sub_agent_completions[0];
+        assert_eq!(sub_name, "explore");
+        assert_eq!(sub_usage.input_tokens, 100);
+        assert_eq!(sub_usage.output_tokens, 42);
     }
 
     #[test]
