@@ -701,6 +701,15 @@ pub struct SubAgentChildRunRequest<'a> {
     pub effective_ruleset: &'a PermissionRuleset,
     pub task_id: String,
     pub agent_run_id: AgentRunId,
+    /// Optional pre-built chat history the runner threads into the
+    /// child's tool loop before the user prompt. Today the
+    /// dispatcher passes `Vec::new()` (the child sees only the
+    /// invocation's prompt), but the field exists so a follow-up
+    /// integration can materialise the parent
+    /// `ContextHandoff::recent_tail` segments into `Message`s and
+    /// hand them in without changing the runner trait's surface.
+    /// Empty is the "no handoff yet" baseline.
+    pub history: Vec<crate::internal::ai::completion::Message>,
 }
 
 /// Executes the tail of a dispatch after gates and approvals pass.
@@ -849,7 +858,7 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             let mut observer = ChildRunObserver::default();
             let turn = run_tool_loop_with_history_and_observer(
                 &model,
-                Vec::new(),
+                request.history.clone(),
                 request.invocation.prompt.clone(),
                 request.ctx.tool_registry,
                 tool_loop_config,
@@ -1594,6 +1603,7 @@ mod tests {
             effective_ruleset: &parent_ruleset,
             task_id: "task-id".to_string(),
             agent_run_id: AgentRunId::new(),
+            history: Vec::new(),
         };
 
         let runner = DefaultSubAgentChildRunner::new();

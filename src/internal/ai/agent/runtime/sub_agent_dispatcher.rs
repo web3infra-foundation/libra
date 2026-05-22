@@ -489,6 +489,7 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     effective_ruleset: &_effective,
                     task_id: task_id.clone(),
                     agent_run_id,
+                    history: Vec::new(),
                 };
                 runner.run(request).await
             } else {
