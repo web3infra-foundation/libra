@@ -2883,6 +2883,7 @@ where
             &storage_root,
             &model_name,
             &provider_name,
+            &agent_router,
         )
         .await
         {
@@ -3357,6 +3358,7 @@ pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::
 /// captures a fresh `parent_message_id` for each `task` tool
 /// invocation; the rest of the parent context is stable for the
 /// session.
+#[allow(clippy::too_many_arguments)]
 async fn build_subagent_runtime_for_session(
     agents_config: &AgentsConfig,
     registry: std::sync::Arc<ToolRegistry>,
@@ -3365,6 +3367,7 @@ async fn build_subagent_runtime_for_session(
     storage_root: &Path,
     model_name: &str,
     provider_name: &str,
+    agent_router: &AgentProfileRouter,
 ) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
     use crate::internal::ai::{
         agent::{
@@ -3412,12 +3415,32 @@ async fn build_subagent_runtime_for_session(
             )
         })?;
 
-    let parent_agent = AgentExecutionSpec {
-        name: "parent".to_string(),
-        description: "libra-code primary agent (session bootstrap default)".to_string(),
-        mode: AgentMode::Primary,
-        model: Some(parent_model_binding.clone()),
-        ..AgentExecutionSpec::default()
+    // OC-Phase 3 P3.4 router-resolved parent_agent (v0.17.780):
+    // if the operator has authored a `.libra/agents/primary.md`
+    // (or any `.md` profile named "primary"), use it as the
+    // sub-agent dispatcher's parent_agent. The CLI flags still
+    // win for the model binding because the operator's `libra
+    // code --model <X>` should override the profile's default
+    // model — sub-agents inherit the session's actual model, not
+    // the profile's static one. Falls back to the v0.17.776
+    // placeholder when no profile is found.
+    let parent_agent = match agent_router.execution_spec("primary") {
+        Some(mut spec) => {
+            // The router-supplied spec carries the profile's
+            // declared model binding, but the session's actual
+            // model is what the CLI resolved — sub-agents should
+            // see the same model the parent is talking to, not
+            // the profile's default.
+            spec.model = Some(parent_model_binding.clone());
+            spec
+        }
+        None => AgentExecutionSpec {
+            name: "parent".to_string(),
+            description: "libra-code primary agent (session bootstrap default)".to_string(),
+            mode: AgentMode::Primary,
+            model: Some(parent_model_binding.clone()),
+            ..AgentExecutionSpec::default()
+        },
     };
 
     let session_jsonl_store = SessionJsonlStore::new(session_store.session_root(&session.id));
