@@ -853,19 +853,43 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             // Drive the history-aware tool loop with our observer so
             // the returned `TaskResult` reports the real per-turn
             // count and accumulated usage instead of a `1` / default
-            // placeholder. History starts empty; the loop folds the
-            // user prompt + every assistant / tool turn inside.
+            // placeholder. History starts from the request's
+            // optional handoff segments; the loop folds the user
+            // prompt + every assistant / tool turn after that.
+            //
+            // P3.7 mid-flight cancel: race the child loop against
+            // the parent's abort token. If the token fires while
+            // the child is in a long provider await, the
+            // `tokio::select!` short-circuits with
+            // `Cancelled { ParentAbort }` instead of waiting for
+            // the provider response. The provider future is
+            // dropped at that point — cooperative cancel; any
+            // in-flight network IO finishes its own way, but we
+            // do not wait for it before returning to the parent.
+            // The dispatcher's `map_failure_to_terminal_event`
+            // (v0.17.757) maps the returned `Cancelled` to
+            // `AgentRunEvent::Cancelled { reason: UserRequested }`.
             let mut observer = ChildRunObserver::default();
-            let turn = run_tool_loop_with_history_and_observer(
+            let abort_token_clone = request.ctx.abort_token.clone();
+            let child_loop = run_tool_loop_with_history_and_observer(
                 &model,
                 request.history.clone(),
                 request.invocation.prompt.clone(),
                 request.ctx.tool_registry,
                 tool_loop_config,
                 &mut observer,
-            )
-            .await
-            .map_err(TaskFailure::ProviderError)?;
+            );
+
+            let turn_result = tokio::select! {
+                biased;
+                _ = abort_token_clone.cancelled() => {
+                    return Err(TaskFailure::Cancelled {
+                        source: CancellationSource::ParentAbort,
+                    });
+                }
+                result = child_loop => result,
+            };
+            let turn = turn_result.map_err(TaskFailure::ProviderError)?;
 
             Ok(TaskResult {
                 task_id: request.task_id,
