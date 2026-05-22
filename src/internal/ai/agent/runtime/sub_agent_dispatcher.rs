@@ -476,18 +476,20 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             };
 
             // P3.5: mirror the dispatch tail with the matching
-            // lifecycle event. `Completed` for the success branch;
-            // `Failed { reason }` for the failure branch (the reason
-            // free-form text comes from the TaskFailure's Display so
-            // replay tooling sees the same diagnostic the parent
-            // does). Best-effort: append failures degrade to
-            // tracing::warn rather than overriding the outcome.
+            // lifecycle event. `Completed` for success; for failures
+            // the doc spec distinguishes structurally between
+            // Failed / Cancelled / TimedOut / BudgetExceeded so
+            // replay tooling can branch on the variant tag without
+            // string-matching the reason. Free-form `Failed {
+            // reason }` is the catch-all for everything else (e.g.
+            // ProviderError, ChildToolLoopFailed) — the reason text
+            // is the TaskFailure's Display so the parent transcript
+            // and the persisted event agree byte-for-byte.
+            // Best-effort: append failures degrade to tracing::warn
+            // rather than overriding the outcome.
             let terminal_event = match &outcome {
                 Ok(_) => AgentRunEvent::Completed { agent_run_id },
-                Err(failure) => AgentRunEvent::Failed {
-                    agent_run_id,
-                    reason: failure.to_string(),
-                },
+                Err(failure) => map_failure_to_terminal_event(agent_run_id, failure),
             };
             if let Err(err) =
                 ctx.session_store
@@ -557,6 +559,86 @@ fn collect_permission_keys(
 /// digest fits in a one-line prompt header. Not a cryptographic hash —
 /// the goal is "enough to recognise the dispatch in a log", not
 /// uniqueness.
+/// Translate a `TaskFailure` into the matching `AgentRunEvent`
+/// terminal variant.
+///
+/// The OC-Phase 3 P3.5 contract distinguishes between Failed /
+/// Cancelled / TimedOut / BudgetExceeded at the event level so
+/// replay tooling can branch on the variant tag without scanning
+/// `Failed.reason` for substrings. Variants outside this
+/// structural taxonomy (e.g. provider error, child-tool-loop
+/// failure) fall through to `Failed { reason }` with the
+/// `TaskFailure`'s `Display` text as the reason — that text is the
+/// same one the parent transcript shows, so a downstream reader
+/// can correlate the event with the parent's diagnostic byte-for-byte.
+fn map_failure_to_terminal_event(
+    agent_run_id: crate::internal::ai::agent_run::AgentRunId,
+    failure: &TaskFailure,
+) -> AgentRunEvent {
+    use crate::internal::ai::agent_run::{BudgetDimension, CancellationReason};
+
+    match failure {
+        TaskFailure::Cancelled {
+            source: CancellationSource::ParentAbort,
+        } => AgentRunEvent::Cancelled {
+            agent_run_id,
+            reason: CancellationReason::UserRequested,
+        },
+        TaskFailure::Cancelled {
+            source: CancellationSource::Timeout,
+        } => AgentRunEvent::Cancelled {
+            agent_run_id,
+            reason: CancellationReason::LayerOneTimeout,
+        },
+        TaskFailure::Cancelled {
+            source: CancellationSource::BudgetHardCap,
+        } => AgentRunEvent::Cancelled {
+            agent_run_id,
+            reason: CancellationReason::Other("budget_hard_cap".to_string()),
+        },
+        TaskFailure::Timeout { .. } => AgentRunEvent::TimedOut { agent_run_id },
+        TaskFailure::BudgetExceeded(super::sub_agent::BudgetExceededReason::CostHardCap) => {
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id,
+                dimension: BudgetDimension::Cost,
+            }
+        }
+        TaskFailure::BudgetExceeded(super::sub_agent::BudgetExceededReason::TokenHardCap) => {
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id,
+                dimension: BudgetDimension::Token,
+            }
+        }
+        TaskFailure::BudgetExceeded(super::sub_agent::BudgetExceededReason::WallClock) => {
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id,
+                dimension: BudgetDimension::WallClock,
+            }
+        }
+        TaskFailure::BudgetExceeded(super::sub_agent::BudgetExceededReason::Steps) => {
+            // No dedicated "Steps" dimension — use ToolCall as the
+            // structural neighbour and preserve the Display reason
+            // in the event semantics via the variant tag itself.
+            AgentRunEvent::BudgetExceeded {
+                agent_run_id,
+                dimension: BudgetDimension::ToolCall,
+            }
+        }
+        // Everything else (FeatureDisabled / UnknownSubagent /
+        // DepthExceeded / ConcurrencyExceeded /
+        // PermissionEscalationDenied / SafetyDenied /
+        // ApprovalRejected / BudgetExceeded(Internal) /
+        // ContextHandoffFailed / ProviderError /
+        // ChildToolLoopFailed) goes through Failed with the
+        // Display text. Pre-gate failures never reach this helper
+        // because they return Err before the Spawned event fires.
+        _ => AgentRunEvent::Failed {
+            agent_run_id,
+            reason: failure.to_string(),
+        },
+    }
+}
+
 fn digest_for_prompt(prompt: &str) -> String {
     let first_line = prompt.lines().next().unwrap_or("").trim();
     if first_line.chars().count() <= 80 {
@@ -1697,10 +1779,13 @@ mod tests {
         assert!(matches!(events[1], AgentRunEvent::Completed { .. }));
     }
 
-    /// Symmetric counterpart: a runner that returns `TaskFailure`
-    /// flips the terminal event to `Failed { reason }`, with the
-    /// reason text matching the failure's Display output so replay
-    /// tooling sees the same diagnostic the parent does.
+    /// Symmetric counterpart: a runner that returns
+    /// `TaskFailure::Timeout` produces a structurally-typed
+    /// `AgentRunEvent::TimedOut` terminal (not Failed). The P3.5
+    /// taxonomy distinguishes Failed / Cancelled / TimedOut /
+    /// BudgetExceeded at the event level so replay tooling can
+    /// branch on the variant tag without scanning Failed.reason
+    /// substrings.
     #[tokio::test]
     async fn dispatch_runner_error_emits_failed_event_with_reason() {
         let config = MultiAgentConfig {
@@ -1770,17 +1855,97 @@ mod tests {
         assert_eq!(
             events.len(),
             2,
-            "runner failure must still emit Spawned + Failed"
+            "runner failure must still emit Spawned + TimedOut"
         );
         assert!(matches!(events[0], AgentRunEvent::Spawned { .. }));
+        assert!(
+            matches!(events[1], AgentRunEvent::TimedOut { .. }),
+            "TaskFailure::Timeout must map to AgentRunEvent::TimedOut, got: {:?}",
+            events[1],
+        );
+    }
+
+    /// P3.7 wire-up: a runner that returns `TaskFailure::Cancelled
+    /// { ParentAbort }` produces `AgentRunEvent::Cancelled { reason:
+    /// UserRequested }` — the schema variant tag distinguishes
+    /// human-driven aborts from `LayerOneTimeout` (timeout-driven)
+    /// and the `Other` catch-all (budget-hard-cap, etc.).
+    #[tokio::test]
+    async fn dispatch_runner_cancel_emits_cancelled_event_with_user_requested_reason() {
+        use crate::internal::ai::agent_run::CancellationReason;
+
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+
+        struct CancellingRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for CancellingRunner {
+            fn run<'a>(
+                &'a self,
+                _request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async {
+                    Err(TaskFailure::Cancelled {
+                        source: CancellationSource::ParentAbort,
+                    })
+                })
+            }
+        }
+
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let dispatcher = dispatcher.with_child_runner(Arc::new(CancellingRunner));
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-cancel".to_string();
+        let parent_session: SessionId = "session-cancel".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("runner returned Cancelled");
+
+        let events: Vec<_> = store
+            .load_events()
+            .expect("JSONL readable")
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                crate::internal::ai::session::jsonl::SessionEvent::AgentRun(known) => {
+                    known.known().cloned()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
         match &events[1] {
-            AgentRunEvent::Failed { reason, .. } => {
+            AgentRunEvent::Cancelled { reason, .. } => {
                 assert!(
-                    reason.contains("60000"),
-                    "Failed.reason must surface the failure's Display output, got: {reason}",
+                    matches!(reason, CancellationReason::UserRequested),
+                    "ParentAbort must map to CancellationReason::UserRequested, got: {reason:?}",
                 );
             }
-            other => panic!("expected Failed terminal event, got {other:?}"),
+            other => panic!("expected Cancelled terminal event, got {other:?}"),
         }
     }
 }
