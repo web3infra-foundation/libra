@@ -11,26 +11,35 @@
 //! 4. resolve `subagent_type` via the spec registry; reject `Primary`
 //!    profiles — P3.3 implemented
 //! 5. `SafetyDecision::evaluate(SubAgentSpawn { name, prompt_digest })`
-//!    — still a TODO no-op. Needs a `SubAgentSpawn`
-//!    [`crate::internal::ai::runtime::ToolOperation`] variant before
-//!    `ToolBoundaryPolicy::decide` can take it. Today the dispatcher
-//!    accepts every sub-spec that survived the prior gates; no
-//!    semantic gap exists because Libra has no `SubAgentSpawn`
-//!    policy configured.
+//!    — still a TODO no-op. The `ToolOperation::sub_agent_spawn`
+//!    constructor exists (v0.17.712), so wiring `ToolBoundaryPolicy::decide`
+//!    against it is a small follow-up; today the dispatcher accepts
+//!    every sub-spec that survived the prior gates; no semantic gap
+//!    exists because Libra has no `SubAgentSpawn` policy configured.
 //! 6. compute `effective_ruleset` via `child_ruleset(parent, sub_spec)`
 //!    — P3.3 implemented
 //! 7. assert no permission escalation (Permission Escalation Gate)
-//!    — P3.3 implemented
+//!    — P3.3 implemented; v0.17.743 layered a parent-abort cancel
+//!    check (pre-gate + post-ask) returning
+//!    `TaskFailure::Cancelled { ParentAbort }` if the parent
+//!    short-circuited mid-dispatch. — P3.7 partial
 //! 8. `PermissionService.ask(...)` for `LlmInitiated` only;
 //!    `UserInitiated { bypass_permission_ask: true }` skips the
 //!    dialog. `Reject{feedback}` surfaces as
 //!    [`TaskFailure::ApprovalRejected`]. — P3.4 implemented
 //!
-//! Steps 9–13 (model build, handoff, child JSONL session,
-//! `AgentRunEvent::Spawned`, child run_tool_loop) stay deferred to
-//! P3.4+ follow-ups: each needs a dependency that has not landed yet
-//! (the OC-Phase 4 context handoff builder, the `agent_run`
-//! schema's child run plumbing, and the tool-loop integration).
+//! `Spawned` / `Completed` AgentRun lifecycle events are written into
+//! the parent session JSONL as soon as gates clear — P3.5 partial
+//! (v0.17.739). `Failed` / `Cancelled` / `TimedOut` wait for the real
+//! child loop where actual failure modes exist.
+//!
+//! Steps 9–13 (model build, handoff via `ContextHandoffBuilder`,
+//! child JSONL session, child run_tool_loop) stay deferred to P3.4
+//! follow-ups: the OC-Phase 4 ContextHandoffBuilder + the
+//! ContextFrameLoader real-shape API are now in place (v0.17.740 +
+//! v0.17.744), but the tool-loop integration that drives a child
+//! `run_tool_loop_with_history_and_observer` from inside the
+//! dispatcher tail still needs to land.
 //! Callers that pass step 8 still see the placeholder
 //! [`TaskResult`] from P3.3 — empty `final_text`, zero `steps_used`,
 //! the spec-derived agent / provider / model identities. Tests pin
