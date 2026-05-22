@@ -26,9 +26,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use self::evidence::SandboxEvidenceSink;
 use super::runtime::hardening::{SafetyDecision, SafetyDisposition};
 
 mod command_safety;
+pub mod evidence;
 pub mod policy;
 pub mod proxy;
 pub mod runtime;
@@ -69,6 +71,15 @@ pub struct SandboxRuntimeConfig {
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
     pub deny_read_paths: Vec<PathBuf>,
+    /// Optional structured-event sink that receives sandbox-level
+    /// notifications (tmp cleanup failures, writable-root rejections,
+    /// future enforcement / network denials). Defaults to `None` —
+    /// the sandbox falls back to [`evidence::TracingSandboxEvidenceSink`]
+    /// so existing log scrapers see no change. See
+    /// [`evidence`](self::evidence) for the full event vocabulary and
+    /// `docs/improvement/sandbox.md` lines 142-144 / 162 / 373 for
+    /// the doc contract this hook satisfies.
+    pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1084,7 +1095,8 @@ pub async fn run_command_spec(
     inject_command_tmp_env(&mut spec, &command_tmpdir);
 
     let output = run_command_spec_inner(spec, max_output_bytes, sandbox, sandbox_runtime).await;
-    cleanup_command_tmpdir(&command_tmpdir).await;
+    let evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
+    cleanup_command_tmpdir(&command_tmpdir, evidence_sink.as_deref()).await;
     output
 }
 
@@ -1209,15 +1221,30 @@ fn inject_command_tmp_env(spec: &mut CommandSpec, command_tmpdir: &Path) {
     spec.env.insert("TMP".to_string(), command_tmpdir);
 }
 
-async fn cleanup_command_tmpdir(path: &Path) {
+async fn cleanup_command_tmpdir(
+    path: &Path,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+) {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => {}
         Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => tracing::warn!(
-            path = %path.display(),
-            error = %err,
-            "failed to cleanup private command tmp dir"
-        ),
+        Err(err) => {
+            // Doc contract: `docs/improvement/sandbox.md:142` —
+            // surface tmp cleanup failure as a structured Evidence
+            // event in addition to the legacy tracing line. The
+            // default `TracingSandboxEvidenceSink` keeps the
+            // existing log shape; an opt-in agent-runtime sink can
+            // route to `AgentEvidence` rows downstream.
+            let event = evidence::SandboxEvidenceEvent::TmpdirCleanupFailed {
+                path: path.to_path_buf(),
+                error: err.to_string(),
+            };
+            if let Some(sink) = evidence_sink {
+                sink.record(event);
+            } else {
+                evidence::TracingSandboxEvidenceSink.record(event);
+            }
+        }
     }
 }
 
@@ -1246,7 +1273,29 @@ fn build_command_from_spec(
             enforcement,
             deny_read_paths: &deny_read_paths,
         })
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| {
+            // Doc contract: `docs/improvement/sandbox.md:143` —
+            // writable_root rejections must surface as structured
+            // Evidence in addition to the propagated error string.
+            // The default `TracingSandboxEvidenceSink` keeps the
+            // existing log shape; opt-in agent-runtime sinks fan
+            // out to `AgentEvidence` rows.
+            if let runtime::SandboxTransformError::InvalidPolicy(
+                policy::SandboxPolicyError::DangerousWritableRoot { root, reason },
+            ) = &err
+            {
+                let event = evidence::SandboxEvidenceEvent::WritableRootRejected {
+                    root: root.clone(),
+                    reason: (*reason).to_string(),
+                };
+                if let Some(sink) = sandbox_runtime.and_then(|c| c.evidence_sink.as_deref()) {
+                    sink.record(event);
+                } else {
+                    evidence::TracingSandboxEvidenceSink.record(event);
+                }
+            }
+            err.to_string()
+        })?;
     exec_env.into_command()
 }
 
@@ -2074,8 +2123,131 @@ mod tests {
 
         assert_eq!(metadata.permissions().mode() & 0o777, COMMAND_TMPDIR_MODE);
 
-        cleanup_command_tmpdir(&tmpdir).await;
+        cleanup_command_tmpdir(&tmpdir, None).await;
         assert!(!tmpdir.exists());
+    }
+
+    /// Pin the structured `TmpdirCleanupFailed` Evidence event the
+    /// sandbox emits when `remove_dir_all` fails. We force a
+    /// failure by pointing the cleanup at a path that exists as a
+    /// regular file (not a directory) — `remove_dir_all` returns
+    /// `NotADirectory`/`Other` and the sink should capture exactly
+    /// one event with the file path. See
+    /// `docs/improvement/sandbox.md:142`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_command_tmpdir_records_evidence_on_failure() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::evidence::{
+            InMemorySandboxEvidenceSink, SandboxEvidenceEvent,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir for cleanup-evidence test");
+        let file_path = temp.path().join("not-a-directory.txt");
+        std::fs::write(&file_path, b"file, not a dir").expect("write tmpdir-target file");
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        cleanup_command_tmpdir(&file_path, Some(sink.as_ref())).await;
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SandboxEvidenceEvent::TmpdirCleanupFailed { path, error } => {
+                assert_eq!(path, &file_path);
+                assert!(
+                    !error.is_empty(),
+                    "tmpdir cleanup failure must include a non-empty error string"
+                );
+            }
+            other => panic!("expected TmpdirCleanupFailed, got {other:?}"),
+        }
+    }
+
+    /// Pin that a successful cleanup emits **no** Evidence event.
+    /// The sink contract is "structured surface for failures"; a
+    /// happy-path cleanup must remain silent on the structured
+    /// channel so consumers can treat any event as actionable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_command_tmpdir_records_no_evidence_on_success() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::evidence::InMemorySandboxEvidenceSink;
+
+        let tmpdir = create_command_tmpdir().expect("private command tmpdir should be created");
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+
+        cleanup_command_tmpdir(&tmpdir, Some(sink.as_ref())).await;
+
+        assert!(!tmpdir.exists());
+        assert!(
+            sink.events().is_empty(),
+            "successful cleanup must not emit an Evidence event"
+        );
+    }
+
+    /// Pin the structured `WritableRootRejected` Evidence event
+    /// the sandbox emits when a configured writable_root matches a
+    /// dangerous mount pattern (e.g. `/var/run/docker.sock`). See
+    /// `docs/improvement/sandbox.md:143`. The sandbox's
+    /// `validate_writable_roots_with_cwd` returns
+    /// `SandboxPolicyError::DangerousWritableRoot`, which
+    /// `build_command_from_spec` propagates as a `String` error
+    /// after emitting the Evidence row.
+    #[test]
+    fn build_command_from_spec_records_evidence_on_dangerous_writable_root() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::{
+            evidence::{InMemorySandboxEvidenceSink, SandboxEvidenceEvent},
+            policy::SandboxPolicy,
+        };
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_runtime = SandboxRuntimeConfig {
+            evidence_sink: Some(sink.clone()),
+            ..SandboxRuntimeConfig::default()
+        };
+        let dangerous_root = PathBuf::from("/var/run/docker.sock");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![dangerous_root.clone()],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let sandbox_context = ToolSandboxContext {
+            policy,
+            permissions: SandboxPermissions::default(),
+        };
+        let spec = CommandSpec {
+            program: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            env: std::collections::HashMap::new(),
+            timeout_ms: None,
+            sandbox_permissions: SandboxPermissions::default(),
+            justification: None,
+        };
+
+        let result = build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime));
+
+        // The dangerous writable root must reject the spec.
+        assert!(result.is_err(), "dangerous writable root must abort build");
+
+        // AND the sink must have captured the structured event.
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
+        match &events[0] {
+            SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
+                assert_eq!(root, &dangerous_root);
+                assert!(
+                    !reason.is_empty(),
+                    "rejection must include a non-empty reason"
+                );
+            }
+            other => panic!("expected WritableRootRejected, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
