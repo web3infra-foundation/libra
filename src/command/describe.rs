@@ -16,6 +16,7 @@ use crate::{
     internal::{
         branch::Branch,
         config::ConfigKv,
+        db::get_db_conn_instance_for_path,
         tag::{self, TagObject},
     },
     utils::{
@@ -561,7 +562,15 @@ async fn resolve_max_candidates(flag: Option<usize>) -> Result<Option<usize>, De
         }
         return Ok(Some(n));
     }
-    match ConfigKv::get("describe.maxCandidates").await {
+    let Ok(storage_path) = util::try_get_storage_path(None) else {
+        return Ok(Some(DEFAULT_CANDIDATES));
+    };
+    let db_path = storage_path.join(util::DATABASE);
+    let Ok(db) = get_db_conn_instance_for_path(&db_path).await else {
+        return Ok(Some(DEFAULT_CANDIDATES));
+    };
+
+    match ConfigKv::get_with_conn(&db, "describe.maxCandidates").await {
         Ok(Some(entry)) => match entry.value.trim().parse::<usize>() {
             Ok(n) if n >= 1 => Ok(Some(n)),
             _ => Ok(Some(DEFAULT_CANDIDATES)),
