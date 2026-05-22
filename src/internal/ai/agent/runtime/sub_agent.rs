@@ -38,10 +38,14 @@ use crate::internal::ai::{
     agent::profile::{AgentExecutionSpec, ModelBinding},
     agent_run::AgentRunId,
     completion::{CompletionError, CompletionUsageSummary},
+    context_budget::frame::ContextFrameEvent,
     permission::PermissionRuleset,
     providers::{ProviderBuildOptions, ProviderFactory},
     sandbox::ToolRuntimeContext,
-    session::{SessionId, jsonl::SessionJsonlStore},
+    session::{
+        SessionId,
+        jsonl::{SessionEvent, SessionJsonlStore},
+    },
     tools::ToolRegistry,
     usage::UsageRecorder,
 };
@@ -244,12 +248,58 @@ impl std::fmt::Debug for PermissionService {
 
 // ─── Other runtime service placeholders ─────────────────────────────────
 
-/// Placeholder for the context-frame loader the dispatcher uses to
-/// materialise a [`ContextHandoff`]-style summary from the parent session
-/// JSONL. Real shape arrives in P4.3 alongside the handoff builder.
+/// Loads the latest [`ContextFrameEvent`] from a session JSONL store so
+/// the dispatcher can build a [`ContextHandoff`] via
+/// [`ContextHandoffBuilder`].
+///
+/// Today the loader is a pure scan over the events already on disk —
+/// no caching, no projection index. The OC-Phase 3 dispatcher needs
+/// "the most recent ContextFrame the parent emitted" and nothing
+/// more; richer queries (multi-frame splice, attachment dedup) belong
+/// to the orchestrator/projection layer.
+///
+/// `Default` returns a loader with no fallback frame — every load
+/// path consults the supplied session store. A future P4.5 PR may
+/// add an in-memory baseline; until then `Default` is what tests use
+/// when they don't care about handoff content.
+///
+/// [`ContextFrameEvent`]: super::super::context_budget::frame::ContextFrameEvent
+/// [`ContextHandoff`]: super::super::context_budget::handoff::ContextHandoff
+/// [`ContextHandoffBuilder`]: super::super::context_budget::handoff::ContextHandoffBuilder
 #[derive(Debug, Default)]
 pub struct ContextFrameLoader {
     _marker: (),
+}
+
+impl ContextFrameLoader {
+    /// Build a fresh loader. Exists alongside `Default::default()` so
+    /// call sites that prefer constructor syntax read consistently
+    /// with the rest of the runtime services.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Walk the session's JSONL stream and return the most recent
+    /// [`super::super::context_budget::frame::ContextFrameEvent`], or
+    /// `None` if the stream carries no frame events yet (a fresh
+    /// session, or one whose frames have been pruned).
+    ///
+    /// IO errors surface verbatim so the dispatcher can decide
+    /// whether to fall through with a degraded handoff or refuse the
+    /// dispatch; the loader itself takes no policy stance.
+    pub fn latest_frame_for_session(
+        &self,
+        store: &SessionJsonlStore,
+    ) -> std::io::Result<Option<ContextFrameEvent>> {
+        let events = store.load_events()?;
+        let mut latest = None;
+        for event in events {
+            if let SessionEvent::ContextFrame(frame) = event {
+                latest = Some(frame);
+            }
+        }
+        Ok(latest)
+    }
 }
 
 // ─── Invocation / Result / Entry Kind ───────────────────────────────────
@@ -884,5 +934,107 @@ mod tests {
         // assertion; this drop just keeps clippy from flagging an
         // unused binding.
         drop(dispatcher);
+    }
+
+    /// Scenario: a session whose JSONL has no `ContextFrame` events
+    /// yet returns `None`. Used as the cold-start baseline for the
+    /// dispatcher's "no parent context to forward" branch.
+    #[test]
+    fn context_frame_loader_returns_none_for_empty_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SessionJsonlStore::new(temp.path().to_path_buf());
+        let loader = ContextFrameLoader::new();
+        let latest = loader
+            .latest_frame_for_session(&store)
+            .expect("scan over an empty session must not be an IO error");
+        assert!(latest.is_none(), "no frame events should produce None");
+    }
+
+    /// Scenario: a session JSONL with multiple `ContextFrame` events
+    /// returns the LATEST (last-written) one. The dispatcher relies on
+    /// this rule to pick "the parent's most recent context" rather
+    /// than a stale one earlier in the session.
+    #[test]
+    fn context_frame_loader_returns_latest_frame_when_multiple_present() {
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        use crate::internal::ai::context_budget::frame::{ContextFrameEvent, ContextFrameKind};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SessionJsonlStore::new(temp.path().to_path_buf());
+
+        let older = ContextFrameEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            kind: ContextFrameKind::PromptBuild,
+            prompt_id: None,
+            segments: Vec::new(),
+            omissions: Vec::new(),
+            total_candidate_tokens: 0,
+            total_selected_tokens: 0,
+            budget_exceeded_by: 0,
+        };
+        let newer = ContextFrameEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            kind: ContextFrameKind::ToolResult,
+            prompt_id: None,
+            segments: Vec::new(),
+            omissions: Vec::new(),
+            total_candidate_tokens: 0,
+            total_selected_tokens: 0,
+            budget_exceeded_by: 0,
+        };
+        store
+            .append(&SessionEvent::ContextFrame(older.clone()))
+            .unwrap();
+        store
+            .append(&SessionEvent::ContextFrame(newer.clone()))
+            .unwrap();
+
+        let loader = ContextFrameLoader::new();
+        let latest = loader
+            .latest_frame_for_session(&store)
+            .expect("scan must not fail")
+            .expect("a frame event was appended");
+        assert_eq!(
+            latest.frame_id, newer.frame_id,
+            "loader must return the latest frame, not the first"
+        );
+        assert_ne!(latest.frame_id, older.frame_id);
+    }
+
+    /// Scenario: non-`ContextFrame` events on the session JSONL
+    /// (e.g. `SessionSnapshot`, `AgentRun`) do not get returned. This
+    /// pins the loader's "frame-only" filter so a future
+    /// `SessionEvent` variant cannot silently leak through.
+    #[test]
+    fn context_frame_loader_skips_non_frame_session_events() {
+        use crate::internal::ai::session::state::SessionState;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SessionJsonlStore::new(temp.path().to_path_buf());
+
+        store
+            .append(&SessionEvent::SessionSnapshot(
+                crate::internal::ai::session::jsonl::SessionSnapshotEvent {
+                    event_id: uuid::Uuid::new_v4(),
+                    recorded_at: chrono::Utc::now(),
+                    state: SessionState::new(temp.path().to_string_lossy().as_ref()),
+                },
+            ))
+            .unwrap();
+
+        let loader = ContextFrameLoader::new();
+        let latest = loader
+            .latest_frame_for_session(&store)
+            .expect("scan must not fail");
+        assert!(
+            latest.is_none(),
+            "non-ContextFrame events must not surface as frame loads",
+        );
     }
 }
