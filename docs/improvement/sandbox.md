@@ -42,10 +42,10 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux helper 缺失时，默认 `best_effort` 仍会 `warn` 并回退到无沙箱；`LIBRA_SANDBOX_ENFORCEMENT=required` 或 runtime config 设为 `Required` 时，`SandboxManager::transform()` 会返回 `SandboxTransformError::EnforcementFailed`；`prefer_strict` 在 shell approval 路径会先要求确认降级。
 - `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed { reason: String }` transform error variant 已在 v0.17.670 落地（Display 模板 `"network enforcement failed: {reason}"`，与 `EnforcementFailed` 唯一区分以便 audit 消费者按子串过滤）。三态 `NetworkAccess` 枚举迁移仍待 callsite audit。
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、当前 enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；`required` 模式会把内部沙箱缺失报告为将失败，而不是描述为可接受降级。
-- Linux 执行路径仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`）；`src/internal/ai/sandbox/runtime.rs` 已新增内建 `create_bwrap_command_args()` 参数构造层，但尚未接入真实执行选择。
+- Linux 执行路径已支持双路：外部 `libra-linux-sandbox` helper（`--sandbox-policy` / `--use-bwrap-sandbox` 参数转发）+ 内建 bwrap 直调（`locate_bwrap_binary()` 探测 `PATH`，未设 `LIBRA_LINUX_SANDBOX_EXE` 时自动 fallback；v0.17.724）。`SandboxManager::transform` 在 `LinuxSeccomp` 分支内按"外部 helper → 内建 bwrap → EnforcementFailed/裸跑"三段决策。
 - macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 参数构造层已把 `deny_read` 映射为 `--tmpfs` 遮蔽。
 - `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
-- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs::NetworkAccess`（当前位于 policy.rs:79-83）、`src/internal/ai/sandbox/mod.rs` 内部 `effective_network_access()`、以及 `src/command/code.rs` 中传递 `--network-access` 的入口。锚点改为函数 / 枚举名而非行号，避免 sandbox 子系统继续重构时再次失锚。
+- 网络模型已迁移为三态：`src/internal/ai/sandbox/policy.rs::NetworkAccess::{Denied, Allowlist { services }, Full}`（v0.17.723）；`SandboxPolicy::WorkspaceWrite::network_access: NetworkAccess`、`ExternalSandbox::network_access: NetworkAccess`；`has_full_network_access()` / `network_access.is_enabled()` 给 `LIBRA_SANDBOX_NETWORK_DISABLED` 环境变量的设置位置消费。`src/command/code.rs` 中 `--network-access` CLI 通过 `NetworkAccess::from_legacy_bool(...)` 适配回 enum。`Allowlist` 模式的 per-service 代理后端仍是 stub（`NoopProxy` / `LoopbackOnlyProxy`），实际拦截待 Phase 7.4 真实代理后端落地。
 
 ## 0.17.25 增量收口（2026-05-12）
 
@@ -66,15 +66,15 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **阶段 1 显式 required enforcement 已落地**：`SandboxEnforcement::{Required, PreferStrict, BestEffort}` 已进入策略层并导出给 runtime config；默认保持 `BestEffort` 以维持既有行为。
 - **Linux 静默降级已可关闭**：`SandboxManager::transform()` 在 `Required` 且内部 sandbox policy 需要 OS 后端时，不再允许 Linux helper 缺失后继续裸跑，而是返回 `SandboxTransformError::EnforcementFailed`。
 - **环境开关已接线**：`LIBRA_SANDBOX_ENFORCEMENT=required|prefer_strict|best_effort` 会影响 `libra code` 命令构造路径；无效值返回用户可读错误。
-- **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失时告警会说明相关命令将失败。
-- **仍待收口**：内建 bwrap 未落地前，Linux required 模式仍依赖外部 helper。
+- **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失 + `bwrap` 也不可用时告警会说明相关命令将失败。
+- **仍待收口**：v0.17.724 落地内建 bwrap 真实执行后，Linux required 模式不再唯一依赖外部 helper（无 helper 时自动选择 `bwrap`）；仍待落地的是默认 seccomp BPF 策略（v0.17.725 仅落地 `--seccomp <fd>` wiring，缺省 `None`）。
 
 ## 0.17.45 增量收口（2026-05-12）
 
 - **阶段 3 部分落地**：`ExecEnv::into_command()` 在 Unix 平台对实际启用的 Libra 内部 sandbox 命令调用 `setsid()`，让 macOS Seatbelt / Linux helper 子进程脱离调用方 session。
 - **生效范围**：仅当 `effective_sandbox` 为 `MacosSeatbelt` 或 `LinuxSeccomp` 时启用；显式 escalated、`DangerFullAccess`、`ExternalSandbox` 和默认 fallback `SandboxType::None` 不会被这个路径隐式改写。
 - **回归覆盖**：`exec_env_new_session_runs_child_as_session_leader` 在 Unix 上验证 `setsid()` 后 child PID 与 session ID 一致；fallback / escalated transform 继续断言不会设置 `new_session`。
-- **仍待收口**：内建 bwrap 尚未落地，因此阶段 2 的 `--new-session` 参数覆盖仍是后续工作；Seatbelt 读权限收紧也仍在阶段 4。
+- **仍待收口**：v0.17.724 内建 bwrap 真实执行落地后，阶段 2 的 `--new-session` 参数覆盖（在 `create_bwrap_command_args` 中已包含）现在进入生效路径；Seatbelt 读权限收紧也仍在阶段 4。
 
 ## 0.17.46 增量收口（2026-05-12）
 
@@ -172,12 +172,12 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 | # | Claude Code 做到 | Libra 现状 | 严重度 | 落地阶段 |
 |---|---|---|---|---|
-| G1 | Linux 沙箱开箱即用（bwrap 直调） | 依赖外部 `libra-linux-sandbox` 二进制，未配置时 warn + 裸跑 | ★★★ | 阶段 1 + 阶段 2 |
-| G2 | `--new-session` 阻断 TIOCSTI | sandbox 子进程已 `setsid()`；内建 bwrap `--new-session` 仍待阶段 2 | ★★★ | 阶段 3 部分落地 |
-| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | macOS Seatbelt 已拒读默认敏感路径并支持自定义 deny_read；Linux bwrap 遮蔽仍待实现 | ★★ | 阶段 4 部分落地 |
-| G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
-| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已在 `run_command_spec` 前后注入并清理私有 tmp；清理失败 Evidence 仍待 Runtime 接线 | ✅ | 阶段 5 已落地 |
-| G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
+| G1 | Linux 沙箱开箱即用（bwrap 直调） | 已落地（v0.17.724）：外部 `libra-linux-sandbox` 缺失时自动选择 `bwrap`；`locate_bwrap_binary()` 探测 `PATH` + `LIBRA_BWRAP_BINARY` 覆盖 | ✅ | 阶段 1 + 阶段 2 已落地 |
+| G2 | `--new-session` 阻断 TIOCSTI | 已落地：sandbox 子进程 `setsid()` + 内建 bwrap `create_bwrap_command_args` 包含 `--new-session` / `--die-with-parent`，v0.17.724 真实执行路径下两者生效 | ✅ | 阶段 3 已落地 |
+| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | 已落地：macOS Seatbelt 拒读默认敏感路径 + 自定义 deny_read；Linux bwrap 把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效 | ✅ | 阶段 4 已落地 |
+| G4 | 默认拒绝 + 域名白名单的网络策略 | `NetworkAccess::{Denied, Allowlist { services }, Full}` 三态已落地（v0.17.723）；Linux 在 `Denied` 时 `--unshare-net` 已生效；per-allowlist 代理后端仍是 stub（`NoopProxy` / `LoopbackOnlyProxy`），真实 HTTPS/TCP 过滤待 Phase 7.4 | ★★ | 阶段 7 三态枚举已落地，代理后端待后续 |
+| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已落地：`run_command_spec` 前后注入并清理私有 tmp；清理失败通过 `SandboxEvidenceSink::TmpdirCleanupFailed` 结构化记录（v0.17.720） | ✅ | 阶段 5 已落地 |
+| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；默认 `None`（用户需自备编译后的 BPF），默认 restrictive 策略仍待提供 | ★ | 阶段 2 wiring 已落地；默认策略待后续 |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
 | G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
