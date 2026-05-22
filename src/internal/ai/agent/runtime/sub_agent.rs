@@ -766,9 +766,7 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
         &'a self,
         request: SubAgentChildRunRequest<'a>,
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
-        use crate::internal::ai::completion::{
-            CompletionModel, CompletionRequest, CompletionUsage, Message,
-        };
+        use super::tool_loop::{ToolLoopConfig, run_tool_loop};
 
         Box::pin(async move {
             // Pre-flight cancel: matches the dispatcher's post-ask
@@ -796,32 +794,46 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 .map(|m| m.model_id.clone())
                 .unwrap_or_default();
 
-            let completion_request =
-                CompletionRequest::new(vec![Message::user(request.invocation.prompt.clone())]);
-            let response = model
-                .completion(completion_request)
-                .await
-                .map_err(|err| TaskFailure::ProviderError(err))?;
+            // Compute the child's visible tool surface by intersecting
+            // the parent's registry with `(sub_spec, effective_ruleset)`.
+            // The names feed `ToolLoopConfig::allowed_tools` so the
+            // tool loop blocks anything the child should not see —
+            // even if the underlying registry still carries the
+            // handler. This is the same `available_for` rule the
+            // P3.1 schema-level pre-filter uses; the child sees the
+            // intersection at both the request definition and the
+            // execution-time gate (`available_for` filters the
+            // request's tool list, `allowed_tools` blocks any
+            // hallucinated call to a tool outside that list).
+            let allowed_tools: Vec<String> = request
+                .ctx
+                .tool_registry
+                .available_for(request.sub_spec, request.effective_ruleset)
+                .into_iter()
+                .map(|spec| spec.function.name)
+                .collect();
 
-            // Aggregate assistant text. Tool-call content blocks are
-            // ignored — the runner does not yet drive a tool loop, so
-            // a tool call from the model is functionally a no-op for
-            // this single-shot wiring. The `steps_used = 1` count
-            // pins the single provider call, NOT a multi-step run;
-            // when the tool loop arrives this becomes the loop step
-            // count.
-            use crate::internal::ai::completion::AssistantContent;
-            let mut final_text = String::new();
-            for block in &response.content {
-                if let AssistantContent::Text(text) = block {
-                    if !final_text.is_empty() {
-                        final_text.push('\n');
-                    }
-                    final_text.push_str(&text.text);
-                }
-            }
+            let tool_loop_config = ToolLoopConfig {
+                allowed_tools: Some(allowed_tools),
+                ..ToolLoopConfig::default()
+            };
 
-            let usage = response.raw_response.usage_summary().unwrap_or_default();
+            let final_text = run_tool_loop(
+                &model,
+                request.invocation.prompt.clone(),
+                request.ctx.tool_registry,
+                tool_loop_config,
+            )
+            .await
+            .map_err(TaskFailure::ProviderError)?;
+
+            // `steps_used = 1` for this iteration — the simple
+            // `run_tool_loop` entrypoint returns only the final text
+            // and not the per-turn count. A follow-up swap to
+            // `run_tool_loop_with_history_and_observer` surfaces the
+            // real value from `ToolLoopTurn::steps`. Usage stays
+            // `default()` for the same reason — the simple entry
+            // discards the response envelope on the way out.
             Ok(TaskResult {
                 task_id: request.task_id,
                 agent_name: request.sub_spec.name.clone(),
@@ -829,7 +841,7 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 model_id,
                 final_text,
                 steps_used: 1,
-                usage,
+                usage: CompletionUsageSummary::default(),
             })
         })
     }
