@@ -1489,6 +1489,7 @@ where
             CancelSource::Esc => "Turn interrupted by user",
             CancelSource::SlashQuit => "Turn interrupted by quit command",
             CancelSource::Automation => "Turn interrupted by automation",
+            CancelSource::Budget => "Turn interrupted by budget cap",
         };
         self.enqueue_mcp_turn_decision("abandon", reason.to_string());
         self.cancel_pending_user_input();
@@ -3227,6 +3228,25 @@ where
                         for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
                             self.widget
                                 .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
+                        }
+                        // OC-Phase 5 budget enforcement: any
+                        // `max_*_cost_usd` / `max_session_tokens` /
+                        // `max_wall_clock_minutes` breach surfaces as
+                        // an inline error cell **and** interrupts the
+                        // current turn so the model cannot keep
+                        // burning budget. `check_session` returns the
+                        // first cap that was crossed; `check_goal`
+                        // covers the Goal-mode wall-clock / cost cap
+                        // independently of the session-wide one.
+                        let budget_breach = self
+                            .budget_tracker
+                            .check_session(&self.agents_config)
+                            .err()
+                            .or_else(|| self.budget_tracker.check_goal(&self.agents_config).err());
+                        if let Some(error) = budget_breach {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                            let _ = self.cancel_current_turn(CancelSource::Budget).await;
                         }
                         apply_final_usage_update(
                             &mut self.usage_snapshot,

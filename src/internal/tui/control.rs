@@ -174,6 +174,15 @@ pub enum CancelSource {
     Esc,
     SlashQuit,
     Automation,
+    /// The OC-Phase 5 [`BudgetTracker`] returned
+    /// `BudgetExceededError` from a `check_session` / `check_agent` /
+    /// `check_goal` call wired into the `AgentEvent::UsageUpdated`
+    /// handler. The dispatcher abort source carries this so a future
+    /// budget-vs-user disambiguation in the TUI footer can show
+    /// "interrupted: budget" instead of "interrupted: user".
+    ///
+    /// [`BudgetTracker`]: crate::internal::ai::agent::budget::BudgetTracker
+    Budget,
 }
 
 #[cfg(test)]
