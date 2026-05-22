@@ -586,6 +586,32 @@ impl AgentsConfig {
         }
     }
 
+    /// Build an [`crate::internal::ai::agent::runtime::AgentSpecRegistry`]
+    /// from this config's `[code.agents.*]` entries, suitable for
+    /// handing to
+    /// [`crate::internal::ai::agent::runtime::DefaultSubAgentDispatcher::new`].
+    ///
+    /// This is the production wire-up the libra-code session
+    /// bootstrap calls when `code.sub_agents.enabled = true`: a
+    /// fresh `BTreeMap<String, AgentExecutionSpec>` is captured
+    /// via [`execution_specs`](Self::execution_specs) and wrapped
+    /// in an `Arc<dyn AgentSpecRegistry>` that the dispatcher's
+    /// `lookup(name)` / `registered_names()` calls read from.
+    ///
+    /// `Err` is the same `AgentsConfigValidationErrors` shape the
+    /// callers already surface — if validation passes once at
+    /// load time, this method can be expected to succeed on a
+    /// subsequent call as long as no fields were mutated.
+    pub fn build_agent_registry(
+        &self,
+    ) -> Result<
+        std::sync::Arc<dyn crate::internal::ai::agent::runtime::AgentSpecRegistry>,
+        AgentsConfigValidationErrors,
+    > {
+        let specs = self.execution_specs()?;
+        Ok(std::sync::Arc::new(StaticAgentSpecRegistry { specs }))
+    }
+
     /// Run the full validation pass. See module-level docs for the
     /// rules. Returns `Ok(())` only when the punch list is empty.
     pub fn validate(&self) -> Result<(), AgentsConfigValidationErrors> {
@@ -712,6 +738,32 @@ impl AgentsConfig {
         } else {
             Err(AgentsConfigValidationErrors { errors })
         }
+    }
+}
+
+/// Snapshot-based [`AgentSpecRegistry`] backed by an immutable
+/// `BTreeMap<String, AgentExecutionSpec>` extracted from the
+/// loaded [`AgentsConfig`].
+///
+/// Each `lookup(name)` clones a stored spec; this matches the
+/// trait signature (`fn lookup(&self, name: &str) ->
+/// Option<AgentExecutionSpec>`) without forcing the dispatcher to
+/// hold a long-lived borrow on the config. Use
+/// [`AgentsConfig::build_agent_registry`] to construct one.
+///
+/// [`AgentSpecRegistry`]: crate::internal::ai::agent::runtime::AgentSpecRegistry
+#[derive(Clone, Debug)]
+struct StaticAgentSpecRegistry {
+    specs: BTreeMap<String, AgentExecutionSpec>,
+}
+
+impl crate::internal::ai::agent::runtime::AgentSpecRegistry for StaticAgentSpecRegistry {
+    fn lookup(&self, name: &str) -> Option<AgentExecutionSpec> {
+        self.specs.get(name).cloned()
+    }
+
+    fn registered_names(&self) -> Vec<String> {
+        self.specs.keys().cloned().collect()
     }
 }
 
@@ -1355,6 +1407,58 @@ steps = 12
         assert!(matches!(spec.tools, ToolSelection::Allow(_)));
         assert!(spec.permission.denied_tools.contains("edit"));
         assert!(spec.permission.allowed_tools.contains("shell"));
+    }
+
+    /// OC-Phase 3 P3.4 production wire-up prerequisite (v0.17.772):
+    /// `AgentsConfig::build_agent_registry()` materialises every
+    /// validated `[code.agents.*]` entry into the
+    /// `AgentSpecRegistry` shape the dispatcher consumes via
+    /// `DefaultSubAgentDispatcher::new(registry, config)`.
+    /// `lookup(name)` returns clones; `registered_names()` returns
+    /// the BTreeMap key order (sorted).
+    #[test]
+    fn build_agent_registry_exposes_validated_specs_via_registry_trait() {
+        let cfg = AgentsConfig::from_toml_str(
+            r#"
+[code.agents.explorer]
+model = "deepseek/deepseek-chat"
+mode = "subagent"
+tools = ["read_file"]
+
+[code.agents.reviewer]
+model = "anthropic/claude-3-5-sonnet-latest"
+mode = "subagent"
+tools = ["read_file", "grep_files"]
+"#,
+        )
+        .expect("two-agent config must parse");
+
+        let registry = cfg
+            .build_agent_registry()
+            .expect("validated config must build a registry");
+
+        let names = registry.registered_names();
+        assert_eq!(
+            names,
+            vec!["explorer".to_string(), "reviewer".to_string()],
+            "registered_names should return BTreeMap key order (sorted)",
+        );
+
+        let explorer = registry.lookup("explorer").expect("explorer must resolve");
+        assert_eq!(explorer.name, "explorer");
+        assert_eq!(
+            explorer.model.as_ref().unwrap().provider_id,
+            "deepseek",
+            "explorer's model binding survives the conversion",
+        );
+
+        let reviewer = registry.lookup("reviewer").expect("reviewer must resolve");
+        assert_eq!(reviewer.model.as_ref().unwrap().provider_id, "anthropic");
+
+        assert!(
+            registry.lookup("ghost").is_none(),
+            "unknown names must return None, not a placeholder spec",
+        );
     }
 
     #[test]
