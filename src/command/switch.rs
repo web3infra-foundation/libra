@@ -991,6 +991,114 @@ mod tests {
         );
     }
 
+    /// Pin the `stable_code()` routing for every [`SwitchError`] variant
+    /// via the `From<SwitchError> for CliError` impl. The match arms group
+    /// disparate variants under the same stable code (e.g.
+    /// `BranchCreate` + `HeadUpdate` → `IoWriteFailed`), so a silent
+    /// accidental rerouting between groups would otherwise go undetected
+    /// — only the display strings are currently pinned.
+    ///
+    /// The `DelegatedCli` variant is excluded because it passes the
+    /// wrapped `CliError` through verbatim — its stable code is owned
+    /// by the originating caller, not by `SwitchError`.
+    #[test]
+    fn switch_error_stable_code_pins_each_variant() {
+        fn code_of(err: SwitchError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        // CliInvalidArguments — missing required CLI inputs.
+        assert_eq!(
+            code_of(SwitchError::MissingTrackTarget),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            code_of(SwitchError::MissingDetachTarget),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            code_of(SwitchError::MissingBranchName),
+            StableErrorCode::CliInvalidArguments,
+        );
+
+        // CliInvalidTarget — target ref does not resolve to something switch can act on.
+        assert_eq!(
+            code_of(SwitchError::BranchNotFound {
+                name: "topic/x".to_string(),
+                similar: vec![],
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(SwitchError::GotRemoteBranch("origin/main".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(SwitchError::RemoteBranchNotFound {
+                remote: "origin".to_string(),
+                branch: "feature".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(SwitchError::InvalidRemoteBranch("garbage".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(SwitchError::InternalBranchBlocked("intent".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(SwitchError::CommitResolve("bad-rev".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+
+        // ConflictOperationBlocked — switch refuses because operating would clobber state.
+        assert_eq!(
+            code_of(SwitchError::BranchAlreadyExists("main".to_string())),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            code_of(SwitchError::UntrackedOverwrite("scratch.txt".to_string())),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+
+        // RepoStateInvalid — working tree is not in a switchable state.
+        assert_eq!(
+            code_of(SwitchError::DirtyUnstaged),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(SwitchError::DirtyUncommitted),
+            StableErrorCode::RepoStateInvalid,
+        );
+
+        // IoReadFailed — status probe failed.
+        assert_eq!(
+            code_of(SwitchError::StatusCheck("stat: ENOENT".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+
+        // IoWriteFailed — branch ref or HEAD write failed.
+        assert_eq!(
+            code_of(SwitchError::BranchCreate {
+                branch: "topic".to_string(),
+                detail: "lock.exists".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(SwitchError::HeadUpdate("permission denied".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+
+        // DelegatedCli pass-through: stable code is whatever the wrapped CliError carries.
+        let delegated = SwitchError::DelegatedCli(
+            CliError::fatal("delegated").with_stable_code(StableErrorCode::RepoCorrupt),
+        );
+        assert_eq!(code_of(delegated), StableErrorCode::RepoCorrupt);
+    }
+
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments
     fn test_parse_from() {
