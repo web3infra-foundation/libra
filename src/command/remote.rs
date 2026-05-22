@@ -899,4 +899,103 @@ mod tests {
             "remote object format 'sha1' does not match local 'sha256'",
         );
     }
+
+    /// Pin the `stable_code()` routing for every owned [`RemoteError`]
+    /// variant via the `From<RemoteError> for CliError` impl. The
+    /// existing `remote_error_display_pins_each_owned_variant` test
+    /// only covers the Display strings. The routing groups several
+    /// variants under the same code (e.g. `NotFound` +
+    /// `NoUrlConfigured` + `UrlPatternNotMatched` -> `CliInvalidTarget`;
+    /// `ConfigRead` + `BranchList` -> `IoReadFailed`;
+    /// `ConfigWrite` + `BranchDelete` -> `IoWriteFailed`), so a silent
+    /// rerouting between groups would not register without an
+    /// enum-level pin.
+    ///
+    /// The `Fetch` variant is excluded because it forwards to
+    /// `fetch::FetchError` via `CliError::from(source)` — its stable
+    /// code is owned by `FetchError`'s own routing, not by
+    /// `RemoteError`.
+    #[test]
+    fn remote_error_stable_code_pins_each_owned_variant() {
+        fn code_of(err: RemoteError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        // ConflictOperationBlocked — refused because acting would clobber state.
+        assert_eq!(
+            code_of(RemoteError::AlreadyExists {
+                name: "origin".to_string(),
+            }),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+
+        // CliInvalidTarget — user-supplied target does not resolve.
+        assert_eq!(
+            code_of(RemoteError::NotFound {
+                name: "upstream".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(RemoteError::NoUrlConfigured {
+                name: "origin".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(RemoteError::UrlPatternNotMatched {
+                name: "origin".to_string(),
+                role: UrlRole::Push,
+                pattern: "https://*".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+
+        // IoReadFailed — local config or refs probe failed at read time.
+        assert_eq!(
+            code_of(RemoteError::ConfigRead {
+                detail: "db locked".to_string(),
+            }),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(RemoteError::BranchList {
+                detail: "query failed".to_string(),
+            }),
+            StableErrorCode::IoReadFailed,
+        );
+
+        // IoWriteFailed — local config or refs write failed.
+        assert_eq!(
+            code_of(RemoteError::ConfigWrite {
+                detail: "disk full".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RemoteError::BranchDelete {
+                name: "refs/remotes/origin/stale".to_string(),
+                detail: "row locked".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+
+        // RepoCorrupt — remote-tracking ref payload is malformed.
+        assert_eq!(
+            code_of(RemoteError::BranchCorrupt {
+                name: "refs/remotes/origin/main".to_string(),
+                detail: "invalid hash".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+
+        // RepoStateInvalid — local repo cannot consume the remote's object format.
+        assert_eq!(
+            code_of(RemoteError::ObjectFormatMismatch {
+                remote: "sha1".to_string(),
+                local: "sha256".to_string(),
+            }),
+            StableErrorCode::RepoStateInvalid,
+        );
+    }
 }
