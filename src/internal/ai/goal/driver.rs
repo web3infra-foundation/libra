@@ -4,16 +4,29 @@
 //! [`crate::internal::ai::agent::runtime::run_tool_loop_with_history_and_observer`]
 //! entry point.
 //!
-//! The driver runs **one** assistant turn through the tool loop,
-//! extracts a [`GoalTurnOutcome`] from the resulting
-//! [`ToolLoopTurn`], asks the supervisor for the next decision, and
-//! folds the resulting envelopes back into a fresh [`GoalState`].
-//! Callers (the TUI / Code Control / future automation loop) own the
-//! re-entry decision: if `decision == Continue { prompt }` they
-//! invoke the driver again with the supervisor's continuation
-//! prompt; if `Completed` / `AwaitUser` / `Cancelled` they release
-//! the turn back to idle. This single-turn shape keeps the driver
-//! independent of any specific event-bus or UI cadence.
+//! The driver runs assistant turns through the tool loop until the
+//! supervisor returns a terminal decision. Each iteration:
+//!
+//! 1. Run a single tool-loop turn against the current history.
+//! 2. Project the [`ToolLoopTurn`] into a [`GoalTurnOutcome`] via
+//!    [`goal_turn_outcome_from_tool_loop_turn`].
+//! 3. Ask [`GoalSupervisor::step`] for the next decision, folding
+//!    the emitted envelopes back into [`GoalState`].
+//! 4. Branch on the [`GoalLoopDecision`]:
+//!    * `Completed { .. }` / `Cancelled` / `AwaitUser { .. }` are
+//!      terminal — break out of the loop and return the accumulated
+//!      run.
+//!    * `Continue { prompt }` feeds the continuation prompt back
+//!      into step 1 with the updated history, bounded by
+//!      [`DEFAULT_MAX_CONTINUATION_LOOPS`] to prevent a runaway
+//!      driver if the supervisor keeps returning `Continue` (e.g.
+//!      after a buggy verifier).
+//!
+//! When the iteration cap is reached the driver synthesises a
+//! `LoopLimitReached` outcome and asks the supervisor for one final
+//! decision (which the supervisor folds into a `Blocked {
+//! LoopLimitNeedsUser }` per opencode.md rule 6); that decision is
+//! what the caller sees in [`GoalSupervisedRun::decision`].
 //!
 //! # Mapping `ToolLoopTurn` to `GoalTurnOutcome`
 //!
@@ -28,6 +41,14 @@
 //! outcomes — `ProgressUpdate`, `CompletionClaim`, the various
 //! `Blocked*` arms — are produced inside the tool handlers and
 //! routed through the supervisor on subsequent driver invocations.
+
+/// Default iteration cap for the supervisor-driven continuation
+/// loop. The supervisor itself per opencode.md rule 6 emits
+/// `Blocked { LoopLimitNeedsUser }` when its continuation budget is
+/// exhausted; the driver enforces the same cap as a defensive
+/// belt-and-braces guard so a buggy verifier cannot create an
+/// infinite loop here.
+const DEFAULT_MAX_CONTINUATION_LOOPS: u32 = 8;
 
 use super::{
     event::GoalEventEnvelope,
@@ -81,8 +102,10 @@ where
     pub clock: &'a (dyn GoalEventClock + Send + Sync),
 }
 
-/// Run one Goal-supervised assistant turn end-to-end. See module
-/// docs for the loop-vs-caller-driven shape.
+/// Run a Goal-supervised assistant interaction end-to-end. The
+/// driver loops the tool-loop + supervisor pair until a terminal
+/// decision (Completed / Cancelled / AwaitUser) or the iteration
+/// cap is reached. See module docs for the per-iteration flow.
 pub async fn run_goal_supervised_tool_loop<'a, M, O, V, P>(
     request: GoalSupervisedToolLoopRequest<'a, M, O, V, P>,
 ) -> Result<GoalSupervisedRun, CompletionError>
@@ -106,41 +129,93 @@ where
         clock,
     } = request;
 
-    let turn = run_tool_loop_with_history_and_observer(
-        model,
-        history,
-        initial_prompt,
-        registry,
-        config,
-        observer,
-    )
-    .await?;
+    let mut current_state = state;
+    let mut current_history = history;
+    let mut next_prompt = initial_prompt;
+    let mut accumulated_events: Vec<GoalEventEnvelope> = Vec::new();
+    let mut loops_run: u32 = 0;
 
-    let outcome = goal_turn_outcome_from_tool_loop_turn(&turn);
-    let step = supervisor.step(&state, outcome, verifier_ctx, clock);
-    let mut new_state = state;
-    for envelope in &step.events {
-        // INVARIANT: supervisor.step emits envelopes that are
-        // already shape-validated; replay rejections here would
-        // indicate an internal bug (mis-ordered clock, duplicate
-        // envelope id). We surface them via trace rather than
-        // aborting so the caller can still see the partial state.
-        if let Err(reject) = apply(&mut new_state, envelope) {
-            tracing::warn!(
-                envelope_id = %envelope.envelope_id,
-                ?reject,
-                "goal supervisor envelope rejected on apply",
-            );
+    loop {
+        let turn = run_tool_loop_with_history_and_observer(
+            model,
+            current_history.clone(),
+            next_prompt.clone(),
+            registry,
+            config.clone(),
+            observer,
+        )
+        .await?;
+
+        let outcome = goal_turn_outcome_from_tool_loop_turn(&turn);
+        let step = supervisor.step(&current_state, outcome, verifier_ctx, clock);
+        for envelope in &step.events {
+            // INVARIANT: supervisor.step emits envelopes that are
+            // already shape-validated; replay rejections here would
+            // indicate an internal bug (mis-ordered clock, duplicate
+            // envelope id). We surface them via trace rather than
+            // aborting so the caller can still see the partial state.
+            if let Err(reject) = apply(&mut current_state, envelope) {
+                tracing::warn!(
+                    envelope_id = %envelope.envelope_id,
+                    ?reject,
+                    "goal supervisor envelope rejected on apply",
+                );
+            }
+        }
+        accumulated_events.extend(step.events);
+
+        current_history = turn.history;
+        let last_final_text = turn.final_text;
+        loops_run = loops_run.saturating_add(1);
+
+        match step.decision {
+            GoalLoopDecision::Continue { prompt } => {
+                if loops_run >= DEFAULT_MAX_CONTINUATION_LOOPS {
+                    // Synthesise the supervisor's
+                    // `LoopLimitReached` outcome so it can convert
+                    // to a `Blocked { LoopLimitNeedsUser }`
+                    // decision (opencode.md rule 6) — the caller
+                    // gets the Blocked terminal we agreed on
+                    // instead of a silent runaway exit.
+                    let final_step = supervisor.step(
+                        &current_state,
+                        GoalTurnOutcome::LoopLimitReached { loops_run },
+                        verifier_ctx,
+                        clock,
+                    );
+                    for envelope in &final_step.events {
+                        if let Err(reject) = apply(&mut current_state, envelope) {
+                            tracing::warn!(
+                                envelope_id = %envelope.envelope_id,
+                                ?reject,
+                                "goal supervisor envelope rejected on apply (loop-limit branch)",
+                            );
+                        }
+                    }
+                    accumulated_events.extend(final_step.events);
+                    return Ok(GoalSupervisedRun {
+                        final_text: last_final_text,
+                        history: current_history,
+                        state: current_state,
+                        events: accumulated_events,
+                        decision: final_step.decision,
+                    });
+                }
+                next_prompt = prompt;
+            }
+            terminal @ (GoalLoopDecision::Completed { .. }
+            | GoalLoopDecision::Cancelled
+            | GoalLoopDecision::AwaitUser { .. }) => {
+                return Ok(GoalSupervisedRun {
+                    final_text: last_final_text,
+                    history: current_history,
+                    state: current_state,
+                    events: accumulated_events,
+                    decision: terminal,
+                });
+            }
         }
     }
-
-    Ok(GoalSupervisedRun {
-        final_text: turn.final_text,
-        history: turn.history,
-        state: new_state,
-        events: step.events,
-        decision: step.decision,
-    })
 }
 
 /// Project a [`ToolLoopTurn`] down to a [`GoalTurnOutcome`].
