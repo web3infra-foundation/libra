@@ -132,9 +132,13 @@ impl DefaultSubAgentDispatcher {
         self.in_flight.load(Ordering::Acquire)
     }
 
-    /// Run the seven gates in order, returning either a placeholder
-    /// [`TaskResult`] (steps 8-13 land in P3.4) or the first
-    /// [`TaskFailure`] that fires.
+    /// Run the seven gates in order, returning either the resolved
+    /// `(sub_spec, effective_ruleset)` pair the dispatcher tail
+    /// consumes or the first [`TaskFailure`] that fires. Step 8
+    /// (permission ask) and the P3.5 lifecycle event writes run in
+    /// the dispatcher proper; steps 9-13 (child model build,
+    /// `ContextHandoff` build, child JSONL, child `run_tool_loop`)
+    /// still wait for P3.4 follow-ups.
     fn run_capability_gates(
         &self,
         ctx: &DispatchContext<'_>,
