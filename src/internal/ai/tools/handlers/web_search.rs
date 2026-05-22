@@ -511,7 +511,7 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::sandbox::{
-        SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
+        NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
     };
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
             sandbox: Some(ToolSandboxContext {
                 policy: SandboxPolicy::WorkspaceWrite {
                     writable_roots: vec![PathBuf::from("/tmp")],
-                    network_access: false,
+                    network_access: NetworkAccess::Denied,
                     exclude_tmpdir_env_var: false,
                     exclude_slash_tmp: false,
                 },

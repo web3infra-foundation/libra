@@ -120,8 +120,8 @@ use crate::{
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
                 ApprovalCachePolicy, ApprovalStore, AskForApproval, DEFAULT_APPROVAL_TTL,
-                ExecApprovalRequest, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
-                ToolRuntimeContext, ToolSandboxContext,
+                ExecApprovalRequest, NetworkAccess, SandboxPermissions, SandboxPolicy,
+                ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
             },
             session::{SessionState, SessionStore},
             skills::{SkillDispatcher, load_skills},
@@ -3068,7 +3068,7 @@ fn default_tui_runtime_context(
         Some(CodeContext::Review | CodeContext::Research) => SandboxPolicy::ReadOnly,
         Some(CodeContext::Dev) | None => SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![working_dir.to_path_buf()],
-            network_access,
+            network_access: NetworkAccess::from_legacy_bool(network_access),
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         },
@@ -4351,7 +4351,7 @@ no_cache_unknown_network = true
                 writable_roots,
                 network_access,
                 ..
-            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && !network_access
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access.is_denied()
         ));
     }
 
@@ -4378,7 +4378,7 @@ no_cache_unknown_network = true
                 writable_roots,
                 network_access,
                 ..
-            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access.is_full()
         ));
     }
 

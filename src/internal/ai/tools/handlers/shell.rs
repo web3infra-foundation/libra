@@ -534,7 +534,7 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         sandbox::{
-            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest,
+            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest, NetworkAccess,
             ReviewDecision, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
             ToolRuntimeContext, ToolSandboxContext,
         },
@@ -564,7 +564,7 @@ mod tests {
                 sandbox: Some(ToolSandboxContext {
                     policy: SandboxPolicy::WorkspaceWrite {
                         writable_roots: Vec::new(),
-                        network_access: false,
+                        network_access: NetworkAccess::Denied,
                         exclude_tmpdir_env_var: false,
                         exclude_slash_tmp: false,
                     },

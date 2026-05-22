@@ -2526,10 +2526,10 @@ fn runtime_context_for_task(
     working_dir: &Path,
     inherited_runtime: Option<&ToolRuntimeContext>,
 ) -> ToolRuntimeContext {
-    let network_access = matches!(
+    let network_access = NetworkAccess::from_legacy_bool(matches!(
         spec.constraints.security.network_policy,
         NetworkPolicy::Allow
-    );
+    ));
     let writable_roots = collect_writable_roots(spec, task, working_dir);
     let policy = SandboxPolicy::WorkspaceWrite {
         writable_roots,
@@ -2558,10 +2558,10 @@ fn runtime_context_for_gate_task(
         sandbox: Some(ToolSandboxContext {
             policy: SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![working_dir.to_path_buf()],
-                network_access: matches!(
+                network_access: NetworkAccess::from_legacy_bool(matches!(
                     spec.constraints.security.network_policy,
                     NetworkPolicy::Allow
-                ),
+                )),
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             },
@@ -2583,7 +2583,7 @@ fn runtime_context_for_reviewer(
         NetworkPolicy::Allow
     ) {
         SandboxPolicy::ExternalSandbox {
-            network_access: NetworkAccess::Enabled,
+            network_access: NetworkAccess::Full,
         }
     } else {
         SandboxPolicy::ReadOnly

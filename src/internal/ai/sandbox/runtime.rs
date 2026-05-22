@@ -12,6 +12,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+#[cfg(test)]
+use super::NetworkAccess;
 #[cfg(target_os = "macos")]
 use super::sensitive_read_paths;
 use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
@@ -665,7 +667,7 @@ mod tests {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -680,7 +682,7 @@ mod tests {
     fn select_initial_uses_none_for_external_sandbox() {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::ExternalSandbox {
-            network_access: super::super::NetworkAccess::Restricted,
+            network_access: super::super::NetworkAccess::Denied,
         };
         assert_eq!(
             manager.select_initial(Some(&policy), SandboxPermissions::UseDefault),
@@ -694,7 +696,7 @@ mod tests {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -719,7 +721,7 @@ mod tests {
             ),
             policy: Some(&SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![],
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             }),
@@ -753,7 +755,7 @@ mod tests {
             ),
             policy: Some(&SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![],
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             }),
@@ -780,7 +782,7 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -798,7 +800,7 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: true,
+            network_access: NetworkAccess::Full,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -824,7 +826,7 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -898,7 +900,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -934,7 +936,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };

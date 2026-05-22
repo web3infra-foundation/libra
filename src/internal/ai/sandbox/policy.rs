@@ -232,41 +232,100 @@ impl NetworkService {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// Sandbox network access mode. Per `docs/improvement/sandbox.md`
+/// §7.1 the runtime supports a three-state contract:
+///
+/// - [`NetworkAccess::Denied`] (the default): no outbound network
+///   permitted; the sandbox sets `LIBRA_SANDBOX_NETWORK_DISABLED` and
+///   the proxy backend selects the noop loopback-only proxy.
+/// - [`NetworkAccess::Allowlist`]: outbound network permitted only
+///   to the listed [`NetworkService`] entries (host + port + protocol).
+///   The proxy backend routes matching traffic through the allowlist
+///   proxy and drops everything else.
+/// - [`NetworkAccess::Full`]: unconstrained outbound network. Used
+///   only by explicit-escalation policies (`DangerFullAccess`) or
+///   when a user toggles `--network` for the legacy `WorkspaceWrite`
+///   shape.
+///
+/// The 2-state predecessor (`Restricted` / `Enabled`) is gone. The
+/// `is_enabled` helper now returns `true` for both `Allowlist` and
+/// `Full` so existing "is the network available at all" gates keep
+/// working; new sites that need to distinguish the three modes
+/// match on the enum directly.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum NetworkAccess {
+    /// No outbound network. Loopback only via the noop proxy.
     #[default]
-    Restricted,
-    Enabled,
+    Denied,
+    /// Outbound network permitted only for the listed services. Per
+    /// sandbox.md §7.1 the services must each pass
+    /// [`NetworkService::validate`] (no empty / bare-wildcard host,
+    /// no implicit high-sensitivity-port grants).
+    Allowlist {
+        #[serde(default)]
+        services: Vec<NetworkService>,
+    },
+    /// Unconstrained outbound network — used by
+    /// [`SandboxPolicy::DangerFullAccess`] and any explicit-escalation
+    /// path. The sandbox does NOT set
+    /// `LIBRA_SANDBOX_NETWORK_DISABLED`.
+    Full,
 }
 
 impl NetworkAccess {
-    pub fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-
-    /// Symmetric companion to [`is_enabled`](Self::is_enabled). `true`
-    /// when network access is `Restricted` — the default that the
-    /// sandbox runtime treats as "deny all outbound except loopback".
+    /// `true` when outbound network is permitted at all — `Full` or
+    /// `Allowlist`. The disable-network env-var gate and the
+    /// `has_full_network_access` policy helper use this predicate to
+    /// decide whether to set `LIBRA_SANDBOX_NETWORK_DISABLED`.
     ///
-    /// Provided as a positive predicate so call sites that want to
-    /// gate on "is the network locked down?" can express that intent
-    /// directly instead of negating `is_enabled`. The
-    /// `!is_enabled() == is_restricted()` invariant is pinned by the
-    /// regression test.
-    pub fn is_restricted(self) -> bool {
-        matches!(self, Self::Restricted)
+    /// `Allowlist` is intentionally treated as "enabled" here: the
+    /// outbound proxy must be reachable for the listed services, so
+    /// the disable-network env var would defeat the purpose. Sites
+    /// that need to distinguish `Full` from `Allowlist` should call
+    /// [`is_full`](Self::is_full) / [`is_allowlist`](Self::is_allowlist).
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Denied)
     }
 
-    /// Every variant of [`NetworkAccess`] in declaration order
-    /// (`Restricted`, `Enabled`). Useful for tests that need to sweep
-    /// every mode (e.g. confirming both serialise to the kebab-case
-    /// wire tag) without hand-listing the variants. The fixed-length
-    /// array forces a future variant (e.g. `Denied`/`Allowlist`/`Full`
-    /// from Phase 7) to be added to this list in the same patch,
-    /// which keeps every enumeration site aligned with the enum.
-    pub fn all() -> [Self; 2] {
-        [Self::Restricted, Self::Enabled]
+    /// Positive predicate for `Denied`. Companion to
+    /// [`is_enabled`](Self::is_enabled) so call sites that want to
+    /// gate on "is the network locked down?" can express that intent
+    /// directly. The `!is_enabled() == is_denied()` invariant is
+    /// pinned by regression tests.
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Self::Denied)
+    }
+
+    /// `true` for the unconstrained `Full` variant only. Used by
+    /// callers that must distinguish "any network" (Full +
+    /// Allowlist) from "absolutely no constraints".
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// `true` for the `Allowlist` variant. Carries no payload —
+    /// callers needing the service list should match on the enum.
+    pub fn is_allowlist(&self) -> bool {
+        matches!(self, Self::Allowlist { .. })
+    }
+
+    /// Borrow the configured allowlist when the variant is
+    /// `Allowlist`. Returns `None` for the other two variants so
+    /// callers can simplify a `match` to a single-line helper.
+    pub fn allowlist_services(&self) -> Option<&[NetworkService]> {
+        match self {
+            Self::Allowlist { services } => Some(services.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Construct a `Full`-equivalent from a legacy boolean toggle.
+    /// `true` → `Full`, `false` → `Denied`. Used at the
+    /// `.libra/sandbox.toml` parser boundary and by tests migrating
+    /// from the previous 2-state shape.
+    pub fn from_legacy_bool(allowed: bool) -> Self {
+        if allowed { Self::Full } else { Self::Denied }
     }
 }
 
@@ -323,8 +382,13 @@ pub enum SandboxPolicy {
     WorkspaceWrite {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         writable_roots: Vec<PathBuf>,
+        /// Three-state network policy per `docs/improvement/sandbox.md`
+        /// §7.1: `Denied` / `Allowlist { services }` / `Full`. The
+        /// legacy `bool` (which mapped `true → Full`, `false →
+        /// Denied`) was migrated in v0.17.723; callers needing the
+        /// boolean form should use `network_access.is_enabled()`.
         #[serde(default)]
-        network_access: bool,
+        network_access: NetworkAccess,
         #[serde(default)]
         exclude_tmpdir_env_var: bool,
         #[serde(default)]
@@ -344,7 +408,7 @@ impl Default for SandboxPolicy {
     fn default() -> Self {
         Self::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         }
@@ -382,12 +446,18 @@ impl SandboxPolicy {
         matches!(self, Self::DangerFullAccess | Self::ExternalSandbox { .. })
     }
 
+    /// `true` when the policy permits ANY outbound network — either
+    /// the unconstrained `Full` mode or the proxy-mediated
+    /// `Allowlist`. Callers gating "should `LIBRA_SANDBOX_NETWORK_DISABLED`
+    /// be set?" use this predicate; callers needing the strict
+    /// "unconstrained network" semantic should match the underlying
+    /// [`NetworkAccess`] for `Full` directly.
     pub fn has_full_network_access(&self) -> bool {
         match self {
             Self::DangerFullAccess => true,
             Self::ReadOnly => false,
             Self::ExternalSandbox { network_access } => network_access.is_enabled(),
-            Self::WorkspaceWrite { network_access, .. } => *network_access,
+            Self::WorkspaceWrite { network_access, .. } => network_access.is_enabled(),
         }
     }
 
@@ -592,7 +662,7 @@ mod tests {
     fn explicit_workspace_roots_do_not_expand_to_cwd() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src/main.rs")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -607,7 +677,7 @@ mod tests {
     fn empty_workspace_roots_fall_back_to_cwd() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -625,7 +695,7 @@ mod tests {
                 PathBuf::from("/var/run/docker.sock"),
                 PathBuf::from("/tmp/project"),
             ],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -641,7 +711,7 @@ mod tests {
     fn nested_docker_socket_roots_are_rejected() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("tools/docker.sock")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -658,7 +728,7 @@ mod tests {
         for root in ["/", "/proc", "/proc/self", "/sys", "/dev", "/dev/null"] {
             let policy = SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![PathBuf::from(root)],
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: true,
                 exclude_slash_tmp: true,
             };
@@ -676,7 +746,7 @@ mod tests {
     fn safe_workspace_writable_roots_are_accepted() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -872,36 +942,93 @@ mod tests {
         assert_eq!(back, explicit);
     }
 
-    /// `NetworkAccess::is_restricted` is the positive predicate
-    /// companion of `is_enabled`. Pin the partition invariant
-    /// `!is_enabled() == is_restricted()` across every variant via
-    /// `all()` so a future variant (e.g. Phase 7's `Denied` /
-    /// `Allowlist` / `Full`) fails to compile here unless `all()`
-    /// and the predicates are extended together. Also pins both
-    /// kebab-case wire tags via serde to catch a rename that could
-    /// desynchronise the default-`Restricted` contract.
+    /// Three-state `NetworkAccess` partition: every variant must
+    /// satisfy `is_enabled() XOR is_denied()`. `Allowlist` and `Full`
+    /// both count as "enabled" (the disable-network env gate fires
+    /// only on `Denied`); only `Denied` satisfies `is_denied`.
     #[test]
-    fn network_access_predicates_partition_and_wire_tags_round_trip() {
-        let modes = NetworkAccess::all();
-        assert_eq!(modes.len(), 2);
-        assert_eq!(modes, [NetworkAccess::Restricted, NetworkAccess::Enabled]);
-        assert_eq!(NetworkAccess::default(), NetworkAccess::Restricted);
-
-        for mode in NetworkAccess::all() {
-            // Partition: exactly one predicate fires per variant.
+    fn network_access_three_state_predicates_partition() {
+        for mode in [
+            NetworkAccess::Denied,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            },
+            NetworkAccess::Full,
+        ] {
             assert_eq!(
                 mode.is_enabled(),
-                !mode.is_restricted(),
-                "is_enabled / is_restricted must partition for {mode:?}",
+                !mode.is_denied(),
+                "is_enabled / is_denied must partition for {mode:?}",
             );
-            let expected_tag = match mode {
-                NetworkAccess::Restricted => "\"restricted\"",
-                NetworkAccess::Enabled => "\"enabled\"",
-            };
-            let serialised = serde_json::to_string(&mode).unwrap();
-            assert_eq!(serialised, expected_tag);
-            let back: NetworkAccess = serde_json::from_str(&serialised).unwrap();
-            assert_eq!(back, mode);
         }
+        assert_eq!(NetworkAccess::default(), NetworkAccess::Denied);
+    }
+
+    /// `is_full` / `is_allowlist` / `is_denied` mutual exclusivity:
+    /// exactly one is true for any variant. Pins the three-state
+    /// contract at the helper level so a future variant (Phase 7+)
+    /// fails to compile until the helpers are extended.
+    #[test]
+    fn network_access_variant_helpers_are_mutually_exclusive() {
+        let denied = NetworkAccess::Denied;
+        assert!(denied.is_denied() && !denied.is_allowlist() && !denied.is_full());
+
+        let allowlist = NetworkAccess::Allowlist {
+            services: Vec::new(),
+        };
+        assert!(!allowlist.is_denied() && allowlist.is_allowlist() && !allowlist.is_full());
+
+        let full = NetworkAccess::Full;
+        assert!(!full.is_denied() && !full.is_allowlist() && full.is_full());
+    }
+
+    /// Wire tags round-trip for the three-state form. The tagged
+    /// representation uses `mode: "denied" | "allowlist" | "full"`
+    /// — pin the kebab-case names so a future rename trips loud.
+    #[test]
+    fn network_access_three_state_wire_tags_round_trip() {
+        let denied = NetworkAccess::Denied;
+        let denied_wire = serde_json::to_string(&denied).unwrap();
+        assert!(
+            denied_wire.contains("\"denied\""),
+            "denied wire must include `denied`; got {denied_wire}",
+        );
+        let back: NetworkAccess = serde_json::from_str(&denied_wire).unwrap();
+        assert_eq!(back, denied);
+
+        let allowlist = NetworkAccess::Allowlist {
+            services: vec![NetworkService {
+                host: "registry.npmjs.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            }],
+        };
+        let allowlist_wire = serde_json::to_string(&allowlist).unwrap();
+        assert!(allowlist_wire.contains("\"allowlist\""));
+        let back: NetworkAccess = serde_json::from_str(&allowlist_wire).unwrap();
+        assert_eq!(back, allowlist);
+
+        let full = NetworkAccess::Full;
+        let full_wire = serde_json::to_string(&full).unwrap();
+        assert!(full_wire.contains("\"full\""));
+        let back: NetworkAccess = serde_json::from_str(&full_wire).unwrap();
+        assert_eq!(back, full);
+    }
+
+    /// `from_legacy_bool` preserves the `.libra/sandbox.toml`
+    /// `network_access = true|false` parser semantics: `true → Full`,
+    /// `false → Denied`. Pins the migration adapter so a future
+    /// rename can't drop the boolean code path silently.
+    #[test]
+    fn network_access_from_legacy_bool_maps_to_full_or_denied() {
+        assert_eq!(NetworkAccess::from_legacy_bool(true), NetworkAccess::Full);
+        assert_eq!(
+            NetworkAccess::from_legacy_bool(false),
+            NetworkAccess::Denied
+        );
     }
 }

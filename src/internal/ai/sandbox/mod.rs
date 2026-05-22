@@ -1566,7 +1566,7 @@ fn approval_request_context(
         Some(SandboxPolicy::ReadOnly) => ("read-only".to_string(), false, Vec::new()),
         Some(policy @ SandboxPolicy::WorkspaceWrite { network_access, .. }) => (
             "workspace-write".to_string(),
-            *network_access,
+            network_access.is_enabled(),
             policy
                 .get_writable_roots_with_cwd(cwd)
                 .into_iter()
@@ -2004,7 +2004,7 @@ mod tests {
     fn on_request_requires_approval_in_workspace_write() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2025,7 +2025,7 @@ mod tests {
     fn on_request_skips_approval_for_sandboxed_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2065,7 +2065,7 @@ mod tests {
     fn unless_trusted_allows_known_safe_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2088,7 +2088,7 @@ mod tests {
     fn never_forbids_dangerous_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2235,7 +2235,7 @@ mod tests {
         let sandbox_context = ToolSandboxContext {
             policy: SandboxPolicy::WorkspaceWrite {
                 writable_roots: Vec::new(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             },
@@ -2303,7 +2303,7 @@ mod tests {
         let dangerous_root = PathBuf::from("/var/run/docker.sock");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![dangerous_root.clone()],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2389,7 +2389,7 @@ mod tests {
     fn approval_context_reports_workspace_write_details() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -2719,7 +2719,7 @@ mod tests {
                     sandbox: Some(ToolSandboxContext {
                         policy: SandboxPolicy::WorkspaceWrite {
                             writable_roots: vec![cwd],
-                            network_access: false,
+                            network_access: NetworkAccess::Denied,
                             exclude_tmpdir_env_var: false,
                             exclude_slash_tmp: false,
                         },
