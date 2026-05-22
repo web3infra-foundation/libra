@@ -119,11 +119,7 @@ pub trait ToolLoopObserver: Send {
     /// dispatcher. `usage` is the accumulated `CompletionUsageSummary`
     /// the runner's `ChildRunObserver` collected across every model
     /// turn in the child loop (v0.17.762).
-    fn on_sub_agent_completed(
-        &mut self,
-        _agent_name: &str,
-        usage: &CompletionUsageSummary,
-    ) {
+    fn on_sub_agent_completed(&mut self, _agent_name: &str, usage: &CompletionUsageSummary) {
         self.on_model_usage(usage);
     }
 }
@@ -2056,6 +2052,7 @@ mod tests {
             context_frame_loader: Arc::new(ContextFrameLoader::default()),
             abort_token: AbortToken::new(),
             depth: 0,
+            compaction_model: None,
         };
 
         let mut observer = RecordingObserver::default();

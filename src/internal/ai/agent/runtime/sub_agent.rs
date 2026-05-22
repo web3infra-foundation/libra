@@ -1009,6 +1009,18 @@ pub struct SubAgentToolLoopRuntime {
     pub context_frame_loader: Arc<ContextFrameLoader>,
     pub abort_token: AbortToken,
     pub depth: u8,
+    /// OC-Phase 4 P4.4 compaction model (v0.17.784): when
+    /// configured via `[code.compaction]` in agents.toml, the
+    /// dispatcher tail uses this model to convert the parent's
+    /// latest `ContextFrameEvent` into a validated
+    /// `ContextHandoff` via `run_compaction(...)` before feeding
+    /// the child via `ContextHandoff::to_handoff_messages`
+    /// (v0.17.781). None falls through to the v0.17.773
+    /// raw-segment path — same behaviour as pre-v0.17.784.
+    /// `Arc`-wrapped so cloning the runtime stays O(1) struct
+    /// clone.
+    #[allow(clippy::type_complexity)]
+    pub compaction_model: Option<Arc<crate::internal::ai::providers::AnyCompletionModel>>,
 }
 
 impl std::fmt::Debug for SubAgentToolLoopRuntime {

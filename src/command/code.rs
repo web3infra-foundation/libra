@@ -3471,6 +3471,34 @@ async fn build_subagent_runtime_for_session(
     );
     let context_frame_loader = std::sync::Arc::new(ContextFrameLoader::default());
 
+    // OC-Phase 4 P4.4 compaction model (v0.17.784): when the
+    // operator configured `[code.compaction]`, build a
+    // `CompletionModel` for it so the dispatcher tail can route
+    // parent frames through `run_compaction(...)`. Failures
+    // here degrade to None — the v0.17.773 raw-segment handoff
+    // path stays operational. We log + warn on failure rather
+    // than aborting the whole runtime construction so a
+    // misconfigured compaction model doesn't break operators
+    // who have correctly configured sub-agents.
+    let compaction_model = match agents_config.compaction_model_binding() {
+        Some(binding) => {
+            match ProviderFactory.build(&binding, ProviderBuildOptions::default()) {
+                Ok(model) => Some(std::sync::Arc::new(model)),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        provider = %binding.provider_id,
+                        model = %binding.model_id,
+                        "failed to build compaction model from [code.compaction]; \
+                         falling back to raw-segment handoff",
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     Ok(SubAgentToolLoopRuntime {
         dispatcher: std::sync::Arc::new(dispatcher),
         parent_thread_id: session_canonical_thread_id(session).unwrap_or_else(|| session.id.clone()),
@@ -3485,6 +3513,7 @@ async fn build_subagent_runtime_for_session(
         provider_build_options_resolver: None,
         tool_registry: (*registry).clone(),
         runtime_context: None,
+        compaction_model,
         usage_recorder,
         context_frame_loader,
         abort_token: AbortToken::new(),
