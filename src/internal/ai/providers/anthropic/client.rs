@@ -11,8 +11,8 @@
 //!
 //! The [`Client`] type alias combines the generic HTTP client with
 //! `AnthropicProvider` and exposes convenience constructors that read
-//! credentials from Vault/environment (`ANTHROPIC_API_KEY`) or accept them
-//! directly.
+//! credentials from environment variables (`ANTHROPIC_API_KEY`) or accept
+//! them directly.
 
 use std::fmt;
 
@@ -77,21 +77,20 @@ impl Provider for AnthropicProvider {
 pub type Client = GenericClient<AnthropicProvider>;
 
 impl Client {
-    /// Creates an Anthropic client from Vault or environment variables.
+    /// Creates an Anthropic client from environment variables.
     ///
     /// Functional scope:
-    /// - Reads `vault.env.ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY` (required).
-    /// - Falls back to `https://api.anthropic.com` when neither
-    ///   `vault.env.ANTHROPIC_BASE_URL` nor `ANTHROPIC_BASE_URL` is set.
+    /// - Reads `ANTHROPIC_API_KEY` (required).
+    /// - Falls back to `https://api.anthropic.com` when `ANTHROPIC_BASE_URL` is unset.
     ///
     /// Boundary conditions:
-    /// - Returns an actionable error when `ANTHROPIC_API_KEY` is missing across
-    ///   Vault and process env.
+    /// - Returns `std::env::VarError::NotPresent` when `ANTHROPIC_API_KEY` is missing
+    ///   so callers can surface a friendly "no API key" message.
     /// - `ANTHROPIC_BASE_URL`, when set, is forwarded verbatim — no scheme validation.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let api_key = crate::internal::config::resolve_required_env_sync("ANTHROPIC_API_KEY")?;
-        let base_url = crate::internal::config::resolve_optional_env_sync("ANTHROPIC_BASE_URL")?
-            .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+    pub fn from_env() -> Result<Self, std::env::VarError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+        let base_url = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
 
         let provider = AnthropicProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -99,9 +98,9 @@ impl Client {
 
     /// Vault-aware async constructor: resolves `ANTHROPIC_API_KEY` (required)
     /// and `ANTHROPIC_BASE_URL` (optional override) through the libra-aware
-    /// lookup chain: local `.libra/libra.db` (`vault.env.<name>`, when
-    /// `local_target` selects a repo) → global `~/.libra/config.db` →
-    /// process env.
+    /// lookup chain: process env → local `.libra/libra.db`
+    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
+    /// `~/.libra/config.db`.
     ///
     /// Mirrors the deepseek / gemini / openai `from_resolved_env`
     /// signatures — same `LocalIdentityTarget<'_>` parameter, same
@@ -122,9 +121,9 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "ANTHROPIC_API_KEY is not configured; set vault.env.ANTHROPIC_API_KEY \
-                     with `libra config set vault.env.ANTHROPIC_API_KEY <key>` or export \
-                     ANTHROPIC_API_KEY"
+                    "ANTHROPIC_API_KEY is not set in env, repo vault, or global config \
+                     (set the environment variable or run `libra config --global add \
+                     vault.env.ANTHROPIC_API_KEY <key>`)"
                 )
             })?;
         let base_url = resolve_env_for_target("ANTHROPIC_BASE_URL", local_target)

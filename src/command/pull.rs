@@ -290,7 +290,6 @@ fn child_output_for_pull(output: &OutputConfig) -> OutputConfig {
     let mut child = output.clone();
     if output.is_json() || output.quiet {
         child.progress = ProgressMode::None;
-        child.progress_preference = crate::utils::output::ProgressPreference::None;
     }
     child
 }

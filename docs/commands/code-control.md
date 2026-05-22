@@ -30,12 +30,8 @@ process-level token created by `libra code --control write`; the token is sent a
 | `controller.attach` | `POST /api/code/controller/attach` |
 | `controller.detach` | `POST /api/code/controller/detach` |
 | `message.submit` | `POST /api/code/messages` |
-| `task.dispatch` | `POST /api/code/task/dispatch` |
 | `interaction.respond` | `POST /api/code/interactions/{id}` |
 | `turn.cancel` | `POST /api/code/control/cancel` |
-| `goal.start` | `POST /api/code/goal/start` |
-| `goal.status` | `GET /api/code/goal/status` |
-| `goal.cancel` | `POST /api/code/goal/cancel` |
 
 ## Examples
 
@@ -51,22 +47,16 @@ Submit a message after attach returns `controllerToken`:
 {"jsonrpc":"2.0","id":2,"method":"message.submit","params":{"controllerToken":"...","text":"/chat hello"}}
 ```
 
-Dispatch a sub-agent explicitly:
-
-```json
-{"jsonrpc":"2.0","id":3,"method":"task.dispatch","params":{"controllerToken":"...","agent":"explorer","prompt":"grep TODO src/"}}
-```
-
 Respond to a pending interaction:
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"interaction.respond","params":{"controllerToken":"...","interactionId":"interaction-1","response":{"approved":true}}}
+{"jsonrpc":"2.0","id":3,"method":"interaction.respond","params":{"controllerToken":"...","interactionId":"interaction-1","response":{"approved":true}}}
 ```
 
 Subscribe to events:
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"events.subscribe"}
+{"jsonrpc":"2.0","id":4,"method":"events.subscribe"}
 ```
 
 The shim first returns `{"subscribed":true}` and then emits notifications:

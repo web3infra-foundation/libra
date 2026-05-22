@@ -6,6 +6,8 @@
 //! id reference plus sub-agent provenance fields (the actual diff bytes stay
 //! in the upstream `git_internal::internal::object::patchset::PatchSet`).
 
+#![cfg(feature = "subagent-scaffold")]
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

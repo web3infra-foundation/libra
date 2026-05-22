@@ -30,7 +30,7 @@
 //! ## Provider Dispatch
 //!
 //! The `--provider` flag selects the AI backend. Each provider follows the same pattern:
-//! 1. Create a client from explicit env-file values, Vault, or environment API keys.
+//! 1. Create a client from environment variables (API keys).
 //! 2. Instantiate a completion model with the selected (or default) model name.
 //! 3. Pass the model into the shared `run_tui_with_model` function.
 //!
@@ -56,7 +56,7 @@
 //! - IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -69,7 +69,6 @@ use std::{
 
 use chrono::Utc;
 use clap::{Parser, ValueEnum};
-use futures::future::BoxFuture;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
@@ -99,17 +98,8 @@ use crate::{
     internal::{
         ai::{
             agent::{
-                BudgetTracker, TaskIntent,
-                profile::{
-                    AgentExecutionSpec, AgentMode, AgentPermissionSpec, AgentProfileRouter,
-                    AgentsConfig, ModelBinding, load_profiles,
-                },
-                runtime::{
-                    AbortToken, AgentSpecRegistry, ContextFrameLoader, DefaultSubAgentDispatcher,
-                    MultiAgentConfig as RuntimeMultiAgentConfig, PermissionAskRequest,
-                    PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
-                    ProviderBuildOptionsResolver, SubAgentToolLoopRuntime, ToolLoopConfig,
-                },
+                TaskIntent, ToolLoopConfig,
+                profile::{AgentProfileRouter, load_profiles},
             },
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
@@ -121,21 +111,19 @@ use crate::{
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
-            permission::{PermissionRuleset, agent_permission_spec_to_ruleset},
             projection::{ProjectionRebuilder, ProjectionResolver, ThreadBundle},
             prompt::{ContextMode, SystemPromptBuilder},
             providers::{
-                ProviderBuildOptions, ProviderFactory, anthropic::CLAUDE_3_5_SONNET,
-                gemini::GEMINI_2_5_FLASH, kimi::KIMI_K2_6, openai::GPT_4O_MINI,
-                runtime::provider_id, zhipu::GLM_5,
+                anthropic::CLAUDE_3_5_SONNET, gemini::GEMINI_2_5_FLASH, kimi::KIMI_K2_6,
+                openai::GPT_4O_MINI, zhipu::GLM_5,
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
                 ApprovalCachePolicy, ApprovalStore, AskForApproval, DEFAULT_APPROVAL_TTL,
-                ExecApprovalRequest, ReviewDecision, SandboxPermissions, SandboxPolicy,
-                ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
+                ExecApprovalRequest, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
+                ToolRuntimeContext, ToolSandboxContext,
             },
-            session::{SessionState, SessionStore, jsonl::SessionJsonlStore},
+            session::{SessionState, SessionStore},
             skills::{SkillDispatcher, load_skills},
             sources::{SourcePool, register_builtin_mcp_source_from_project_config},
             tools::{
@@ -144,9 +132,8 @@ use crate::{
                 handlers::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
-                    ShellHandler, SubmitGoalCompleteHandler, SubmitIntentDraftHandler,
-                    SubmitPlanDraftHandler, SubmitTaskCompleteHandler, UpdateGoalProgressHandler,
-                    WebSearchHandler, register_semantic_handlers,
+                    ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
+                    SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
                 },
             },
             usage::{UsageContext, UsagePriceTable, UsageRecorder},
@@ -462,8 +449,8 @@ pub struct CodeArgs {
 
     /// Load provider environment variables from a dotenv-style file.
     ///
-    /// Values in this explicit file take precedence over Vault and already
-    /// exported process environment variables for provider bootstrap.
+    /// Values in this file take precedence over already exported process
+    /// environment variables for provider bootstrap.
     #[arg(long = "env-file", value_name = "PATH")]
     pub env_file: Option<PathBuf>,
 
@@ -878,7 +865,7 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
 // Mode: TUI — full interactive terminal with background servers
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct CodeEnvFile {
     values: BTreeMap<String, String>,
 }
@@ -1017,118 +1004,6 @@ fn provider_env_value_with_lookup(
         .or_else(|| lookup(key))
 }
 
-fn provider_env_value(env_file: &CodeEnvFile, key: &str) -> Option<String> {
-    provider_env_value_with_lookup(env_file, key, |key| {
-        match crate::internal::config::resolve_env_sync(key) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    key = key,
-                    error = %format!("{error:#}"),
-                    "vault-aware env resolution failed; falling back to None"
-                );
-                None
-            }
-        }
-    })
-}
-
-#[derive(Clone, Debug)]
-struct CodeProviderOptionsResolver {
-    env_file: CodeEnvFile,
-    api_base: Option<String>,
-    ollama_compact_tools: bool,
-    #[cfg(feature = "test-provider")]
-    fake_fixture_path: Option<PathBuf>,
-}
-
-impl CodeProviderOptionsResolver {
-    fn from_args(args: &CodeArgs, env_file: CodeEnvFile) -> Self {
-        Self {
-            env_file,
-            api_base: args.api_base.clone(),
-            ollama_compact_tools: args.ollama_compact_tools,
-            #[cfg(feature = "test-provider")]
-            fake_fixture_path: args.fake_fixture.clone(),
-        }
-    }
-}
-
-impl ProviderBuildOptionsResolver for CodeProviderOptionsResolver {
-    fn resolve(&self, binding: &ModelBinding) -> Result<ProviderBuildOptions, String> {
-        let resolve_env = |key: &str| provider_env_value(&self.env_file, key);
-        let api_key = match binding.provider_id.as_str() {
-            provider_id::GEMINI => resolve_env("GEMINI_API_KEY"),
-            provider_id::OPENAI => resolve_env("OPENAI_API_KEY"),
-            provider_id::ANTHROPIC => resolve_env("ANTHROPIC_API_KEY"),
-            provider_id::DEEPSEEK => resolve_env("DEEPSEEK_API_KEY"),
-            provider_id::KIMI => resolve_env("MOONSHOT_API_KEY"),
-            provider_id::ZHIPU => resolve_env("ZHIPU_API_KEY"),
-            provider_id::OLLAMA => resolve_env("OLLAMA_API_KEY"),
-            #[cfg(feature = "test-provider")]
-            provider_id::FAKE => None,
-            _ => None,
-        };
-
-        let api_base = match binding.provider_id.as_str() {
-            provider_id::ANTHROPIC => self
-                .api_base
-                .clone()
-                .or_else(|| resolve_env("ANTHROPIC_BASE_URL")),
-            provider_id::OPENAI => self
-                .api_base
-                .clone()
-                .or_else(|| resolve_env("OPENAI_BASE_URL")),
-            provider_id::DEEPSEEK => self.api_base.clone(),
-            provider_id::GEMINI => self.api_base.clone(),
-            provider_id::KIMI => self
-                .api_base
-                .clone()
-                .or_else(|| resolve_env("MOONSHOT_BASE_URL")),
-            provider_id::ZHIPU => self
-                .api_base
-                .clone()
-                .or_else(|| resolve_env("ZHIPU_BASE_URL")),
-            provider_id::OLLAMA => self
-                .api_base
-                .clone()
-                .or_else(|| resolve_env("OLLAMA_BASE_URL")),
-            _ => None,
-        };
-
-        #[cfg(feature = "test-provider")]
-        let fake_fixture_path = if binding.provider_id == provider_id::FAKE {
-            Some(
-                self.fake_fixture_path
-                    .clone()
-                    .ok_or_else(|| "--fake-fixture is required with provider=fake".to_string())?,
-            )
-        } else {
-            None
-        };
-        #[cfg(not(feature = "test-provider"))]
-        let fake_fixture_path: Option<PathBuf> = None;
-
-        let ollama_compact_tools = self.ollama_compact_tools
-            || resolve_env("OLLAMA_COMPACT_TOOLS")
-                .map(|raw| {
-                    matches!(
-                        raw.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                })
-                .unwrap_or(false);
-
-        Ok(ProviderBuildOptions {
-            api_key,
-            api_base,
-            ollama_compact_tools,
-            fake_fixture_path,
-            accept_unknown_models: true,
-        })
-    }
-}
-
 /// Build an [`AnyCompletionModel`] for every non-Codex provider through the
 /// shared [`ProviderFactory`].
 ///
@@ -1140,11 +1015,12 @@ impl ProviderBuildOptionsResolver for CodeProviderOptionsResolver {
 ///
 /// Env resolution flows through [`provider_env_value_with_lookup`] for
 /// **every** provider, not just Deepseek / Kimi as before. The precedence is
-/// explicit `--env-file` values first, then the shared vault-first resolver
-/// (`vault.env.<name>` local, `vault.env.<name>` global, process env). This
-/// applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS` flag.
-/// Gemini / OpenAI / Anthropic / Zhipu used to read only from process env via
-/// `from_env()`; this widens them to consult `--env-file` and vault config.
+/// `--env-file` first then process env (documented on `--env-file` itself),
+/// and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`
+/// flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process
+/// env via `from_env()`; this widens them to consult `--env-file` first as
+/// well, so a value defined in the env-file now wins over a stale process-env
+/// value for those providers.
 ///
 /// The function returns the resolved model name AND the effective provider
 /// name string so the caller can tag usage / UI metadata against the agent's
@@ -1171,9 +1047,9 @@ fn build_any_completion_model_for_args(
     String,
 )> {
     build_any_completion_model_for_args_with_lookup(args, env_file, working_dir, |key| {
-        // Vault-aware fallback chain: prefer the libra config DB (repo-local +
-        // global `vault.env.<name>`) and then fall back to process env via the
-        // sync resolver. Phase 5 from_env →
+        // Vault-aware fallback chain: try process env first (cheap), then
+        // fall back to the libra config DB (repo-local + global
+        // `vault.env.<name>`) via the sync resolver. Phase 5 from_env →
         // resolve_env call-site cutover: users who configured an API key
         // once via `libra config --global add vault.env.GEMINI_API_KEY <…>`
         // no longer need to re-export it in every shell.
@@ -1365,10 +1241,7 @@ fn build_any_completion_model_for_args_with_lookup(
                      (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
                     )
                 } else {
-                    CliError::auth(format!(
-                        "{env_var} is not configured; set vault.env.{env_var} with `libra \
-                         config set vault.env.{env_var} <key>` or export {env_var}"
-                    ))
+                    CliError::auth(format!("{env_var} is not set"))
                 }
             }
             ProviderFactoryError::BuildFailed { reason, .. } => CliError::io(reason),
@@ -1479,7 +1352,7 @@ fn resolve_agent_binding_override(
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
 ///
 /// # Side Effects
-/// - Reads provider credentials from Vault, environment variables, and optional dotenv
+/// - Reads provider credentials from environment variables and optional dotenv
 ///   files.
 /// - Registers local file, shell, planning, and MCP bridge tools for the agent.
 /// - May start web/MCP background services and a managed Codex app-server.
@@ -1492,9 +1365,6 @@ fn resolve_agent_binding_override(
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
-    let provider_options_resolver: Arc<dyn ProviderBuildOptionsResolver> = Arc::new(
-        CodeProviderOptionsResolver::from_args(&args, env_file.clone()),
-    );
     let browser_control = resolve_browser_control_mode(&args)?;
     let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
 
@@ -1544,8 +1414,6 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<UserInputRequest>();
     let (exec_approval_tx, exec_approval_rx) =
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
-    let agents_config_for_registry = load_agents_config_from_project(&working_dir)?;
-    let goal_tools_enabled = args.goal.is_some() || agents_config_for_registry.goal.enabled;
 
     // Build registry: basic file tools + MCP workflow tools.
     //
@@ -1573,13 +1441,6 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
-    // Register the handlers unconditionally so `/goal start` and Code
-    // Control `goal.start` can enable Goal mode after launch. The
-    // per-turn allowed-tool policy below keeps both tools hidden on
-    // flag-off turns.
-    builder = builder
-        .register("update_goal_progress", Arc::new(UpdateGoalProgressHandler))
-        .register("submit_goal_complete", Arc::new(SubmitGoalCompleteHandler));
     builder = register_semantic_handlers(builder);
 
     // AI user story: MCP bridge tools let the agent persist intent/task/run,
@@ -1591,10 +1452,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let registry = Arc::new(builder.build());
-    let mut allowed_tools = registry.filter_by_intent(task_intent);
-    if !goal_tools_enabled {
-        allowed_tools.retain(|name| !is_goal_protocol_tool(name));
-    }
+    let allowed_tools = registry.filter_by_intent(task_intent);
 
     let approval_config = approval_config_from_project_config(registry.working_dir());
     let approval_ttl = args
@@ -1615,10 +1473,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         stream,
         preserve_reasoning_content,
         allowed_tools: Some(allowed_tools),
-        selected_agent_name: args.agent.clone(),
-        provider_options_resolver,
         auto_classify_first_user_message: args.context.is_none(),
-        initial_goal: args.goal.clone(),
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
@@ -2450,10 +2305,7 @@ struct TuiLaunchConfig {
     stream: Option<bool>,
     preserve_reasoning_content: bool,
     allowed_tools: Option<Vec<String>>,
-    selected_agent_name: Option<String>,
-    provider_options_resolver: Arc<dyn ProviderBuildOptionsResolver>,
     auto_classify_first_user_message: bool,
-    initial_goal: Option<String>,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
@@ -2702,16 +2554,15 @@ where
             None
         }
     };
-    let agents_config = load_agents_config_from_project(registry.working_dir())?;
 
     let mut config = ToolLoopConfig {
-        preamble: Some(params.preamble.clone()),
+        preamble: Some(params.preamble),
         temperature: params.temperature,
         thinking: params.thinking,
         reasoning_effort: params.reasoning_effort,
         stream: params.stream,
         hook_runner,
-        allowed_tools: params.allowed_tools.clone(),
+        allowed_tools: params.allowed_tools,
         runtime_context: Some(default_tui_runtime_context(
             registry.working_dir(),
             params.context,
@@ -2719,7 +2570,7 @@ where
                 policy: params.approval_policy,
                 allow_all_commands: params.allow_all_commands,
                 ttl: params.approval_ttl,
-                cache_policy: params.approval_cache_policy.clone(),
+                cache_policy: params.approval_cache_policy,
             },
             params.network_access,
             params.exec_approval_tx.clone(),
@@ -2728,9 +2579,6 @@ where
         preserve_reasoning_content: params.preserve_reasoning_content,
         ..Default::default()
     };
-    if params.initial_goal.is_some() || agents_config.goal.enabled {
-        config.terminal_tools = Some(vec!["submit_goal_complete".to_string()]);
-    }
 
     // Initialize terminal.
     let terminal = match tui_init() {
@@ -2795,31 +2643,6 @@ where
             agent_name: None,
         });
     }
-
-    // Load agent profiles before any background runtime starts so
-    // multi-agent config errors fail cleanly without server cleanup.
-    let profiles = load_profiles(registry.working_dir());
-    let agent_router = AgentProfileRouter::new(profiles);
-    let agent_registry = Arc::new(build_agent_spec_registry(
-        &agents_config,
-        agent_router.clone(),
-    )?);
-    configure_multi_agent_runtime(
-        &mut config,
-        &agents_config,
-        agent_registry,
-        params.selected_agent_name.as_deref(),
-        params.provider_options_resolver.clone(),
-        params.approval_policy,
-        params.allow_all_commands,
-        params.exec_approval_tx.clone(),
-        &registry,
-        params.network_access,
-        &session,
-        &session_store,
-        &provider_name,
-        &model_name,
-    )?;
 
     let automation_write_enabled = control_runtime.is_write();
     let browser_write_enabled = browser_control == BrowserControlMode::Loopback;
@@ -2989,6 +2812,9 @@ where
     let skills = load_skills(registry.working_dir());
     let skill_dispatcher = SkillDispatcher::new(skills);
 
+    // Load agent profiles
+    let profiles = load_profiles(registry.working_dir());
+    let agent_router = AgentProfileRouter::new(profiles);
     let source_pool = SourcePool::new();
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
@@ -3014,7 +2840,6 @@ where
             command_dispatcher,
             skill_dispatcher,
             agent_router,
-            agents_config,
             session,
             session_store,
             user_input_rx: params.user_input_rx,
@@ -3028,7 +2853,6 @@ where
             managed_code_ui_runtime,
             default_network_access: params.network_access,
             auto_classify_first_user_message,
-            initial_goal: params.initial_goal,
             source_pool,
         },
     );
@@ -3209,10 +3033,6 @@ fn task_intent_for_context(context: Option<CodeContext>) -> TaskIntent {
     }
 }
 
-fn is_goal_protocol_tool(name: &str) -> bool {
-    matches!(name, "update_goal_progress" | "submit_goal_complete")
-}
-
 /// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
 /// the sandbox policy based on the operating context:
 ///
@@ -3269,293 +3089,6 @@ fn default_tui_runtime_context(
         file_history: None,
         max_output_bytes: None,
     }
-}
-
-#[derive(Clone)]
-struct CombinedAgentSpecRegistry {
-    config_specs: Arc<BTreeMap<String, AgentExecutionSpec>>,
-    profile_router: AgentProfileRouter,
-}
-
-impl AgentSpecRegistry for CombinedAgentSpecRegistry {
-    fn lookup(&self, name: &str) -> Option<AgentExecutionSpec> {
-        self.config_specs
-            .get(name)
-            .cloned()
-            .or_else(|| self.profile_router.execution_spec(name))
-    }
-
-    fn registered_names(&self) -> Vec<String> {
-        let mut names: BTreeSet<String> = self.config_specs.keys().cloned().collect();
-        names.extend(
-            self.profile_router
-                .profiles()
-                .iter()
-                .map(|profile| profile.name.clone()),
-        );
-        names.into_iter().collect()
-    }
-}
-
-#[derive(Clone)]
-struct TuiSubAgentPermissionAsker {
-    policy: AskForApproval,
-    allow_all_commands: bool,
-    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
-    working_dir: PathBuf,
-    network_access: bool,
-}
-
-impl PermissionAsker for TuiSubAgentPermissionAsker {
-    fn ask<'a>(&'a self, request: PermissionAskRequest<'a>) -> BoxFuture<'a, PermissionReply> {
-        let auto_allow = self.allow_all_commands || matches!(self.policy, AskForApproval::Never);
-        let tx = self.exec_approval_tx.clone();
-        let cwd = self.working_dir.clone();
-        let network_access = self.network_access;
-        let permission = request.permission.to_string();
-        let patterns = request.patterns.to_vec();
-        let thread_id = request.thread_id.to_string();
-        let session_id = request.session_id.clone();
-        let source = request.source.clone();
-        Box::pin(async move {
-            if auto_allow {
-                return PermissionReply::Once;
-            }
-
-            let (name, prompt_digest) = match source {
-                PermissionAskSource::SubAgentSpawn {
-                    name,
-                    prompt_digest,
-                } => (name, prompt_digest),
-            };
-            let (response_tx, response_rx) = oneshot::channel();
-            let request = ExecApprovalRequest {
-                call_id: format!("task-{}", Uuid::new_v4()),
-                command: format!("task {name}"),
-                cwd,
-                reason: Some(format!(
-                    "Model requested sub-agent `{name}` via permission `{permission}` \
-                     (thread {thread_id}, session {session_id}, prompt {prompt_digest})."
-                )),
-                is_retry: false,
-                sandbox_label: "sub-agent dispatch".to_string(),
-                network_access,
-                writable_roots: Vec::new(),
-                cache_disabled_reason: Some(
-                    "sub-agent dispatch approvals are not cached yet".to_string(),
-                ),
-                response_tx,
-            };
-            if tx.send(request).is_err() {
-                return PermissionReply::Reject {
-                    feedback: Some("approval UI is unavailable for sub-agent dispatch".to_string()),
-                };
-            }
-
-            match response_rx.await {
-                Ok(ReviewDecision::Approved) => PermissionReply::Once,
-                Ok(
-                    ReviewDecision::ApprovedForSession
-                    | ReviewDecision::ApprovedForTtl
-                    | ReviewDecision::ApprovedForDirectoryTtl
-                    | ReviewDecision::ApprovedForPatternTtl
-                    | ReviewDecision::ApprovedForAllCommands,
-                ) => PermissionReply::Always { patterns },
-                Ok(ReviewDecision::Denied) => PermissionReply::Reject {
-                    feedback: Some("sub-agent dispatch was denied".to_string()),
-                },
-                Ok(ReviewDecision::Abort) => PermissionReply::Reject {
-                    feedback: Some("sub-agent dispatch was aborted".to_string()),
-                },
-                Err(_) => PermissionReply::Reject {
-                    feedback: Some("approval response channel closed".to_string()),
-                },
-            }
-        })
-    }
-}
-
-fn load_agents_config_from_project(working_dir: &Path) -> CliResult<AgentsConfig> {
-    let path = resolve_storage_root(working_dir).join("agents.toml");
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AgentsConfig::default());
-        }
-        Err(error) => {
-            return Err(CliError::io(format!(
-                "failed to read agent config {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    let config = AgentsConfig::from_toml_str(&contents).map_err(|error| {
-        CliError::command_usage(format!(
-            "failed to parse agent config {}: {error}",
-            path.display()
-        ))
-    })?;
-    config.validate().map_err(|error| {
-        CliError::command_usage(format!("invalid agent config {}: {error}", path.display()))
-    })?;
-    Ok(config)
-}
-
-fn build_agent_spec_registry(
-    config: &AgentsConfig,
-    profile_router: AgentProfileRouter,
-) -> CliResult<CombinedAgentSpecRegistry> {
-    let config_specs = config
-        .execution_specs()
-        .map_err(|error| CliError::command_usage(format!("invalid agent config: {error}")))?;
-    Ok(CombinedAgentSpecRegistry {
-        config_specs: Arc::new(config_specs),
-        profile_router,
-    })
-}
-
-fn runtime_multi_agent_config(
-    config: &crate::internal::ai::agent::profile::MultiAgentConfig,
-) -> CliResult<RuntimeMultiAgentConfig> {
-    let max_subagent_depth = u8::try_from(config.max_subagent_depth).map_err(|_| {
-        CliError::command_usage(format!(
-            "code.multi_agent.max_subagent_depth={} is too large; maximum supported depth is {}",
-            config.max_subagent_depth,
-            u8::MAX
-        ))
-    })?;
-    Ok(RuntimeMultiAgentConfig {
-        enabled: config.enabled,
-        max_subagent_depth,
-        max_concurrent_subagents: config.max_concurrent_subagents,
-        subagent_timeout_ms: Some(config.subagent_timeout_ms),
-    })
-}
-
-fn default_parent_agent_spec(binding: &ModelBinding) -> AgentExecutionSpec {
-    AgentExecutionSpec {
-        name: "default".to_string(),
-        description: "Default Libra Code session driver".to_string(),
-        mode: AgentMode::Primary,
-        model: Some(binding.clone()),
-        permission: AgentPermissionSpec::default(),
-        ..AgentExecutionSpec::default()
-    }
-}
-
-fn resolve_parent_agent_spec(
-    registry: &dyn AgentSpecRegistry,
-    selected_agent_name: Option<&str>,
-    binding: &ModelBinding,
-) -> CliResult<AgentExecutionSpec> {
-    let Some(name) = selected_agent_name else {
-        return Ok(default_parent_agent_spec(binding));
-    };
-    let mut spec = registry.lookup(name).ok_or_else(|| {
-        CliError::command_usage(format!(
-            "unknown agent '{name}' selected for multi-agent parent runtime"
-        ))
-    })?;
-    if !spec.mode.is_primary_eligible() {
-        return Err(CliError::command_usage(format!(
-            "agent '{name}' is not primary-eligible and cannot drive the parent session"
-        )));
-    }
-    if spec.model.is_none() {
-        spec.model = Some(binding.clone());
-    }
-    Ok(spec)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn configure_multi_agent_runtime(
-    config: &mut ToolLoopConfig,
-    agents_config: &AgentsConfig,
-    agent_registry: Arc<CombinedAgentSpecRegistry>,
-    selected_agent_name: Option<&str>,
-    provider_options_resolver: Arc<dyn ProviderBuildOptionsResolver>,
-    approval_policy: AskForApproval,
-    allow_all_commands: bool,
-    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
-    registry: &Arc<ToolRegistry>,
-    network_access: bool,
-    session: &SessionState,
-    session_store: &SessionStore,
-    provider_name: &str,
-    model_name: &str,
-) -> CliResult<()> {
-    if !agents_config.multi_agent.enabled {
-        return Ok(());
-    }
-    if provider_name == "codex" {
-        return Err(CliError::command_usage(
-            "code.multi_agent.enabled is not supported with --provider codex; \
-             choose a ProviderFactory-backed provider such as ollama, deepseek, kimi, zhipu, \
-             openai, anthropic, or gemini",
-        ));
-    }
-
-    let parent_binding = ModelBinding {
-        provider_id: provider_name.to_string(),
-        model_id: model_name.to_string(),
-        variant: None,
-    };
-    let parent_agent = resolve_parent_agent_spec(
-        agent_registry.as_ref(),
-        selected_agent_name,
-        &parent_binding,
-    )?;
-    let parent_model_binding = parent_agent.model.clone().unwrap_or(parent_binding);
-    let provider_build_options = provider_options_resolver
-        .resolve(&parent_model_binding)
-        .map_err(|error| {
-            CliError::command_usage(format!(
-                "failed to resolve provider options for multi-agent parent model {}: {error}",
-                parent_model_binding.to_canonical_string()
-            ))
-        })?;
-    let usage_recorder = config.usage_recorder.clone().ok_or_else(|| {
-        CliError::io(
-            "code.multi_agent.enabled requires usage recording, but the usage database could not be opened"
-                .to_string(),
-        )
-    })?;
-    let parent_ruleset: PermissionRuleset =
-        agent_permission_spec_to_ruleset(&parent_agent.permission);
-    let permission_service = PermissionService::new(Arc::new(TuiSubAgentPermissionAsker {
-        policy: approval_policy,
-        allow_all_commands,
-        exec_approval_tx,
-        working_dir: registry.working_dir().to_path_buf(),
-        network_access,
-    }));
-    config.subagent_runtime = Some(SubAgentToolLoopRuntime {
-        dispatcher: Arc::new(DefaultSubAgentDispatcher::new_with_budget_tracker(
-            agent_registry,
-            runtime_multi_agent_config(&agents_config.multi_agent)?,
-            Arc::new(crate::internal::ai::agent::runtime::ToolLoopSubAgentChildRunner),
-            agents_config.clone(),
-            Arc::new(std::sync::Mutex::new(BudgetTracker::new())),
-        )),
-        parent_thread_id: session_canonical_thread_id(session)
-            .unwrap_or_else(|| session.id.clone()),
-        parent_session_id: session.id.clone(),
-        parent_agent,
-        parent_ruleset,
-        parent_model_binding,
-        permission_service: Arc::new(permission_service),
-        session_store: SessionJsonlStore::new(session_store.session_root(&session.id)),
-        provider_factory: Arc::new(ProviderFactory),
-        provider_build_options,
-        provider_build_options_resolver: Some(provider_options_resolver),
-        tool_registry: registry.as_ref().clone(),
-        runtime_context: config.runtime_context.clone(),
-        usage_recorder: Arc::new(usage_recorder),
-        context_frame_loader: Arc::new(ContextFrameLoader::default()),
-        abort_token: AbortToken::new(),
-        depth: 0,
-    });
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -4771,14 +4304,6 @@ no_cache_unknown_network = true
     }
 
     #[test]
-    fn goal_protocol_tool_filter_is_limited_to_goal_tools() {
-        assert!(is_goal_protocol_tool("update_goal_progress"));
-        assert!(is_goal_protocol_tool("submit_goal_complete"));
-        assert!(!is_goal_protocol_tool("update_plan"));
-        assert!(!is_goal_protocol_tool("submit_task_complete"));
-    }
-
-    #[test]
     fn system_preamble_includes_explicit_context_intent_and_dynamic_context() {
         let temp_dir = tempfile::tempdir().unwrap();
         let prompt = system_preamble(
@@ -5148,7 +4673,7 @@ no_cache_unknown_network = true
                 "expected {expected_env} in missing-key error for {provider:?}, got: {msg}"
             );
             assert!(
-                msg.contains("is not configured") || msg.contains("is required"),
+                msg.contains("is not set") || msg.contains("is required"),
                 "missing-key error should be readable and actionable for {provider:?}, got: {msg}"
             );
         }

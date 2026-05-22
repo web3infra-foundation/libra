@@ -1154,7 +1154,6 @@ async fn read_fetch_stream(
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
     let progress = json_progress.then(|| ProgressReporter::new(task, None, output));
-    let mut remote_progress = RemoteProgressBuffer::default();
     let time = Instant::now();
 
     loop {
@@ -1209,14 +1208,8 @@ async fn read_fetch_stream(
                             progress.tick(data_out.pack_data.len() as u64);
                         }
                     }
-                    2 => handle_remote_progress(
-                        payload,
-                        render_progress,
-                        bar.as_ref(),
-                        &mut remote_progress,
-                    ),
+                    2 => print_remote_progress(payload, render_progress, bar.as_ref()),
                     3 => {
-                        flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                         if let Some(bar) = &bar {
                             bar.finish_and_clear();
                         }
@@ -1236,14 +1229,8 @@ async fn read_fetch_stream(
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
-                2 => handle_remote_progress(
-                    payload,
-                    render_progress,
-                    bar.as_ref(),
-                    &mut remote_progress,
-                ),
+                2 => print_remote_progress(payload, render_progress, bar.as_ref()),
                 3 => {
-                    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                     if let Some(bar) = &bar {
                         bar.finish_and_clear();
                     }
@@ -1260,7 +1247,6 @@ async fn read_fetch_stream(
             }
         }
     }
-    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
@@ -1277,119 +1263,32 @@ fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// Line-buffers raw sideband progress bytes so the indicatif spinner and the
-/// remote's `\r`-overwriting progress text do not stomp on each other.
-///
-/// Git's smart protocol delivers human-readable progress on side-band 2 in
-/// arbitrarily small chunks that may split mid-word. The remote uses `\r` for
-/// in-place updates (e.g. `Counting objects:  5%\rCounting objects: 10%\r…`)
-/// and `\n` to commit a line (e.g. `Counting objects: 100% (38/38), done.\n`).
-/// Forwarding raw bytes straight to `eprint!` while the local spinner is also
-/// being redrawn produces interleaved fragments separated by spinner ticks.
-#[derive(Default)]
-struct RemoteProgressBuffer {
-    buf: String,
+fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
+    emit_remote_progress(payload, render_progress, bar, |text| {
+        eprint!("{text}");
+        let _ = io::stderr().flush();
+    });
 }
 
-impl RemoteProgressBuffer {
-    /// Append `payload` and dispatch any complete lines.
-    ///
-    /// - `\n`-terminated (and `\r\n`-terminated) lines are emitted to
-    ///   `on_permanent` so the caller can promote them to a log line above
-    ///   the bar.
-    /// - `\r`-terminated lines are emitted to `on_transient`, which typically
-    ///   maps to `bar.set_message` so the latest progress replaces the prior.
-    /// - Any trailing partial content stays in the buffer for the next call.
-    fn push<P, T>(&mut self, payload: &[u8], mut on_permanent: P, mut on_transient: T)
-    where
-        P: FnMut(&str),
-        T: FnMut(&str),
-    {
-        if payload.is_empty() {
-            return;
-        }
-        self.buf.push_str(&String::from_utf8_lossy(payload));
-        while let Some(pos) = self.buf.find(['\r', '\n']) {
-            // ASCII terminators are always at char boundaries, so split_off is safe.
-            let terminator = self.buf.as_bytes()[pos];
-            let line: String = self.buf.drain(..pos).collect();
-            self.buf.drain(..1);
-
-            // Treat CRLF as a single newline so we don't emit an extra empty transient.
-            let is_permanent =
-                terminator == b'\n' || (terminator == b'\r' && self.buf.starts_with('\n'));
-            if terminator == b'\r' && self.buf.starts_with('\n') {
-                self.buf.drain(..1);
-            }
-            if is_permanent {
-                on_permanent(&line);
-            } else {
-                on_transient(&line);
-            }
-        }
-    }
-
-    /// Emit any unterminated trailing bytes as a permanent line.
-    ///
-    /// Called once the sideband stream has ended so we never silently drop
-    /// the last fragment when the remote closed without a final newline.
-    fn flush_remaining<P>(&mut self, mut on_permanent: P)
-    where
-        P: FnMut(&str),
-    {
-        if !self.buf.is_empty() {
-            let line = std::mem::take(&mut self.buf);
-            on_permanent(&line);
-        }
-    }
-}
-
-fn handle_remote_progress(
+fn emit_remote_progress<F>(
     payload: &[u8],
     render_progress: bool,
     bar: Option<&ProgressBar>,
-    buffer: &mut RemoteProgressBuffer,
-) {
-    if !render_progress {
-        return;
-    }
-    buffer.push(
-        payload,
-        |line| emit_permanent_progress_line(line, bar),
-        |line| emit_transient_progress_line(line, bar),
-    );
-}
-
-fn flush_remote_progress(
-    render_progress: bool,
-    bar: Option<&ProgressBar>,
-    buffer: &mut RemoteProgressBuffer,
-) {
-    if !render_progress {
-        return;
-    }
-    buffer.flush_remaining(|line| emit_permanent_progress_line(line, bar));
-}
-
-fn emit_permanent_progress_line(line: &str, bar: Option<&ProgressBar>) {
-    if let Some(bar) = bar {
-        // `println` clears the bar, prints the line, then redraws the bar
-        // below — the canonical way to interleave logs with an indicatif spinner.
-        bar.println(line);
-    } else {
-        let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "{line}");
-    }
-}
-
-fn emit_transient_progress_line(line: &str, bar: Option<&ProgressBar>) {
-    if let Some(bar) = bar {
-        bar.set_message(line.to_owned());
-        bar.tick();
-    } else {
-        let mut stderr = io::stderr().lock();
-        let _ = write!(stderr, "\r{line}");
-        let _ = stderr.flush();
+    emit: F,
+) where
+    F: FnOnce(&str),
+{
+    if render_progress {
+        let text = String::from_utf8_lossy(payload);
+        let emit_text = || emit(text.as_ref());
+        // Remote side-band progress writes raw terminal control characters.
+        // Hide the local receiving spinner while printing it so the two
+        // streams do not leave stale or shifted lines in an interactive TTY.
+        if let Some(bar) = bar {
+            bar.suspend(emit_text);
+        } else {
+            emit_text();
+        }
     }
 }
 
@@ -1807,11 +1706,13 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
+    use indicatif::ProgressBar;
     use tempfile::tempdir;
 
     use super::{
-        FetchError, RemoteProgressBuffer, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
-        cleanup_expired_vault_ssh_temp_files_in, ensure_vault_ssh_tmp_dir, redact_url_credentials,
+        FetchError, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
+        cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        redact_url_credentials,
     };
     use crate::utils::test::ScopedEnvVar;
 
@@ -1887,97 +1788,39 @@ mod tests {
         );
     }
 
-    /// Drive `RemoteProgressBuffer` with `payload` and return
-    /// `(permanent_lines, transient_lines)` in dispatch order.
-    fn collect_buffered_progress(
-        buffer: &mut RemoteProgressBuffer,
+    fn capture_remote_progress(
         payload: &[u8],
-    ) -> (Vec<String>, Vec<String>) {
-        let mut perm = Vec::new();
-        let mut trans = Vec::new();
-        buffer.push(
-            payload,
-            |line| perm.push(line.to_string()),
-            |line| trans.push(line.to_string()),
-        );
-        (perm, trans)
+        render_progress: bool,
+        bar: Option<&ProgressBar>,
+    ) -> String {
+        let mut captured = String::new();
+        emit_remote_progress(payload, render_progress, bar, |text| {
+            captured.push_str(text);
+        });
+        captured
     }
 
-    /// `\n`-terminated chunks are promoted to permanent log lines so the
-    /// remote's `Counting objects: 100% (38/38), done.` survives above the bar.
     #[test]
-    fn remote_progress_buffer_promotes_newline_terminated_lines() {
-        let mut buffer = RemoteProgressBuffer::default();
-        let (perm, trans) =
-            collect_buffered_progress(&mut buffer, b"Counting objects: 100% (38/38), done.\n");
+    fn print_remote_progress_writes_payload_without_spinner() {
+        let captured = capture_remote_progress(b"\rReceiving objects: 42%", true, None);
 
-        assert_eq!(perm, vec!["Counting objects: 100% (38/38), done."]);
-        assert!(trans.is_empty());
+        assert_eq!(captured, "\rReceiving objects: 42%");
     }
 
-    /// `\r`-terminated chunks update the bar message in place so successive
-    /// `Counting objects:  5%\rCounting objects: 10%\r…` updates replace each
-    /// other instead of stacking as separate lines.
     #[test]
-    fn remote_progress_buffer_routes_carriage_returns_to_transient() {
-        let mut buffer = RemoteProgressBuffer::default();
-        let (perm, trans) = collect_buffered_progress(
-            &mut buffer,
-            b"Counting objects:  5%\rCounting objects: 10%\r",
-        );
+    fn print_remote_progress_writes_payload_while_spinner_is_suspended() {
+        let bar = ProgressBar::hidden();
 
-        assert!(perm.is_empty());
-        assert_eq!(
-            trans,
-            vec!["Counting objects:  5%", "Counting objects: 10%"]
-        );
+        let captured = capture_remote_progress(b"\rReceiving objects: 100%", true, Some(&bar));
+
+        assert_eq!(captured, "\rReceiving objects: 100%");
     }
 
-    /// Side-band chunks may split mid-word; partial bytes must survive until
-    /// the next push delivers the terminator.
     #[test]
-    fn remote_progress_buffer_holds_partial_bytes_across_pushes() {
-        let mut buffer = RemoteProgressBuffer::default();
-        let (perm1, trans1) = collect_buffered_progress(&mut buffer, b"Counting");
-        assert!(perm1.is_empty());
-        assert!(trans1.is_empty());
+    fn print_remote_progress_is_silent_when_rendering_is_disabled() {
+        let captured = capture_remote_progress(b"\rReceiving objects: 42%", false, None);
 
-        let (perm2, trans2) = collect_buffered_progress(&mut buffer, b" objects: 100%, done.\n");
-        assert_eq!(perm2, vec!["Counting objects: 100%, done."]);
-        assert!(trans2.is_empty());
-    }
-
-    /// CRLF must collapse to a single permanent line so we don't emit a
-    /// spurious empty transient followed by an empty permanent.
-    #[test]
-    fn remote_progress_buffer_treats_crlf_as_single_newline() {
-        let mut buffer = RemoteProgressBuffer::default();
-        let (perm, trans) = collect_buffered_progress(&mut buffer, b"Compressing done.\r\n");
-
-        assert_eq!(perm, vec!["Compressing done."]);
-        assert!(trans.is_empty());
-    }
-
-    /// At end of stream any unterminated tail must be flushed so a remote
-    /// that closes mid-line still surfaces the partial message.
-    #[test]
-    fn remote_progress_buffer_flush_remaining_emits_trailing_partial() {
-        let mut buffer = RemoteProgressBuffer::default();
-        collect_buffered_progress(&mut buffer, b"Resolving deltas: 99%");
-        let mut tail = Vec::new();
-        buffer.flush_remaining(|line| tail.push(line.to_string()));
-
-        assert_eq!(tail, vec!["Resolving deltas: 99%"]);
-    }
-
-    /// Empty payloads (e.g. a bare side-band code with no body) must not push
-    /// anything through the line splitter.
-    #[test]
-    fn remote_progress_buffer_ignores_empty_payload() {
-        let mut buffer = RemoteProgressBuffer::default();
-        let (perm, trans) = collect_buffered_progress(&mut buffer, b"");
-        assert!(perm.is_empty());
-        assert!(trans.is_empty());
+        assert!(captured.is_empty());
     }
 
     #[test]

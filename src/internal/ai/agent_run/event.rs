@@ -30,6 +30,8 @@
 //! CEX-S2-12 hook dispatch implementation may NOT add fields to these types;
 //! field additions require a new CEX-S2-* card.
 
+#![cfg(feature = "subagent-scaffold")]
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -238,17 +240,6 @@ pub enum CancellationReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum AgentRunEvent {
-    Spawned {
-        agent_run_id: AgentRunId,
-        parent_thread_id: String,
-        parent_session_id: String,
-        parent_message_id: String,
-        subagent_name: String,
-        provider_id: String,
-        model_id: String,
-        depth: u8,
-        prompt_digest: String,
-    },
     Started {
         agent_run_id: AgentRunId,
     },
@@ -340,7 +331,6 @@ pub enum AgentRunEvent {
 impl crate::internal::ai::runtime::Event for AgentRunEvent {
     fn event_kind(&self) -> &'static str {
         match self {
-            Self::Spawned { .. } => "spawned",
             Self::Started { .. } => "started",
             Self::ToolCall { .. } => "tool_call",
             Self::Blocked { .. } => "blocked",
@@ -367,8 +357,7 @@ impl crate::internal::ai::runtime::Event for AgentRunEvent {
         // `agent_run_id`" and gives audit/dedupe code something stable to
         // group by per run.
         match self {
-            Self::Spawned { agent_run_id, .. }
-            | Self::Started { agent_run_id }
+            Self::Started { agent_run_id }
             | Self::ToolCall { agent_run_id, .. }
             | Self::Blocked { agent_run_id, .. }
             | Self::Completed { agent_run_id }
@@ -391,16 +380,6 @@ impl crate::internal::ai::runtime::Event for AgentRunEvent {
         // consumers requiring full payloads should inspect the JSONL row;
         // this is the audit-channel sketch.
         match self {
-            Self::Spawned {
-                agent_run_id,
-                subagent_name,
-                provider_id,
-                model_id,
-                ..
-            } => format!(
-                "spawned run={} agent={subagent_name} model={provider_id}/{model_id}",
-                agent_run_id.0
-            ),
             Self::Started { agent_run_id } => format!("started run={}", agent_run_id.0),
             Self::ToolCall {
                 agent_run_id,

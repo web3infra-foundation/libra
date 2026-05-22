@@ -912,23 +912,28 @@ impl Storage for ClientStorage {
     }
 }
 
-/// Resolve an environment variable, checking vault config before system env.
+/// Resolve an environment variable, checking both system env and vault config.
 ///
-/// Uses a dedicated thread to run async config I/O so local/global
-/// `vault.env.*` values can win over process environment variables even during
-/// synchronous storage initialization.
+/// First checks `std::env::var` (fast, sync). If the system env var is absent,
+/// it reuses the async `resolve_env()` path on a dedicated thread so local/global
+/// config and vault-backed values share exactly the same semantics.
 ///
 /// This avoids deadlocks from nested tokio runtimes during storage init, which
 /// runs synchronously and may be called from within async test contexts.
 ///
 /// Boundary conditions:
-/// - Returns `Ok(None)` only when neither any config scope nor the system env
+/// - Returns `Ok(None)` only when neither the system env nor any config scope
 ///   contains the value.
 /// - Returns `Err(String)` when the worker thread crashes before sending or when
 ///   the underlying config lookup raises an error (e.g. corrupt SQLite, unreadable
 ///   permissions). Callers convert this into a hard storage configuration failure
 ///   rather than silently degrading.
 fn resolve_env_sync(name: &str) -> Result<Option<String>, String> {
+    // Always check system environment first.
+    if let Ok(val) = std::env::var(name) {
+        return Ok(Some(val));
+    }
+
     let owned = name.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -953,15 +958,14 @@ fn resolve_env_sync_worker(name: &str) -> Result<Option<String>, String> {
     runtime.block_on(resolve_env_for_storage_init(name))
 }
 
-/// Look up `name` in the local repo's config, then the global config, then env.
+/// Look up `name` in the local repo's config first, then in the global config.
 ///
 /// Functional scope:
 /// - Reads `vault.env.<name>` from `<repo>/.libra/<DATABASE>` if it exists, then from
-///   the global config (overridable via `LIBRA_CONFIG_GLOBAL_DB`), then from the
-///   process environment for users who have not moved credentials into Vault.
+///   the global config (overridable via `LIBRA_CONFIG_GLOBAL_DB`).
 ///
 /// Boundary conditions:
-/// - Returns `Ok(None)` when neither database nor process env holds the key.
+/// - Returns `Ok(None)` when neither database holds the key.
 /// - Returns `Err` when a database file exists but cannot be opened or queried — the
 ///   caller surfaces this so the user sees actionable errors rather than silently
 ///   degrading to local-only storage on a typo'd schema.
@@ -986,13 +990,7 @@ async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, Stri
         return Ok(Some(value));
     }
 
-    match std::env::var(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{name} is set in the environment but is not valid Unicode"
-        )),
-    }
+    Ok(None)
 }
 
 /// Read a single `vault.env.*` entry from a config database, decrypting if needed.
@@ -1746,34 +1744,6 @@ mod tests {
 
         let value = resolve_env_sync("LIBRA_STORAGE_ENDPOINT").unwrap();
         assert_eq!(value.as_deref(), Some("https://storage.example.com"));
-    }
-
-    /// Scenario: when both repository Vault and process env define a storage
-    /// credential/config value, storage initialization must prefer Vault. This
-    /// keeps a sourced `.env` or shell profile from shadowing an intentionally
-    /// configured repo-local R2/S3 credential.
-    #[test]
-    #[serial]
-    fn resolve_env_sync_prefers_local_config_over_system_env() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let repo = tempdir().unwrap();
-        rt.block_on(setup_with_new_libra_in(repo.path()));
-        let _guard = ChangeDirGuard::new(repo.path());
-        let _endpoint =
-            ScopedEnvVar::set("LIBRA_STORAGE_ENDPOINT", "https://env-storage.example.com");
-
-        rt.block_on(async {
-            ConfigKv::set(
-                "vault.env.LIBRA_STORAGE_ENDPOINT",
-                "https://vault-storage.example.com",
-                false,
-            )
-            .await
-            .unwrap();
-        });
-
-        let value = resolve_env_sync("LIBRA_STORAGE_ENDPOINT").unwrap();
-        assert_eq!(value.as_deref(), Some("https://vault-storage.example.com"));
     }
 
     /// Scenario: a corrupt global config file must propagate a fatal error rather

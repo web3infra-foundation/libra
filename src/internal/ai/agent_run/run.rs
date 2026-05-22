@@ -1,5 +1,7 @@
 //! `AgentRun[S]` snapshot: one sub-agent execution attempt for an `AgentTask`.
 
+#![cfg(feature = "subagent-scaffold")]
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -6,7 +6,7 @@
 //! - `libra cloud status` - Show sync status
 
 use std::{
-    collections::{BTreeMap, HashSet, hash_map::DefaultHasher},
+    collections::{BTreeMap, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -669,10 +669,7 @@ impl CloudError {
                     .with_stable_code(StableErrorCode::AuthMissingCredentials)
                     .with_detail("missing_keys", missing_keys)
                     .with_detail("raw_detail", detail)
-                    .with_hint(
-                        "set the missing variables as vault.env.* with `libra config set`, or \
-                         export them in the environment before retrying.",
-                    )
+                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
             }
             CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
@@ -924,23 +921,22 @@ pub(crate) async fn run_cloud_sync(
         )));
     }
 
-    // Initialize local storage before selecting sync work. Older repositories
-    // can contain valid loose/packed objects that predate object_index writes,
-    // so cloud sync first reconciles the local object store into object_index.
-    let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
-    reconcile_local_object_index(&db_conn, &repo_id, &local_storage).await?;
+    // Query unsynced objects.
+    let query = if ctx.force {
+        object_index::Entity::find().filter(object_index::Column::RepoId.eq(&repo_id))
+    } else {
+        object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq(&repo_id))
+            .filter(object_index::Column::IsSynced.eq(0))
+    };
 
-    let local_objects = object_index::Entity::find()
-        .filter(object_index::Column::RepoId.eq(&repo_id))
+    let unsynced_objects = query
         .all(&db_conn)
         .await
         .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
 
     // Initialize R2 storage.
     let r2_storage = create_r2_storage(&repo_id).await?;
-    let unsynced_objects =
-        select_objects_for_cloud_sync(local_objects, ctx.force, &d1_client, &repo_id).await?;
 
     let total_unsynced = unsynced_objects.len();
 
@@ -971,6 +967,10 @@ pub(crate) async fn run_cloud_sync(
     }
 
     progress.on_object_total(total_unsynced);
+
+    // Initialize local storage for reading objects.
+    let objects_path = path::objects();
+    let local_storage = LocalStorage::new(objects_path);
 
     let mut synced_count = 0usize;
     let mut failed_count = 0usize;
@@ -1038,94 +1038,6 @@ pub(crate) async fn run_cloud_sync(
         metadata,
         agent_capture,
     })
-}
-
-async fn reconcile_local_object_index(
-    db_conn: &sea_orm::DatabaseConnection,
-    repo_id: &str,
-    local_storage: &LocalStorage,
-) -> CloudResult<usize> {
-    let existing_rows = object_index::Entity::find()
-        .filter(object_index::Column::RepoId.eq(repo_id))
-        .all(db_conn)
-        .await
-        .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
-    let mut existing_oids = existing_rows
-        .into_iter()
-        .map(|row| row.o_id)
-        .collect::<HashSet<_>>();
-
-    let mut hashes = local_storage
-        .search("")
-        .await
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    hashes.sort_by_key(|hash| hash.to_string());
-
-    let mut inserted = 0usize;
-    for hash in hashes {
-        let o_id = hash.to_string();
-        if existing_oids.contains(&o_id) {
-            continue;
-        }
-
-        let (data, obj_type) = local_storage.get(&hash).await.map_err(|e| {
-            CloudError::Generic(format!(
-                "Failed to read local object {o_id} while reconciling object index: {e}"
-            ))
-        })?;
-        let entry = object_index::ActiveModel {
-            o_id: Set(o_id.clone()),
-            o_type: Set(obj_type.to_string()),
-            o_size: Set(data.len() as i64),
-            repo_id: Set(repo_id.to_string()),
-            created_at: Set(chrono::Utc::now().timestamp()),
-            is_synced: Set(0),
-            ..Default::default()
-        };
-        entry
-            .insert(db_conn)
-            .await
-            .map_err(|e| CloudError::Generic(format!("Failed to insert object index: {e}")))?;
-        existing_oids.insert(o_id);
-        inserted += 1;
-    }
-
-    Ok(inserted)
-}
-
-async fn select_objects_for_cloud_sync(
-    local_objects: Vec<object_index::Model>,
-    force: bool,
-    d1_client: &D1Client,
-    repo_id: &str,
-) -> CloudResult<Vec<object_index::Model>> {
-    if force {
-        return Ok(local_objects);
-    }
-
-    let remote_d1_oids = d1_client
-        .get_object_indexes(repo_id)
-        .await
-        .map_err(|e| CloudError::D1(format!("Failed to query D1: {}", e.message)))?
-        .into_iter()
-        .map(|row| row.o_id)
-        .collect::<HashSet<_>>();
-
-    let mut selected = Vec::new();
-    for object in local_objects {
-        if object_needs_cloud_sync(&object, &remote_d1_oids) {
-            selected.push(object);
-        }
-    }
-
-    Ok(selected)
-}
-
-fn object_needs_cloud_sync(object: &object_index::Model, remote_d1_oids: &HashSet<String>) -> bool {
-    object.is_synced == 0 || !remote_d1_oids.contains(&object.o_id)
 }
 
 /// Sync a single object: R2 first (idempotent), then D1
@@ -1752,7 +1664,7 @@ async fn resolve_cloud_env(
         .await
         .map_err(|e| {
             CloudError::Generic(format!(
-                "failed to resolve '{name}' from vault config or env: {e}"
+                "failed to resolve '{name}' from env or config: {e}"
             ))
         })
 }
@@ -2490,18 +2402,6 @@ mod tests {
         }
     }
 
-    fn test_object_index_model(hash: ObjectHash, size: i64, is_synced: i32) -> object_index::Model {
-        object_index::Model {
-            id: 0,
-            o_id: hash.to_string(),
-            o_type: "blob".to_string(),
-            o_size: size,
-            repo_id: "test-repo".to_string(),
-            created_at: 0,
-            is_synced,
-        }
-    }
-
     struct ClearedEnvVarGuard {
         key: String,
         previous: Option<OsString>,
@@ -2747,88 +2647,6 @@ mod tests {
         assert!(output.agent_capture.sessions_failed.is_none());
         assert!(output.agent_capture.checkpoints_synced.is_none());
         assert!(output.agent_capture.checkpoints_failed.is_none());
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn cloud_sync_reconciles_loose_objects_missing_from_object_index() {
-        let repo = tempdir().unwrap();
-        let home = tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
-        setup_with_new_libra_in(repo.path()).await;
-        let _cwd = ChangeDirGuard::new(repo.path());
-
-        let db_conn = db::get_db_conn_instance().await;
-        let storage = LocalStorage::new(path::objects());
-        let data = b"object written before object_index existed";
-        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
-        storage
-            .put(&hash, data, ObjectType::Blob)
-            .await
-            .expect("test object should be written directly to local storage");
-
-        let before = object_index::Entity::find()
-            .filter(object_index::Column::RepoId.eq("repo-reconcile"))
-            .filter(object_index::Column::OId.eq(hash.to_string()))
-            .one(&db_conn)
-            .await
-            .unwrap();
-        assert!(before.is_none());
-
-        let inserted = reconcile_local_object_index(&db_conn, "repo-reconcile", &storage)
-            .await
-            .expect("reconcile should index loose local objects");
-        assert_eq!(inserted, 1);
-
-        let row = object_index::Entity::find()
-            .filter(object_index::Column::RepoId.eq("repo-reconcile"))
-            .filter(object_index::Column::OId.eq(hash.to_string()))
-            .one(&db_conn)
-            .await
-            .unwrap()
-            .expect("reconciled object should be indexed");
-        assert_eq!(row.o_type, "blob");
-        assert_eq!(row.o_size, data.len() as i64);
-        assert_eq!(row.is_synced, 0);
-
-        let inserted_again = reconcile_local_object_index(&db_conn, "repo-reconcile", &storage)
-            .await
-            .expect("reconcile should be idempotent");
-        assert_eq!(inserted_again, 0);
-    }
-
-    #[tokio::test]
-    async fn cloud_sync_reselects_synced_rows_missing_from_remote_d1() {
-        let present_data = b"present remotely";
-        let present_hash = ObjectHash::from_type_and_data(ObjectType::Blob, present_data);
-
-        let mut remote_d1_oids = HashSet::from([present_hash.to_string()]);
-        let present = test_object_index_model(present_hash, present_data.len() as i64, 1);
-        assert!(
-            !object_needs_cloud_sync(&present, &remote_d1_oids),
-            "synced rows present in D1 should remain skipped"
-        );
-
-        let missing_d1_data = b"missing d1";
-        let missing_d1_hash = ObjectHash::from_type_and_data(ObjectType::Blob, missing_d1_data);
-        let missing_d1 = test_object_index_model(missing_d1_hash, missing_d1_data.len() as i64, 1);
-        assert!(
-            object_needs_cloud_sync(&missing_d1, &remote_d1_oids),
-            "local is_synced=1 must not hide rows absent from D1"
-        );
-
-        let unsynced = test_object_index_model(present_hash, present_data.len() as i64, 0);
-        assert!(
-            object_needs_cloud_sync(&unsynced, &remote_d1_oids),
-            "locally unsynced rows should still be selected"
-        );
-
-        remote_d1_oids.clear();
-        assert!(
-            object_needs_cloud_sync(&present, &remote_d1_oids),
-            "an empty remote object_index must cause a full D1 repair pass"
-        );
     }
 
     /// Scenario: metadata restore into a freshly initialized repo where local refs

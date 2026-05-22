@@ -244,7 +244,6 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 repeat_warning_threshold: None,
                 repeat_abort_threshold: None,
                 terminal_tools: None,
-                subagent_runtime: None,
                 context_frame_session_root: None,
                 context_frame_prompt_id: None,
                 context_frame_budget: None,

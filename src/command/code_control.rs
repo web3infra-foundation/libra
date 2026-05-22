@@ -98,14 +98,6 @@ struct CancelParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TaskDispatchParams {
-    agent: String,
-    prompt: String,
-    controller_token: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct GoalStartParams {
     objective: String,
     controller_token: String,
@@ -314,21 +306,6 @@ async fn dispatch_json_rpc_request(
             return DispatchResult::Subscribe {
                 response: json_rpc_success(id, json!({ "subscribed": true })),
             };
-        }
-        "task.dispatch" => {
-            let params = match parse_params::<TaskDispatchParams>(request.params) {
-                Ok(params) => params,
-                Err(error) => return DispatchResult::Error(error),
-            };
-            send_post(
-                client,
-                base_url,
-                "/api/code/task/dispatch",
-                control_token,
-                Some(&params.controller_token),
-                json!({ "agent": params.agent, "prompt": params.prompt }),
-            )
-            .await
         }
         "goal.start" => {
             // OC-Phase 6 P6.6 — Goal mode entrypoint for automation.
@@ -711,19 +688,6 @@ mod tests {
             Json(json!({ "accepted": true }))
         }
 
-        async fn task_dispatch(
-            State(state): State<Arc<MockState>>,
-            headers: HeaderMap,
-            Json(body): Json<Value>,
-        ) -> Json<Value> {
-            state
-                .calls
-                .lock()
-                .await
-                .push(json!({ "path": "task.dispatch", "token": headers.get("x-libra-control-token").and_then(|value| value.to_str().ok()), "controller": headers.get("x-code-controller-token").and_then(|value| value.to_str().ok()), "body": body }));
-            Json(json!({ "accepted": true, "result": "Task `task-1` completed" }))
-        }
-
         async fn detach(
             State(state): State<Arc<MockState>>,
             headers: HeaderMap,
@@ -743,7 +707,6 @@ mod tests {
         let app = Router::new()
             .route("/api/code/controller/attach", post(attach))
             .route("/api/code/messages", post(messages))
-            .route("/api/code/task/dispatch", post(task_dispatch))
             .route("/api/code/controller/detach", post(detach))
             .route("/api/code/session", get(|| async { Json(json!({})) }))
             .with_state(state.clone());
@@ -786,24 +749,6 @@ mod tests {
         .await;
         assert!(matches!(submit_response, DispatchResult::Response(_)));
 
-        let task_response = dispatch_json_rpc_request(
-            &client,
-            &base_url,
-            "process-token",
-            JsonRpcRequest {
-                jsonrpc: Some("2.0".to_string()),
-                method: Some("task.dispatch".to_string()),
-                params: Some(json!({
-                    "agent": "explorer",
-                    "prompt": "grep TODO src/",
-                    "controllerToken": "lease-token"
-                })),
-                id: Some(json!(4)),
-            },
-        )
-        .await;
-        assert!(matches!(task_response, DispatchResult::Response(_)));
-
         let detach_response = dispatch_json_rpc_request(
             &client,
             &base_url,
@@ -821,16 +766,12 @@ mod tests {
         assert!(matches!(detach_response, DispatchResult::Response(_)));
 
         let calls = state.calls.lock().await.clone();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 3);
         assert_eq!(calls[0]["path"], "attach");
         assert_eq!(calls[0]["token"], "process-token");
         assert_eq!(calls[1]["path"], "messages");
         assert_eq!(calls[1]["controller"], "lease-token");
-        assert_eq!(calls[2]["path"], "task.dispatch");
-        assert_eq!(calls[2]["controller"], "lease-token");
-        assert_eq!(calls[2]["body"]["agent"], "explorer");
-        assert_eq!(calls[2]["body"]["prompt"], "grep TODO src/");
-        assert_eq!(calls[3]["path"], "detach");
+        assert_eq!(calls[2]["path"], "detach");
 
         let _ = shutdown_tx.send(());
         let _ = server.await;

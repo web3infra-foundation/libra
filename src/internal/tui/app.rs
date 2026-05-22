@@ -5,10 +5,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     future::Future,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -19,7 +17,6 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
-use ring::digest;
 use serde::Deserialize;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -50,12 +47,9 @@ use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            BudgetTracker, TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
+            TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
             TaskIntentClassifierError, TaskIntentDecision, ToolLoopConfig, ToolLoopObserver,
-            format_agents_table, format_budget_status,
-            profile::{AgentProfileRouter, AgentsConfig},
-            run_tool_loop_with_history_and_observer,
-            runtime::{TaskEntryKind, TaskInvocation, TaskResult as SubAgentTaskResult},
+            profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
         commands::CommandDispatcher,
         completion::{
@@ -66,12 +60,6 @@ use crate::{
         context_budget::{
             MemoryAnchor, MemoryAnchorDraft, MemoryAnchorEvent, MemoryAnchorLookupError,
             build_memory_anchor_prompt_section,
-        },
-        goal::{
-            DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor,
-            GoalEventClock, GoalEventEnvelope, GoalLoopDecision, GoalStopPolicy,
-            GoalSupervisedToolLoopRequest, GoalSupervisor, GoalVerifierContext, RecentToolCall,
-            ToolResultStatus, run_goal_supervised_tool_loop,
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
@@ -415,7 +403,6 @@ pub struct AppConfig {
     pub command_dispatcher: CommandDispatcher,
     pub skill_dispatcher: SkillDispatcher,
     pub agent_router: AgentProfileRouter,
-    pub agents_config: AgentsConfig,
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
@@ -438,8 +425,6 @@ pub struct AppConfig {
     pub default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
     pub auto_classify_first_user_message: bool,
-    /// Goal objective supplied via `libra code --goal`, if any.
-    pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
     pub source_pool: SourcePool,
 }
@@ -482,10 +467,6 @@ pub struct App<M: CompletionModel> {
     skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
     agent_router: AgentProfileRouter,
-    /// Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.
-    agents_config: AgentsConfig,
-    /// In-memory budget totals for this TUI session.
-    budget_tracker: BudgetTracker,
     /// Session state for persistence.
     session: SessionState,
     /// Session store for saving/loading.
@@ -628,36 +609,6 @@ where
             .get(LATEST_EXECUTION_PLAN_ID)
             .and_then(|value| value.as_str())
             .map(ToString::to_string);
-        let initial_goal_session = app_config.initial_goal.as_ref().and_then(|objective| {
-            let session_id = app_config.session.id.clone();
-            match super::goal_session::GoalSession::create(
-                session_id.clone(),
-                session_id,
-                objective.clone(),
-                crate::internal::ai::goal::GoalActor::User { id: None },
-            ) {
-                Ok(session) => Some(session),
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "failed to create initial Goal session from validated CLI objective"
-                    );
-                    None
-                }
-            }
-        });
-        if let Some(session) = initial_goal_session.as_ref() {
-            let session_root = app_config
-                .session_store
-                .session_root(&app_config.session.id);
-            if let Err(error) = persist_goal_events_to_session_root(session_root, session.events())
-            {
-                tracing::warn!(
-                    error = %error,
-                    "failed to persist initial Goal event"
-                );
-            }
-        }
         Self {
             tui,
             widget,
@@ -682,8 +633,6 @@ where
             command_dispatcher: app_config.command_dispatcher,
             skill_dispatcher: app_config.skill_dispatcher,
             agent_router: app_config.agent_router,
-            agents_config: app_config.agents_config,
-            budget_tracker: BudgetTracker::new(),
             session: app_config.session,
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
@@ -719,7 +668,7 @@ where
             default_network_access: app_config.default_network_access,
             auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
-            goal_session: initial_goal_session,
+            goal_session: None,
             source_pool: app_config.source_pool,
         }
     }
@@ -1042,10 +991,6 @@ where
                 let result = self.cancel_current_turn(CancelSource::Automation).await;
                 let _ = ack.send(result);
             }
-            TuiControlCommand::TaskDispatch { agent, prompt, ack } => {
-                let result = self.task_dispatch_from_control(agent, prompt).await;
-                let _ = ack.send(result);
-            }
             TuiControlCommand::ReclaimController { ack } => {
                 let result = self.reclaim_local_controller().await;
                 let _ = ack.send(result);
@@ -1086,11 +1031,6 @@ where
         let actor = goal_actor_for_session(self);
         match GoalSession::create(session_id.clone(), session_id, objective, actor) {
             Ok(session) => {
-                if let Err(error) = self.persist_goal_events_to_jsonl(session.events()) {
-                    return Err(TuiControlError::Internal(format!(
-                        "failed to persist Goal start event: {error}"
-                    )));
-                }
                 let rendered = render_goal_status(session.state());
                 self.goal_session = Some(session);
                 Ok(rendered)
@@ -1121,19 +1061,11 @@ where
     ) -> Result<String, TuiControlError> {
         use super::goal_session::{GoalSessionError, render_goal_status};
         let actor = goal_actor_for_session(self);
-        let session_root = self.session_store.session_root(&self.session.id);
         let Some(session) = self.goal_session.as_mut() else {
             return Err(TuiControlError::GoalNotActive);
         };
-        let previous_event_count = session.events().len();
         match session.cancel(reason, actor) {
             Ok(outcome) => {
-                let new_events = session.events()[previous_event_count..].to_vec();
-                if let Err(error) = persist_goal_events_to_session_root(session_root, &new_events) {
-                    return Err(TuiControlError::Internal(format!(
-                        "failed to persist Goal cancel event: {error}"
-                    )));
-                }
                 let rendered = render_goal_status(&outcome.state);
                 // Per opencode.md:665 a Cancelled session is
                 // terminal; clear the slot so a subsequent
@@ -1148,13 +1080,6 @@ where
             }
             Err(other) => Err(TuiControlError::Internal(other.to_string())),
         }
-    }
-
-    fn persist_goal_events_to_jsonl(&self, events: &[GoalEventEnvelope]) -> std::io::Result<()> {
-        persist_goal_events_to_session_root(
-            self.session_store.session_root(&self.session.id),
-            events,
-        )
     }
 
     async fn submit_message_from_code_ui(&mut self, text: String) -> Result<(), TuiControlError> {
@@ -1178,24 +1103,6 @@ where
             && self.pending_intent_review.is_none()
             && self.pending_plan_revision.is_none()
             && self.pending_execution_plan_revision.is_none()
-    }
-
-    async fn task_dispatch_from_control(
-        &mut self,
-        agent: String,
-        prompt: String,
-    ) -> Result<String, TuiControlError> {
-        if !self.can_accept_code_ui_submit() {
-            return Err(TuiControlError::Busy);
-        }
-        let invocation = task_invocation_from_parts(&agent, &prompt)
-            .map_err(TuiControlError::TaskInvalidRequest)?;
-        let message = self.dispatch_user_task_invocation(invocation).await;
-        self.widget
-            .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
-        self.sync_mux_input_context();
-        self.schedule_draw();
-        Ok(message)
     }
 
     async fn automation_controller_active(&self) -> bool {
@@ -2770,11 +2677,6 @@ where
                 attach_file_history_context(&mut config, session_root.clone(), turn_id);
                 config.context_frame_session_root = Some(session_root.clone());
                 config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
-                let active_goal_state = self
-                    .goal_session
-                    .as_ref()
-                    .filter(|session| !session.is_terminal())
-                    .map(|session| session.state().clone());
                 let should_auto_classify = should_auto_classify_first_user_message(
                     self.auto_classify_first_user_message,
                     &self.history,
@@ -2783,18 +2685,11 @@ where
                 if self.auto_classify_first_user_message && self.history.is_empty() {
                     self.auto_classify_first_user_message = false;
                 }
-                let mut turn_allowed_tools = allowed_tools
-                    .clone()
-                    .unwrap_or_else(|| self.default_allowed_tools.clone());
-                apply_goal_tool_visibility(
-                    &mut turn_allowed_tools,
-                    active_goal_state.is_some(),
-                    &registry,
+                config.allowed_tools = Some(
+                    allowed_tools
+                        .clone()
+                        .unwrap_or_else(|| self.default_allowed_tools.clone()),
                 );
-                config.allowed_tools = Some(turn_allowed_tools);
-                if active_goal_state.is_some() {
-                    ensure_terminal_tool_name(&mut config, "submit_goal_complete");
-                }
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
@@ -2804,7 +2699,6 @@ where
                     .clone()
                     .unwrap_or_else(|| Arc::new(Mutex::new(None)));
                 let mcp_write_tracker = self.mcp_write_tracker.clone();
-                let working_dir = registry.working_dir().to_path_buf();
 
                 // Execute agent call in background task
                 let handle = tokio::spawn(async move {
@@ -2813,8 +2707,6 @@ where
                         mcp_server: Option<Arc<LibraMcpServer>>,
                         run_id: Arc<Mutex<Option<String>>>,
                         mcp_write_tracker: McpWriteTracker,
-                        recent_tool_results: Arc<Mutex<Vec<RecentToolCall>>>,
-                        goal_cost_micro_usd: Arc<AtomicU64>,
                         turn_id: TurnId,
                     }
 
@@ -2863,10 +2755,6 @@ where
                             usage: &crate::internal::ai::completion::CompletionUsageSummary,
                             wall_clock_ms: u64,
                         ) {
-                            let cost = usage_cost_micro_usd(usage);
-                            if cost > 0 {
-                                self.goal_cost_micro_usd.fetch_add(cost, Ordering::Relaxed);
-                            }
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::UsageUpdated {
@@ -2904,12 +2792,6 @@ where
                             tool_name: &str,
                             result: &Result<ToolOutput, String>,
                         ) {
-                            record_recent_goal_tool_result(
-                                &self.recent_tool_results,
-                                call_id,
-                                tool_name,
-                                result,
-                            );
                             let _ = self.tx.send(AppEvent::ToolCallEnd {
                                 turn_id: self.turn_id,
                                 call_id: call_id.to_string(),
@@ -2984,15 +2866,11 @@ where
                         }
                     }
 
-                    let recent_tool_results = Arc::new(Mutex::new(Vec::new()));
-                    let goal_cost_micro_usd = Arc::new(AtomicU64::new(0));
                     let mut observer = UiObserver {
                         tx,
                         mcp_server,
                         run_id,
                         mcp_write_tracker,
-                        recent_tool_results: recent_tool_results.clone(),
-                        goal_cost_micro_usd: goal_cost_micro_usd.clone(),
                         turn_id,
                     };
                     if should_auto_classify {
@@ -3006,20 +2884,12 @@ where
                         .await
                         {
                             Ok(decision) => {
-                                if let Some(tools) = config.allowed_tools.as_mut() {
-                                    apply_goal_tool_visibility(
-                                        tools,
-                                        active_goal_state.is_some(),
-                                        &registry,
-                                    );
-                                }
                                 send_task_intent_classified_event(
                                     &observer.tx,
                                     observer.turn_id,
                                     decision,
                                     &config,
                                     &registry,
-                                    active_goal_state.is_some(),
                                 );
                             }
                             Err(error) => {
@@ -3031,61 +2901,15 @@ where
                         }
                     }
                     attach_memory_anchor_prompt_context(&mut config);
-                    let result = if let Some(goal_state) = active_goal_state {
-                        let supervisor = GoalSupervisor {
-                            stop_policy: GoalStopPolicy::GoalBound {
-                                goal_id: goal_state.spec.goal_id,
-                            },
-                            verifier: DeterministicGoalVerifier,
-                            prompt_builder: DefaultGoalContinuationPromptBuilder,
-                        };
-                        let verifier_ctx = WorkspaceGoalVerifierContext {
-                            working_dir,
-                            recent_tool_results,
-                            goal_cost_micro_usd,
-                            created_at: goal_state.spec.created_at,
-                        };
-                        let clock = SystemGoalEventClock;
-                        match run_goal_supervised_tool_loop(GoalSupervisedToolLoopRequest {
-                            model: &model,
-                            history,
-                            initial_prompt: user_text,
-                            registry: &registry,
-                            config,
-                            observer: &mut observer,
-                            state: goal_state,
-                            supervisor: &supervisor,
-                            verifier_ctx: &verifier_ctx,
-                            clock: &clock,
-                        })
-                        .await
-                        {
-                            Ok(run) => {
-                                let _ = observer.tx.send(AppEvent::AgentEvent {
-                                    turn_id: observer.turn_id,
-                                    event: AgentEvent::GoalResponseComplete {
-                                        text: run.final_text,
-                                        new_history: run.history,
-                                        goal_state: Box::new(run.state),
-                                        goal_events: run.events,
-                                        decision: run.decision,
-                                    },
-                                });
-                                return;
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        run_tool_loop_with_history_and_observer(
-                            &model,
-                            history,
-                            user_text,
-                            &registry,
-                            config,
-                            &mut observer,
-                        )
-                        .await
-                    };
+                    let result = run_tool_loop_with_history_and_observer(
+                        &model,
+                        history,
+                        user_text,
+                        &registry,
+                        config,
+                        &mut observer,
+                    )
+                    .await;
 
                     match result {
                         Ok(turn) => {
@@ -3133,8 +2957,6 @@ where
                         usage,
                         wall_clock_ms,
                     } => {
-                        self.budget_tracker
-                            .accumulate(&usage, Some(wall_clock_ms), None);
                         apply_final_usage_update(
                             &mut self.usage_snapshot,
                             &usage,
@@ -3148,101 +2970,6 @@ where
                         self.widget.set_usage_header(Some(usage_badge));
                         self.refresh_usage_detail_panel().await;
                         self.schedule_draw();
-                    }
-                    AgentEvent::GoalResponseComplete {
-                        text,
-                        new_history,
-                        goal_state,
-                        goal_events,
-                        decision,
-                    } => {
-                        self.pending_stream_output_tokens = 0;
-                        let rendered_text = render_goal_response_text(&text, &decision);
-                        let mcp_decision = match &decision {
-                            GoalLoopDecision::Completed { .. } => "Goal completed successfully",
-                            GoalLoopDecision::Cancelled => "Goal cancelled",
-                            GoalLoopDecision::AwaitUser { .. } => "Goal paused for user input",
-                            GoalLoopDecision::Continue { .. } => {
-                                "Goal supervisor returned an unexpected continuation"
-                            }
-                        };
-                        self.enqueue_mcp_turn_decision("checkpoint", mcp_decision.to_string());
-                        self.finish_turn_state();
-                        self.history = new_history;
-
-                        if let Some(session) = self.goal_session.as_mut() {
-                            if let Err(error) = session.append_supervisor_events(&goal_events) {
-                                let message =
-                                    format!("failed to apply Goal supervisor events: {error}");
-                                self.complete_streaming_assistant_cell(format!("Error: {message}"));
-                                if let Some(code_ui_session) = self.code_ui_session.clone() {
-                                    code_ui_session
-                                        .upsert_transcript_entry(CodeUiTranscriptEntry {
-                                            id: Self::code_ui_assistant_entry_id(_turn_id),
-                                            kind: CodeUiTranscriptEntryKind::AssistantMessage,
-                                            title: Some("Assistant".to_string()),
-                                            content: Some(format!("Error: {message}")),
-                                            status: Some("error".to_string()),
-                                            streaming: false,
-                                            metadata: serde_json::json!({}),
-                                            created_at: Utc::now(),
-                                            updated_at: Utc::now(),
-                                        })
-                                        .await;
-                                    code_ui_session.set_status(CodeUiSessionStatus::Error).await;
-                                }
-                                self.set_idle_and_draw();
-                                return Ok(());
-                            }
-                            // The supervisor returns its own projection so callers can
-                            // verify the App-side replay stayed aligned.
-                            debug_assert_eq!(session.state(), goal_state.as_ref());
-                        } else {
-                            tracing::warn!(
-                                "Goal supervisor completed but the App no longer has an active Goal session"
-                            );
-                        }
-
-                        if let Err(error) = self.persist_goal_events_to_jsonl(&goal_events) {
-                            tracing::warn!(
-                                error = %error,
-                                "failed to persist Goal supervisor events"
-                            );
-                        }
-
-                        self.session.add_assistant_message(&rendered_text);
-                        self.complete_streaming_assistant_cell(rendered_text.clone());
-                        if let Some(code_ui_session) = self.code_ui_session.clone() {
-                            let transcript_status = match &decision {
-                                GoalLoopDecision::AwaitUser { .. } => "paused",
-                                GoalLoopDecision::Completed { .. } => "completed",
-                                GoalLoopDecision::Cancelled => "cancelled",
-                                GoalLoopDecision::Continue { .. } => "completed",
-                            };
-                            code_ui_session
-                                .upsert_transcript_entry(CodeUiTranscriptEntry {
-                                    id: Self::code_ui_assistant_entry_id(_turn_id),
-                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
-                                    title: Some("Assistant".to_string()),
-                                    content: Some(
-                                        self.session
-                                            .messages
-                                            .last()
-                                            .map(|message| message.content.clone())
-                                            .unwrap_or_default(),
-                                    ),
-                                    status: Some(transcript_status.to_string()),
-                                    streaming: false,
-                                    metadata: serde_json::json!({
-                                        "goalStatus": format!("{:?}", goal_state.status),
-                                    }),
-                                    created_at: Utc::now(),
-                                    updated_at: Utc::now(),
-                                })
-                                .await;
-                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
-                        }
-                        self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.pending_stream_output_tokens = 0;
@@ -4923,26 +4650,29 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
-            BuiltinCommand::Task => {
-                let message = self.task_command_message(args).await;
-                self.widget
-                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
-                self.sync_mux_input_context();
-                self.schedule_draw();
-            }
             BuiltinCommand::Agents => {
-                self.widget
-                    .add_cell(Box::new(AssistantHistoryCell::new(format_agents_table(
-                        &self.agents_config,
-                    ))));
+                // OC-Phase 5 P5.4: declarative agents.toml is not yet wired
+                // through the TUI session config (lands with the dispatcher
+                // integration in P5.5 + later). Until then, surface an
+                // actionable placeholder so the slash command exists as a
+                // discoverable UX surface.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Multi-agent declarative config (`agents.toml`) is not yet loaded by this \
+                     session. See `docs/improvement/opencode.md` OC-Phase 5 for the rollout \
+                     plan."
+                        .to_string(),
+                )));
             }
             BuiltinCommand::Budget => {
-                self.widget
-                    .add_cell(Box::new(AssistantHistoryCell::new(format_budget_status(
-                        &self.agents_config,
-                        &self.budget_tracker,
-                        &[],
-                    ))));
+                // Same gating as Agents — budget enforcement is implemented
+                // (`src/internal/ai/agent/budget.rs`) but the runtime tracker
+                // is not yet plumbed into the TUI session.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Per-session / per-agent budget tracker is not yet plumbed through this \
+                     TUI session. The `[code.budget]` config schema and enforcement primitive \
+                     are in place; runtime wiring lands in OC-Phase 5 P5.5."
+                        .to_string(),
+                )));
             }
             BuiltinCommand::Goal => {
                 let message = self.format_goal_command_response(args);
@@ -4989,45 +4719,6 @@ where
                  envelope path, which lands once `run_tool_loop` integrates."
             ),
             Err(err) => err.to_string(),
-        }
-    }
-
-    /// Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.
-    ///
-    /// This is the OC-Phase 3 P3.6 user entry point: it skips the
-    /// LLM-initiated permission dialog because the human explicitly
-    /// requested the sub-agent, while keeping all other dispatcher
-    /// gates (feature flag, depth, concurrency, safety, permission
-    /// escalation, model build, child loop) intact.
-    async fn task_command_message(&self, args: &str) -> String {
-        let invocation = match parse_task_command_args(args) {
-            Ok(invocation) => invocation,
-            Err(message) => return message,
-        };
-        self.dispatch_user_task_invocation(invocation).await
-    }
-
-    async fn dispatch_user_task_invocation(&self, invocation: TaskInvocation) -> String {
-        let Some(runtime) = self.config.subagent_runtime.clone() else {
-            return "`/task` requires `code.multi_agent.enabled = true` in `.libra/agents.toml`."
-                .to_string();
-        };
-
-        let subagent_name = invocation.subagent_type.clone();
-        let ctx = runtime.dispatch_context(format!("user-task:{}", uuid::Uuid::new_v4()));
-        match runtime
-            .dispatcher
-            .dispatch(
-                ctx,
-                invocation,
-                TaskEntryKind::UserInitiated {
-                    bypass_permission_ask: true,
-                },
-            )
-            .await
-        {
-            Ok(result) => format_task_command_result(result),
-            Err(error) => format!("`/task {subagent_name}` failed: {error}"),
         }
     }
 
@@ -6981,7 +6672,7 @@ where
                 {
                     Ok(decision) => {
                         send_task_intent_classified_event(
-                            &tx, turn_id, decision, &config, &registry, false,
+                            &tx, turn_id, decision, &config, &registry,
                         );
                     }
                     Err(error) => {
@@ -8079,61 +7770,6 @@ fn parse_usage_grouping(args: &str) -> Result<UsageGrouping, String> {
     }
 }
 
-fn parse_task_command_args(args: &str) -> Result<TaskInvocation, String> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Err("Usage: /task <agent> <prompt>".to_string());
-    }
-    let Some((agent, prompt)) = trimmed.split_once(char::is_whitespace) else {
-        return Err("Usage: /task <agent> <prompt>".to_string());
-    };
-    task_invocation_from_parts(agent, prompt)
-        .map_err(|_| "Usage: /task <agent> <prompt>".to_string())
-}
-
-fn task_invocation_from_parts(agent: &str, prompt: &str) -> Result<TaskInvocation, String> {
-    let agent = agent.trim();
-    let prompt = prompt.trim();
-    if agent.is_empty() {
-        return Err("agent must not be empty".to_string());
-    }
-    if prompt.is_empty() {
-        return Err("prompt must not be empty".to_string());
-    }
-    Ok(TaskInvocation {
-        description: task_description_from_prompt(prompt),
-        prompt: prompt.to_string(),
-        subagent_type: agent.to_string(),
-        task_id: None,
-    })
-}
-
-fn task_description_from_prompt(prompt: &str) -> String {
-    const MAX_DESCRIPTION_CHARS: usize = 96;
-    let first_line = prompt.lines().next().unwrap_or(prompt).trim();
-    if first_line.chars().count() <= MAX_DESCRIPTION_CHARS {
-        return first_line.to_string();
-    }
-    let mut description = first_line
-        .chars()
-        .take(MAX_DESCRIPTION_CHARS.saturating_sub(3))
-        .collect::<String>();
-    description.push_str("...");
-    description
-}
-
-fn format_task_command_result(result: SubAgentTaskResult) -> String {
-    format!(
-        "Task `{}` completed with `{}` on {}/{} ({} step(s)).\n\n{}",
-        result.task_id,
-        result.agent_name,
-        result.provider_id,
-        result.model_id,
-        result.steps_used,
-        result.final_text.trim(),
-    )
-}
-
 fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
     match grouping {
         UsageGrouping::ProviderModel => "provider/model",
@@ -8657,11 +8293,10 @@ mod tests {
         FirstTurnIntentPolicyUpdate, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
         PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep, ReviewScrollAction,
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
-        apply_developer_network_access, apply_final_usage_update, apply_goal_tool_visibility,
-        apply_streaming_usage_delta, automatic_plan_repair_request_from_report,
-        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        changed_path_from_short_status_line, classify_execution_failure_revision,
+        apply_developer_network_access, apply_final_usage_update, apply_streaming_usage_delta,
+        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, classify_execution_failure_revision,
         classify_first_turn_task_intent, code_ui_response_from_managed_selection,
         default_chat_allowed_tools, estimate_streamed_output_tokens,
         exec_approval_decision_from_selection, execution_failure_report,
@@ -8672,16 +8307,14 @@ mod tests {
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
         is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
-        normalize_terminal_paste_text, parse_pending_plan_revision_command,
-        parse_task_command_args, parse_usage_grouping,
+        normalize_terminal_paste_text, parse_pending_plan_revision_command, parse_usage_grouping,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
         provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
         session_graph_thread_id, should_auto_classify_first_user_message,
         should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
         should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
-        task_description_from_prompt, undo_should_prefer_vcs_rollback,
-        usage_detail_popup_enabled_from_toml,
+        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
@@ -8754,36 +8387,6 @@ mod tests {
             UsageGrouping::AgentProviderModel
         );
         assert!(parse_usage_grouping("--bad").is_err());
-    }
-
-    #[test]
-    fn task_command_parser_requires_agent_and_prompt() {
-        assert_eq!(
-            parse_task_command_args("").unwrap_err(),
-            "Usage: /task <agent> <prompt>"
-        );
-        assert_eq!(
-            parse_task_command_args("explorer").unwrap_err(),
-            "Usage: /task <agent> <prompt>"
-        );
-
-        let invocation = parse_task_command_args(" explorer   grep TODO src/ ").unwrap();
-        assert_eq!(invocation.subagent_type, "explorer");
-        assert_eq!(invocation.prompt, "grep TODO src/");
-        assert_eq!(invocation.description, "grep TODO src/");
-        assert!(invocation.task_id.is_none());
-    }
-
-    #[test]
-    fn task_description_from_prompt_is_bounded_to_first_line() {
-        assert_eq!(
-            task_description_from_prompt("first line\nsecond line"),
-            "first line"
-        );
-        let long = "a".repeat(140);
-        let description = task_description_from_prompt(&long);
-        assert!(description.ends_with("..."));
-        assert!(description.chars().count() <= 96);
     }
 
     #[test]
@@ -9143,56 +8746,8 @@ mod tests {
     fn default_chat_tools_exclude_phase_review_submission_tools() {
         assert!(!is_default_chat_tool("submit_intent_draft"));
         assert!(!is_default_chat_tool("submit_plan_draft"));
-        assert!(!is_default_chat_tool("update_goal_progress"));
-        assert!(!is_default_chat_tool("submit_goal_complete"));
         assert!(is_default_chat_tool("update_plan"));
         assert!(is_default_chat_tool("web_search"));
-    }
-
-    #[test]
-    fn goal_tools_are_visible_only_when_goal_is_active() {
-        let registry = ToolRegistryBuilder::with_working_dir(std::path::PathBuf::from("/tmp"))
-            .register("read_file", Arc::new(NamedToolHandler("read_file")))
-            .register(
-                "update_goal_progress",
-                Arc::new(NamedToolHandler("update_goal_progress")),
-            )
-            .register(
-                "submit_goal_complete",
-                Arc::new(NamedToolHandler("submit_goal_complete")),
-            )
-            .build();
-        let mut allowed = vec![
-            "read_file".to_string(),
-            "update_goal_progress".to_string(),
-            "submit_goal_complete".to_string(),
-        ];
-
-        apply_goal_tool_visibility(&mut allowed, false, &registry);
-        assert_eq!(allowed, vec!["read_file".to_string()]);
-
-        apply_goal_tool_visibility(&mut allowed, true, &registry);
-        assert_eq!(
-            allowed,
-            vec![
-                "read_file".to_string(),
-                "update_goal_progress".to_string(),
-                "submit_goal_complete".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn short_status_parser_extracts_changed_path() {
-        assert_eq!(
-            changed_path_from_short_status_line(" M src/main.rs"),
-            Some("src/main.rs".to_string())
-        );
-        assert_eq!(
-            changed_path_from_short_status_line("R  old.rs -> new.rs"),
-            Some("new.rs".to_string())
-        );
-        assert_eq!(changed_path_from_short_status_line("## main"), None);
     }
 
     #[test]
@@ -11288,7 +10843,6 @@ fn send_task_intent_classified_event(
     decision: TaskIntentDecision,
     config: &ToolLoopConfig,
     registry: &ToolRegistry,
-    goal_active: bool,
 ) {
     let preamble = config.preamble.clone().unwrap_or_else(|| {
         SystemPromptBuilder::new(registry.working_dir())
@@ -11296,8 +10850,7 @@ fn send_task_intent_classified_event(
             .with_dynamic_context()
             .build()
     });
-    let mut allowed_tools = registry.filter_by_intent(decision.intent);
-    apply_goal_tool_visibility(&mut allowed_tools, goal_active, registry);
+    let allowed_tools = registry.filter_by_intent(decision.intent);
     let _ = tx.send(AppEvent::TaskIntentClassified {
         turn_id,
         intent: decision.intent,
@@ -11307,13 +10860,7 @@ fn send_task_intent_classified_event(
 }
 
 fn is_default_chat_tool(tool_name: &str) -> bool {
-    !matches!(
-        tool_name,
-        "submit_intent_draft"
-            | "submit_plan_draft"
-            | "update_goal_progress"
-            | "submit_goal_complete"
-    )
+    !matches!(tool_name, "submit_intent_draft" | "submit_plan_draft")
 }
 
 fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) -> Vec<String> {
@@ -11325,221 +10872,6 @@ fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) 
             .filter(|name| is_default_chat_tool(name))
             .collect()
     })
-}
-
-fn apply_goal_tool_visibility(
-    allowed_tools: &mut Vec<String>,
-    goal_active: bool,
-    registry: &ToolRegistry,
-) {
-    if goal_active {
-        for tool_name in ["update_goal_progress", "submit_goal_complete"] {
-            if registry.contains_tool(tool_name)
-                && !allowed_tools.iter().any(|name| name == tool_name)
-            {
-                allowed_tools.push(tool_name.to_string());
-            }
-        }
-    } else {
-        allowed_tools.retain(|name| !is_goal_tool(name));
-    }
-}
-
-fn is_goal_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "update_goal_progress" | "submit_goal_complete")
-}
-
-fn ensure_terminal_tool_name(config: &mut ToolLoopConfig, tool_name: &str) {
-    let terminal_tools = config.terminal_tools.get_or_insert_with(Vec::new);
-    if !terminal_tools.iter().any(|name| name == tool_name) {
-        terminal_tools.push(tool_name.to_string());
-    }
-}
-
-fn persist_goal_events_to_session_root(
-    session_root: PathBuf,
-    events: &[GoalEventEnvelope],
-) -> std::io::Result<()> {
-    let store = SessionJsonlStore::new(session_root);
-    for event in events {
-        store.append(&SessionEvent::goal(event.clone()))?;
-    }
-    Ok(())
-}
-
-fn render_goal_response_text(text: &str, decision: &GoalLoopDecision) -> String {
-    match decision {
-        GoalLoopDecision::AwaitUser { question } => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                format!("Goal paused: {question}")
-            } else {
-                format!("{trimmed}\n\nGoal paused: {question}")
-            }
-        }
-        GoalLoopDecision::Cancelled if text.trim().is_empty() => "Goal cancelled.".to_string(),
-        GoalLoopDecision::Continue { .. } if text.trim().is_empty() => {
-            "Goal paused before completion.".to_string()
-        }
-        _ => text.to_string(),
-    }
-}
-
-fn record_recent_goal_tool_result(
-    recent_tool_results: &Arc<Mutex<Vec<RecentToolCall>>>,
-    call_id: &str,
-    tool_name: &str,
-    result: &Result<ToolOutput, String>,
-) {
-    let status = match result {
-        Ok(_) => ToolResultStatus::Succeeded,
-        Err(message) if looks_like_permission_denial(message) => ToolResultStatus::Denied,
-        Err(message) if looks_like_timeout(message) => ToolResultStatus::TimedOut,
-        Err(_) => ToolResultStatus::Failed,
-    };
-    if let Ok(mut recent) = recent_tool_results.lock() {
-        recent.insert(
-            0,
-            RecentToolCall {
-                call_id: call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                status,
-            },
-        );
-        recent.truncate(32);
-    }
-}
-
-fn looks_like_permission_denial(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("denied") || lower.contains("permission") || lower.contains("approval")
-}
-
-fn looks_like_timeout(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("timeout") || lower.contains("timed out")
-}
-
-fn usage_cost_micro_usd(usage: &CompletionUsageSummary) -> u64 {
-    let Some(cost) = usage.cost_usd else {
-        return 0;
-    };
-    if !cost.is_finite() || cost <= 0.0 {
-        return 0;
-    }
-    let micros = cost * 1_000_000.0;
-    if micros >= u64::MAX as f64 {
-        u64::MAX
-    } else {
-        micros.round() as u64
-    }
-}
-
-struct SystemGoalEventClock;
-
-impl GoalEventClock for SystemGoalEventClock {
-    fn mint_envelope_id(&self) -> uuid::Uuid {
-        uuid::Uuid::new_v4()
-    }
-
-    fn now(&self) -> chrono::DateTime<Utc> {
-        Utc::now()
-    }
-}
-
-struct WorkspaceGoalVerifierContext {
-    working_dir: PathBuf,
-    recent_tool_results: Arc<Mutex<Vec<RecentToolCall>>>,
-    goal_cost_micro_usd: Arc<AtomicU64>,
-    created_at: chrono::DateTime<Utc>,
-}
-
-impl GoalVerifierContext for WorkspaceGoalVerifierContext {
-    fn file_sha256(&self, path: &str) -> Option<String> {
-        let relative = Path::new(path);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            return None;
-        }
-        let bytes = fs::read(self.working_dir.join(relative)).ok()?;
-        Some(hex::encode(
-            digest::digest(&digest::SHA256, &bytes).as_ref(),
-        ))
-    }
-
-    fn recent_tool_results(&self) -> Vec<RecentToolCall> {
-        self.recent_tool_results
-            .lock()
-            .map(|recent| recent.clone())
-            .unwrap_or_default()
-    }
-
-    fn changed_files(&self) -> Vec<String> {
-        changed_files_from_status(&self.working_dir)
-    }
-
-    fn now(&self) -> chrono::DateTime<Utc> {
-        Utc::now()
-    }
-
-    fn finalised_by(&self) -> GoalActor {
-        GoalActor::System {
-            reason: "deterministic Goal verifier accepted completion".to_string(),
-        }
-    }
-
-    fn total_spent_micro_usd(&self) -> u64 {
-        self.goal_cost_micro_usd.load(Ordering::Relaxed)
-    }
-
-    fn elapsed_wall_clock_seconds(&self) -> u64 {
-        (Utc::now() - self.created_at).num_seconds().max(0) as u64
-    }
-
-    fn continuation_loops_used(&self) -> u32 {
-        0
-    }
-}
-
-fn changed_files_from_status(working_dir: &Path) -> Vec<String> {
-    let Ok(exe) = std::env::current_exe() else {
-        return Vec::new();
-    };
-    let Ok(output) = Command::new(exe)
-        .arg("status")
-        .arg("--short")
-        .current_dir(working_dir)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .filter_map(changed_path_from_short_status_line)
-        .collect()
-}
-
-fn changed_path_from_short_status_line(line: &str) -> Option<String> {
-    let trimmed = line.trim_end();
-    if trimmed.is_empty() || trimmed.starts_with("##") {
-        return None;
-    }
-    let path = trimmed.get(3..).unwrap_or(trimmed).trim();
-    let path = path
-        .rsplit_once(" -> ")
-        .map_or(path, |(_, new_path)| new_path);
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
 }
 
 fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {

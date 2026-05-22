@@ -104,16 +104,16 @@ fn normalize_api_key(api_key: &str) -> String {
 pub type Client = GenericClient<DeepSeekProvider>;
 
 impl Client {
-    /// Creates a DeepSeek client from Vault or environment variables.
+    /// Creates a DeepSeek client from environment variables.
     ///
-    /// Reads `vault.env.DEEPSEEK_API_KEY` first, then `DEEPSEEK_API_KEY`, and
-    /// uses the default base URL (`https://api.deepseek.com`).
+    /// Reads the `DEEPSEEK_API_KEY` environment variable and uses the default
+    /// base URL (`https://api.deepseek.com`).
     ///
     /// # Errors
     ///
-    /// Returns an actionable error if `DEEPSEEK_API_KEY` is not configured.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let api_key = crate::internal::config::resolve_required_env_sync("DEEPSEEK_API_KEY")?;
+    /// Returns [`std::env::VarError`] if `DEEPSEEK_API_KEY` is not set.
+    pub fn from_env() -> std::result::Result<Self, std::env::VarError> {
+        let api_key = std::env::var("DEEPSEEK_API_KEY")?;
         let base_url = "https://api.deepseek.com".to_string();
 
         let provider = DeepSeekProvider::new(api_key);
@@ -126,9 +126,9 @@ impl Client {
     /// the process environment.
     ///
     /// Priority order:
-    /// 1. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
-    /// 2. Global config
-    /// 3. Process env var
+    /// 1. Process env var
+    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 3. Global config
     ///
     /// DeepSeek does not expose a base-URL env override. Tests that need a
     /// stub endpoint should keep using [`Client::with_base_url`].
@@ -136,10 +136,7 @@ impl Client {
         let api_key = resolve_env_for_target("DEEPSEEK_API_KEY", local_target)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "DEEPSEEK_API_KEY is not configured; set vault.env.DEEPSEEK_API_KEY with \
-                     `libra config set vault.env.DEEPSEEK_API_KEY <key>` or export DEEPSEEK_API_KEY"
-                )
+                anyhow::anyhow!("DEEPSEEK_API_KEY is not set in env, repo vault, or global config")
             })?;
         let provider = DeepSeekProvider::new(api_key);
         Ok(Self::new("https://api.deepseek.com", provider))
@@ -216,34 +213,6 @@ mod tests {
             .await
             .expect("from_resolved_env should succeed when DEEPSEEK_API_KEY is set");
         assert_eq!(client.provider.api_key(), "ds-test-resolved");
-
-        drop(key_guard);
-        drop(global_guard);
-    }
-
-    #[test]
-    #[serial]
-    fn from_env_prefers_global_vault_over_process_env() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", Some("ds-env-key"));
-        let global_dir = tempfile::tempdir().unwrap();
-        let global_db_path = global_dir.path().join("deepseek-global-config.db");
-        let global_db_string = global_db_path.to_string_lossy().into_owned();
-        let global_guard = TestEnvGuard::set("LIBRA_CONFIG_GLOBAL_DB", Some(&global_db_string));
-
-        let global_conn = rt
-            .block_on(crate::internal::db::create_database(&global_db_string))
-            .unwrap();
-        rt.block_on(crate::internal::config::ConfigKv::set_with_conn(
-            &global_conn,
-            "vault.env.DEEPSEEK_API_KEY",
-            "ds-vault-key",
-            false,
-        ))
-        .unwrap();
-
-        let client = Client::from_env().expect("from_env should read Vault before process env");
-        assert_eq!(client.provider.api_key(), "ds-vault-key");
 
         drop(key_guard);
         drop(global_guard);

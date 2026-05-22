@@ -436,7 +436,8 @@ async fn lookup_truncation_support(
     // Mirrors the dispatch path in
     // `truncate_agent_transcript_for_checkpoint_with_conn` — both
     // sites must answer "would the truncator fire?" the same way so
-    // the dry-run preview matches what `--apply` actually does.
+    // the dry-run preview matches what `--apply` actually does (Codex
+    // round-3 follow-up at the top of this fn).
     use crate::internal::ai::observed_agents::{AgentKind, truncator_for};
     let truncator_available = AgentKind::from_db_str(&kind)
         .and_then(truncator_for)

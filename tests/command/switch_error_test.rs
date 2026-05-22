@@ -304,6 +304,29 @@ fn internal_branch_blocked_returns_cli_invalid_target() {
     );
 }
 
+#[test]
+fn internal_branch_blocked_rejects_agent_traces() {
+    // docs/improvement/entire.md Risk #5 ("分支保护遗漏") requires
+    // `switch <ref>` to reject `agent-traces` along with `intent`. Before
+    // v0.17.659 the guard used a literal `name == INTENT_BRANCH` check
+    // and silently allowed `switch agent-traces`, even though
+    // `is_locked_branch` (used by `restore`/`reset`/`branch create-delete`)
+    // covered the literal. The `is_libra_internal_branch` helper now
+    // expresses the narrower "Libra-managed, never user-facing" set
+    // (`intent`, `agent-traces` — but NOT `main`); pin the agent-traces
+    // rejection here so a refactor that loses the literal fails this
+    // test rather than letting users move HEAD onto the orphan ref.
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["switch", "agent-traces"], repo.path());
+    assert_cli_error_contract(
+        &output,
+        129,
+        StableErrorCode::CliInvalidTarget,
+        "'agent-traces' is a reserved branch name",
+        &[],
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn branch_already_exists_with_track_returns_conflict() {

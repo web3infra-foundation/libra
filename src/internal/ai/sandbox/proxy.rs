@@ -262,7 +262,7 @@ pub enum ProxyEnforcement {
 ///
 /// Output `NetworkProxySelection` variants map per the doc:
 ///
-/// | mode      | allowlist_proxy | enforcement     | result                          |
+/// | mode      | proxy available | enforcement     | result                          |
 /// |-----------|-----------------|-----------------|---------------------------------|
 /// | Denied    | n/a             | n/a             | Proxy(NoopProxy)                |
 /// | Allowlist | Some(p)         | n/a             | Proxy(p)                        |
@@ -401,31 +401,6 @@ mod tests {
         }
     }
 
-    /// The proxy trait must be object-safe so the sandbox runtime can
-    /// borrow either implementation through a `&'static dyn
-    /// NetworkProxy`. This test exercises the dyn-safe path
-    /// explicitly so a future trait change that adds a non-object-safe
-    /// method (e.g. a generic) fails to compile here rather than at
-    /// the sandbox-runtime callsite.
-    #[test]
-    fn network_proxy_is_object_safe_and_dispatches_through_dyn_reference() {
-        let proxies: &[&'static dyn NetworkProxy] = &[&NoopProxy, &LoopbackOnlyProxy];
-        let req = request("localhost", 8080);
-        let mut allowed = 0;
-        let mut denied = 0;
-        for proxy in proxies {
-            match proxy.evaluate(&req) {
-                NetworkDecision::Allow => allowed += 1,
-                NetworkDecision::Deny(_) => denied += 1,
-            }
-        }
-        // Exactly the loopback-only proxy should accept the loopback
-        // request; the noop proxy denies it. The two-element split
-        // proves the dyn dispatch hit both implementations.
-        assert_eq!(allowed, 1);
-        assert_eq!(denied, 1);
-    }
-
     /// `select_network_proxy(Denied, _, _)` must always route to a
     /// proxy that denies everything, regardless of the supplied
     /// allowlist proxy or enforcement tier. Pin the denial across
@@ -526,21 +501,6 @@ mod tests {
         }
     }
 
-    /// `Full` mode currently routes to `LoopbackOnlyProxy` (v1 stub).
-    /// Pin the assertion so when the full pass-through proxy lands,
-    /// this test fails and forces the implementer to update the
-    /// expected backend name — that's exactly the kind of arm change
-    /// audit consumers need to be aware of.
-    #[test]
-    fn select_network_proxy_full_mode_routes_to_loopback_only_in_v1_stub() {
-        let selection =
-            select_network_proxy(NetworkAccessMode::Full, None, ProxyEnforcement::BestEffort);
-        let NetworkProxySelection::Proxy(p) = selection else {
-            panic!("Full mode must return Proxy(_); got {selection:?}");
-        };
-        assert_eq!(p.backend_name(), "loopback-only");
-    }
-
     /// End-to-end integration test that exercises the full
     /// Phase 7 stub chain:
     ///
@@ -612,5 +572,45 @@ mod tests {
             decision.is_deny(),
             "v1 stub must reject remote host even on allowlist port",
         );
+    }
+
+    /// `Full` mode currently routes to `LoopbackOnlyProxy` (v1 stub).
+    /// Pin the assertion so when the full pass-through proxy lands,
+    /// this test fails and forces the implementer to update the
+    /// expected backend name — that's exactly the kind of arm change
+    /// audit consumers need to be aware of.
+    #[test]
+    fn select_network_proxy_full_mode_routes_to_loopback_only_in_v1_stub() {
+        let selection =
+            select_network_proxy(NetworkAccessMode::Full, None, ProxyEnforcement::BestEffort);
+        let NetworkProxySelection::Proxy(p) = selection else {
+            panic!("Full mode must return Proxy(_); got {selection:?}");
+        };
+        assert_eq!(p.backend_name(), "loopback-only");
+    }
+
+    /// The proxy trait must be object-safe so the sandbox runtime can
+    /// borrow either implementation through a `&'static dyn
+    /// NetworkProxy`. This test exercises the dyn-safe path
+    /// explicitly so a future trait change that adds a non-object-safe
+    /// method (e.g. a generic) fails to compile here rather than at
+    /// the sandbox-runtime callsite.
+    #[test]
+    fn network_proxy_is_object_safe_and_dispatches_through_dyn_reference() {
+        let proxies: &[&'static dyn NetworkProxy] = &[&NoopProxy, &LoopbackOnlyProxy];
+        let req = request("localhost", 8080);
+        let mut allowed = 0;
+        let mut denied = 0;
+        for proxy in proxies {
+            match proxy.evaluate(&req) {
+                NetworkDecision::Allow => allowed += 1,
+                NetworkDecision::Deny(_) => denied += 1,
+            }
+        }
+        // Exactly the loopback-only proxy should accept the loopback
+        // request; the noop proxy denies it. The two-element split
+        // proves the dyn dispatch hit both implementations.
+        assert_eq!(allowed, 1);
+        assert_eq!(denied, 1);
     }
 }

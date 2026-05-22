@@ -32,14 +32,6 @@ pub enum TuiControlCommand {
     CancelCurrentTurn {
         ack: oneshot::Sender<Result<(), TuiControlError>>,
     },
-    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
-    /// dispatch from Code Control. Mirrors `/task <agent> <prompt>`
-    /// and returns the rendered task result or failure message.
-    TaskDispatch {
-        agent: String,
-        prompt: String,
-        ack: oneshot::Sender<Result<String, TuiControlError>>,
-    },
     ReclaimController {
         ack: oneshot::Sender<Result<(), TuiControlError>>,
     },
@@ -89,9 +81,6 @@ pub enum TuiControlError {
     /// HTTP boundary (empty / oversized). The wire message
     /// repeats the underlying `GoalSpecError` for client logs.
     GoalInvalidObjective(String),
-    /// `task.dispatch` failed request-shape validation before it
-    /// reached the sub-agent dispatcher.
-    TaskInvalidRequest(String),
 }
 
 impl TuiControlError {
@@ -105,7 +94,6 @@ impl TuiControlError {
             Self::GoalAlreadyActive => 409,
             Self::GoalNotActive => 409,
             Self::GoalInvalidObjective(_) => 422,
-            Self::TaskInvalidRequest(_) => 422,
         }
     }
 
@@ -119,7 +107,6 @@ impl TuiControlError {
             Self::GoalAlreadyActive => "GOAL_ALREADY_ACTIVE",
             Self::GoalNotActive => "GOAL_NOT_ACTIVE",
             Self::GoalInvalidObjective(_) => "GOAL_INVALID_OBJECTIVE",
-            Self::TaskInvalidRequest(_) => "TASK_INVALID_REQUEST",
         }
     }
 
@@ -144,9 +131,6 @@ impl TuiControlError {
             }
             Self::GoalInvalidObjective(detail) => {
                 format!("Goal objective failed validation: {detail}")
-            }
-            Self::TaskInvalidRequest(detail) => {
-                format!("Invalid task.dispatch request: {detail}")
             }
         }
     }
@@ -204,79 +188,6 @@ mod tests {
         assert_eq!(
             TuiControlError::GoalInvalidObjective("empty objective".to_string()).to_string(),
             "Goal objective failed validation: empty objective",
-        );
-        assert_eq!(
-            TuiControlError::TaskInvalidRequest("missing prompt".to_string()).to_string(),
-            "Invalid task.dispatch request: missing prompt",
-        );
-    }
-
-    /// Pins the HTTP `status()` mapping for every variant. The wire
-    /// contract surface includes both the human message (pinned in
-    /// `tui_control_error_display_pins_each_variant`) and the status
-    /// code — a future refactor that flips a 409 to a 500 (or adds a
-    /// new variant defaulting to 500 by accident) would silently
-    /// change client retry / error-classification behaviour. Listing
-    /// every variant here keeps the parallel surface honest.
-    #[test]
-    fn tui_control_error_status_pins_each_variant() {
-        assert_eq!(TuiControlError::Busy.status(), 409);
-        assert_eq!(TuiControlError::InteractionNotActive.status(), 409);
-        assert_eq!(TuiControlError::UnsupportedInteractionKind.status(), 422);
-        assert_eq!(TuiControlError::ControllerConflict.status(), 409);
-        assert_eq!(
-            TuiControlError::Internal("ignored".to_string()).status(),
-            500,
-        );
-        assert_eq!(TuiControlError::GoalAlreadyActive.status(), 409);
-        assert_eq!(TuiControlError::GoalNotActive.status(), 409);
-        assert_eq!(
-            TuiControlError::GoalInvalidObjective("ignored".to_string()).status(),
-            422,
-        );
-        assert_eq!(
-            TuiControlError::TaskInvalidRequest("ignored".to_string()).status(),
-            422,
-        );
-    }
-
-    /// Pins the stable `code()` mapping for every variant. Clients
-    /// (HTTP and automation) key off these SCREAMING_SNAKE_CASE codes
-    /// rather than parsing the human message; a typo or renaming
-    /// `SESSION_BUSY` → `BUSY_SESSION` would silently break every
-    /// consumer that branches on the code. Pinning every variant
-    /// turns a rename into a test failure.
-    #[test]
-    fn tui_control_error_code_pins_each_variant() {
-        assert_eq!(TuiControlError::Busy.code(), "SESSION_BUSY");
-        assert_eq!(
-            TuiControlError::InteractionNotActive.code(),
-            "INTERACTION_NOT_ACTIVE",
-        );
-        assert_eq!(
-            TuiControlError::UnsupportedInteractionKind.code(),
-            "UNSUPPORTED_INTERACTION_KIND",
-        );
-        assert_eq!(
-            TuiControlError::ControllerConflict.code(),
-            "CONTROLLER_CONFLICT",
-        );
-        assert_eq!(
-            TuiControlError::Internal("ignored".to_string()).code(),
-            "TUI_CONTROL_INTERNAL",
-        );
-        assert_eq!(
-            TuiControlError::GoalAlreadyActive.code(),
-            "GOAL_ALREADY_ACTIVE",
-        );
-        assert_eq!(TuiControlError::GoalNotActive.code(), "GOAL_NOT_ACTIVE");
-        assert_eq!(
-            TuiControlError::GoalInvalidObjective("ignored".to_string()).code(),
-            "GOAL_INVALID_OBJECTIVE",
-        );
-        assert_eq!(
-            TuiControlError::TaskInvalidRequest("ignored".to_string()).code(),
-            "TASK_INVALID_REQUEST",
         );
     }
 }

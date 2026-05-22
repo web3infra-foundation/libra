@@ -7,15 +7,14 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::SystemTime,
+    sync::Mutex,
 };
 
 use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, types::ObjectType},
 };
-use ignore::{Match, WalkBuilder, gitignore::Gitignore};
+use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use path_absolutize::*;
@@ -36,20 +35,11 @@ use crate::{
 // or cases where invariants are guaranteed by the code structure.
 
 pub const ROOT_DIR: &str = ".libra";
-const LIBRAIGNORE_FILE: &str = ".libraignore";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
 
 static OBJECTS_STORAGE_CACHE: Lazy<Mutex<HashMap<PathBuf, ClientStorage>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static LIBRAIGNORE_CACHE: Lazy<Mutex<HashMap<PathBuf, CachedGitignore>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-struct CachedGitignore {
-    len: u64,
-    modified: SystemTime,
-    matcher: Arc<Gitignore>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitRepositoryLocation {
@@ -542,47 +532,10 @@ pub fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// list all non-ignored files in the working dir(include sub_dir)
+/// list all files in the working dir(include sub_dir)
 /// - output: to workdir path
 pub fn list_workdir_files() -> io::Result<Vec<PathBuf>> {
-    list_files_respecting_libraignore(&working_dir())
-}
-
-/// list all files in the working dir(include sub_dir), including ignored files
-/// - output: to workdir path
-pub fn list_workdir_files_unfiltered() -> io::Result<Vec<PathBuf>> {
     list_files(&working_dir())
-}
-
-fn list_files_respecting_libraignore(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    if !path.is_dir() || path.file_name().unwrap_or_default() == ROOT_DIR {
-        return Ok(files);
-    }
-
-    let mut builder = WalkBuilder::new(path);
-    builder
-        .hidden(false)
-        .parents(true)
-        .ignore(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .add_custom_ignore_filename(LIBRAIGNORE_FILE)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(ROOT_DIR));
-
-    for entry in builder.build() {
-        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
-        let entry_path = entry.path();
-        if entry_path == path {
-            continue;
-        }
-        if entry_path.is_file() {
-            files.push(to_workdir_path(entry_path));
-        }
-    }
-
-    Ok(files)
 }
 
 /// Integrate the input paths (relative, absolute, file, dir) to workdir paths.
@@ -1065,7 +1018,12 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
             continue;
         }
 
-        let ignore = cached_libraignore(&gitignore_path);
+        let (ignore, err) = Gitignore::new(&gitignore_path);
+        if let Some(e) = err {
+            eprintln!(
+                "warning: There are some invalid globs in libraignore file {gitignore_path:#?}:\n{e}\n"
+            );
+        }
 
         match ignore.matched(target_file, target_file.is_dir()) {
             Match::Ignore(_) => return true,
@@ -1100,48 +1058,6 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     }
 
     false
-}
-
-fn cached_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
-    let Ok(metadata) = fs::metadata(gitignore_path) else {
-        return load_libraignore(gitignore_path);
-    };
-    let Ok(modified) = metadata.modified() else {
-        return load_libraignore(gitignore_path);
-    };
-    let len = metadata.len();
-
-    let mut cache = match LIBRAIGNORE_CACHE.lock() {
-        Ok(cache) => cache,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(cached) = cache.get(gitignore_path)
-        && cached.len == len
-        && cached.modified == modified
-    {
-        return Arc::clone(&cached.matcher);
-    }
-
-    let matcher = load_libraignore(gitignore_path);
-    cache.insert(
-        gitignore_path.to_path_buf(),
-        CachedGitignore {
-            len,
-            modified,
-            matcher: Arc::clone(&matcher),
-        },
-    );
-    matcher
-}
-
-fn load_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
-    let (ignore, err) = Gitignore::new(gitignore_path);
-    if let Some(e) = err {
-        eprintln!(
-            "warning: There are some invalid globs in libraignore file {gitignore_path:#?}:\n{e}\n"
-        );
-    }
-    Arc::new(ignore)
 }
 
 use git_internal::internal::object::signature::{Signature, SignatureType};
@@ -1290,25 +1206,6 @@ mod test {
     fn test_to_relative() {
         assert_eq!(to_relative("src/main.rs", "src"), PathBuf::from("main.rs"));
         assert_eq!(to_relative(".", "src"), PathBuf::from(".."));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn list_workdir_files_prunes_libraignored_directories() {
-        let repo = tempdir().unwrap();
-        test::setup_with_new_libra_in(repo.path()).await;
-        let _guard = test::ChangeDirGuard::new(repo.path());
-
-        fs::write(".libraignore", "target/\n").unwrap();
-        fs::create_dir_all("target/debug/deps").unwrap();
-        fs::write("target/debug/deps/ignored.rlib", "ignored").unwrap();
-        fs::write("visible.txt", "visible").unwrap();
-
-        let files = list_workdir_files().unwrap();
-
-        assert!(files.contains(&PathBuf::from(".libraignore")));
-        assert!(files.contains(&PathBuf::from("visible.txt")));
-        assert!(!files.contains(&PathBuf::from("target/debug/deps/ignored.rlib")));
     }
 
     #[test]

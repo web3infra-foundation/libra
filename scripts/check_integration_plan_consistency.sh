@@ -69,7 +69,7 @@ done
 #    Whitelist: LIBRA_TEST_* (introduced by the plan itself) and known
 #    runtime/shell vars.
 # ---------------------------------------------------------------------------
-WHITELIST_RE='^(LIBRA_TEST_|LIBRA_RUN_LIVE$|LIBRA_RUN_PERF$|LIBRA_ENABLE_TEST_LIVE_CLOUD$|LIBRA_ENABLE_TEST_PROVIDER$|LIBRA_CODE_TEST_PROVIDER$|LIBRA_CODE_TEST_MODEL$|CI_AGENT_KEY$|LIBRA_AI_LIVE_OLLAMA$)'
+WHITELIST_RE='^(LIBRA_TEST_|LIBRA_RUN_LIVE$|LIBRA_RUN_PERF$|LIBRA_ENABLE_TEST_LIVE_CLOUD$|LIBRA_ENABLE_TEST_PROVIDER$|LIBRA_CODE_TEST_PROVIDER$|LIBRA_CODE_TEST_MODEL$|CI_AGENT_KEY$)'
 
 plan_envs=$(grep -oE '\b(LIBRA_[A-Z_]+|[A-Z_]+_API_KEY|[A-Z_]+_BASE_URL)\b' "$PLAN" \
   | grep -v '_$'      `# drop wildcard refs like LIBRA_STORAGE_ (from LIBRA_STORAGE_*)` \

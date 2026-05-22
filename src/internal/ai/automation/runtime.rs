@@ -199,3 +199,164 @@ fn automation_hook_event(event_kind: LifecycleEventKind) -> Option<HookEvent> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::automation::config::{
+        AutomationAction, AutomationConfig, AutomationRule, AutomationTrigger,
+    };
+
+    fn hook_rule(id: &str, event: HookEvent, enabled: bool) -> AutomationRule {
+        AutomationRule {
+            id: id.to_string(),
+            enabled,
+            trigger: AutomationTrigger::Hook { event },
+            action: AutomationAction::Prompt {
+                prompt: "noop".to_string(),
+            },
+        }
+    }
+
+    fn vcs_rule(id: &str, event: &str, enabled: bool) -> AutomationRule {
+        AutomationRule {
+            id: id.to_string(),
+            enabled,
+            trigger: AutomationTrigger::Vcs {
+                event: event.to_string(),
+            },
+            action: AutomationAction::Prompt {
+                prompt: "noop".to_string(),
+            },
+        }
+    }
+
+    fn cron_rule(id: &str, enabled: bool) -> AutomationRule {
+        AutomationRule {
+            id: id.to_string(),
+            enabled,
+            trigger: AutomationTrigger::Cron {
+                schedule: "@hourly".to_string(),
+            },
+            action: AutomationAction::Prompt {
+                prompt: "noop".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn automation_hook_event_maps_session_lifecycle_kinds() {
+        // INVARIANT: only session-start/end currently project onto
+        // user-visible automation `HookEvent` variants. The repo-hook
+        // bridge silently drops every other lifecycle kind.
+        assert_eq!(
+            automation_hook_event(LifecycleEventKind::SessionStart),
+            Some(HookEvent::SessionStart)
+        );
+        assert_eq!(
+            automation_hook_event(LifecycleEventKind::SessionEnd),
+            Some(HookEvent::SessionEnd)
+        );
+    }
+
+    #[test]
+    fn automation_hook_event_returns_none_for_non_session_kinds() {
+        // INVARIANT: any future `LifecycleEventKind` variant must be
+        // explicitly mapped — defaulting to `Some(_)` would push
+        // unexpected events through the dispatcher.
+        for kind in [
+            LifecycleEventKind::TurnStart,
+            LifecycleEventKind::ToolUse,
+            LifecycleEventKind::ModelUpdate,
+            LifecycleEventKind::Compaction,
+            LifecycleEventKind::CompactionCompleted,
+            LifecycleEventKind::PermissionRequest,
+            LifecycleEventKind::SourceEnabled,
+            LifecycleEventKind::SourceDisabled,
+            LifecycleEventKind::TurnEnd,
+        ] {
+            assert!(
+                automation_hook_event(kind).is_none(),
+                "lifecycle kind {kind:?} must not map to a HookEvent without an explicit branch"
+            );
+        }
+    }
+
+    #[test]
+    fn has_matching_hook_rule_requires_enabled_and_event_equality() {
+        let config = AutomationConfig {
+            rules: vec![
+                hook_rule("disabled_end", HookEvent::SessionEnd, false),
+                hook_rule("start", HookEvent::SessionStart, true),
+                hook_rule("end", HookEvent::SessionEnd, true),
+            ],
+        };
+        assert!(has_matching_hook_rule(&config, HookEvent::SessionEnd));
+        assert!(has_matching_hook_rule(&config, HookEvent::SessionStart));
+    }
+
+    #[test]
+    fn has_matching_hook_rule_returns_false_when_only_disabled_rules_match() {
+        let config = AutomationConfig {
+            rules: vec![hook_rule("disabled_end", HookEvent::SessionEnd, false)],
+        };
+        assert!(!has_matching_hook_rule(&config, HookEvent::SessionEnd));
+    }
+
+    #[test]
+    fn has_matching_hook_rule_returns_false_when_only_other_trigger_kinds_present() {
+        let config = AutomationConfig {
+            rules: vec![cron_rule("c", true), vcs_rule("v", "post_commit", true)],
+        };
+        assert!(!has_matching_hook_rule(&config, HookEvent::SessionEnd));
+    }
+
+    #[test]
+    fn has_matching_hook_rule_returns_false_for_empty_config() {
+        let config = AutomationConfig::default();
+        assert!(!has_matching_hook_rule(&config, HookEvent::SessionEnd));
+        assert!(!has_matching_hook_rule(&config, HookEvent::SessionStart));
+    }
+
+    #[test]
+    fn has_matching_vcs_rule_requires_exact_event_string() {
+        // INVARIANT: VCS event names are compared as raw strings, not
+        // normalised. `post_commit` and `post-commit` are different
+        // events; a silent change to case-insensitive matching would
+        // re-fire unrelated rules.
+        let config = AutomationConfig {
+            rules: vec![
+                vcs_rule("post_commit", "post_commit", true),
+                vcs_rule("post_push", "post_push", true),
+            ],
+        };
+        assert!(has_matching_vcs_rule(&config, "post_commit"));
+        assert!(has_matching_vcs_rule(&config, "post_push"));
+        assert!(!has_matching_vcs_rule(&config, "post-commit"));
+        assert!(!has_matching_vcs_rule(&config, "Post_Commit"));
+        assert!(!has_matching_vcs_rule(&config, "post_commit "));
+    }
+
+    #[test]
+    fn has_matching_vcs_rule_skips_disabled_rules() {
+        let config = AutomationConfig {
+            rules: vec![vcs_rule("off", "post_commit", false)],
+        };
+        assert!(!has_matching_vcs_rule(&config, "post_commit"));
+    }
+
+    #[test]
+    fn has_matching_vcs_rule_returns_false_when_only_other_trigger_kinds_present() {
+        let config = AutomationConfig {
+            rules: vec![hook_rule("h", HookEvent::SessionEnd, true)],
+        };
+        assert!(!has_matching_vcs_rule(&config, "post_commit"));
+    }
+
+    #[test]
+    fn has_matching_vcs_rule_returns_false_for_empty_config() {
+        let config = AutomationConfig::default();
+        assert!(!has_matching_vcs_rule(&config, "post_commit"));
+        assert!(!has_matching_vcs_rule(&config, ""));
+    }
+}

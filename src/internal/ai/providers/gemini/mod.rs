@@ -5,8 +5,8 @@
 //!
 //! # Authentication
 //!
-//! Set `vault.env.GEMINI_API_KEY` or the `GEMINI_API_KEY` environment variable.
-//! The provider sends the key via the `x-goog-api-key` HTTP header on every request.
+//! Set the `GEMINI_API_KEY` environment variable. The provider sends the key
+//! via the `x-goog-api-key` HTTP header on every request.
 //!
 //! # Example
 //! ```no_run

@@ -451,14 +451,11 @@ impl From<CloneError> for CliError {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::AuthMissingCredentials)
                     .with_detail("clone_domain", domain.clone())
-                    .with_detail(
-                        "missing_keys",
-                        "vault.env.LIBRA_D1_API_TOKEN or LIBRA_D1_API_TOKEN",
+                    .with_detail("missing_keys", "LIBRA_D1_API_TOKEN (env or vault)")
+                    .with_hint(
+                        "set LIBRA_D1_API_TOKEN in the environment or Libra vault config so \
+                         the CLI can query the configured D1 database.",
                     )
-                .with_hint(
-                    "set vault.env.LIBRA_D1_API_TOKEN with `libra config set`, or export \
-                     LIBRA_D1_API_TOKEN, so the CLI can query the configured D1 database.",
-                )
             }
             CloneError::CloudCloneD1ApiBaseUrlInvalid {
                 ref domain,
@@ -478,9 +475,8 @@ impl From<CloneError> for CliError {
                 .with_detail("clone_domain", domain.clone())
                 .with_detail("missing_keys", missing_keys.clone())
                 .with_hint(
-                    "set vault.env.LIBRA_STORAGE_ENDPOINT, vault.env.LIBRA_STORAGE_ACCESS_KEY, \
-                     and vault.env.LIBRA_STORAGE_SECRET_KEY with `libra config set`, or export \
-                     the matching LIBRA_STORAGE_* variables.",
+                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_ACCESS_KEY, and \
+                     LIBRA_STORAGE_SECRET_KEY in the environment or Libra vault config.",
                 ),
             CloneError::CloudCloneR2ConfigRead { ref domain, .. } => {
                 CliError::fatal(error.to_string())

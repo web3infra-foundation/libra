@@ -51,13 +51,16 @@ impl SandboxEnforcement {
     }
 
     /// Every variant of [`SandboxEnforcement`] in declaration order
-    /// (`Required`, `PreferStrict`, `BestEffort`). The fixed-length
-    /// array makes the enumeration size part of the public API — a
-    /// future fourth tier requires extending this list in the same
-    /// patch, which forces the [`as_str`](Self::as_str) match arms,
-    /// the [`FromStr`](std::str::FromStr) parser, and the
-    /// [`SandboxEnforcementParseError`] expected-list error message
-    /// to all be revisited.
+    /// (`Required`, `PreferStrict`, `BestEffort`). Useful for tests
+    /// that need to sweep every enforcement tier (e.g. confirming
+    /// the `--enforcement` CLI flag accepts every variant) and for
+    /// `libra sandbox status` rendering that wants to list every
+    /// valid value alongside the active one.
+    ///
+    /// Mirrors the v0.17.660+ `*::all()` pattern: the fixed-length
+    /// array forces a future variant to extend this list in the
+    /// same patch, which keeps `as_str` / `FromStr` / display table
+    /// surfaces aligned with the enum.
     pub fn all() -> [Self; 3] {
         [Self::Required, Self::PreferStrict, Self::BestEffort]
     }
@@ -84,6 +87,44 @@ impl std::str::FromStr for SandboxEnforcement {
 )]
 pub struct SandboxEnforcementParseError {
     value: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkAccess {
+    #[default]
+    Restricted,
+    Enabled,
+}
+
+impl NetworkAccess {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+
+    /// Symmetric companion to [`is_enabled`](Self::is_enabled). `true`
+    /// when network access is `Restricted` — the default that the
+    /// sandbox runtime treats as "deny all outbound except loopback".
+    ///
+    /// Provided as a positive predicate so call sites that want to
+    /// gate on "is the network locked down?" can express that intent
+    /// directly instead of negating `is_enabled`. The
+    /// `!is_enabled() == is_restricted()` invariant is pinned by the
+    /// new regression test.
+    pub fn is_restricted(self) -> bool {
+        matches!(self, Self::Restricted)
+    }
+
+    /// Every variant of [`NetworkAccess`] in declaration order
+    /// (`Restricted`, `Enabled`). Useful for tests that need to sweep
+    /// every mode (e.g. confirming both serialise to the kebab-case
+    /// wire tag) without hand-listing the variants. The fixed-length
+    /// array forces a future variant (e.g. `Denied`/`Allowlist`/`Full`
+    /// from Phase 7) to be added to this list in the same patch,
+    /// which keeps every enumeration site aligned with the enum.
+    pub fn all() -> [Self; 2] {
+        [Self::Restricted, Self::Enabled]
+    }
 }
 
 /// Wire-protocol selector for a [`NetworkService`] allowlist entry.
@@ -232,44 +273,6 @@ impl NetworkService {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NetworkAccess {
-    #[default]
-    Restricted,
-    Enabled,
-}
-
-impl NetworkAccess {
-    pub fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-
-    /// Symmetric companion to [`is_enabled`](Self::is_enabled). `true`
-    /// when network access is `Restricted` — the default that the
-    /// sandbox runtime treats as "deny all outbound except loopback".
-    ///
-    /// Provided as a positive predicate so call sites that want to
-    /// gate on "is the network locked down?" can express that intent
-    /// directly instead of negating `is_enabled`. The
-    /// `!is_enabled() == is_restricted()` invariant is pinned by the
-    /// regression test.
-    pub fn is_restricted(self) -> bool {
-        matches!(self, Self::Restricted)
-    }
-
-    /// Every variant of [`NetworkAccess`] in declaration order
-    /// (`Restricted`, `Enabled`). Useful for tests that need to sweep
-    /// every mode (e.g. confirming both serialise to the kebab-case
-    /// wire tag) without hand-listing the variants. The fixed-length
-    /// array forces a future variant (e.g. `Denied`/`Allowlist`/`Full`
-    /// from Phase 7) to be added to this list in the same patch,
-    /// which keeps every enumeration site aligned with the enum.
-    pub fn all() -> [Self; 2] {
-        [Self::Restricted, Self::Enabled]
-    }
-}
-
 pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -283,12 +286,25 @@ pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
             ".docker",
             ".npmrc",
             ".pypirc",
+            // Database / object-store credential files commonly used by
+            // CLIs that AI tooling may shell out to. Adding these matches
+            // the per-cloud / per-package credential coverage already
+            // present for .aws / .azure / .npmrc and prevents a Shell
+            // tool that runs `cat ~/.pgpass` from leaking Postgres
+            // passwords, `cat ~/.my.cnf` from leaking MySQL passwords,
+            // and `cat ~/.s3cfg` from leaking s3cmd / s3tools tokens.
+            ".pgpass",
+            ".my.cnf",
+            ".s3cfg",
             ".cargo/credentials",
             ".cargo/credentials.toml",
             ".gem/credentials",
             ".config/gcloud",
             ".config/gh",
             ".config/hub",
+            // Git credential helper store and per-user libsecret cache
+            // (when running on Linux with the libsecret helper).
+            ".config/git/credentials",
             ".kube",
             ".config/libra/vault",
             ".mozilla/firefox",
@@ -544,198 +560,6 @@ fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sandbox_enforcement_accepts_stable_spellings() {
-        assert_eq!(
-            "required".parse::<SandboxEnforcement>(),
-            Ok(SandboxEnforcement::Required)
-        );
-        assert_eq!(
-            "prefer-strict".parse::<SandboxEnforcement>(),
-            Ok(SandboxEnforcement::PreferStrict)
-        );
-        assert_eq!(
-            "best_effort".parse::<SandboxEnforcement>(),
-            Ok(SandboxEnforcement::BestEffort)
-        );
-    }
-
-    #[test]
-    fn sandbox_enforcement_rejects_unknown_values() {
-        let error = "strict"
-            .parse::<SandboxEnforcement>()
-            .expect_err("unsupported enforcement names must be rejected");
-
-        assert_eq!(
-            error.to_string(),
-            "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
-        );
-    }
-
-    #[test]
-    fn sensitive_read_paths_include_home_credentials_and_system_shadow() {
-        let paths = sensitive_read_paths(Some(Path::new("/home/tester")));
-
-        assert!(paths.contains(&PathBuf::from("/home/tester/.ssh")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.aws")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.netrc")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.config/gh")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.docker")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.cargo/credentials.toml")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.config/google-chrome")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/.mozilla/firefox")));
-        assert!(paths.contains(&PathBuf::from("/home/tester/Library/Cookies")));
-        assert!(paths.contains(&PathBuf::from("/etc/shadow")));
-    }
-
-    #[test]
-    fn explicit_workspace_roots_do_not_expand_to_cwd() {
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![PathBuf::from("src/main.rs")],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        };
-
-        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
-
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace/src/main.rs"));
-    }
-
-    #[test]
-    fn empty_workspace_roots_fall_back_to_cwd() {
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: Vec::new(),
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        };
-
-        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
-
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace"));
-    }
-
-    #[test]
-    fn dangerous_socket_writable_roots_are_rejected() {
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![
-                PathBuf::from("/var/run/docker.sock"),
-                PathBuf::from("/tmp/project"),
-            ],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        };
-
-        let error = policy
-            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
-            .expect_err("docker socket writable roots must be rejected");
-
-        assert!(error.to_string().contains("Docker socket access"));
-    }
-
-    #[test]
-    fn nested_docker_socket_roots_are_rejected() {
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![PathBuf::from("tools/docker.sock")],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        };
-
-        let error = policy
-            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
-            .expect_err("glob-style docker.sock writable roots must be rejected");
-
-        assert!(error.to_string().contains("Docker socket access"));
-    }
-
-    #[test]
-    fn kernel_and_device_writable_roots_are_rejected() {
-        for root in ["/", "/proc", "/proc/self", "/sys", "/dev", "/dev/null"] {
-            let policy = SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from(root)],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            };
-
-            assert!(
-                policy
-                    .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
-                    .is_err(),
-                "{root} must not be accepted as a writable sandbox root",
-            );
-        }
-    }
-
-    #[test]
-    fn safe_workspace_writable_roots_are_accepted() {
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        };
-
-        policy
-            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
-            .expect("ordinary workspace roots should be accepted");
-    }
-
-    #[test]
-    fn sandbox_policy_error_display_pins_dangerous_writable_root_template() {
-        let err = SandboxPolicyError::DangerousWritableRoot {
-            root: PathBuf::from("/etc"),
-            reason: "is a system configuration directory",
-        };
-        assert_eq!(
-            err.to_string(),
-            "refusing writable_root '/etc' because is a system configuration directory; \
-             choose a non-privileged project directory, expose the tool through a narrow \
-             proxy, or rerun with explicit escalated permissions if host-level access is \
-             intentional",
-        );
-    }
-
-    /// `SandboxEnforcement::all()` enumerates every variant in
-    /// declaration order, cross-checks each variant's `as_str()`
-    /// against an exhaustive match (so a future fourth tier fails to
-    /// compile here unless `all()` is also extended), and round-trips
-    /// every canonical string through `FromStr`. Mirrors the
-    /// v0.17.660+ `*::all()` + round-trip pattern.
-    #[test]
-    fn sandbox_enforcement_all_enumerates_every_variant_and_round_trips() {
-        let variants = SandboxEnforcement::all();
-        assert_eq!(variants.len(), 3);
-        assert_eq!(
-            variants,
-            [
-                SandboxEnforcement::Required,
-                SandboxEnforcement::PreferStrict,
-                SandboxEnforcement::BestEffort,
-            ]
-        );
-
-        for variant in SandboxEnforcement::all() {
-            let canonical = variant.as_str();
-            let expected_canonical = match variant {
-                SandboxEnforcement::Required => "required",
-                SandboxEnforcement::PreferStrict => "prefer_strict",
-                SandboxEnforcement::BestEffort => "best_effort",
-            };
-            assert_eq!(canonical, expected_canonical);
-
-            let parsed: SandboxEnforcement = canonical
-                .parse()
-                .expect("canonical as_str() must round-trip through FromStr");
-            assert_eq!(parsed, variant);
-        }
-    }
-
     /// `NetworkProtocol` must round-trip through serde as kebab-case
     /// (`"tcp"` / `"udp"`), default to `Tcp`, and `Hash` + `Eq` must
     /// hold so callers can index allowlists by protocol.
@@ -872,6 +696,34 @@ mod tests {
         assert_eq!(back, explicit);
     }
 
+    #[test]
+    fn sandbox_enforcement_accepts_stable_spellings() {
+        assert_eq!(
+            "required".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::Required)
+        );
+        assert_eq!(
+            "prefer-strict".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::PreferStrict)
+        );
+        assert_eq!(
+            "best_effort".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::BestEffort)
+        );
+    }
+
+    #[test]
+    fn sandbox_enforcement_rejects_unknown_values() {
+        let error = "strict"
+            .parse::<SandboxEnforcement>()
+            .expect_err("unsupported enforcement names must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
+        );
+    }
+
     /// `NetworkAccess::is_restricted` is the positive predicate
     /// companion of `is_enabled`. Pin the partition invariant
     /// `!is_enabled() == is_restricted()` across every variant via
@@ -903,5 +755,200 @@ mod tests {
             let back: NetworkAccess = serde_json::from_str(&serialised).unwrap();
             assert_eq!(back, mode);
         }
+    }
+
+    /// `SandboxEnforcement::all()` must enumerate every variant in
+    /// declaration order, return a fixed-length array, and round-trip
+    /// through `as_str` ↔ `FromStr` for every entry. The exhaustive
+    /// `match` in the cross-check forces a future fourth variant to
+    /// be added alongside `all()` and the `as_str` / `FromStr` arms
+    /// in the same patch.
+    #[test]
+    fn sandbox_enforcement_all_enumerates_every_variant_and_round_trips() {
+        let variants = SandboxEnforcement::all();
+        assert_eq!(variants.len(), 3);
+        assert_eq!(
+            variants,
+            [
+                SandboxEnforcement::Required,
+                SandboxEnforcement::PreferStrict,
+                SandboxEnforcement::BestEffort,
+            ]
+        );
+
+        for variant in SandboxEnforcement::all() {
+            let canonical = variant.as_str();
+            let expected_canonical = match variant {
+                SandboxEnforcement::Required => "required",
+                SandboxEnforcement::PreferStrict => "prefer_strict",
+                SandboxEnforcement::BestEffort => "best_effort",
+            };
+            assert_eq!(canonical, expected_canonical);
+
+            let parsed: SandboxEnforcement = canonical
+                .parse()
+                .expect("canonical as_str() must round-trip through FromStr");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn sensitive_read_paths_include_home_credentials_and_system_shadow() {
+        let paths = sensitive_read_paths(Some(Path::new("/home/tester")));
+
+        assert!(paths.contains(&PathBuf::from("/home/tester/.ssh")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.aws")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.netrc")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.config/gh")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.docker")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.cargo/credentials.toml")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.config/google-chrome")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.mozilla/firefox")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/Library/Cookies")));
+        assert!(paths.contains(&PathBuf::from("/etc/shadow")));
+    }
+
+    /// v0.17.669 extends `sensitive_read_paths` with three database /
+    /// object-store credential files (`~/.pgpass`, `~/.my.cnf`,
+    /// `~/.s3cfg`) and the libsecret-style git credential helper store
+    /// (`~/.config/git/credentials`). The original credential coverage
+    /// already protected `.aws` / `.azure` / `.npmrc`, but a Shell
+    /// tool that ran `cat ~/.pgpass` or `cat ~/.my.cnf` would have
+    /// leaked Postgres / MySQL passwords because those files were
+    /// outside the deny set. Pin the four additions so a refactor
+    /// that drops any of them fails this test.
+    #[test]
+    fn sensitive_read_paths_cover_database_and_git_credential_files() {
+        let paths = sensitive_read_paths(Some(Path::new("/home/tester")));
+
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.pgpass")),
+            "Postgres credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.my.cnf")),
+            "MySQL credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.s3cfg")),
+            "s3cmd / s3tools credential file must be deny-listed",
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/tester/.config/git/credentials")),
+            "git credential-store cache must be deny-listed",
+        );
+    }
+
+    #[test]
+    fn explicit_workspace_roots_do_not_expand_to_cwd() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src/main.rs")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace/src/main.rs"));
+    }
+
+    #[test]
+    fn empty_workspace_roots_fall_back_to_cwd() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace"));
+    }
+
+    #[test]
+    fn dangerous_socket_writable_roots_are_rejected() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![
+                PathBuf::from("/var/run/docker.sock"),
+                PathBuf::from("/tmp/project"),
+            ],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let error = policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect_err("docker socket writable roots must be rejected");
+
+        assert!(error.to_string().contains("Docker socket access"));
+    }
+
+    #[test]
+    fn nested_docker_socket_roots_are_rejected() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("tools/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let error = policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect_err("glob-style docker.sock writable roots must be rejected");
+
+        assert!(error.to_string().contains("Docker socket access"));
+    }
+
+    #[test]
+    fn kernel_and_device_writable_roots_are_rejected() {
+        for root in ["/", "/proc", "/proc/self", "/sys", "/dev", "/dev/null"] {
+            let policy = SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![PathBuf::from(root)],
+                network_access: false,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            };
+
+            assert!(
+                policy
+                    .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+                    .is_err(),
+                "{root} must not be accepted as a writable sandbox root",
+            );
+        }
+    }
+
+    #[test]
+    fn safe_workspace_writable_roots_are_accepted() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect("ordinary workspace roots should be accepted");
+    }
+
+    #[test]
+    fn sandbox_policy_error_display_pins_dangerous_writable_root_template() {
+        let err = SandboxPolicyError::DangerousWritableRoot {
+            root: PathBuf::from("/etc"),
+            reason: "is a system configuration directory",
+        };
+        assert_eq!(
+            err.to_string(),
+            "refusing writable_root '/etc' because is a system configuration directory; \
+             choose a non-privileged project directory, expose the tool through a narrow \
+             proxy, or rerun with explicit escalated permissions if host-level access is \
+             intentional",
+        );
     }
 }

@@ -127,10 +127,9 @@ Current behavior:
 - Without `--dry-run`, the command requires `publish.site_id` plus
   `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, `LIBRA_D1_DATABASE_ID`,
   `LIBRA_STORAGE_ENDPOINT`, `LIBRA_STORAGE_BUCKET`,
-  `LIBRA_STORAGE_ACCESS_KEY`, and `LIBRA_STORAGE_SECRET_KEY`. Libra reads
-  repo-local `vault.env.*` first, then global `vault.env.*`, then exported
-  environment variables. It loads the matching `publish_sites` row from D1
-  for `repo_id`, visibility, max preview bytes, and `refs_generation`.
+  `LIBRA_STORAGE_ACCESS_KEY`, and `LIBRA_STORAGE_SECRET_KEY`. It loads
+  the matching `publish_sites` row from D1 for `repo_id`, visibility,
+  max preview bytes, and `refs_generation`.
 - Full sync writes one code snapshot per unique local branch/tag
   revision, uploads text previews and `code-manifest.json` to R2, writes
   binary, too-large, and ignored files as D1 metadata only, uploads
@@ -262,8 +261,8 @@ configuration keys when they are present:
 `libra publish sync`, `libra publish status --site-id`, and
 `libra+cloud://` clone restore read Cloudflare account ids, API tokens,
 and R2 S3 credentials from the same `LIBRA_D1_*` / `LIBRA_STORAGE_*`
-keys that `libra cloud` uses, with `vault.env.*` taking priority over the
-process environment. These secrets are never written into the Worker template.
+environment variables that `libra cloud` uses. These secrets are never
+written into the Worker template or to `ConfigKv`.
 
 ## Files
 
@@ -338,8 +337,8 @@ LIBRA_ENABLE_TEST_LIVE_CLOUD=1 \
 cargo test --features test-live-cloud publish_live -- --test-threads=1
 ```
 
-Required for the D1/R2 prerequisite portion, either as `vault.env.*` config
-entries, exported environment variables, or key/value lines in the repository
+Required for the D1/R2 prerequisite portion, either as exported
+environment variables or as key/value lines in the repository
 `.env.test` file:
 
 - `LIBRA_D1_ACCOUNT_ID`

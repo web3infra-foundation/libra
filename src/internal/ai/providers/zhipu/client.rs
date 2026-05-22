@@ -53,15 +53,14 @@ impl Provider for ZhipuProvider {
 pub type Client = GenericClient<ZhipuProvider>;
 
 impl Client {
-    /// Creates a Zhipu client from Vault or environment variables.
+    /// Creates a Zhipu client from environment variables.
     ///
-    /// Reads `vault.env.ZHIPU_API_KEY` first, then `ZHIPU_API_KEY`.
-    /// Also supports `vault.env.ZHIPU_BASE_URL` / `ZHIPU_BASE_URL` for
-    /// custom endpoints.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let api_key = crate::internal::config::resolve_required_env_sync("ZHIPU_API_KEY")?;
-        let base_url = crate::internal::config::resolve_optional_env_sync("ZHIPU_BASE_URL")?
-            .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
+    /// Reads the `ZHIPU_API_KEY` environment variable.
+    /// Also supports `ZHIPU_BASE_URL` for custom endpoints.
+    pub fn from_env() -> Result<Self, std::env::VarError> {
+        let api_key = std::env::var("ZHIPU_API_KEY")?;
+        let base_url = std::env::var("ZHIPU_BASE_URL")
+            .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
 
         let provider = ZhipuProvider::new(api_key);
         Ok(Self::new(&base_url, provider))
@@ -83,8 +82,9 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "ZHIPU_API_KEY is not configured; set vault.env.ZHIPU_API_KEY with \
-                     `libra config set vault.env.ZHIPU_API_KEY <key>` or export ZHIPU_API_KEY"
+                    "ZHIPU_API_KEY is not set in env, repo vault, or global config \
+                     (set the environment variable or run `libra config --global add \
+                     vault.env.ZHIPU_API_KEY <key>`)"
                 )
             })?;
         let base_url = resolve_env_for_target("ZHIPU_BASE_URL", local_target)

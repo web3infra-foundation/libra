@@ -88,34 +88,30 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
     // TODO: attributes file should be created in current dir, NOT root dir
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
-        LfsCmds::Track { pattern } => {
-            // TODO: deduplicate
-            match pattern {
-                Some(pattern) => {
-                    let pattern = convert_patterns_to_workdir(pattern); //
-                    let patterns = add_lfs_patterns(&attr_path, pattern).map_err(|e| {
-                        CliError::io(format!("failed to update '{attr_path}': {e}"))
-                    })?;
-                    Ok(LfsOutput {
-                        action: "track".to_string(),
-                        patterns,
-                        ..LfsOutput::default()
-                    })
-                }
-                None => {
-                    let lfs_patterns = lfs::extract_lfs_patterns(&attr_path)
-                        .map_err(|e| CliError::io(format!("failed to read '{attr_path}': {e}")))?;
-                    Ok(LfsOutput {
-                        action: "track-list".to_string(),
-                        patterns: lfs_patterns,
-                        ..LfsOutput::default()
-                    })
-                }
+        LfsCmds::Track { pattern } => match pattern {
+            Some(pattern) => {
+                let pattern = dedupe_preserving_order(convert_patterns_to_workdir(pattern));
+                let patterns = add_lfs_patterns(&attr_path, pattern)
+                    .map_err(|e| CliError::io(format!("failed to update '{attr_path}': {e}")))?;
+                Ok(LfsOutput {
+                    action: "track".to_string(),
+                    patterns,
+                    ..LfsOutput::default()
+                })
             }
-        }
+            None => {
+                let lfs_patterns = lfs::extract_lfs_patterns(&attr_path)
+                    .map_err(|e| CliError::io(format!("failed to read '{attr_path}': {e}")))?;
+                Ok(LfsOutput {
+                    action: "track-list".to_string(),
+                    patterns: lfs_patterns,
+                    ..LfsOutput::default()
+                })
+            }
+        },
         LfsCmds::Untrack { path } => {
             // only remove totally same pattern with path ?
-            let path = convert_patterns_to_workdir(path); //
+            let path = dedupe_preserving_order(convert_patterns_to_workdir(path));
             let patterns = untrack_lfs_patterns(&attr_path, path)
                 .map_err(|e| CliError::io(format!("failed to update '{attr_path}': {e}")))?;
             Ok(LfsOutput {
@@ -429,6 +425,22 @@ fn convert_patterns_to_workdir(patterns: Vec<String>) -> Vec<String> {
         .into_iter()
         .map(|p| util::to_workdir_path(&p).to_string_or_panic())
         .collect()
+}
+
+/// Remove duplicate entries while preserving the original insertion order.
+///
+/// Used by `lfs track` / `lfs untrack` so that a CLI invocation like
+/// `libra lfs track foo foo` doesn't append the same pattern twice or report
+/// the pattern multiple times in the structured output.
+fn dedupe_preserving_order(patterns: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(patterns.len());
+    let mut out = Vec::with_capacity(patterns.len());
+    for p in patterns {
+        if seen.insert(p.clone()) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Vec<String>> {

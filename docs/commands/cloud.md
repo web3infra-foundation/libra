@@ -14,7 +14,7 @@ libra cloud status [--verbose]
 
 `libra cloud` provides backup and restore capabilities using Cloudflare D1 (serverless SQLite) for object indexes and metadata, and Cloudflare R2 (S3-compatible object storage) for git objects. This enables full repository backup to the cloud with incremental sync support.
 
-The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. Before selecting work, sync reconciles the local `.libra/objects` store into `object_index` so older loose or packed objects are not skipped. On each default sync, objects are selected when they are locally unsynced or missing from D1, making repeated syncs efficient while still repairing stale local sync flags after a D1 database change. A `--force` flag allows re-syncing all indexed local objects and is the recovery path for R2 bucket-side data loss. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
+The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. On each sync, only unsynced objects are uploaded to R2 and indexed in D1, making repeated syncs efficient. A `--force` flag allows re-syncing all objects. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
 
 Each repository is identified by a UUID (`libra.repoid` config key) and optionally a human-readable project name (`cloud.name` config key or directory name). The project name is registered in a D1 `repositories` table for lookup during restore.
 
@@ -28,11 +28,11 @@ Sync local repository to cloud. Uploads objects to R2 and indexes to D1.
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Sync all indexed local objects, regardless of local/D1 sync state. Useful for deliberately re-upserting every object or recovering after R2 bucket-side data loss. |
+| `--force` | Sync all objects, not just those marked as unsynced. Useful for recovering from a partially failed sync or re-uploading after cloud-side data loss. |
 | `--batch-size <N>` | Number of objects to process per batch. Default: `50`. Must be at least 1. Smaller batches produce more frequent progress output; larger batches reduce overhead. |
 
 ```bash
-# Incremental repair sync
+# Incremental sync (only unsynced objects)
 libra cloud sync
 
 # Force re-sync everything
@@ -285,23 +285,20 @@ error machinery.
 
 ## Environment Variables
 
-Cloud operations require the following keys. Libra reads repo-local `vault.env.*`
-entries first, then global `vault.env.*`, then the matching environment
-variables. If all layers are missing for a required key, the command reports the
-key and asks you to configure it before retrying.
+Cloud operations require the following environment variables (or equivalent `vault.env.*` config entries):
 
 ### D1 (required for all operations)
 
-| Key | Description |
-|-----|-------------|
+| Variable | Description |
+|----------|-------------|
 | `LIBRA_D1_ACCOUNT_ID` | Cloudflare account ID |
 | `LIBRA_D1_API_TOKEN` | Cloudflare API token with D1 access |
 | `LIBRA_D1_DATABASE_ID` | D1 database UUID |
 
 ### R2 (required for sync and full restore)
 
-| Key | Description |
-|-----|-------------|
+| Variable | Description |
+|----------|-------------|
 | `LIBRA_STORAGE_ENDPOINT` | S3-compatible endpoint URL |
 | `LIBRA_STORAGE_BUCKET` | Bucket name |
 | `LIBRA_STORAGE_ACCESS_KEY` | Access key ID |
@@ -356,7 +353,7 @@ Note: Neither Git nor jj have a built-in cloud backup command. They rely on push
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-CLI-002` | Missing required Vault/env credential keys (lists which ones) |
+| `LBR-CLI-002` | Missing required environment variables (lists which ones) |
 | `LBR-CLI-002` | Batch size must be at least 1 |
 | `LBR-CLI-002` | Neither `--repo-id` nor `--name` provided for restore |
 | `LBR-CLI-003` | Repository with given name not found in D1 |

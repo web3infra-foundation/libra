@@ -24,14 +24,7 @@
 | `compat_checkout_alias_help` | 1 | Guards `--help` text for checkout aliases | `src/command/checkout.rs` |
 | `compat_matrix_alignment` | 1 | Guards the docs compat matrix vs. real subcommands | `docs/commands/`, `src/cli.rs` |
 | `compat_branch_lossy_wrapper_guard` | 1 | Guards branch-name lossy conversion wrapper | `src/internal/branch.rs` |
-| `compat_lfs_client_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/protocol/lfs_client.rs` | `src/internal/protocol/lfs_client.rs` |
-| `compat_config_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/config.rs` | `src/internal/config.rs` |
-| `compat_head_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/head.rs` | `src/internal/head.rs` |
-| `compat_util_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `common_utils.rs` / `utils/` | `src/common_utils.rs`, `src/utils/` |
-| `compat_client_storage_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `utils/client_storage.rs` | `src/utils/client_storage.rs` |
-| `compat_extra_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in miscellaneous modules | `src/**` |
-| `compat_all_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in general production codebase | `src/**` |
-| `compat_agent_run_non_exhaustive_guard` | 1 | Bans `unwrap()/expect()` in agent run modules | `src/internal/ai/agent_run/` |
+| `compat_*_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in named production modules | `src/**` |
 | `db_migration_test` | 1 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 
 ## Wave 2 — Code UI & local automation
@@ -63,62 +56,6 @@
 | `ai_dag_tool_loop_test` | 2 | DAG-based tool loop regression | `src/internal/ai/agent/` |
 | `ai_mock_provider_test` | 2 | Mock provider used by `test-provider` feature | `src/internal/ai/providers/` (test-only) |
 | `agent_capture_migration_test` | 2 | Capture/replay store migration | `src/internal/ai/history.rs` |
-| `ai_agent_baseline_test` | 2 | Step 1.0 / CEX-00 single-agent baseline tests | `src/command/code.rs`, `src/internal/ai/agent/` |
-| `ai_approval_ttl_test` | 2 | CEX-11 approval TTL and canonical key contract tests | `src/internal/ai/agent/` |
-| `ai_classifier_test` | 2 | CEX-08 TaskIntent classifier contract tests | `src/internal/ai/completion/` |
-| `ai_command_safety_test` | 2 | CEX-01 command safety contract tests | `src/internal/ai/commands/` |
-| `ai_compaction_filter_test` | 2 | Integration tests for filter_compacted projection | `src/internal/ai/context_budget/` |
-| `ai_compaction_handoff_e2e_test` | 2 | S5 compaction handoff end-to-end scenario | `src/internal/ai/context_budget/` |
-| `ai_concurrency_lock_test` | 2 | Session-level advisory lock and CAS conflict tests | `src/command/code.rs`, `src/internal/ai/session/` |
-| `ai_context_budget_test` | 2 | CEX-13a context budget core contract tests | `src/internal/ai/context_budget/` |
-| `ai_context_compaction_prune_test` | 2 | S5 prune phase + budget-driven sequence tests | `src/internal/ai/context_budget/` |
-| `ai_context_frame_test` | 2 | Context frame serialization and lifecycle | `src/internal/ai/context_budget/` |
-| `ai_context_handoff_test` | 2 | S5 compaction handoff template parser tests | `src/internal/ai/context_budget/` |
-| `ai_dagrs_081_spike_test` | 2 | Phase 0 spike for dagrs 0.8.1 API assumptions | `src/internal/ai/orchestrator/` |
-| `ai_dynamic_prompt_test` | 2 | CEX-09 dynamic prompt and intent tool-policy tests | `src/internal/ai/prompt/` |
-| `ai_file_undo_test` | 2 | CEX-10 file-level undo contract tests | `src/internal/ai/tools/` |
-| `ai_goal_completion_gate_test` | 2 | OC-Phase 6 P6.7 completion gate scenarios | `src/internal/ai/goal/` |
-| `ai_goal_flag_off_regression_test` | 2 | OC-Phase 6 Goal mode opt-in flag-off regression tests | `src/internal/ai/goal/` |
-| `ai_goal_resume_test` | 2 | OC-Phase 6 Goal mode supervisor resume replay tests | `src/internal/ai/goal/` |
-| `ai_goal_state_test` | 2 | OC-Phase 6 Goal mode schema integration tests | `src/internal/ai/goal/` |
-| `ai_goal_supervisor_test` | 2 | OC-Phase 6 S6 supervisor non-completion E2E | `src/internal/ai/goal/` |
-| `ai_goal_verifier_test` | 2 | OC-Phase 6 P6.2 deterministic GoalVerifier integration tests | `src/internal/ai/goal/` |
-| `ai_hardening_contract_test` | 2 | Phase E hardening contract tests | `src/internal/ai/sandbox/` |
-| `ai_json_repair_test` | 2 | JSON repair and correction parser tests | `src/internal/ai/completion/` |
-| `ai_libra_vcs_safety_test` | 2 | CEX-02 run_libra_vcs parameter-level safety tests | `src/internal/ai/tools/` |
-| `ai_memory_anchor_test` | 2 | Short-term/long-term memory anchor contract tests | `src/internal/ai/agent/` |
-| `ai_multi_agent_e2e_test` | 2 | S7 multi-agent declarative config E2E | `src/internal/ai/agent/` |
-| `ai_projection_resolver_test` | 2 | Phase B projection resolver and scheduler repository tests | `src/internal/ai/orchestrator/` |
-| `ai_provider_context_overflow_compact_loop_test` | 2 | OC-Phase 4 context-overflow compaction loop integration tests | `src/internal/ai/providers/` |
-| `ai_provider_error_taxonomy_test` | 2 | Integration fixtures for OC-Phase 4 provider error taxonomy | `src/internal/ai/providers/` |
-| `ai_provider_retry_policy_test` | 2 | OC-Phase 4 retry-policy integration test | `src/internal/ai/providers/` |
-| `ai_provider_transform_test` | 2 | Integration tests for OC-Phase 4 P4.1 provider transform pipeline | `src/internal/ai/providers/` |
-| `ai_runtime_contract_test` | 2 | Wave 1A runtime contract tests pinning TaskExecutor | `src/internal/ai/runtime/` |
-| `ai_scheduler_plan_set_test` | 2 | Phase 0 selected plan set and task dependency tests | `src/internal/ai/orchestrator/` |
-| `ai_schema_migration_test` | 2 | Phase 0 schema migration tests for AI runtime contract tables | `src/internal/db.rs`, `sql/` |
-| `ai_security_runtime_test` | 2 | Phase 5 security runtime (authz, redaction, shell, audit) | `src/internal/ai/sandbox/` |
-| `ai_semantic_rust_test` | 2 | Semantic Rust code indexing and structure extraction | `src/internal/ai/skills/` |
-| `ai_semantic_tools_test` | 2 | Semantic tools registration and classification | `src/internal/ai/tools/` |
-| `ai_session_jsonl_test` | 2 | Session JSONL persistence format and event streaming | `src/internal/ai/session/` |
-| `ai_skill_test` | 2 | System skills load, parse, and execution validation | `src/internal/ai/skills/` |
-| `ai_source_pool_test` | 2 | CEX-14 source-pool isolation and MCP integration tests | `src/internal/ai/session/` |
-| `ai_storage_flow_test` | 2 | Integration tests for AI object storage on local and R2 backends | `src/utils/storage/` |
-| `ai_subagent_contract_test` | 2 | CEX-S2-10 schema contract tests | `src/internal/ai/agent_run/` |
-| `ai_usage_stats_test` | 2 | CEX-16 usage stats persistence and aggregation tests | `src/internal/ai/usage/` |
-| `ai_usage_tui_test` | 2 | CEX-16 usage display formatting tests | `src/internal/ai/usage/` |
-| `ai_validation_decision_flow_test` | 2 | Phase D validation and decision derived-record tests | `src/internal/ai/orchestrator/` |
-| `diagnostics_redaction_test` | 2 | Diagnostics logs redaction and sanitization | `src/internal/ai/usage/` |
-| `local_client_test` | 2 | Local Git protocol client working directory restoration on error | `src/internal/protocol/` |
-| `publish_ai_export_test` | 2 | Publish pipeline export representation for AI tasks | `src/internal/publish/` |
-| `publish_ai_object_model_contract_test` | 2 | Publish pipeline AI object model contract | `src/internal/publish/` |
-| `publish_incremental_test` | 2 | Publish pipeline incremental sync and state tracking | `src/internal/publish/` |
-| `publish_preflight_test` | 2 | Publish pipeline validation and preflight checks | `src/internal/publish/` |
-| `publish_redaction_contract_test` | 2 | Publish pipeline redaction rules and scanning | `src/internal/publish/` |
-| `publish_refs_test` | 2 | Publish pipeline references and branch tracking | `src/internal/publish/` |
-| `publish_snapshot_test` | 2 | Publish pipeline snapshot generation and verification | `src/internal/publish/` |
-| `publish_upload_test` | 2 | Publish pipeline bundle upload to cloud storage | `src/internal/publish/` |
-| `publish_worker_template_embed_test` | 2 | Verification of embedded Worker template exclusion list | `src/internal/publish/` |
-| `redaction_contract_test` | 2 | Pin the RedactedBytes contract for transcript output | `src/internal/ai/session/` |
 
 ## Wave 3 — network (test-network)
 
@@ -153,8 +90,66 @@
 
 ## TODO — uncategorised (one-liner pass needed)
 
-None. All currently known integration targets have a wave, purpose, and
-relevant source entry above.
+These targets are real but not yet indexed. AI/human owners: pick a row, replace
+`TODO` with a one-line purpose + relevant src paths, and move it to the matching
+Wave above.
+
+```
+ai_agent_baseline_test                          TODO
+ai_approval_ttl_test                            TODO
+ai_classifier_test                              TODO
+ai_command_safety_test                          TODO
+ai_compaction_filter_test                       TODO
+ai_compaction_handoff_e2e_test                  TODO
+ai_context_budget_test                          TODO
+ai_context_compaction_prune_test                TODO
+ai_context_frame_test                           TODO
+ai_context_handoff_test                         TODO
+ai_dagrs_081_spike_test                         TODO
+ai_dynamic_prompt_test                          TODO
+ai_file_undo_test                               TODO
+ai_goal_completion_gate_test                    TODO
+ai_goal_flag_off_regression_test                TODO
+ai_goal_resume_test                             TODO
+ai_goal_state_test                              TODO
+ai_goal_supervisor_test                         TODO
+ai_goal_verifier_test                           TODO
+ai_hardening_contract_test                      TODO
+ai_json_repair_test                             TODO
+ai_libra_vcs_safety_test                        TODO
+ai_memory_anchor_test                           TODO
+ai_multi_agent_e2e_test                         TODO
+ai_projection_resolver_test                     TODO
+ai_provider_context_overflow_compact_loop_test  TODO
+ai_provider_error_taxonomy_test                 TODO
+ai_provider_retry_policy_test                   TODO
+ai_provider_transform_test                      TODO
+ai_runtime_contract_test                        TODO
+ai_scheduler_plan_set_test                      TODO
+ai_schema_migration_test                        TODO
+ai_semantic_rust_test                           TODO
+ai_semantic_tools_test                          TODO
+ai_session_jsonl_test                           TODO
+ai_skill_test                                   TODO
+ai_source_pool_test                             TODO
+ai_storage_flow_test                            TODO
+ai_subagent_contract_test                       TODO
+ai_usage_stats_test                             TODO
+ai_usage_tui_test                               TODO
+ai_validation_decision_flow_test                TODO
+diagnostics_redaction_test                      TODO
+local_client_test                               TODO
+publish_ai_export_test                          TODO
+publish_ai_object_model_contract_test           TODO
+publish_incremental_test                        TODO
+publish_preflight_test                          TODO
+publish_redaction_contract_test                 TODO
+publish_refs_test                               TODO
+publish_snapshot_test                           TODO
+publish_upload_test                             TODO
+publish_worker_template_embed_test              TODO
+redaction_contract_test                         TODO
+```
 
 ---
 

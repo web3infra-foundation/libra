@@ -22,8 +22,7 @@ pub use contracts::{PromptPackage, WorkflowPhase};
 pub use event::{Event, audit_action_for};
 pub use hardening::{
     AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
-    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, ToolOperationDetails,
-    TracingAuditSink,
+    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, TracingAuditSink,
 };
 pub use phase3::{
     ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,

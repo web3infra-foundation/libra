@@ -2229,40 +2229,9 @@ fn push_detail_kv(lines: &mut Vec<Line<'static>>, key: &str, value: &str, conten
 }
 
 fn push_detail_wrapped_line(lines: &mut Vec<Line<'static>>, value: &str, content_width: usize) {
-    for chunk in wrap_preformatted_display_width(value, content_width.max(1)) {
+    for chunk in wrap_display_width(value, content_width.max(1)) {
         lines.push(Line::styled(chunk, detail_value_style()));
     }
-}
-
-fn wrap_preformatted_display_width(value: &str, max_width: usize) -> Vec<String> {
-    if value.is_empty() {
-        return vec![String::new()];
-    }
-    if max_width == usize::MAX {
-        return value.lines().map(ToString::to_string).collect();
-    }
-
-    let width = max_width.max(1);
-    let mut lines = Vec::new();
-    for source_line in value.lines() {
-        let mut current = String::new();
-        let mut current_width = 0usize;
-        for ch in source_line.chars() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if current_width > 0 && current_width.saturating_add(ch_width) > width {
-                lines.push(current);
-                current = String::new();
-                current_width = 0;
-            }
-            current.push(ch);
-            current_width = current_width.saturating_add(ch_width);
-        }
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
 }
 
 fn wrap_display_width(value: &str, max_width: usize) -> Vec<String> {
@@ -2686,67 +2655,6 @@ mod tests {
         // ("── OBJECT JSON ──") instead of `object_json:`.
         assert!(rendered.contains("OBJECT JSON"));
         assert!(rendered.contains("Show the stored task object"));
-    }
-
-    #[test]
-    fn graph_object_json_detail_preserves_pretty_indentation() {
-        let detail = GraphObjectDetail::from_json(
-            GraphNodeKind::Patchset,
-            Some("abc123".to_string()),
-            Some("Blob".to_string()),
-            serde_json::json!({
-                "object_id": "88888888-8888-4888-8888-888888888888",
-                "artifact": {
-                    "key": "9e0414b625957df8834d25dc612959b3851ac4e",
-                    "store": "libra"
-                },
-                "touched": [
-                    {
-                        "change_type": "modify",
-                        "path": "Cargo.lock"
-                    }
-                ]
-            }),
-        );
-        let line = GraphLine {
-            depth: 1,
-            kind: GraphNodeKind::Patchset,
-            id: "88888888-8888-4888-8888-888888888888".to_string(),
-            label: "88888888".to_string(),
-            tags: Vec::new(),
-            detail: vec![(
-                "patchset_id".to_string(),
-                "88888888-8888-4888-8888-888888888888".to_string(),
-            )],
-            object: Some(detail),
-        };
-
-        let rendered = detail_lines_for_width(Some(&line), 80)
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            rendered.iter().any(|line| line == "  \"artifact\": {"),
-            "expected nested object to keep two-space JSON indentation: {rendered:#?}"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line == "    \"key\": \"9e0414b625957df8834d25dc612959b3851ac4e\","),
-            "expected nested object field to keep four-space JSON indentation: {rendered:#?}"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line == "      \"change_type\": \"modify\","),
-            "expected nested array object field to keep six-space JSON indentation: {rendered:#?}"
-        );
     }
 
     #[test]

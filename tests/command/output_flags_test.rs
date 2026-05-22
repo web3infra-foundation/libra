@@ -82,7 +82,7 @@ fn log_file_writes_tracing_without_stderr() {
     let log_path = log_path.to_str().expect("test path should be UTF-8");
 
     let output = run_with_envs(
-        &["--progress=none", "diff"],
+        &["diff"],
         repo.path(),
         &[
             ("LIBRA_LOG", "libra::command::diff=debug"),

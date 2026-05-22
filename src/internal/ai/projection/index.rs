@@ -5,8 +5,16 @@
 //! `task -> run`, and `run -> patchset` cheap without changing the underlying
 //! object graph defined in `docs/agent/agent.md`.
 //!
-//! TODO(test): add CRUD coverage for the corresponding `ai_index_*` SeaORM
-//! entities when the projector starts materializing these rows.
+//! The materialisation path for these rows lives in
+//! [`super::rebuild::ProjectionRebuilder`] (see `rebuild.rs::400`+ for
+//! the `IntentPlanIndexRow` → `ai_index_intent_plan::ActiveModel` mapping
+//! and the surrounding entity inserts / deletes). End-to-end coverage
+//! exercises the rebuild path via `ProjectionRebuilder::rebuild_*` in
+//! [`tests/ai_projection_resolver_test.rs`](../../../../../tests/ai_projection_resolver_test.rs).
+//! The in-module `#[cfg(test)]` suite below pins the serde round-trips
+//! that the rebuild path serialises into the SeaORM JSON columns; the
+//! row-level entity contract is intentionally narrow to keep the
+//! pure-data layer separate from the storage adapter.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

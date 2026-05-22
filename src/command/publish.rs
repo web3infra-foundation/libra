@@ -664,10 +664,8 @@ fn publish_status_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, and \
-             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
-             variables for cloud comparison. Omit --site-id/publish.site_id to inspect only \
-             the local template.",
+            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, and LIBRA_D1_DATABASE_ID for cloud \
+             comparison, or omit --site-id/publish.site_id to inspect only the local template.",
         )
 }
 
@@ -1046,9 +1044,8 @@ async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncO
             CliError::fatal(format!("failed to initialize publish R2 storage: {source}"))
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint(
-                    "set vault.env.LIBRA_STORAGE_ENDPOINT, vault.env.LIBRA_STORAGE_BUCKET, \
-                     vault.env.LIBRA_STORAGE_ACCESS_KEY, and vault.env.LIBRA_STORAGE_SECRET_KEY \
-                     with `libra config set`, or export the matching variables.",
+                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_BUCKET, \
+                     LIBRA_STORAGE_ACCESS_KEY, and LIBRA_STORAGE_SECRET_KEY.",
                 )
         })?;
 
@@ -1922,9 +1919,8 @@ fn publish_sync_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, \
-             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
-             variables, and set publish.site_id before running 'libra publish sync'.",
+            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, LIBRA_D1_DATABASE_ID, and \
+             publish.site_id before running 'libra publish sync'.",
         )
 }
 
@@ -3375,22 +3371,6 @@ mod tests {
         }
     }
 
-    fn replace_d1_database_id_for_test(wrangler: &str, database_id: &str) -> String {
-        wrangler
-            .lines()
-            .map(|line| {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("\"database_id\":") {
-                    let indent = &line[..line.len() - trimmed.len()];
-                    format!("{indent}\"database_id\": \"{database_id}\",")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     fn materialize_deployable_worker(repo_root: &Path) {
         run_publish_init_at_root(repo_root, &default_init_args())
             .expect("publish init must materialize the template");
@@ -3399,9 +3379,12 @@ mod tests {
             fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
         fs::write(
             &wrangler_path,
-            replace_d1_database_id_for_test(&wrangler, "00000000-0000-0000-0000-000000000000"),
+            wrangler.replace(
+                "REPLACE_WITH_D1_DATABASE_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
         )
-        .expect("wrangler config database_id should be replaceable");
+        .expect("wrangler config placeholder should be replaceable");
     }
 
     #[tokio::test]
@@ -4324,7 +4307,7 @@ mod tests {
                     "failed to initialize D1 client for publish status ref comparison",
                     D1Error {
                         code: 1001,
-                        message: "LIBRA_D1_ACCOUNT_ID is not configured".to_string(),
+                        message: "LIBRA_D1_ACCOUNT_ID not set (env or vault)".to_string(),
                     },
                 ))
             },
@@ -4426,14 +4409,6 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir must be created");
         run_publish_init_at_root(temp.path(), &default_init_args())
             .expect("publish init must materialize the template");
-        let wrangler_path = temp.path().join("worker/wrangler.jsonc");
-        let wrangler =
-            fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
-        fs::write(
-            &wrangler_path,
-            replace_d1_database_id_for_test(&wrangler, "REPLACE_WITH_D1_DATABASE_ID"),
-        )
-        .expect("wrangler config should be writable for placeholder validation test");
         let args = DeployArgs { skip_deploy: true };
         let mut runner = FakePublishWorkerCommandRunner::default();
 

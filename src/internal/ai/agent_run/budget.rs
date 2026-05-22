@@ -4,6 +4,8 @@
 //! the Step 2 core-objects table. Concrete field names mirror the
 //! `agent_usage_stats` schema owned by Step 1.11 / CEX-16.
 
+#![cfg(feature = "subagent-scaffold")]
+
 use serde::{Deserialize, Serialize};
 
 /// One of the five enforcement dimensions. Used as the `dimension` field on

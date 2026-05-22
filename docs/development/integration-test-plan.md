@@ -168,19 +168,6 @@ cargo test --test compat_worktree_delete_dir -- --test-threads=1
 cargo test --test compat_checkout_alias_help -- --test-threads=1
 cargo test --test compat_matrix_alignment -- --test-threads=1
 cargo test --test compat_branch_lossy_wrapper_guard -- --test-threads=1
-
-# Unwrap guards
-cargo test --test compat_lfs_client_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_config_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_head_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_util_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_client_storage_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_extra_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_all_production_unwrap_guard -- --test-threads=1
-cargo test --test compat_agent_run_non_exhaustive_guard -- --test-threads=1
-
-# Database migrations
-cargo test --test db_migration_test -- --test-threads=1
 ```
 
 通过标准：全部 green，无 skip/fail。
@@ -188,62 +175,7 @@ cargo test --test db_migration_test -- --test-threads=1
 ## 4.2 Wave 2：Code UI 与本地自动化控制（必跑）
 
 ```bash
-# Block 1: L1 local AI, goal, session and VCS safety (no features)
-cargo test \
-  --test agent_capture_migration_test \
-  --test ai_agent_baseline_test \
-  --test ai_automation_test \
-  --test ai_classifier_test \
-  --test ai_code_ui_projection_test \
-  --test ai_code_ui_wire_test \
-  --test ai_command_safety_test \
-  --test ai_compaction_filter_test \
-  --test ai_concurrency_lock_test \
-  --test ai_context_budget_test \
-  --test ai_context_compaction_prune_test \
-  --test ai_context_frame_test \
-  --test ai_dag_tool_loop_test \
-  --test ai_dagrs_081_spike_test \
-  --test ai_dynamic_prompt_test \
-  --test ai_file_undo_test \
-  --test ai_goal_completion_gate_test \
-  --test ai_goal_flag_off_regression_test \
-  --test ai_goal_resume_test \
-  --test ai_goal_state_test \
-  --test ai_goal_supervisor_test \
-  --test ai_goal_verifier_test \
-  --test ai_hardening_contract_test \
-  --test ai_json_repair_test \
-  --test ai_libra_vcs_safety_test \
-  --test ai_memory_anchor_test \
-  --test ai_mock_provider_test \
-  --test ai_projection_resolver_test \
-  --test ai_provider_context_overflow_compact_loop_test \
-  --test ai_provider_error_taxonomy_test \
-  --test ai_provider_retry_policy_test \
-  --test ai_provider_transform_test \
-  --test ai_runtime_contract_test \
-  --test ai_scheduler_plan_set_test \
-  --test ai_schema_migration_test \
-  --test ai_security_runtime_test \
-  --test ai_semantic_rust_test \
-  --test ai_semantic_tools_test \
-  --test ai_session_jsonl_test \
-  --test ai_skill_test \
-  --test ai_source_pool_test \
-  --test ai_storage_flow_test \
-  --test ai_usage_stats_test \
-  --test ai_usage_tui_test \
-  --test ai_validation_decision_flow_test \
-  --test diagnostics_redaction_test \
-  --test e2e_mcp_flow \
-  --test intent_flow_test \
-  --test local_client_test \
-  --test mcp_integration_test \
-  --test redaction_contract_test \
-  -- --test-threads=1
-
-# Block 2: Matrix, session, and event stream automation (requires test-provider)
+# test-provider 矩阵与场景
 cargo test --features test-provider \
   --test harness_self_test \
   --test code_ui_scenarios \
@@ -253,6 +185,10 @@ cargo test --features test-provider \
   --test code_ui_remote_security_matrix \
   --test code_ui_remote_generation_matrix \
   --test code_ui_remote_approval_matrix \
+  -- --test-threads=1
+
+# Code 路径专项
+cargo test --features test-provider \
   --test code_cli_dispatch_test \
   --test code_provider_boot_test \
   --test code_tool_acl_test \
@@ -260,29 +196,6 @@ cargo test --features test-provider \
   --test code_resume_test \
   --test code_codex_default_tui_test \
   --test code_codex_runtime_test \
-  --test ai_code_ui_headless_test \
-  --test ai_approval_ttl_test \
-  --test ai_compaction_handoff_e2e_test \
-  --test ai_context_handoff_test \
-  -- --test-threads=1
-
-# Block 3: Subagent contract and multi-agent e2e (requires test-provider, subagent-scaffold)
-cargo test --features test-provider,subagent-scaffold \
-  --test ai_subagent_contract_test \
-  --test ai_multi_agent_e2e_test \
-  -- --test-threads=1
-
-# Block 4: Publish pipeline local tests (no features)
-cargo test \
-  --test publish_ai_export_test \
-  --test publish_ai_object_model_contract_test \
-  --test publish_incremental_test \
-  --test publish_preflight_test \
-  --test publish_redaction_contract_test \
-  --test publish_refs_test \
-  --test publish_snapshot_test \
-  --test publish_upload_test \
-  --test publish_worker_template_embed_test \
   -- --test-threads=1
 ```
 
@@ -310,9 +223,6 @@ cargo test --test ai_chat_agent_test -- --test-threads=1
 LIBRA_RUN_LIVE=1 cargo test --features test-provider \
   --test code_ui_remote_model_generation_matrix \
   -- --ignored --test-threads=1
-
-# Ollama live gate (requires LIBRA_AI_LIVE_OLLAMA=1 and optional OLLAMA_HOST)
-LIBRA_AI_LIVE_OLLAMA=1 cargo test --test ai_ollama_live_gate_test -- --test-threads=1
 ```
 
 通过标准：
@@ -329,9 +239,6 @@ cargo test --features test-live-cloud --test cloud_storage_backup_test -- --test
 # publish live gate（额外要求 LIBRA_ENABLE_TEST_LIVE_CLOUD=1）
 LIBRA_ENABLE_TEST_LIVE_CLOUD=1 cargo test --features test-live-cloud \
   --test publish_live_test publish_live -- --test-threads=1
-
-# Storage R2 test
-cargo test --features test-live-cloud --test storage_r2_test -- --test-threads=1
 ```
 
 通过标准：

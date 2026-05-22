@@ -150,7 +150,11 @@ async fn record_decision_default_impl_redacts_secret_in_reason() {
     let principal = PrincipalContext::system();
     let redactor = SecretRedactor::default_runtime();
     let trace_id = Uuid::new_v4();
-    let operation = ToolOperation::tool("shell", true, false);
+    let operation = ToolOperation {
+        tool_name: "shell".to_string(),
+        mutates_state: true,
+        requires_network: false,
+    };
     let decision = BoundaryDecision {
         allowed: false,
         approval_required: true,
@@ -203,7 +207,11 @@ async fn tool_boundary_runtime_system_writes_redacted_audit_with_bound_principal
     let runtime = ToolBoundaryRuntime::system(trace_id, sink.clone());
 
     // Readonly tool: shouldn't require approval.
-    let readonly_op = ToolOperation::tool("read_file", false, false);
+    let readonly_op = ToolOperation {
+        tool_name: "read_file".to_string(),
+        mutates_state: false,
+        requires_network: false,
+    };
     let readonly = runtime.decide(&readonly_op);
     assert!(
         readonly.allowed && !readonly.approval_required,
@@ -214,7 +222,11 @@ async fn tool_boundary_runtime_system_writes_redacted_audit_with_bound_principal
     // `PrincipalContext::system()`, which bypasses approval because the
     // system principal is the trusted runtime caller. The reason field
     // still calls out the mutating-tool classification so audit can see it.
-    let mutating_op = ToolOperation::tool("apply_patch", true, false);
+    let mutating_op = ToolOperation {
+        tool_name: "apply_patch".to_string(),
+        mutates_state: true,
+        requires_network: false,
+    };
     let mutating = runtime.decide(&mutating_op);
     assert!(
         mutating.allowed,
@@ -283,7 +295,11 @@ fn tool_boundary_policy_default_runtime_classifies_canonical_tools() {
         "mcp_read",
         "run_libra_vcs",
     ] {
-        let op = ToolOperation::tool(readonly_tool, false, false);
+        let op = ToolOperation {
+            tool_name: readonly_tool.to_string(),
+            mutates_state: false,
+            requires_network: false,
+        };
         let decision = policy.decide(&contributor, &op);
         assert!(
             decision.allowed && !decision.approval_required,
@@ -295,13 +311,16 @@ fn tool_boundary_policy_default_runtime_classifies_canonical_tools() {
         "shell",
         "apply_patch",
         "update_plan",
-        "task",
         "submit_intent_draft",
         "submit_plan_draft",
         "submit_task_complete",
         "mcp_write",
     ] {
-        let op = ToolOperation::tool(mutating_tool, true, false);
+        let op = ToolOperation {
+            tool_name: mutating_tool.to_string(),
+            mutates_state: true,
+            requires_network: false,
+        };
         let decision = policy.decide(&contributor, &op);
         assert!(
             decision.allowed,
@@ -319,7 +338,14 @@ fn tool_boundary_policy_default_runtime_classifies_canonical_tools() {
         principal_id: "test-observer".to_string(),
         role: PrincipalRole::Observer,
     };
-    let observer_decision = policy.decide(&observer, &ToolOperation::tool("shell", true, false));
+    let observer_decision = policy.decide(
+        &observer,
+        &ToolOperation {
+            tool_name: "shell".to_string(),
+            mutates_state: true,
+            requires_network: false,
+        },
+    );
     assert!(
         !observer_decision.allowed && !observer_decision.approval_required,
         "Observer principals must be denied without approval prompt, got {observer_decision:?}",

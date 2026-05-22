@@ -10,7 +10,7 @@
 - `StashError` typed enum 已落地（stash.rs:59），含 `NotInRepo` / `NoInitialCommit` / `NoStashFound` / `InvalidStashRef` / `StashNotExist` / `MergeConflict` / `BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` / `ReadObject` / `WriteObject` / `IndexSave` / `ResetFailed` / `Other` 共 14 变体，每个变体在 `StashError::stable_code()` 有显式 `StableErrorCode` 映射，并由 `From<StashError> for CliError`（含 `Other` 的 Issues URL hint）派生 hint。`BranchExists` / `BranchLookupFailed` 服务 `stash branch <name>` 子命令；`ClearRequiresForce` 守护交互模式下的 `stash clear` —— 必须显式 `--force` 或 `--json`/`--machine` 才允许清空
 - `run_stash()` + `render_stash_output()` 已完成执行层/渲染层拆分（stash.rs:263 / stash.rs:619），human / JSON / machine 共用一套结果模型
 - `StashOutput` 是 `#[serde(tag = "action")]` enum（stash.rs:166），已覆盖 `push` / `pop` / `apply` / `drop` / `list` / `noop`；list 项使用 `StashListEntry` 结构体（index / message / stash_id）
-- `STASH_EXAMPLES` 常量已定义（stash.rs:234）并通过 cli.rs:299 的 `#[command(after_help = command::stash::STASH_EXAMPLES)]` 接入，`libra stash --help` 末尾会显示 7 条示例
+- `STASH_EXAMPLES` 常量已定义（stash.rs:234）并通过 cli.rs:215 的 `#[command(after_help = command::stash::STASH_EXAMPLES)]` 接入，`libra stash --help` 末尾会显示 7 条示例
 - `docs/commands/stash.md` 已记录 JSON schema、错误码和常用示例
 - `tests/command/stash_test.rs` 已覆盖 push/pop/list/apply/drop、JSON 输出、错误码和仓库外调用（12 个 `#[test]` / `#[tokio::test]`）
 

@@ -352,16 +352,6 @@ pub struct CodeUiAckResponse {
     pub accepted: bool,
 }
 
-/// `POST /api/code/task/dispatch` body. This is the Code Control
-/// equivalent of `/task <agent> <prompt>` and enters the dispatcher as
-/// `UserInitiated { bypass_permission_ask: true }`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodeUiTaskDispatchRequest {
-    pub agent: String,
-    pub prompt: String,
-}
-
 /// `POST /api/code/goal/start` body. The objective is validated
 /// at the App layer against the same `GoalSpec::new` shape rules
 /// (non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire
@@ -658,15 +648,6 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         Err(anyhow!(
             "This libra code session does not support turn cancel"
-        ))
-    }
-
-    /// `task.dispatch` — explicitly run a sub-agent from automation.
-    /// Default implementation returns "not supported" for adapters
-    /// that do not expose the local TUI sub-agent runtime.
-    async fn task_dispatch(&self, _agent: String, _prompt: String) -> anyhow::Result<String> {
-        Err(anyhow!(
-            "This libra code session does not support task.dispatch"
         ))
     }
 
@@ -1111,22 +1092,6 @@ impl CodeUiRuntimeHandle {
         self.ensure_controller_write_access(token).await?;
         self.adapter
             .cancel_turn()
-            .await
-            .map_err(CodeUiApiError::unsupported_from_error)
-    }
-
-    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
-    /// dispatch. Requires controller write-access because it mutates
-    /// the session transcript and may run tools.
-    pub async fn task_dispatch(
-        &self,
-        token: Option<&str>,
-        agent: String,
-        prompt: String,
-    ) -> Result<String, CodeUiApiError> {
-        self.ensure_controller_write_access(token).await?;
-        self.adapter
-            .task_dispatch(agent, prompt)
             .await
             .map_err(CodeUiApiError::unsupported_from_error)
     }

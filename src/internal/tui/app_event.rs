@@ -21,7 +21,6 @@ use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     agent::TaskIntent,
     completion::{CompletionUsageSummary, Message},
-    goal::{GoalEventEnvelope, GoalLoopDecision, GoalState},
     intentspec::types::IntentSpec,
     orchestrator::types::{
         ExecutionPlanSpec, OrchestratorResult, PersistedPlanReviewBundle,
@@ -57,16 +56,6 @@ pub enum AgentEvent {
     ResponseComplete {
         text: String,
         new_history: Vec<Message>,
-    },
-    /// Complete response for a Goal-bound turn. Carries the updated
-    /// Goal projection and the envelopes the App must persist before
-    /// rendering the turn as terminal or paused.
-    GoalResponseComplete {
-        text: String,
-        new_history: Vec<Message>,
-        goal_state: Box<GoalState>,
-        goal_events: Vec<GoalEventEnvelope>,
-        decision: GoalLoopDecision,
     },
     /// Managed provider produced a streamed delta for the current response.
     /// The TUI accumulates these into the in-flight assistant cell.

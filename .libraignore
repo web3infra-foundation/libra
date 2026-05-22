@@ -61,8 +61,7 @@ worker/cloudflare-env.d.ts
 worker/*.tsbuildinfo
 worker/coverage/
 
-# AI
-.codex
-.claude
-.antigravitycli
-.omo
+# Mac
+.DS_Store
+.gemini/
+gha-creds-*.json

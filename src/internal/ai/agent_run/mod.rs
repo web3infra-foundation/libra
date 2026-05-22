@@ -1,11 +1,11 @@
-//! Step 2 sub-agent contracts (CEX-S2-10 schema-first runtime contracts).
+//! Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold).
 //!
 //! # Status
 //!
 //! This module is **schema-only**: it defines the data types Step 2 will use,
-//! and the event vocabulary now used by the OC-Phase 3 sub-agent dispatcher.
-//! The richer task / patchset / merge schemas remain schema-first contracts;
-//! production runtime wiring still lives in `agent::runtime`.
+//! but no runtime, no dispatcher, no flag, no behaviour change. It is gated
+//! behind the `subagent-scaffold` Cargo feature and **never** linked in the
+//! default build. Production callers must not depend on it.
 //!
 //! # CP-4 gate violation
 //!
@@ -50,6 +50,7 @@
 //! future variants will carry payloads (maps), and `#[serde(other)]` requires
 //! a unit catch-all.
 
+#![cfg(feature = "subagent-scaffold")]
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};

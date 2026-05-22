@@ -262,7 +262,7 @@ Your branch is based on 'origin/main', but the upstream is gone.
 
 **设计决策：为什么不复用 `--quiet`？**
 
-- `--quiet` 是全局 flag（`src/cli.rs:240-244`），文档契约是 *”Suppress standard stdout output; keep warnings/errors on stderr”*——它是输出抑制，不携带控制流语义
+- `--quiet` 是全局 flag（`src/cli.rs:156-160`），文档契约是 *”Suppress standard stdout output; keep warnings/errors on stderr”*——它是输出抑制，不携带控制流语义
 - `git status` 本身没有 `--quiet` 选项。`git diff --quiet` 才是 Git 中提供 “dirty → exit 1” 的机制
 - 在全局 `--quiet` 上为单个命令附加 exit code 语义会违反最小惊讶原则——用户在其他命令上使用 `--quiet` 时不会期待退出码变化
 

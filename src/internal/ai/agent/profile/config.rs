@@ -36,8 +36,6 @@
 //!   (so warnings fire before the hard cap).
 //! - `max_concurrent_subagents` and `max_subagent_depth` are at
 //!   least 1 when `multi_agent.enabled = true`.
-//! - `subagent_timeout_ms` is greater than 0 when
-//!   `multi_agent.enabled = true`.
 //! - `auto_continue_on_resume` is one of `"ask"`, `"auto"`, `"never"`.
 //! - Per-agent `[code.budget.per_agent.<name>]` references an agent
 //!   declared under `[code.agents.<name>]`.
@@ -46,14 +44,12 @@
 //! provider exists) are NOT enforced here; the factory layer
 //! (OC-Phase 1) owns those.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::spec::{
-    AgentExecutionSpec, AgentMode, AgentPermissionSpec, ModelBinding, ToolSelection,
-};
+use super::spec::{AgentMode, ModelBinding, ToolSelection};
 
 /// Top-level config. Every subsection is optional so a partial
 /// `agents.toml` (e.g. only `[code.multi_agent]`) parses cleanly and
@@ -66,23 +62,6 @@ pub struct AgentsConfig {
 
     #[serde(default)]
     pub goal: GoalConfig,
-
-    /// `[code.sub_agents]` — the CEX-S2-12 flag-gated sub-agent
-    /// runtime. Defaults to `enabled = false` so existing
-    /// single-Agent installs are byte-equivalent pre/post upgrade.
-    /// Schema-only landing today: the runtime that consumes this
-    /// flag (single sub-agent behind flag + hook dispatch) is the
-    /// substantive CEX-S2-12 work and stays in its own card. Adding
-    /// the flag now lets future runtime code branch on
-    /// `cfg.sub_agents.enabled` without an extra schema patch.
-    ///
-    /// Distinct from [`multi_agent`](Self::multi_agent): that flag is
-    /// the OC-Phase 5 user-facing multi-agent mode (`/agents` slash
-    /// command, model bindings, etc.); `sub_agents` is the
-    /// CEX-S2-12 runtime gate for explorer/worker/reviewer sub-agent
-    /// types. Both keys can coexist and both default to disabled.
-    #[serde(default)]
-    pub sub_agents: SubAgentsConfig,
 
     /// Per-agent declarations keyed by agent name. The TOML form is
     /// `[code.agents.<name>]`; deserialisation maps the table key
@@ -112,9 +91,6 @@ pub struct MultiAgentConfig {
 
     #[serde(default = "default_max_concurrent_subagents")]
     pub max_concurrent_subagents: u32,
-
-    #[serde(default = "default_subagent_timeout_ms")]
-    pub subagent_timeout_ms: u64,
 }
 
 impl Default for MultiAgentConfig {
@@ -123,7 +99,6 @@ impl Default for MultiAgentConfig {
             enabled: false,
             max_subagent_depth: default_max_subagent_depth(),
             max_concurrent_subagents: default_max_concurrent_subagents(),
-            subagent_timeout_ms: default_subagent_timeout_ms(),
         }
     }
 }
@@ -133,72 +108,6 @@ fn default_max_subagent_depth() -> u32 {
 }
 fn default_max_concurrent_subagents() -> u32 {
     1
-}
-fn default_subagent_timeout_ms() -> u64 {
-    600_000
-}
-
-/// `[code.sub_agents]` — CEX-S2-12 sub-agent runtime gate.
-///
-/// Defaults to disabled per S2-INV-08 (Step 2 default off + flag-off
-/// rollback): a fresh install must observe byte-equivalent behaviour
-/// to Step 1, and any sub-agent attempt with `enabled = false` is a
-/// programmer error that fails closed at the dispatcher layer (the
-/// CEX-S2-12 dispatcher itself doesn't exist yet — this card only
-/// lands the schema).
-///
-/// `max_parallel = 2` matches the CEX-S2-14 scheduler-side observer
-/// budget; CEX-S2-12 enforces `max_parallel = 1` regardless (single
-/// sub-agent behind flag). The field is parsed here so a later
-/// CEX-S2-14 patch doesn't need to touch the config schema.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubAgentsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-
-    #[serde(default = "default_sub_agents_max_parallel")]
-    pub max_parallel: u32,
-
-    #[serde(default)]
-    pub auto_merge: AutoMergeConfig,
-}
-
-impl Default for SubAgentsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_parallel: default_sub_agents_max_parallel(),
-            auto_merge: AutoMergeConfig::default(),
-        }
-    }
-}
-
-fn default_sub_agents_max_parallel() -> u32 {
-    2
-}
-
-/// `[code.sub_agents.auto_merge]` — CEX-S2-15 auto-merge feature flag.
-///
-/// Defaults to disabled per CEX-S2-15 acceptance criterion (4):
-/// auto-merge of human-gated `MergeCandidate` instances may only be
-/// enabled after a 30-day operator-collected fixture demonstrates
-/// `conflict_rate < 5%` and `rollback_rate < 1%`. This card lands only
-/// the schema gate — the CEX-S2-15 ValidatorEngine + risk-score
-/// pipeline that consumes the flag does not exist yet.
-///
-/// Modelled as a structured subsection rather than a bare
-/// `auto_merge: bool` on [`SubAgentsConfig`] because CEX-S2-15 will
-/// need companion knobs (window length, minimum sample size, …) and
-/// adding fields inside an existing table is additive — widening a
-/// scalar field to a table later would be a breaking schema change.
-/// Landing the table shape now keeps the future CEX-S2-15 patch
-/// confined to validator wiring.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AutoMergeConfig {
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 /// `[code.goal]`. Mirrors the doc's defaults: feature off, ask before
@@ -318,70 +227,6 @@ impl AgentConfigEntry {
             ToolSelection::Allow(self.tools.iter().map(|t| t.trim().to_string()).collect())
         }
     }
-
-    /// Convert a validated TOML entry into the runtime
-    /// [`AgentExecutionSpec`] shape.
-    ///
-    /// Returns a validation-style error instead of panicking so callers
-    /// can surface one user-friendly config error path whether the
-    /// failure was found during `validate()` or during conversion.
-    pub fn to_execution_spec(
-        &self,
-        name: &str,
-    ) -> Result<AgentExecutionSpec, AgentsConfigValidationError> {
-        let model = ModelBinding::parse(&self.model).ok_or_else(|| {
-            AgentsConfigValidationError::InvalidModelBinding {
-                name: name.to_string(),
-                value: self.model.clone(),
-            }
-        })?;
-        let mode = parse_agent_mode(&self.mode).ok_or_else(|| {
-            AgentsConfigValidationError::InvalidAgentMode {
-                name: name.to_string(),
-                value: self.mode.clone(),
-            }
-        })?;
-        Ok(AgentExecutionSpec {
-            name: name.to_string(),
-            mode,
-            model: Some(model),
-            tools: self.tool_selection(),
-            permission: permission_spec_from_config(&self.permission),
-            max_steps: self.steps,
-            ..AgentExecutionSpec::default()
-        })
-    }
-}
-
-fn permission_spec_from_config(
-    permissions: &BTreeMap<String, PermissionPolicy>,
-) -> AgentPermissionSpec {
-    let mut allowed_tools = BTreeSet::new();
-    let mut denied_tools = BTreeSet::new();
-    for (permission, policy) in permissions {
-        let key = normalize_permission_key(permission);
-        match policy {
-            PermissionPolicy::Allow | PermissionPolicy::Ask => {
-                allowed_tools.insert(key);
-            }
-            PermissionPolicy::Deny => {
-                denied_tools.insert(key);
-            }
-        }
-    }
-    AgentPermissionSpec {
-        allowed_tools,
-        denied_tools,
-        ..AgentPermissionSpec::default()
-    }
-}
-
-fn normalize_permission_key(permission: &str) -> String {
-    match permission.trim() {
-        "write" => "edit".to_string(),
-        "bash" => "shell".to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn default_agent_mode_string() -> String {
@@ -496,21 +341,6 @@ pub enum AgentsConfigValidationError {
     MultiAgentMustBePositive { field: &'static str, value: u32 },
 
     #[error(
-        "multi_agent.subagent_timeout_ms must be greater than 0 when multi_agent.enabled is true"
-    )]
-    MultiAgentTimeoutMustBePositive,
-
-    #[error(
-        "sub_agents.max_parallel must be at least 1 when sub_agents.enabled is true (got {value})"
-    )]
-    SubAgentsMaxParallelMustBePositive { value: u32 },
-
-    #[error(
-        "sub_agents.auto_merge.enabled requires sub_agents.enabled = true (cannot auto-merge when the sub-agent runtime gate is off)"
-    )]
-    AutoMergeRequiresSubAgentsEnabled,
-
-    #[error(
         "budget.warn_session_cost_usd ({warn}) must be strictly less than max_session_cost_usd ({max})"
     )]
     SessionCostWarnNotBelowMax { warn: f64, max: f64 },
@@ -563,29 +393,6 @@ impl AgentsConfig {
         toml::to_string_pretty(&Wrapper { code: self })
     }
 
-    /// Convert every `[code.agents.<name>]` entry into executable
-    /// specs after running the same validation pass used at load time.
-    pub fn execution_specs(
-        &self,
-    ) -> Result<BTreeMap<String, AgentExecutionSpec>, AgentsConfigValidationErrors> {
-        self.validate()?;
-        let mut specs = BTreeMap::new();
-        let mut errors = Vec::new();
-        for (name, agent) in &self.agents {
-            match agent.to_execution_spec(name) {
-                Ok(spec) => {
-                    specs.insert(name.clone(), spec);
-                }
-                Err(error) => errors.push(error),
-            }
-        }
-        if errors.is_empty() {
-            Ok(specs)
-        } else {
-            Err(AgentsConfigValidationErrors { errors })
-        }
-    }
-
     /// Run the full validation pass. See module-level docs for the
     /// rules. Returns `Ok(())` only when the punch list is empty.
     pub fn validate(&self) -> Result<(), AgentsConfigValidationErrors> {
@@ -605,31 +412,6 @@ impl AgentsConfig {
                     value: 0,
                 });
             }
-            if self.multi_agent.subagent_timeout_ms == 0 {
-                errors.push(AgentsConfigValidationError::MultiAgentTimeoutMustBePositive);
-            }
-        }
-
-        // sub_agents.max_parallel must be >= 1 when the flag is on.
-        // Schema-only landing: the runtime that consumes this flag is
-        // CEX-S2-12 (single sub-agent behind flag); the validation
-        // here is the public contract surface so a future patch that
-        // wires the dispatcher cannot ship with the flag enabled but
-        // capped at zero.
-        if self.sub_agents.enabled && self.sub_agents.max_parallel == 0 {
-            errors
-                .push(AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 });
-        }
-
-        // auto_merge.enabled cannot be true while the parent sub_agents
-        // gate is off — that would be a programmer error declaring a
-        // dormant sub-feature enabled on a dormant runtime. Schema-only
-        // landing: the CEX-S2-15 ValidatorEngine + risk-score pipeline
-        // that actually consumes `auto_merge.enabled` does not exist
-        // yet, but the contract surface must reject the misconfigured
-        // combination at config load.
-        if self.sub_agents.auto_merge.enabled && !self.sub_agents.enabled {
-            errors.push(AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled);
         }
 
         // goal.auto_continue_on_resume value enum.
@@ -739,7 +521,6 @@ mod tests {
 enabled = false
 max_subagent_depth = 1
 max_concurrent_subagents = 1
-subagent_timeout_ms = 600000
 
 [code.goal]
 enabled = false
@@ -813,14 +594,6 @@ max_steps = 20
         assert!(!cfg.multi_agent.enabled);
         assert_eq!(cfg.multi_agent.max_subagent_depth, 1);
         assert_eq!(cfg.multi_agent.max_concurrent_subagents, 1);
-        assert_eq!(cfg.multi_agent.subagent_timeout_ms, 600_000);
-        // CEX-S2-12 sub_agents flag — default off, max_parallel = 2 per
-        // the scheduler-side observer budget in CEX-S2-14.
-        assert!(!cfg.sub_agents.enabled);
-        assert_eq!(cfg.sub_agents.max_parallel, 2);
-        // CEX-S2-15 auto_merge subsection — default off until the 30-day
-        // conflict_rate/rollback_rate fixture is collected.
-        assert!(!cfg.sub_agents.auto_merge.enabled);
         assert!(!cfg.goal.enabled);
         assert_eq!(cfg.goal.auto_continue_on_resume, "ask");
         assert_eq!(cfg.goal.max_continuation_loops, 50);
@@ -828,176 +601,6 @@ max_steps = 20
         assert!(cfg.agents.is_empty());
         assert!(cfg.compaction.is_none());
         assert!(cfg.budget.max_session_cost_usd.is_none());
-    }
-
-    /// `[code.sub_agents]` parses from TOML with both fields explicit
-    /// + the default empty form. Round-trips through `to_toml_string`.
-    #[test]
-    fn sub_agents_section_parses_and_round_trips() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = true
-max_parallel = 3
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        assert!(cfg.sub_agents.enabled);
-        assert_eq!(cfg.sub_agents.max_parallel, 3);
-        cfg.validate()
-            .expect("enabled + max_parallel >= 1 must validate");
-
-        // Round-trip: serialise then re-parse.
-        let serialised = cfg.to_toml_string().expect("to_toml");
-        let reparsed = AgentsConfig::from_toml_str(&serialised).expect("re-parse");
-        assert_eq!(reparsed.sub_agents, cfg.sub_agents);
-    }
-
-    /// `sub_agents.enabled = true` with `max_parallel = 0` must fail
-    /// validation per the schema contract — a flag-gated runtime
-    /// capped at zero would be a programmer error that should be
-    /// caught at config load, not after the dispatcher tries to spawn
-    /// the first sub-agent.
-    #[test]
-    fn sub_agents_max_parallel_must_be_positive_when_enabled() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = true
-max_parallel = 0
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        let err = cfg
-            .validate()
-            .expect_err("max_parallel = 0 with enabled = true must fail");
-        assert!(
-            err.errors.iter().any(|e| matches!(
-                e,
-                AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 }
-            )),
-            "expected SubAgentsMaxParallelMustBePositive, got {:?}",
-            err.errors,
-        );
-    }
-
-    /// `sub_agents.enabled = false` with `max_parallel = 0` must NOT
-    /// fail validation — the gate is off, so the cap is dormant and
-    /// the user shouldn't be forced to fix a stale leftover value
-    /// just to keep the flag turned off.
-    #[test]
-    fn sub_agents_max_parallel_zero_is_allowed_when_disabled() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = false
-max_parallel = 0
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        cfg.validate()
-            .expect("disabled + max_parallel = 0 must validate (gate is off)");
-    }
-
-    /// `deny_unknown_fields` on `SubAgentsConfig` catches typo'd keys
-    /// (`enable` vs `enabled`, `max_parallels` vs `max_parallel`) at
-    /// load time rather than silently accepting them.
-    #[test]
-    fn sub_agents_section_rejects_unknown_keys() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = true
-max_parallels = 3
-"#;
-        let err = AgentsConfig::from_toml_str(toml_str).expect_err("typo'd key must be rejected");
-        let message = err.to_string();
-        assert!(
-            message.contains("max_parallels") || message.contains("unknown field"),
-            "expected error to mention the unknown field, got: {message}",
-        );
-    }
-
-    /// `[code.sub_agents.auto_merge]` parses with `enabled = true` when
-    /// the parent `sub_agents` gate is also on, and round-trips through
-    /// `to_toml_string`. Mirrors `sub_agents_section_parses_and_round_trips`
-    /// to lock the auto_merge subsection as part of the public schema.
-    #[test]
-    fn sub_agents_auto_merge_parses_and_round_trips() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = true
-
-[code.sub_agents.auto_merge]
-enabled = true
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        assert!(cfg.sub_agents.enabled);
-        assert!(cfg.sub_agents.auto_merge.enabled);
-        cfg.validate()
-            .expect("auto_merge enabled with parent enabled must validate");
-
-        // Round-trip: serialise then re-parse — the nested table shape
-        // must survive without flattening into a scalar.
-        let serialised = cfg.to_toml_string().expect("to_toml");
-        let reparsed = AgentsConfig::from_toml_str(&serialised).expect("re-parse");
-        assert_eq!(reparsed.sub_agents, cfg.sub_agents);
-    }
-
-    /// `auto_merge.enabled = true` while `sub_agents.enabled = false`
-    /// is a programmer error: enabling a sub-feature gate on a dormant
-    /// runtime never executes anything, so it must fail at config load
-    /// rather than silently no-op.
-    #[test]
-    fn sub_agents_auto_merge_requires_parent_enabled() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = false
-
-[code.sub_agents.auto_merge]
-enabled = true
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        let err = cfg
-            .validate()
-            .expect_err("auto_merge enabled with parent disabled must fail");
-        assert!(
-            err.errors.iter().any(|e| matches!(
-                e,
-                AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled
-            )),
-            "expected AutoMergeRequiresSubAgentsEnabled, got {:?}",
-            err.errors,
-        );
-    }
-
-    /// `auto_merge.enabled = false` (default) with `sub_agents.enabled
-    /// = false` is the dormant baseline — both gates off must validate
-    /// cleanly so a fresh install never has to touch the sub_agents
-    /// table just to keep everything off.
-    #[test]
-    fn sub_agents_auto_merge_default_is_allowed_when_parent_disabled() {
-        let toml_str = r#"
-[code.sub_agents]
-enabled = false
-
-[code.sub_agents.auto_merge]
-enabled = false
-"#;
-        let cfg = AgentsConfig::from_toml_str(toml_str).expect("parses");
-        cfg.validate()
-            .expect("disabled + auto_merge disabled must validate (both gates off)");
-    }
-
-    /// `deny_unknown_fields` on `AutoMergeConfig` catches typo'd keys
-    /// (`enable` vs `enabled`) at load time rather than silently
-    /// accepting them — important because the auto-merge gate must
-    /// fail loud rather than appearing on by accident.
-    #[test]
-    fn sub_agents_auto_merge_rejects_unknown_keys() {
-        let toml_str = r#"
-[code.sub_agents.auto_merge]
-enable = true
-"#;
-        let err = AgentsConfig::from_toml_str(toml_str).expect_err("typo'd key must be rejected");
-        let message = err.to_string();
-        assert!(
-            message.contains("enable") || message.contains("unknown field"),
-            "expected error to mention the unknown field, got: {message}",
-        );
     }
 
     #[test]
@@ -1150,7 +753,6 @@ auto_continue_on_resume = "yolo"
 enabled = true
 max_subagent_depth = 0
 max_concurrent_subagents = 0
-subagent_timeout_ms = 0
 "#;
         let cfg = AgentsConfig::from_toml_str(toml_str).unwrap();
         let err = cfg.validate().expect_err("zero caps must fail");
@@ -1166,10 +768,6 @@ subagent_timeout_ms = 0
             fields,
             vec!["max_subagent_depth", "max_concurrent_subagents"]
         );
-        assert!(err.errors.iter().any(|e| matches!(
-            e,
-            AgentsConfigValidationError::MultiAgentTimeoutMustBePositive
-        )));
     }
 
     #[test]
@@ -1333,31 +931,6 @@ permission = { write = "deny", read = "allow", shell = "ask" }
     }
 
     #[test]
-    fn execution_specs_convert_toml_agents_for_runtime_dispatch() {
-        let cfg = AgentsConfig::from_toml_str(
-            r#"
-[code.agents.explorer]
-model = "deepseek/deepseek-chat"
-mode = "subagent"
-tools = ["read_file", "grep_files"]
-permission = { write = "deny", bash = "ask" }
-steps = 12
-"#,
-        )
-        .unwrap();
-
-        let specs = cfg.execution_specs().expect("valid config converts");
-        let spec = specs.get("explorer").expect("explorer spec");
-        assert_eq!(spec.name, "explorer");
-        assert_eq!(spec.mode, AgentMode::Subagent);
-        assert_eq!(spec.model.as_ref().unwrap().provider_id, "deepseek");
-        assert_eq!(spec.max_steps, Some(12));
-        assert!(matches!(spec.tools, ToolSelection::Allow(_)));
-        assert!(spec.permission.denied_tools.contains("edit"));
-        assert!(spec.permission.allowed_tools.contains("shell"));
-    }
-
-    #[test]
     fn agents_config_validation_error_display_pins_each_variant() {
         assert_eq!(
             AgentsConfigValidationError::InvalidModelBinding {
@@ -1407,16 +980,6 @@ steps = 12
              (got 0)",
         );
         assert_eq!(
-            AgentsConfigValidationError::MultiAgentTimeoutMustBePositive.to_string(),
-            "multi_agent.subagent_timeout_ms must be greater than 0 when multi_agent.enabled is \
-             true",
-        );
-        assert_eq!(
-            AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 }
-                .to_string(),
-            "sub_agents.max_parallel must be at least 1 when sub_agents.enabled is true (got 0)",
-        );
-        assert_eq!(
             AgentsConfigValidationError::SessionCostWarnNotBelowMax {
                 warn: 9.0,
                 max: 5.0,
@@ -1445,11 +1008,6 @@ steps = 12
             .to_string(),
             "budget.per_agent.unknown references an agent that is not declared under \
              [code.agents.unknown]",
-        );
-        assert_eq!(
-            AgentsConfigValidationError::AutoMergeRequiresSubAgentsEnabled.to_string(),
-            "sub_agents.auto_merge.enabled requires sub_agents.enabled = true (cannot auto-merge \
-             when the sub-agent runtime gate is off)",
         );
     }
 }
