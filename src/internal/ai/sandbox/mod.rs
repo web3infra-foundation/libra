@@ -1560,14 +1560,41 @@ fn resolve_seccomp_policy_env() -> Option<PathBuf> {
 /// then defaulting to `~/.libra/seccomp.bpf` when the env
 /// var is not set at all. Empty / whitespace-only env values
 /// explicitly disable seccomp and therefore block defaulting.
+///
+/// On Linux, if the env var is unset and the default file is
+/// missing, the v0.17.770
+/// [`seccomp_compile::ensure_compiled_seccomp_policy_at`] helper
+/// materialises it from the bundled JSON template before the
+/// `is_file()` filter runs. This means a fresh Linux install
+/// gets the default seccomp policy with zero operator action —
+/// the file is created on first dispatch and reused thereafter.
+/// Compile failures (unknown host arch, malformed bundled JSON)
+/// downgrade to None so the legacy "no fallback" behaviour
+/// kicks in; we never block a sandbox dispatch on a seccomp
+/// compile error.
 fn resolve_seccomp_policy_path() -> Option<PathBuf> {
     if std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV).is_some() {
         return resolve_seccomp_policy_env();
     }
 
-    dirs::home_dir()
-        .map(|home| home.join(DEFAULT_SECCOMP_POLICY_PATH))
-        .filter(|path| path.is_file())
+    let default_path = dirs::home_dir().map(|home| home.join(DEFAULT_SECCOMP_POLICY_PATH))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        if !default_path.is_file()
+            && let Err(err) = seccomp_compile::ensure_compiled_seccomp_policy_at(&default_path)
+        {
+            tracing::warn!(
+                error = %err,
+                path = %default_path.display(),
+                "failed to materialise default seccomp policy at first launch; \
+                 sandbox dispatch will run without seccomp enforcement",
+            );
+            return None;
+        }
+    }
+
+    Some(default_path).filter(|path| path.is_file())
 }
 
 async fn request_exec_approval(
