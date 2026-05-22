@@ -104,6 +104,7 @@
 | `ai_source_pool_test` | 2 | CEX-14 source-pool isolation and MCP integration tests | `src/internal/ai/session/` |
 | `ai_storage_flow_test` | 2 | Integration tests for AI object storage on local and R2 backends | `src/utils/storage/` |
 | `ai_subagent_contract_test` | 2 | CEX-S2-10 schema contract tests | `src/internal/ai/agent_run/` |
+| `ai_subagent_worktree_readonly_test` | 3 | OC-Phase 3 sub-agent registry pre-filter pins `apply_patch` + EDIT_TOOLS stripped under `[{edit:*:deny}]` | `src/internal/ai/tools/registry.rs`, `src/internal/ai/permission/` |
 | `ai_usage_stats_test` | 2 | CEX-16 usage stats persistence and aggregation tests | `src/internal/ai/usage/` |
 | `ai_usage_tui_test` | 2 | CEX-16 usage display formatting tests | `src/internal/ai/usage/` |
 | `ai_validation_decision_flow_test` | 2 | Phase D validation and decision derived-record tests | `src/internal/ai/orchestrator/` |
