@@ -42,6 +42,7 @@ use crate::internal::ai::{
         ContextFrameBuilder, ContextFrameCandidate, ContextFrameEvent, ContextFrameKind,
         ContextFrameSource, ContextSegmentKind, ContextTrustLevel,
     },
+    goal::GoalStopPolicy,
     hooks::{HookAction, HookRunner},
     session::jsonl::{SessionEvent, SessionJsonlStore},
     sources::{SourcePool, SourcePoolError, SourceToolNaming},
@@ -163,6 +164,26 @@ pub struct ToolLoopConfig {
     pub source_session_id: Option<String>,
     /// Whether assistant reasoning content should be retained in model history.
     pub preserve_reasoning_content: bool,
+    /// Optional Goal-mode stop policy that the supervisor-aware
+    /// driver consults to decide whether a finished tool-loop turn
+    /// releases the session to idle or feeds the supervisor for the
+    /// next iteration.
+    ///
+    /// `None` (the default) means the legacy non-Goal behaviour:
+    /// the tool loop ends after a single turn unless the model
+    /// continues. `Some(GoalStopPolicy::Normal)` is intentionally
+    /// equivalent — the field carries a `Some(GoalBound { goal_id })`
+    /// when callers want to pin a turn to a specific Goal, matching
+    /// the supervisor's [`GoalStopPolicy`] enum.
+    ///
+    /// Schema-only contract field for OC-Phase 6 P6.3: the
+    /// [`super::run_tool_loop_with_history_and_observer`] entry
+    /// point does **not** branch on this today — the Goal-aware
+    /// driver in `goal::driver` reads `GoalSupervisor::stop_policy`
+    /// directly. The field exists so future loop integrations can
+    /// thread the policy through the config without breaking the
+    /// existing call sites.
+    pub goal_stop_policy: Option<GoalStopPolicy>,
 }
 
 impl Default for ToolLoopConfig {
@@ -191,6 +212,7 @@ impl Default for ToolLoopConfig {
             source_pool: None,
             source_session_id: None,
             preserve_reasoning_content: false,
+            goal_stop_policy: None,
         }
     }
 }
@@ -1394,6 +1416,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     use super::*;
     use crate::internal::ai::{
@@ -1412,6 +1435,41 @@ mod tests {
         tools::{ToolHandler, ToolKind, ToolSpec},
         usage::UsageRecorder,
     };
+
+    /// Default `ToolLoopConfig` is the legacy non-Goal shape: the
+    /// schema-only `goal_stop_policy` field is `None`. The
+    /// supervisor-aware driver in `goal::driver` is the only caller
+    /// that reads this today and treats `None` as
+    /// `GoalStopPolicy::Normal`.
+    #[test]
+    fn tool_loop_config_default_goal_stop_policy_is_none() {
+        let config = ToolLoopConfig::default();
+        assert!(
+            config.goal_stop_policy.is_none(),
+            "schema-only field must default to None so existing callers stay on the legacy non-Goal path",
+        );
+    }
+
+    /// `goal_stop_policy` accepts a `GoalBound { goal_id }` policy
+    /// without translation — the field is a plain
+    /// `Option<GoalStopPolicy>` so future driver wiring can pattern
+    /// match on the variant directly. This pins the schema shape;
+    /// changing it (e.g. to `Option<Uuid>` or to a sibling enum)
+    /// trips this guard.
+    #[test]
+    fn tool_loop_config_accepts_goal_bound_stop_policy() {
+        let goal_id = Uuid::from_u128(0xbadc_afed_eadb_eef0_0000_0000_0000_0001);
+        let config = ToolLoopConfig {
+            goal_stop_policy: Some(GoalStopPolicy::GoalBound { goal_id }),
+            ..ToolLoopConfig::default()
+        };
+        match config.goal_stop_policy {
+            Some(GoalStopPolicy::GoalBound { goal_id: pinned }) => {
+                assert_eq!(pinned, goal_id);
+            }
+            other => panic!("unexpected goal_stop_policy shape: {other:?}"),
+        }
+    }
 
     #[derive(Clone)]
     struct MockModel;
@@ -1773,6 +1831,7 @@ mod tests {
                 source_pool: None,
                 source_session_id: None,
                 preserve_reasoning_content: false,
+                goal_stop_policy: None,
             },
             &mut observer,
         )
@@ -2452,6 +2511,7 @@ mod tests {
                 source_pool: None,
                 source_session_id: None,
                 preserve_reasoning_content: false,
+                goal_stop_policy: None,
             },
             &mut observer,
         )
@@ -2587,6 +2647,7 @@ mod tests {
                 source_pool: None,
                 source_session_id: None,
                 preserve_reasoning_content: false,
+                goal_stop_policy: None,
             },
             &mut observer,
         )

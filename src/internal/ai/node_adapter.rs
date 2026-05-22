@@ -254,6 +254,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 source_pool: None,
                 source_session_id: None,
                 preserve_reasoning_content: false,
+                goal_stop_policy: None,
             },
         }
     }
