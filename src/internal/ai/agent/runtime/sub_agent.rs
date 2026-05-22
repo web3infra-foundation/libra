@@ -639,6 +639,59 @@ impl<'a> DispatchContext<'a> {
             None => Ok(self.provider_build_options.clone()),
         }
     }
+
+    /// Build the child sub-agent's [`AnyCompletionModel`] for OC-Phase 3
+    /// P3.4 step 9 ("model build for child").
+    ///
+    /// Sequence:
+    /// 1. Verify `sub_spec.model` is `Some`; without a binding the
+    ///    sub-agent cannot run. Returns
+    ///    [`TaskFailure::ProviderError`] with a descriptive message
+    ///    rather than panicking — the dispatcher tail propagates this
+    ///    verbatim into the parent's transcript.
+    /// 2. Resolve [`ProviderBuildOptions`] via
+    ///    [`Self::resolve_provider_build_options`] (resolver-first,
+    ///    parent-clone fallback).
+    /// 3. Call [`ProviderFactory::build`] with the resolved binding +
+    ///    options. Factory errors map to
+    ///    [`TaskFailure::ProviderError`] carrying a
+    ///    [`CompletionError::ProviderError`] with the verbatim factory
+    ///    error message so the operator can see exactly which
+    ///    provider rejected the binding.
+    ///
+    /// The helper performs **no** I/O of its own — `ProviderFactory`
+    /// is env-free and the factory's `build` is a sync constructor
+    /// over already-resolved options. Networked provider clients open
+    /// connections lazily on the first request, so the helper can be
+    /// called from the dispatcher's sync gate path without making the
+    /// future block.
+    pub fn build_child_model(
+        &self,
+        sub_spec: &AgentExecutionSpec,
+    ) -> Result<crate::internal::ai::providers::AnyCompletionModel, TaskFailure> {
+        let binding = sub_spec.model.as_ref().ok_or_else(|| {
+            TaskFailure::ProviderError(CompletionError::ProviderError(format!(
+                "sub-agent `{name}` has no `model` binding; cannot build a CompletionModel",
+                name = sub_spec.name,
+            )))
+        })?;
+
+        let options = self
+            .resolve_provider_build_options(binding)
+            .map_err(|reason| {
+                TaskFailure::ProviderError(CompletionError::ProviderError(format!(
+                    "failed to resolve provider build options for `{provider}/{model}`: {reason}",
+                    provider = binding.provider_id,
+                    model = binding.model_id,
+                )))
+            })?;
+
+        self.provider_factory
+            .build(binding, options)
+            .map_err(|err| {
+                TaskFailure::ProviderError(CompletionError::ProviderError(err.to_string()))
+            })
+    }
 }
 
 pub struct SubAgentChildRunRequest<'a> {
@@ -1228,5 +1281,126 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, PermissionReply> {
             Box::pin(async { unreachable!("resolver fixture never reaches the step-8 ask path") })
         }
+    }
+
+    /// Build a `DispatchContext` parameterised on the parent options +
+    /// resolver, and run the closure with it. Used by the
+    /// `build_child_model` tests so the boilerplate doesn't crowd the
+    /// scenario assertions.
+    fn with_dispatch_context<R>(
+        parent_options: ProviderBuildOptions,
+        resolver: Option<&dyn ProviderBuildOptionsResolver>,
+        f: impl FnOnce(&DispatchContext<'_>) -> R,
+    ) -> R {
+        use crate::internal::ai::providers::ProviderFactory;
+
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding =
+            ModelBinding::parse("anthropic/claude-3-5-sonnet-latest").expect("parent binding");
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio rt");
+        let conn = rt
+            .block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("sqlite memory db");
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session".to_string();
+
+        let context = DispatchContext {
+            parent_thread_id: "thread",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &parent_options,
+            provider_build_options_resolver: resolver,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+        };
+
+        f(&context)
+    }
+
+    /// Scenario: a sub-agent spec with `model: None` cannot build a
+    /// CompletionModel. `build_child_model` surfaces this as a
+    /// structured `TaskFailure::ProviderError` rather than panicking
+    /// so the dispatcher tail can echo the reason into the parent
+    /// transcript.
+    #[test]
+    fn build_child_model_rejects_sub_spec_with_no_model_binding() {
+        use crate::internal::ai::providers::ProviderBuildOptions;
+
+        let sub_spec = AgentExecutionSpec {
+            name: "no-binding".to_string(),
+            model: None,
+            ..AgentExecutionSpec::default()
+        };
+
+        with_dispatch_context(ProviderBuildOptions::default(), None, |ctx| {
+            let err = ctx
+                .build_child_model(&sub_spec)
+                .expect_err("None binding must fail");
+            let message = err.to_string();
+            assert!(
+                message.contains("no `model` binding"),
+                "expected the missing-binding hint in the error, got: {message}",
+            );
+            assert!(
+                message.contains("no-binding"),
+                "expected the sub-spec name to be quoted, got: {message}",
+            );
+        });
+    }
+
+    /// Scenario: a sub-agent spec with an unknown provider id flows
+    /// through `ProviderFactory::build`'s `UnknownProvider` rejection
+    /// and surfaces as `TaskFailure::ProviderError` carrying the
+    /// factory's verbatim message — including the list of recognised
+    /// providers, so the operator can fix the binding without
+    /// trial-and-error.
+    #[test]
+    fn build_child_model_surfaces_provider_factory_unknown_provider() {
+        use crate::internal::ai::providers::ProviderBuildOptions;
+
+        let sub_spec = AgentExecutionSpec {
+            name: "bad-provider".to_string(),
+            model: ModelBinding::parse("definitely-not-a-real-provider/foo"),
+            ..AgentExecutionSpec::default()
+        };
+
+        with_dispatch_context(ProviderBuildOptions::default(), None, |ctx| {
+            let err = ctx
+                .build_child_model(&sub_spec)
+                .expect_err("unknown provider must fail");
+            let message = err.to_string();
+            assert!(
+                message.contains("unknown provider"),
+                "expected the factory's 'unknown provider' phrasing, got: {message}",
+            );
+            assert!(
+                message.contains("definitely-not-a-real-provider"),
+                "expected the offending provider id in the message, got: {message}",
+            );
+        });
     }
 }
