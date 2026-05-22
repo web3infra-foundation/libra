@@ -187,14 +187,19 @@ impl DefaultSubAgentDispatcher {
         // Step 5: SafetyDecision evaluate.
         //
         // TODO(OC-Phase 3 P3.4): wire `ToolBoundaryPolicy::decide`
-        // against a freshly-introduced `ToolOperation::SubAgentSpawn`
-        // variant carrying `{ name, prompt_digest }`. Today this is a
-        // documented no-op — P3.3 ships the gate ordering and the
-        // P3.4 PR will swap this stub for the real call without
-        // touching the surrounding capability gates. The dispatcher
-        // accepts any sub-spec that survived the prior gates; no
-        // semantic gap exists today because Libra has no
-        // `SubAgentSpawn` policy configured.
+        // against the `ToolOperation::sub_agent_spawn(name,
+        // prompt_digest)` operation that v0.17.712 already exposes.
+        // The remaining blocker is that `DispatchContext` does not
+        // carry a `ToolBoundaryPolicy` reference; wiring requires
+        // adding `tool_boundary_policy: Option<&ToolBoundaryPolicy>`
+        // to `DispatchContext` and threading the system principal
+        // from the parent runtime. Today this is a documented no-op
+        // — P3.3 ships the gate ordering and the P3.4 PR will swap
+        // this stub for the real call without touching the
+        // surrounding capability gates. The dispatcher accepts any
+        // sub-spec that survived the prior gates; no semantic gap
+        // exists today because Libra has no `SubAgentSpawn` policy
+        // configured.
         let _safety_decision_stub_marker = ();
 
         // Step 6: compute effective ruleset for the child.
