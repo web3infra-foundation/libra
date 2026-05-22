@@ -3390,8 +3390,8 @@ async fn build_subagent_runtime_for_session(
         agent::{
             profile::{AgentExecutionSpec, AgentMode, ModelBinding},
             runtime::{
-                AbortToken, ContextFrameLoader, DefaultSubAgentDispatcher,
-                DenyByDefaultPermissionAsker, MultiAgentConfig, PermissionAsker, PermissionService,
+                AbortToken, ChannelPermissionAsker, ContextFrameLoader, DefaultSubAgentDispatcher,
+                MultiAgentConfig, PermissionAsker, PermissionReply, PermissionService,
                 SubAgentToolLoopRuntime,
             },
         },
@@ -3420,10 +3420,49 @@ async fn build_subagent_runtime_for_session(
     )
     .with_default_child_runner();
 
-    let permission_service =
-        PermissionService::new(std::sync::Arc::new(DenyByDefaultPermissionAsker) as std::sync::Arc<
-            dyn PermissionAsker,
-        >);
+    // OC-Phase 3 P3.4 / P3.7 interactive permission asker (v0.17.788):
+    // construct a ChannelPermissionAsker + spawn a background
+    // consumer task that auto-rejects each ask while emitting a
+    // structured tracing event with the full ask context. This is
+    // the channel-plumbing wire-up that proves the path end-to-end;
+    // the follow-up replaces the auto-reject consumer with a real
+    // TUI prompt widget that surfaces each ask interactively.
+    //
+    // The consumer task lives for the entire session — when the
+    // session exits, the sender drops, the receiver's `recv()`
+    // returns None, and the task ends cleanly.
+    let (permission_ask_tx, mut permission_ask_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::internal::ai::agent::runtime::ChannelPermissionAsk,
+    >();
+    tokio::spawn(async move {
+        while let Some(ask) = permission_ask_rx.recv().await {
+            tracing::warn!(
+                permission = %ask.permission,
+                patterns = ?ask.patterns,
+                thread_id = %ask.thread_id,
+                session_id = %ask.session_id,
+                source = ?ask.source,
+                "permission ask received via ChannelPermissionAsker; \
+                 auto-rejecting until interactive TUI prompt widget lands",
+            );
+            // Send may fail if the dispatcher dropped its
+            // oneshot receiver (e.g. cancelled mid-await). Ignore
+            // the send error — the dispatcher already handles a
+            // closed reply channel by surfacing Reject.
+            let _ = ask.reply_tx.send(PermissionReply::Reject {
+                feedback: Some(
+                    "permission ask auto-rejected by the v0.17.788 channel consumer; \
+                     pre-grant the permission via [code.agents.<name>.permission] in \
+                     .libra/agents.toml or wait for the interactive TUI widget"
+                        .to_string(),
+                ),
+            });
+        }
+    });
+    let permission_service = PermissionService::new(
+        std::sync::Arc::new(ChannelPermissionAsker::new(permission_ask_tx))
+            as std::sync::Arc<dyn PermissionAsker>,
+    );
 
     let parent_model_binding = ModelBinding::parse(&format!("{provider_name}/{model_name}"))
         .ok_or_else(|| {
