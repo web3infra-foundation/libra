@@ -80,6 +80,16 @@ pub struct SandboxRuntimeConfig {
     /// `docs/improvement/sandbox.md` lines 142-144 / 162 / 373 for
     /// the doc contract this hook satisfies.
     pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
+    /// Optional seccomp BPF policy file path. When set on Linux
+    /// and the built-in bwrap path is selected,
+    /// [`runtime::create_bwrap_command_args_with_seccomp`] appends
+    /// `--seccomp <fd>` to the bwrap args and
+    /// [`runtime::install_seccomp_policy_pre_exec`] opens the
+    /// file in the child to populate that FD. Default `None`
+    /// keeps the pre-patch behaviour (no seccomp filter). See
+    /// `docs/improvement/sandbox.md` line 19 ("seccomp 注入") for
+    /// the doc contract.
+    pub seccomp_policy_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1262,6 +1272,7 @@ fn build_command_from_spec(
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
     let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
+    let seccomp_policy_path = sandbox_runtime.and_then(|cfg| cfg.seccomp_policy_path.as_deref());
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1272,6 +1283,7 @@ fn build_command_from_spec(
             use_linux_sandbox_bwrap,
             enforcement,
             deny_read_paths: &deny_read_paths,
+            seccomp_policy_path,
         })
         .map_err(|err| {
             // Doc contract: `docs/improvement/sandbox.md:143`, L162,

@@ -138,7 +138,22 @@ pub struct ExecEnv {
     pub justification: Option<String>,
     pub arg0: Option<String>,
     pub new_session: bool,
+    /// Optional seccomp BPF policy file. When `Some`, the
+    /// command's `pre_exec` hook opens this file inside the child
+    /// (just before exec) and dups it to [`SECCOMP_POLICY_FD`].
+    /// The bwrap arg vector includes `--seccomp <fd>` pointing at
+    /// the same FD number so bwrap finds the policy after exec.
+    /// See `docs/improvement/sandbox.md` line 19 ("seccomp 注入")
+    /// for the doc contract this satisfies.
+    pub seccomp_policy_path: Option<PathBuf>,
 }
+
+/// Fixed file-descriptor number used to hand a seccomp BPF policy
+/// to a bwrap child. Stable across runs so the bwrap arg vector
+/// can include `--seccomp 200` literally. 200 is well above the
+/// stdin/stdout/stderr (0/1/2) range and any rust-stdlib-internal
+/// FDs.
+pub const SECCOMP_POLICY_FD: i32 = 200;
 
 impl ExecEnv {
     pub fn into_command(self) -> Result<(Command, Option<u64>), String> {
@@ -154,8 +169,81 @@ impl ExecEnv {
         if self.new_session {
             configure_new_session(&mut command);
         }
+        if let Some(path) = self.seccomp_policy_path {
+            install_seccomp_policy_pre_exec(&mut command, path);
+        }
         Ok((command, self.timeout_ms))
     }
+}
+
+/// Install a `pre_exec` hook that opens the seccomp BPF policy
+/// file inside the child (between fork and exec) and dups it to
+/// [`SECCOMP_POLICY_FD`]. The FD is opened without `O_CLOEXEC` so
+/// it survives the exec, and bwrap picks it up via the
+/// `--seccomp <fd>` argument the parent already baked into the
+/// command vector.
+///
+/// On non-unix platforms this is a no-op: the seccomp wire-up is
+/// a Linux-only feature and the bwrap path itself never selects
+/// on non-Linux. The function is compiled but inert so the
+/// `into_command` call site doesn't need to platform-gate.
+#[cfg(unix)]
+fn install_seccomp_policy_pre_exec(command: &mut Command, policy_path: PathBuf) {
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: `pre_exec` runs in the child after fork and before
+    // exec. The closure performs only async-signal-safe libc
+    // calls (`open`, `dup2`, `close`, `fcntl`) and converts errno
+    // into owned `std::io::Error` values. No allocator calls in
+    // the hot path beyond the `CString` constructed in the
+    // parent before fork.
+    let path_bytes = policy_path.as_os_str().as_bytes().to_vec();
+    let path_cstr = match std::ffi::CString::new(path_bytes) {
+        Ok(c) => c,
+        Err(_) => {
+            tracing::warn!(
+                path = %policy_path.display(),
+                "seccomp policy path contains interior NUL; ignoring pre_exec hook"
+            );
+            return;
+        }
+    };
+    unsafe {
+        command.pre_exec(move || {
+            let raw = libc::open(path_cstr.as_ptr(), libc::O_RDONLY);
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if raw != SECCOMP_POLICY_FD {
+                if libc::dup2(raw, SECCOMP_POLICY_FD) < 0 {
+                    let err = std::io::Error::last_os_error();
+                    libc::close(raw);
+                    return Err(err);
+                }
+                libc::close(raw);
+            }
+            // Ensure the FD survives exec by stripping CLOEXEC.
+            // `dup2` already returns a CLOEXEC-cleared FD per
+            // POSIX, but be explicit so the contract is robust
+            // against future kernel changes.
+            let flags = libc::fcntl(SECCOMP_POLICY_FD, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(SECCOMP_POLICY_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn install_seccomp_policy_pre_exec(_command: &mut Command, _policy_path: PathBuf) {
+    // Seccomp is a Linux feature; non-unix platforms never set
+    // `seccomp_policy_path`, so this branch is unreachable in
+    // practice. The stub exists so callers don't need
+    // platform-gating.
 }
 
 #[cfg(unix)]
@@ -185,6 +273,15 @@ pub struct SandboxTransformRequest<'a> {
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
     pub deny_read_paths: &'a [PathBuf],
+    /// Optional seccomp BPF policy file path. When set on Linux
+    /// and the built-in bwrap path is selected,
+    /// [`create_bwrap_command_args_with_seccomp`] adds
+    /// `--seccomp <fd>` to the bwrap args and
+    /// [`install_seccomp_policy_pre_exec`] opens the file in the
+    /// child to populate that FD. Ignored on non-Linux and when
+    /// the external helper path is taken (the helper has its own
+    /// seccomp story).
+    pub seccomp_policy_path: Option<&'a Path>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -277,7 +374,9 @@ impl SandboxManager {
             use_linux_sandbox_bwrap,
             enforcement,
             deny_read_paths,
+            seccomp_policy_path,
         } = request;
+        let seccomp_policy_path_for_transform = seccomp_policy_path.map(|p| p.to_path_buf());
 
         #[cfg(not(target_os = "linux"))]
         let _ = use_linux_sandbox_bwrap;
@@ -362,28 +461,36 @@ impl SandboxManager {
                             SandboxType::LinuxSeccomp,
                         )
                     } else if let Some(bwrap_path) = locate_bwrap_binary() {
-                        // OC-Phase 7 P0 #2: built-in bwrap real-execution
-                        // path. When the external `libra-linux-sandbox`
-                        // helper is not configured but `bwrap` is on the
-                        // host PATH, construct the bwrap command directly
-                        // via `create_bwrap_command_args` instead of
-                        // falling back to no-sandbox. This closes the
-                        // doc gap at sandbox.md L26 ("内建 bwrap 执行
-                        // 选择...仍未进入主干实现") and the previous
-                        // EnforcementFailed reason string that
-                        // explicitly named "the built-in bwrap sandbox
-                        // is not available yet".
-                        let mut bwrap_args = create_bwrap_command_args(
+                        // OC-Phase 7 P0 #2 + #3: built-in bwrap
+                        // real-execution path with optional seccomp
+                        // BPF policy injection. The bwrap command is
+                        // constructed via
+                        // `create_bwrap_command_args_with_seccomp` so
+                        // `--seccomp <SECCOMP_POLICY_FD>` is appended
+                        // when a policy file is configured. The
+                        // matching `pre_exec` hook in
+                        // `ExecEnv::into_command` opens the file in
+                        // the child to populate the FD. See
+                        // `docs/improvement/sandbox.md` line 19 for
+                        // the doc contract.
+                        let seccomp_fd = if seccomp_policy_path_for_transform.is_some() {
+                            Some(SECCOMP_POLICY_FD)
+                        } else {
+                            None
+                        };
+                        let mut bwrap_args = create_bwrap_command_args_with_seccomp(
                             command,
                             policy,
                             sandbox_policy_cwd,
                             deny_read_paths,
+                            seccomp_fd,
                         );
                         let mut full = Vec::with_capacity(1 + bwrap_args.len());
                         full.push(bwrap_path.to_string_lossy().into_owned());
                         full.append(&mut bwrap_args);
                         tracing::info!(
                             bwrap = %bwrap_path.display(),
+                            seccomp = ?seccomp_policy_path_for_transform.as_deref(),
                             "using built-in bwrap sandbox (LIBRA_LINUX_SANDBOX_EXE unset; helper-less path)",
                         );
                         (
@@ -433,6 +540,7 @@ impl SandboxManager {
                 effective_sandbox,
                 SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
             ),
+            seccomp_policy_path: seccomp_policy_path_for_transform,
         })
     }
 }
@@ -478,11 +586,37 @@ pub fn create_bwrap_command_args(
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
 ) -> Vec<String> {
+    create_bwrap_command_args_with_seccomp(
+        command,
+        sandbox_policy,
+        sandbox_policy_cwd,
+        deny_read_paths,
+        None,
+    )
+}
+
+/// `create_bwrap_command_args` plus optional `--seccomp <fd>`
+/// wiring. When `seccomp_fd` is `Some(fd)`, the argument vector
+/// includes `--seccomp <fd>` so bwrap loads the BPF policy from
+/// the inherited file descriptor. The caller is responsible for
+/// keeping the FD open across exec — see
+/// [`install_seccomp_policy_pre_exec`].
+pub fn create_bwrap_command_args_with_seccomp(
+    command: Vec<String>,
+    sandbox_policy: &SandboxPolicy,
+    sandbox_policy_cwd: &Path,
+    deny_read_paths: &[PathBuf],
+    seccomp_fd: Option<i32>,
+) -> Vec<String> {
     let mut args = vec![
         "--unshare-all".to_string(),
         "--die-with-parent".to_string(),
         "--new-session".to_string(),
     ];
+    if let Some(fd) = seccomp_fd {
+        args.push("--seccomp".to_string());
+        args.push(fd.to_string());
+    }
     if sandbox_policy.has_full_network_access() {
         args.push("--share-net".to_string());
     } else {
@@ -826,6 +960,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let transformed = manager
@@ -860,6 +995,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let error = manager
@@ -943,6 +1079,125 @@ mod tests {
         let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[secret]);
 
         assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
+    }
+
+    /// `create_bwrap_command_args_with_seccomp` appends
+    /// `--seccomp <fd>` when a seccomp FD is supplied, and omits
+    /// the arg when `None`. Pin the contract that the seccomp arg
+    /// pair is contiguous and ordered (so a future refactor that
+    /// splits them across other flags trips loud) and that it
+    /// appears before the command delimiter `--`.
+    #[test]
+    fn create_bwrap_command_args_with_seccomp_appends_fd_arg_when_supplied() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let with_seccomp = create_bwrap_command_args_with_seccomp(
+            command(),
+            &policy,
+            cwd,
+            &[],
+            Some(SECCOMP_POLICY_FD),
+        );
+        let seccomp_idx = with_seccomp
+            .iter()
+            .position(|arg| arg == "--seccomp")
+            .expect("--seccomp must be present when fd supplied");
+        assert_eq!(
+            with_seccomp.get(seccomp_idx + 1),
+            Some(&SECCOMP_POLICY_FD.to_string()),
+        );
+        let delim_idx = with_seccomp
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("command delimiter must be present");
+        assert!(
+            seccomp_idx < delim_idx,
+            "--seccomp must precede the command delimiter; got seccomp={seccomp_idx} delim={delim_idx}",
+        );
+
+        let without_seccomp =
+            create_bwrap_command_args_with_seccomp(command(), &policy, cwd, &[], None);
+        assert!(
+            !without_seccomp.iter().any(|arg| arg == "--seccomp"),
+            "--seccomp must be absent when fd is None",
+        );
+    }
+
+    /// `transform` propagates the configured seccomp policy path
+    /// into the returned [`ExecEnv`] so the matching `pre_exec`
+    /// hook can open the file in the child. Linux-only because the
+    /// built-in bwrap path is gated to that platform.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_threads_seccomp_policy_into_exec_env_on_linux_bwrap_path() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for seccomp threading test");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+        let policy_file = tmpdir.path().join("seccomp.bpf");
+        std::fs::write(&policy_file, b"\x00").unwrap();
+
+        let prior_bwrap = std::env::var_os("LIBRA_BWRAP_BINARY");
+        // SAFETY: test-only env mutation; restored below.
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Denied,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: Some(policy_file.as_path()),
+        };
+
+        let result = manager.transform(request);
+        unsafe {
+            if let Some(value) = prior_bwrap {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        let env = result.expect("built-in bwrap with seccomp policy must succeed");
+        assert_eq!(
+            env.seccomp_policy_path.as_deref(),
+            Some(policy_file.as_path())
+        );
+        let seccomp_idx = env
+            .command
+            .iter()
+            .position(|arg| arg == "--seccomp")
+            .expect("--seccomp must be threaded into the built-in bwrap command");
+        assert_eq!(
+            env.command.get(seccomp_idx + 1),
+            Some(&SECCOMP_POLICY_FD.to_string()),
+        );
     }
 
     /// `locate_bwrap_binary` honours the `LIBRA_BWRAP_BINARY`
@@ -1078,6 +1333,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let result = manager.transform(request);
@@ -1173,6 +1429,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let error = manager
@@ -1209,6 +1466,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let transformed = manager
@@ -1235,6 +1493,7 @@ mod tests {
             justification: None,
             arg0: None,
             new_session: true,
+            seccomp_policy_path: None,
         };
         let (mut command, _) = env.into_command().expect("exec env should build");
         let mut child = command.spawn().expect("child should spawn");
