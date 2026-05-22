@@ -2874,6 +2874,23 @@ where
     // `code.sub_agents.enabled = true` with a malformed agents
     // block degrades to the same "task tool not available" UX
     // an operator sees with the flag off.
+    //
+    // OC-Phase 4 P4.4 diagnostic (v0.17.783): if the operator
+    // configured `[code.compaction]`, log the resolved model
+    // binding so an operator can confirm the binding round-trip
+    // works before the dispatcher-side integration lands. A
+    // future commit consumes this binding in
+    // `build_subagent_runtime_for_session` to route parent
+    // frames through `run_compaction(...)` before feeding the
+    // child via `ContextHandoff::to_handoff_messages`.
+    if let Some(binding) = agents_config.compaction_model_binding() {
+        tracing::info!(
+            provider = %binding.provider_id,
+            model = %binding.model_id,
+            "compaction model binding resolved from [code.compaction]; \
+             dispatcher integration is a v0.17.783+ follow-up",
+        );
+    }
     if agents_config.sub_agents.enabled {
         match build_subagent_runtime_for_session(
             &agents_config,
