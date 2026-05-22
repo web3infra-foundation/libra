@@ -857,6 +857,13 @@ const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMAND_TMPDIR_PREFIX: &str = "libra-sandbox-";
 const COMMAND_TMPDIR_CREATE_ATTEMPTS: usize = 8;
 const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
+/// Environment variable users export to opt into seccomp BPF
+/// policy injection without editing `SandboxRuntimeConfig`
+/// directly. Value is an absolute path to a precompiled BPF
+/// binary (output of `seccompiler --output bpf-bin` or
+/// equivalent). See `docs/sandbox-seccomp.md` for the recommended
+/// policy and compilation steps.
+const SANDBOX_SECCOMP_POLICY_ENV: &str = "LIBRA_SECCOMP_POLICY";
 const SANDBOX_CONFIG_FILE: &str = "sandbox.toml";
 #[cfg(unix)]
 const COMMAND_TMPDIR_MODE: u32 = 0o700;
@@ -1272,7 +1279,10 @@ fn build_command_from_spec(
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
     let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
-    let seccomp_policy_path = sandbox_runtime.and_then(|cfg| cfg.seccomp_policy_path.as_deref());
+    let seccomp_env_path = resolve_seccomp_policy_env();
+    let seccomp_policy_path = sandbox_runtime
+        .and_then(|cfg| cfg.seccomp_policy_path.as_deref())
+        .or(seccomp_env_path.as_deref());
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1473,6 +1483,22 @@ fn env_flag_enabled(name: &str) -> bool {
         let value = value.to_string_lossy().to_ascii_lowercase();
         matches!(value.as_str(), "1" | "true" | "yes" | "on")
     })
+}
+
+/// Read `LIBRA_SECCOMP_POLICY` and return it as a `PathBuf` when
+/// set to a non-empty value. Used by `build_command_from_spec` as
+/// a fallback when `SandboxRuntimeConfig::seccomp_policy_path`
+/// is `None`, so users can opt into seccomp without editing
+/// in-process config. An empty / whitespace-only value is
+/// treated as unset.
+fn resolve_seccomp_policy_env() -> Option<PathBuf> {
+    let raw = std::env::var(SANDBOX_SECCOMP_POLICY_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
 }
 
 async fn request_exec_approval(
@@ -1939,6 +1965,50 @@ mod tests {
             error,
             "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
         );
+    }
+
+    /// `LIBRA_SECCOMP_POLICY` env var resolves to a `PathBuf`
+    /// when set to a non-empty value; whitespace-only and unset
+    /// both yield `None` so users can clear the policy by
+    /// `unset LIBRA_SECCOMP_POLICY` rather than needing to set
+    /// an empty string sentinel. Pins the contract that env-var
+    /// seccomp opt-in is the lowest-friction path for users who
+    /// don't customise `SandboxRuntimeConfig` directly.
+    #[test]
+    fn seccomp_policy_env_resolves_path_only_when_non_empty() {
+        // SAFETY: test-only env mutation. The whole block runs
+        // single-threaded under the lib test harness and restores
+        // any prior value after each assertion so other tests
+        // remain isolated.
+        let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
+        unsafe {
+            std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+        }
+        assert!(resolve_seccomp_policy_env().is_none(), "unset env → None");
+
+        unsafe {
+            std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, "   ");
+        }
+        assert!(
+            resolve_seccomp_policy_env().is_none(),
+            "whitespace-only env → None so a stale `export VAR=' '` doesn't accidentally enable seccomp",
+        );
+
+        unsafe {
+            std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, "/etc/libra/seccomp.bpf");
+        }
+        assert_eq!(
+            resolve_seccomp_policy_env().as_deref(),
+            Some(std::path::Path::new("/etc/libra/seccomp.bpf")),
+        );
+
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, value);
+            } else {
+                std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+            }
+        }
     }
 
     #[test]
