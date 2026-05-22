@@ -115,6 +115,19 @@ pub struct DefaultSubAgentDispatcher {
     registry: Arc<dyn AgentSpecRegistry>,
     config: MultiAgentConfig,
     in_flight: Arc<AtomicU32>,
+    /// Optional child runner the dispatcher delegates to after the
+    /// gates clear. When `Some`, the dispatcher tail constructs a
+    /// [`SubAgentChildRunRequest`] from the current dispatch state
+    /// and calls `runner.run(...).await` instead of synthesising the
+    /// P3.3-era placeholder `TaskResult`. When `None`, the dispatcher
+    /// falls back to the placeholder so existing call sites (and the
+    /// gate-only tests) keep working unchanged.
+    ///
+    /// The field is plumbed now so the P3.4 child-loop PR is purely
+    /// additive: that PR ships the `RealChildRunner` implementation
+    /// and a `with_child_runner` constructor; nothing else in the
+    /// dispatcher needs to change.
+    child_runner: Option<Arc<dyn super::sub_agent::SubAgentChildRunner>>,
 }
 
 impl DefaultSubAgentDispatcher {
@@ -123,7 +136,25 @@ impl DefaultSubAgentDispatcher {
             registry,
             config,
             in_flight: Arc::new(AtomicU32::new(0)),
+            child_runner: None,
         }
+    }
+
+    /// Attach a [`SubAgentChildRunner`] to the dispatcher. The runner
+    /// is consulted after every gate (1-8) clears and the Spawned
+    /// event is written; its `TaskResult` (or `TaskFailure`) becomes
+    /// the dispatch's outcome, and the dispatcher writes the
+    /// matching `Completed` / `Failed` lifecycle event before
+    /// returning. Production wires the OC-Phase 3 P3.4 implementation
+    /// via this seam; tests can supply a deterministic stub.
+    ///
+    /// [`SubAgentChildRunner`]: super::sub_agent::SubAgentChildRunner
+    pub fn with_child_runner(
+        mut self,
+        runner: Arc<dyn super::sub_agent::SubAgentChildRunner>,
+    ) -> Self {
+        self.child_runner = Some(runner);
+        self
     }
 
     /// Number of dispatches currently running (test introspection only).
@@ -408,47 +439,73 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 );
             }
 
-            // Steps 9-13 land in subsequent OC-Phase 3 PRs. Today the
-            // placeholder tail produces a TaskResult shaped from the
-            // resolved spec so gate-success is observable end-to-end.
-            let task_id = invocation.task_id.clone().unwrap_or_else(|| {
-                // Bind the placeholder task id to the run id so future
-                // call sites that grep the JSONL stream can correlate
-                // the synthetic placeholder back to its `Spawned`
-                // event. P3.4 replaces this with a real AgentTaskId
-                // minted alongside the child run.
-                format!("task-placeholder-{}", agent_run_id.0)
-            });
-            let result = TaskResult {
-                task_id,
-                agent_name: sub_spec.name.clone(),
-                provider_id,
-                model_id,
-                final_text: String::new(),
-                steps_used: 0,
-                usage: CompletionUsageSummary::default(),
+            // Bind the task id to the run id so future call sites
+            // that grep the JSONL stream can correlate the dispatch
+            // back to its `Spawned` event. Both the P3.4 child runner
+            // and the legacy placeholder tail consume the same id.
+            let task_id = invocation
+                .task_id
+                .clone()
+                .unwrap_or_else(|| format!("task-placeholder-{}", agent_run_id.0));
+
+            // Steps 9-13: when a child runner is registered, delegate
+            // to it. Otherwise fall back to the P3.3-era placeholder
+            // so existing gate-only tests keep working unchanged. The
+            // runner branch is the seam OC-Phase 3 P3.4 fills in;
+            // today every test path takes the placeholder branch.
+            let outcome = if let Some(runner) = self.child_runner.as_ref() {
+                let request = super::sub_agent::SubAgentChildRunRequest {
+                    ctx: &ctx,
+                    invocation: &invocation,
+                    sub_spec: &sub_spec,
+                    effective_ruleset: &_effective,
+                    task_id: task_id.clone(),
+                    agent_run_id,
+                };
+                runner.run(request).await
+            } else {
+                Ok(TaskResult {
+                    task_id,
+                    agent_name: sub_spec.name.clone(),
+                    provider_id,
+                    model_id,
+                    final_text: String::new(),
+                    steps_used: 0,
+                    usage: CompletionUsageSummary::default(),
+                })
             };
 
-            // P3.5: mirror the dispatch tail with `Completed`. Today
-            // the placeholder result is always successful so this is
-            // the only terminal event; P3.4 adds the real child loop
-            // and the `Failed` / `Cancelled` / `TimedOut` companions.
+            // P3.5: mirror the dispatch tail with the matching
+            // lifecycle event. `Completed` for the success branch;
+            // `Failed { reason }` for the failure branch (the reason
+            // free-form text comes from the TaskFailure's Display so
+            // replay tooling sees the same diagnostic the parent
+            // does). Best-effort: append failures degrade to
+            // tracing::warn rather than overriding the outcome.
+            let terminal_event = match &outcome {
+                Ok(_) => AgentRunEvent::Completed { agent_run_id },
+                Err(failure) => AgentRunEvent::Failed {
+                    agent_run_id,
+                    reason: failure.to_string(),
+                },
+            };
             if let Err(err) =
                 ctx.session_store
                     .append(&SessionEvent::AgentRun(AgentRunEventEnvelope::from(
-                        AgentRunEvent::Completed { agent_run_id },
+                        terminal_event,
                     )))
             {
                 tracing::warn!(
                     error = %err,
                     agent_run_id = %agent_run_id.0,
                     subagent = %invocation.subagent_type,
-                    "failed to append AgentRunEvent::Completed to parent session JSONL"
+                    outcome_ok = outcome.is_ok(),
+                    "failed to append AgentRunEvent::Completed/Failed to parent session JSONL"
                 );
             }
 
             // `_slot` drops here, releasing the concurrency slot.
-            Ok(result)
+            outcome
         })
     }
 }
@@ -1541,6 +1598,189 @@ mod tests {
                 );
             }
             other => panic!("second event must be Completed, got {other:?}"),
+        }
+    }
+
+    /// OC-Phase 3 P3.4 seam: when a `SubAgentChildRunner` is attached
+    /// via `with_child_runner`, the dispatcher delegates the result
+    /// to it instead of synthesising the legacy placeholder. The
+    /// `Spawned` event still fires up front, and the runner's
+    /// outcome (Ok or Err) flips the terminal event between
+    /// `Completed` and `Failed`.
+    #[tokio::test]
+    async fn dispatch_delegates_to_child_runner_when_attached_and_writes_completed() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+
+        // A deterministic runner that returns a recognisable
+        // TaskResult so the test can assert it propagated through.
+        struct ConstantRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for ConstantRunner {
+            fn run<'a>(
+                &'a self,
+                request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                let task_id = request.task_id.clone();
+                let agent_name = request.sub_spec.name.clone();
+                Box::pin(async move {
+                    Ok(TaskResult {
+                        task_id,
+                        agent_name,
+                        provider_id: "runner-provider".to_string(),
+                        model_id: "runner-model".to_string(),
+                        final_text: "runner produced this".to_string(),
+                        steps_used: 7,
+                        usage: CompletionUsageSummary::default(),
+                    })
+                })
+            }
+        }
+
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let dispatcher = dispatcher.with_child_runner(Arc::new(ConstantRunner));
+
+        let mut sub = explore_subagent();
+        sub.model = ModelBinding::parse("anthropic/claude-3-5-haiku-latest");
+        registry.insert(sub);
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-runner".to_string();
+        let parent_session: SessionId = "session-runner".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect("runner returned Ok");
+        assert_eq!(result.final_text, "runner produced this");
+        assert_eq!(result.steps_used, 7);
+        assert_eq!(result.provider_id, "runner-provider");
+
+        let events: Vec<_> = store
+            .load_events()
+            .expect("JSONL readable")
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                crate::internal::ai::session::jsonl::SessionEvent::AgentRun(known) => {
+                    known.known().cloned()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "runner success must still emit Spawned + Completed"
+        );
+        assert!(matches!(events[0], AgentRunEvent::Spawned { .. }));
+        assert!(matches!(events[1], AgentRunEvent::Completed { .. }));
+    }
+
+    /// Symmetric counterpart: a runner that returns `TaskFailure`
+    /// flips the terminal event to `Failed { reason }`, with the
+    /// reason text matching the failure's Display output so replay
+    /// tooling sees the same diagnostic the parent does.
+    #[tokio::test]
+    async fn dispatch_runner_error_emits_failed_event_with_reason() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+
+        struct FailingRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for FailingRunner {
+            fn run<'a>(
+                &'a self,
+                _request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async {
+                    Err(TaskFailure::Timeout {
+                        wall_clock_ms: 60_000,
+                    })
+                })
+            }
+        }
+
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let dispatcher = dispatcher.with_child_runner(Arc::new(FailingRunner));
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-fail".to_string();
+        let parent_session: SessionId = "session-fail".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let err = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("runner returned Err must surface from dispatch");
+        assert!(matches!(err, TaskFailure::Timeout { .. }));
+
+        let events: Vec<_> = store
+            .load_events()
+            .expect("JSONL readable")
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                crate::internal::ai::session::jsonl::SessionEvent::AgentRun(known) => {
+                    known.known().cloned()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "runner failure must still emit Spawned + Failed"
+        );
+        assert!(matches!(events[0], AgentRunEvent::Spawned { .. }));
+        match &events[1] {
+            AgentRunEvent::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("60000"),
+                    "Failed.reason must surface the failure's Display output, got: {reason}",
+                );
+            }
+            other => panic!("expected Failed terminal event, got {other:?}"),
         }
     }
 }
