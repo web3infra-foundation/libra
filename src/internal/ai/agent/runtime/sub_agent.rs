@@ -761,12 +761,35 @@ impl DefaultSubAgentChildRunner {
     }
 }
 
+/// Lightweight tool-loop observer that accumulates the per-turn
+/// count and the total usage seen during a child run. The child
+/// runner uses this to surface real `steps_used` / `usage` on the
+/// returned `TaskResult` instead of always reporting 1 / default.
+#[derive(Debug, Default)]
+struct ChildRunObserver {
+    steps_used: u32,
+    usage: CompletionUsageSummary,
+}
+
+impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
+    fn on_model_turn_start(&mut self, _turn: usize) {
+        self.steps_used = self.steps_used.saturating_add(1);
+    }
+
+    fn on_model_usage(&mut self, usage: &CompletionUsageSummary) {
+        // Delegate to the canonical accumulator — every existing
+        // `merge_optional_*` rule applies (saturating add, None
+        // collapses to existing).
+        self.usage.merge(usage);
+    }
+}
+
 impl SubAgentChildRunner for DefaultSubAgentChildRunner {
     fn run<'a>(
         &'a self,
         request: SubAgentChildRunRequest<'a>,
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
-        use super::tool_loop::{ToolLoopConfig, run_tool_loop};
+        use super::tool_loop::{ToolLoopConfig, run_tool_loop_with_history_and_observer};
 
         Box::pin(async move {
             // Pre-flight cancel: matches the dispatcher's post-ask
@@ -818,30 +841,31 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 ..ToolLoopConfig::default()
             };
 
-            let final_text = run_tool_loop(
+            // Drive the history-aware tool loop with our observer so
+            // the returned `TaskResult` reports the real per-turn
+            // count and accumulated usage instead of a `1` / default
+            // placeholder. History starts empty; the loop folds the
+            // user prompt + every assistant / tool turn inside.
+            let mut observer = ChildRunObserver::default();
+            let turn = run_tool_loop_with_history_and_observer(
                 &model,
+                Vec::new(),
                 request.invocation.prompt.clone(),
                 request.ctx.tool_registry,
                 tool_loop_config,
+                &mut observer,
             )
             .await
             .map_err(TaskFailure::ProviderError)?;
 
-            // `steps_used = 1` for this iteration — the simple
-            // `run_tool_loop` entrypoint returns only the final text
-            // and not the per-turn count. A follow-up swap to
-            // `run_tool_loop_with_history_and_observer` surfaces the
-            // real value from `ToolLoopTurn::steps`. Usage stays
-            // `default()` for the same reason — the simple entry
-            // discards the response envelope on the way out.
             Ok(TaskResult {
                 task_id: request.task_id,
                 agent_name: request.sub_spec.name.clone(),
                 provider_id,
                 model_id,
-                final_text,
-                steps_used: 1,
-                usage: CompletionUsageSummary::default(),
+                final_text: turn.final_text,
+                steps_used: observer.steps_used,
+                usage: observer.usage,
             })
         })
     }
