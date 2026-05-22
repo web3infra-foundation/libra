@@ -79,6 +79,26 @@ pub enum SandboxEvidenceEvent {
         /// concrete error type.
         reason: String,
     },
+    /// `SandboxManager::transform` refused to build a command
+    /// because the network enforcement layer rejected the
+    /// configured policy — typically `NetworkAccess::Allowlist`
+    /// requested under `SandboxEnforcement::Required` while the
+    /// per-allowlist proxy backend is unavailable. Doc reference:
+    /// `docs/improvement/sandbox.md:348` ("网络拒绝事件（连接被
+    /// OS 或代理阻断）写入 ToolInvocation[E] + Evidence[E]") and
+    /// L373.
+    ///
+    /// The runtime's `SandboxTransformError::NetworkEnforcementFailed`
+    /// is the dual of `EnforcementFailed` for the network axis;
+    /// pre-positioning the Evidence variant lets Phase 7's real
+    /// proxy backend emit structured audit signals from day one
+    /// instead of starting on `tracing::warn!` like the other
+    /// variants did pre-v0.17.720.
+    NetworkEnforcementFailed {
+        /// Verbatim `reason` string from
+        /// [`crate::internal::ai::sandbox::runtime::SandboxTransformError::NetworkEnforcementFailed`].
+        reason: String,
+    },
 }
 
 /// Object-safe sink the sandbox calls at each structured event
@@ -122,6 +142,12 @@ impl SandboxEvidenceSink for TracingSandboxEvidenceSink {
                 tracing::warn!(
                     reason = %reason,
                     "sandbox.evidence enforcement_failed",
+                );
+            }
+            SandboxEvidenceEvent::NetworkEnforcementFailed { reason } => {
+                tracing::warn!(
+                    reason = %reason,
+                    "sandbox.evidence network_enforcement_failed",
                 );
             }
         }
@@ -186,6 +212,9 @@ mod tests {
         sink.record(SandboxEvidenceEvent::EnforcementFailed {
             reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::NetworkEnforcementFailed {
+            reason: "allowlist proxy unavailable in Required mode".to_string(),
+        });
     }
 
     /// `InMemorySandboxEvidenceSink` captures events in the order
@@ -208,8 +237,11 @@ mod tests {
         sink.record(SandboxEvidenceEvent::EnforcementFailed {
             reason: "missing helper".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::NetworkEnforcementFailed {
+            reason: "proxy unavailable".to_string(),
+        });
         let recorded = sink.events();
-        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded.len(), 4);
         assert!(matches!(
             &recorded[0],
             SandboxEvidenceEvent::TmpdirCleanupFailed { path, .. }
@@ -224,6 +256,11 @@ mod tests {
             &recorded[2],
             SandboxEvidenceEvent::EnforcementFailed { reason }
                 if reason == "missing helper"
+        ));
+        assert!(matches!(
+            &recorded[3],
+            SandboxEvidenceEvent::NetworkEnforcementFailed { reason }
+                if reason == "proxy unavailable"
         ));
     }
 

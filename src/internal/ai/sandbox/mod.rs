@@ -1305,6 +1305,11 @@ fn build_command_from_spec(
                         reason: reason.clone(),
                     })
                 }
+                runtime::SandboxTransformError::NetworkEnforcementFailed { reason } => {
+                    Some(evidence::SandboxEvidenceEvent::NetworkEnforcementFailed {
+                        reason: reason.clone(),
+                    })
+                }
                 _ => None,
             };
             if let Some(event) = event {
