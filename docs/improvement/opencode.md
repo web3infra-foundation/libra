@@ -1470,8 +1470,8 @@ max_steps = 20
 | `src/internal/ai/goal/prompt.rs` | Goal preamble / continuation prompt 模板 |
 | `src/internal/ai/session/jsonl.rs` | 增加 `SessionEvent::Goal`，replay 时不影响旧 `SessionState` |
 | `src/internal/ai/tools/spec.rs` | 增加 `update_goal_progress`、`submit_goal_complete` schema |
-| `src/internal/ai/tools/handlers/goal.rs` | 两个 Goal 工具 handler，只写事件，不直接改 final status |
-| `src/internal/ai/agent/runtime/tool_loop.rs` | 增加 `GoalStopPolicy` 或等价 `LoopExitPolicy`，确保 Goal 模式下普通 final text 不被视为完成 |
+| `src/internal/ai/tools/handlers/{update_goal_progress,submit_goal_complete}.rs` | 两个 Goal 工具 handler，只写事件，不直接改 final status（已拆分为各自文件，落地后保留独立模块以便单测） |
+| `src/internal/ai/agent/runtime/tool_loop.rs` | `ToolLoopConfig::goal_stop_policy: Option<GoalStopPolicy>` schema 字段已落地（v0.17.713）；默认 `None` 走原 non-Goal 路径，`Some(GoalBound { goal_id })` 由 P6.3 driver 阅读 |
 | `src/command/code.rs` | `--goal` CLI、config wiring、GoalSupervisor 启动 |
 | `src/internal/tui/slash_command.rs` | `/goal start/status/cancel/criteria` |
 | `src/internal/tui/app.rs` / bottom pane | active Goal 状态、blocker、budget 提示 |
@@ -1484,18 +1484,22 @@ max_steps = 20
 libra code --goal "..."
   -> GoalSpecBuilder parses objective and optional acceptance criteria
   -> append GoalEvent::Created
-  -> GoalSupervisor::run_until_goal_boundary(...)
+  -> goal::driver::run_goal_supervised_tool_loop(GoalSupervisedToolLoopRequest { .. })
        -> build Goal-bound ToolLoopConfig
        -> expose update_goal_progress + submit_goal_complete
-       -> run_tool_loop(...)
-       -> replay GoalState
+       -> run_tool_loop_with_history_and_observer(...)
+       -> goal_turn_outcome_from_tool_loop_turn(turn) -> GoalTurnOutcome
+       -> GoalSupervisor::step(state, outcome, verifier_ctx, clock) -> GoalSupervisorStep
+       -> fold step.events into a fresh GoalState
        -> if Completed or Cancelled: return final response
-       -> if CompletionClaimed: GoalVerifier::verify(...)
+       -> if CompletionClaimed: verifier ran inside step(...); GoalVerifier::verify(...)
             -> pass: append Completed, return final response
             -> fail: append CompletionRejected, continue
        -> if AwaitingUser or Blocked: render blocker, stop interactive turn without marking complete
        -> otherwise: build continuation prompt and loop
 ```
+
+**实现现状**：`GoalSupervisor::step` 是一个纯函数，每次返回 `GoalSupervisorStep { events, decision }`，由 driver 负责将事件折叠回 `GoalState` 并决定是否再次进入 `run_tool_loop`。原计划中假设的 `GoalSupervisor::run_until_goal_boundary` 一体化入口被替换为 `goal::driver::run_goal_supervised_tool_loop` 单轮 wrapper，调用方负责多轮的循环；这样测试和 supervisor 自身的失败模式可以单独 pin（`step` 不再 await，便于 deterministic 验证）。
 
 **完成判定**
 
@@ -1832,8 +1836,8 @@ flag-off 等价：把 `code.multi_agent.enabled = false`；同样输入下 `task
 |----|------|----------|
 | P6.1 | `goal/spec.rs` `goal/event.rs` `goal/state.rs`（schema only） | ~300 |
 | P6.2 | `goal/verifier.rs` deterministic completion gate | ~250 |
-| P6.3 | `goal/supervisor.rs` 主循环 + continuation prompt builder | ~400 |
-| P6.4 | `tools/handlers/goal.rs`（`update_goal_progress` / `submit_goal_complete`） | ~250 |
+| P6.3 | `goal/supervisor.rs` 决策 step + `goal/prompt.rs` continuation prompt builder + `goal/driver.rs` 单轮 wrapper | ~400 |
+| P6.4 | `tools/handlers/{update_goal_progress,submit_goal_complete}.rs`（落地后拆为两个独立 handler 文件） | ~250 |
 | P6.5 | `--goal` CLI + `/goal start/status/cancel` TUI | ~300 |
 | P6.6 | Code Control `goal.start/status/cancel` NDJSON | ~200 |
 | P6.7 | E2E（S6）+ resume replay + flag-off regression | ~350 |
