@@ -94,11 +94,68 @@ impl PrincipalContext {
     }
 }
 
+/// A tool-boundary operation the runtime is about to attempt.
+///
+/// Carries the classifier inputs the policy actually reads
+/// (`tool_name`, `mutates_state`, `requires_network`) plus a
+/// structured [`ToolOperationDetails`] tag that distinguishes the
+/// payload shape — currently a plain tool call vs. a sub-agent spawn
+/// (mirrors the `task` tool semantics introduced in OC-Phase 2 P3.3).
+/// Construct via the [`ToolOperation::tool`] / [`ToolOperation::sub_agent_spawn`]
+/// helpers so the `details` discriminator stays in sync with the
+/// shape-determined fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOperation {
     pub tool_name: String,
     pub mutates_state: bool,
     pub requires_network: bool,
+    #[serde(default)]
+    pub details: ToolOperationDetails,
+}
+
+/// Shape-tag for a [`ToolOperation`]. `Tool` is the default for the
+/// model's normal tool-loop calls; `SubAgentSpawn` carries the
+/// child-agent name and a redacted prompt digest so auditors can
+/// reconstruct who-asked-what without seeing the verbatim user
+/// prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolOperationDetails {
+    /// A regular registry-routed tool call.
+    #[default]
+    Tool,
+    /// A sub-agent spawn issued via the `task` tool.
+    SubAgentSpawn { name: String, prompt_digest: String },
+}
+
+impl ToolOperation {
+    /// Build a regular tool-call operation. Use this in the
+    /// registry's pre-execute path; the policy classifies based on
+    /// the three boolean/string fields.
+    pub fn tool(tool_name: impl Into<String>, mutates_state: bool, requires_network: bool) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            mutates_state,
+            requires_network,
+            details: ToolOperationDetails::Tool,
+        }
+    }
+
+    /// Build a sub-agent spawn operation. Pinned to `tool_name =
+    /// "task"`, `mutates_state = true`, `requires_network = false`
+    /// because every spawn must route through the approval-mediated
+    /// `task` boundary (CEX-S2-12 dispatcher).
+    pub fn sub_agent_spawn(name: impl Into<String>, prompt_digest: impl Into<String>) -> Self {
+        Self {
+            tool_name: "task".to_string(),
+            mutates_state: true,
+            requires_network: false,
+            details: ToolOperationDetails::SubAgentSpawn {
+                name: name.into(),
+                prompt_digest: prompt_digest.into(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

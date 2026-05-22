@@ -99,7 +99,7 @@ use crate::{
         ai::{
             agent::{
                 TaskIntent, ToolLoopConfig,
-                profile::{AgentProfileRouter, load_profiles},
+                profile::{AgentProfileRouter, AgentsConfig, load_profiles},
             },
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
@@ -1487,6 +1487,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         mcp_server,
         control_runtime,
         browser_control,
+        initial_goal: args.goal.clone(),
     };
 
     // Create agent based on provider. Every non-Codex provider funnels
@@ -2319,6 +2320,10 @@ struct TuiLaunchConfig {
     mcp_server: Arc<LibraMcpServer>,
     control_runtime: ControlRuntimeConfig,
     browser_control: BrowserControlMode,
+    /// Goal objective passed via `libra code --goal`. The TUI app
+    /// uses this to bootstrap a `GoalSpec` and seed
+    /// [`AppConfig::initial_goal`] before the first turn.
+    initial_goal: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2840,6 +2845,7 @@ where
             command_dispatcher,
             skill_dispatcher,
             agent_router,
+            agents_config: AgentsConfig::default(),
             session,
             session_store,
             user_input_rx: params.user_input_rx,
@@ -2853,6 +2859,7 @@ where
             managed_code_ui_runtime,
             default_network_access: params.network_access,
             auto_classify_first_user_message,
+            initial_goal: params.initial_goal.clone(),
             source_pool,
         },
     );

@@ -29,7 +29,8 @@ pub mod builder;
 pub mod tool_loop;
 pub use builder::AgentBuilder;
 pub use tool_loop::{
-    ToolLoopConfig, ToolLoopObserver, run_tool_loop, run_tool_loop_with_history_and_observer,
+    ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop,
+    run_tool_loop_with_history_and_observer,
 };
 
 pub mod chat;
@@ -53,9 +54,7 @@ pub use sub_agent::{
 // parent-cancel propagation, SafetyDecision checks, AgentRunEvent
 // Spawned/Completed/Failed wiring, timeout caps, and budget caps.
 pub mod sub_agent_dispatcher;
-pub use sub_agent_dispatcher::{
-    AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig, ToolLoopSubAgentChildRunner,
-};
+pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
 
 /// An AI Agent that manages interactions with a CompletionModel.
 ///

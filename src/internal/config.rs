@@ -915,6 +915,29 @@ pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
         .map_err(|_| anyhow::anyhow!("resolve_env_sync worker for '{name}' exited unexpectedly"))?
 }
 
+/// Required-value wrapper over [`resolve_env_sync`]: returns `Ok(value)`
+/// when the variable is set in the process env, the local repo's
+/// `.libra/libra.db`, or the global `~/.libra/config.db`, and a single
+/// actionable error otherwise. Provider clients use this for the
+/// API-key class of variables where missing means the provider cannot
+/// initialise.
+pub fn resolve_required_env_sync(name: &str) -> anyhow::Result<String> {
+    match resolve_env_sync(name)? {
+        Some(value) => Ok(value),
+        None => Err(anyhow::anyhow!(
+            "environment variable `{name}` is not set — export it or store it in libra config (`libra config set vault.env.{name} <value>`)"
+        )),
+    }
+}
+
+/// Optional-value wrapper over [`resolve_env_sync`]. Identical to
+/// [`resolve_env_sync`]; provided as a named alias so callers can
+/// document at the call site that the variable is optional and
+/// `Ok(None)` is the success path.
+pub fn resolve_optional_env_sync(name: &str) -> anyhow::Result<Option<String>> {
+    resolve_env_sync(name)
+}
+
 /// Resolve an environment variable using an explicit local config target.
 ///
 /// Same priority chain as [`resolve_env`] but lets callers point at a

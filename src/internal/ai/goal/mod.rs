@@ -33,6 +33,7 @@
 //! drive-by edit from accidentally cross-wiring Goal events into the
 //! external `ObservedAgent` capture path.
 
+pub mod driver;
 pub mod event;
 pub mod prompt;
 pub mod spec;
@@ -40,6 +41,10 @@ pub mod state;
 pub mod supervisor;
 pub mod verifier;
 
+pub use driver::{
+    GoalSupervisedRun, GoalSupervisedToolLoopRequest, goal_turn_outcome_from_tool_loop_turn,
+    run_goal_supervised_tool_loop,
+};
 pub use event::{
     GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCompletionShapeError,
     GoalEvent, GoalEventEnvelope, GoalProgressRecord, validate_completion_claim_shape,
@@ -56,9 +61,8 @@ pub use state::{
     GoalVerificationRecord, MAX_REPLAY_REJECTIONS, PendingGoalClaim, apply, replay,
 };
 pub use supervisor::{
-    GoalEventClock, GoalLoopDecision, GoalStopPolicy, GoalSupervisedRun,
-    GoalSupervisedToolLoopRequest, GoalSupervisor, GoalSupervisorStep, GoalTurnOutcome,
-    goal_turn_outcome_from_tool_loop_turn, run_goal_supervised_tool_loop,
+    GoalEventClock, GoalLoopDecision, GoalStopPolicy, GoalSupervisor, GoalSupervisorStep,
+    GoalTurnOutcome,
 };
 pub use verifier::{
     DeterministicGoalVerifier, GoalVerifier, GoalVerifierContext, GoalVerifyOutcome,

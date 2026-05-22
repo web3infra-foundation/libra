@@ -427,7 +427,7 @@ fn collect_pattern_samples(
 mod tests {
     use std::{
         collections::{BTreeSet, HashMap},
-        sync::Mutex,
+        sync::{Mutex, OnceLock},
     };
 
     use futures::future::BoxFuture;
@@ -447,10 +447,31 @@ mod tests {
             },
         },
         permission::{PermissionAction, PermissionRule, PermissionRuleset},
-        providers::ProviderFactory,
+        providers::{ProviderBuildOptions, ProviderFactory},
         session::SessionId,
+        tools::ToolRegistry,
         usage::UsageRecorder,
     };
+
+    /// Process-wide empty `ProviderBuildOptions` used by every
+    /// `DispatchContext` test fixture. The gates exercised here never
+    /// read these fields, but the struct shape requires the borrow,
+    /// so a single shared static keeps every `ctx()` call site free of
+    /// per-test allocation noise.
+    fn default_provider_build_options() -> &'static ProviderBuildOptions {
+        static OPTS: OnceLock<ProviderBuildOptions> = OnceLock::new();
+        OPTS.get_or_init(ProviderBuildOptions::default)
+    }
+
+    /// Process-wide empty `ToolRegistry` used by every
+    /// `DispatchContext` test fixture. Construction uses
+    /// `with_working_dir(".")` so the helper never panics on
+    /// CWD-resolution like `ToolRegistry::new()` could under a
+    /// concurrent harness.
+    fn default_tool_registry() -> &'static ToolRegistry {
+        static REG: OnceLock<ToolRegistry> = OnceLock::new();
+        REG.get_or_init(|| ToolRegistry::with_working_dir(std::path::PathBuf::from(".")))
+    }
 
     /// Test asker that replies with a pre-canned [`PermissionReply`]
     /// and counts how many times `ask()` was invoked. The counter
@@ -581,6 +602,10 @@ mod tests {
             permission_service,
             session_store,
             provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: default_tool_registry(),
+            runtime_context: None,
             usage_recorder,
             context_frame_loader,
             abort_token: AbortToken::new(),

@@ -59,6 +59,20 @@ pub enum TuiControlCommand {
         reason: String,
         ack: oneshot::Sender<Result<String, TuiControlError>>,
     },
+    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
+    /// dispatch through the `task` tool, mirroring `/task <agent>
+    /// <prompt>`. The acknowledgement carries the rendered task
+    /// message so the Code Control client can show the task id and
+    /// summary without a follow-up status poll. Refuses with `Busy`
+    /// when the session is mid-turn / awaiting interaction, and
+    /// with `TaskInvalidRequest` when the `agent`+`prompt` pair
+    /// fails the dispatcher's shape rules (unknown agent, empty
+    /// prompt, oversized payload, etc.).
+    TaskDispatch {
+        agent: String,
+        prompt: String,
+        ack: oneshot::Sender<Result<String, TuiControlError>>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +95,12 @@ pub enum TuiControlError {
     /// HTTP boundary (empty / oversized). The wire message
     /// repeats the underlying `GoalSpecError` for client logs.
     GoalInvalidObjective(String),
+    /// `task.dispatch` was called with an `agent`+`prompt` pair
+    /// that failed the dispatcher's shape rules at the HTTP
+    /// boundary (unknown agent, empty / oversized prompt, etc.).
+    /// The wire message repeats the underlying validation error
+    /// for client logs.
+    TaskInvalidRequest(String),
 }
 
 impl TuiControlError {
@@ -94,6 +114,7 @@ impl TuiControlError {
             Self::GoalAlreadyActive => 409,
             Self::GoalNotActive => 409,
             Self::GoalInvalidObjective(_) => 422,
+            Self::TaskInvalidRequest(_) => 422,
         }
     }
 
@@ -107,6 +128,7 @@ impl TuiControlError {
             Self::GoalAlreadyActive => "GOAL_ALREADY_ACTIVE",
             Self::GoalNotActive => "GOAL_NOT_ACTIVE",
             Self::GoalInvalidObjective(_) => "GOAL_INVALID_OBJECTIVE",
+            Self::TaskInvalidRequest(_) => "TASK_INVALID_REQUEST",
         }
     }
 
@@ -131,6 +153,9 @@ impl TuiControlError {
             }
             Self::GoalInvalidObjective(detail) => {
                 format!("Goal objective failed validation: {detail}")
+            }
+            Self::TaskInvalidRequest(detail) => {
+                format!("Task dispatch request failed validation: {detail}")
             }
         }
     }
@@ -188,6 +213,72 @@ mod tests {
         assert_eq!(
             TuiControlError::GoalInvalidObjective("empty objective".to_string()).to_string(),
             "Goal objective failed validation: empty objective",
+        );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest("unknown agent `nope`".to_string()).to_string(),
+            "Task dispatch request failed validation: unknown agent `nope`",
+        );
+    }
+
+    /// Pin every variant's HTTP status code so a future surface
+    /// drift (e.g. dropping `TaskInvalidRequest` back to 409) is
+    /// loud rather than silent. Mirrors the per-variant Display pin
+    /// above; clients downstream of `/code-control` branch on these
+    /// codes for retry / surface routing.
+    #[test]
+    fn tui_control_error_status_pins_each_variant() {
+        assert_eq!(TuiControlError::Busy.status(), 409);
+        assert_eq!(TuiControlError::InteractionNotActive.status(), 409);
+        assert_eq!(TuiControlError::UnsupportedInteractionKind.status(), 422);
+        assert_eq!(TuiControlError::ControllerConflict.status(), 409);
+        assert_eq!(TuiControlError::Internal(String::new()).status(), 500);
+        assert_eq!(TuiControlError::GoalAlreadyActive.status(), 409);
+        assert_eq!(TuiControlError::GoalNotActive.status(), 409);
+        assert_eq!(
+            TuiControlError::GoalInvalidObjective(String::new()).status(),
+            422,
+        );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest(String::new()).status(),
+            422,
+        );
+    }
+
+    /// Pin every variant's stable wire code so a rename or
+    /// re-bucketing of the snake_case identifier (e.g. switching
+    /// `TASK_INVALID_REQUEST` to `INVALID_TASK_REQUEST`) trips the
+    /// guard at PR time.
+    #[test]
+    fn tui_control_error_code_pins_each_variant() {
+        assert_eq!(TuiControlError::Busy.code(), "SESSION_BUSY");
+        assert_eq!(
+            TuiControlError::InteractionNotActive.code(),
+            "INTERACTION_NOT_ACTIVE",
+        );
+        assert_eq!(
+            TuiControlError::UnsupportedInteractionKind.code(),
+            "UNSUPPORTED_INTERACTION_KIND",
+        );
+        assert_eq!(
+            TuiControlError::ControllerConflict.code(),
+            "CONTROLLER_CONFLICT",
+        );
+        assert_eq!(
+            TuiControlError::Internal(String::new()).code(),
+            "TUI_CONTROL_INTERNAL",
+        );
+        assert_eq!(
+            TuiControlError::GoalAlreadyActive.code(),
+            "GOAL_ALREADY_ACTIVE",
+        );
+        assert_eq!(TuiControlError::GoalNotActive.code(), "GOAL_NOT_ACTIVE");
+        assert_eq!(
+            TuiControlError::GoalInvalidObjective(String::new()).code(),
+            "GOAL_INVALID_OBJECTIVE",
+        );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest(String::new()).code(),
+            "TASK_INVALID_REQUEST",
         );
     }
 }
