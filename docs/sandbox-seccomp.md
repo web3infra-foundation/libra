@@ -16,66 +16,66 @@ editing `SandboxRuntimeConfig` in-process.
 
 ## Quick start
 
+Libra ships a recommended baseline policy at
+[`template/seccomp-default.json`](../template/seccomp-default.json).
+Compile it once for your architecture and export
+`LIBRA_SECCOMP_POLICY`:
+
 1. Install one of:
    * [`seccompiler`](https://crates.io/crates/seccompiler) (Rust;
-     used by Firecracker)
+     used by Firecracker) — `cargo install seccompiler-bin`
    * `libseccomp-tools` (`apt install libseccomp-tools` or
      `dnf install libseccomp-devel`)
 
-2. Save the policy below as `~/.libra/seccomp.json` (seccompiler
-   form) or `~/.libra/seccomp.cil` (libseccomp form).
-
-3. Compile to a BPF binary:
+2. Compile the bundled JSON to a BPF binary:
    ```sh
    # seccompiler — recommended for portability
    seccompiler-bin --target-arch "$(uname -m)" \
-       --input-file ~/.libra/seccomp.json \
+       --input-file "$(libra repo-root)/template/seccomp-default.json" \
        --output-file ~/.libra/seccomp.bpf
 
-   # libseccomp-tools — alternative
-   libseccomp-tools --binary --output ~/.libra/seccomp.bpf ~/.libra/seccomp.cil
+   # Or hand-pasted from this doc into ~/.libra/seccomp.json
+   # if you cloned without the bundled template/ directory.
    ```
 
-4. Export the env var (e.g. in your shell rc):
+3. Export the env var (e.g. in your shell rc):
    ```sh
    export LIBRA_SECCOMP_POLICY="$HOME/.libra/seccomp.bpf"
    ```
 
-5. Verify the wiring picked it up:
+4. Verify the wiring picked it up:
    ```sh
    LIBRA_LOG=info libra code --goal 'noop' --network deny
    # → look for `sandbox.evidence ...` lines and `--seccomp 200`
    #   in the bwrap arg vector.
    ```
 
-## Recommended baseline policy (seccompiler form)
+## Recommended baseline policy (bundled)
 
-```json
-{
-  "default_action": "allow",
-  "filter": [
-    { "action": "kill_process", "syscalls": [
-      "mount", "umount", "umount2", "swapon", "swapoff",
-      "init_module", "finit_module", "delete_module",
-      "kexec_load", "kexec_file_load",
-      "ptrace", "process_vm_writev", "process_vm_readv",
-      "syslog", "setdomainname", "sethostname",
-      "reboot", "iopl", "ioperm",
-      "perf_event_open", "bpf",
-      "userfaultfd", "clone3", "io_uring_setup",
-      "pivot_root", "open_tree", "move_mount",
-      "fsopen", "fsmount", "fsconfig", "fspick",
-      "setns", "unshare"
-    ]}
-  ]
-}
-```
+The bundled
+[`template/seccomp-default.json`](../template/seccomp-default.json)
+groups syscalls into six intent-labelled buckets:
 
-This denies the most common sandbox-escape vectors (kernel module
-load, ptrace ATTACH, reboot, kexec) and namespace manipulation
-syscalls that could circumvent the bwrap mount namespace. Tools
-like `cargo`, `pytest`, `npm`, and standard shell commands stay
-fully functional under this filter.
+- **Mount manipulation** (`mount` / `umount` / `pivot_root` /
+  `move_mount` / etc.) — could remount `/proc` or escape the
+  bwrap mount namespace.
+- **Kernel module + kexec** (`init_module`, `finit_module`,
+  `delete_module`, `kexec_load`, `kexec_file_load`) — direct
+  kernel-mode escalation.
+- **Process tampering** (`ptrace`, `process_vm_writev`,
+  `process_vm_readv`) — cross-process memory access bypass.
+- **Host control** (`reboot`, `setdomainname`, `sethostname`,
+  `syslog`, `iopl`, `ioperm`) — system-wide identity / power /
+  I/O port access.
+- **Sandbox-bypass primitives** (`setns`, `unshare`) — re-enter
+  namespaces or create new ones for escape.
+- **Kernel-introspection surfaces** (`perf_event_open`, `bpf`,
+  `userfaultfd`) — common LPE rungs.
+
+Default action is `allow`, so tools like `cargo`, `pytest`,
+`npm`, and standard shell commands stay fully functional.
+Tighten by adding more denies (mind that some legitimate tools
+need `clone3` / `io_uring_setup` on newer kernels).
 
 ### Architecture caveat
 
