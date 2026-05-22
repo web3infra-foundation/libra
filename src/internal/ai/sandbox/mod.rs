@@ -1274,20 +1274,28 @@ fn build_command_from_spec(
             deny_read_paths: &deny_read_paths,
         })
         .map_err(|err| {
-            // Doc contract: `docs/improvement/sandbox.md:143` —
-            // writable_root rejections must surface as structured
-            // Evidence in addition to the propagated error string.
-            // The default `TracingSandboxEvidenceSink` keeps the
-            // existing log shape; opt-in agent-runtime sinks fan
-            // out to `AgentEvidence` rows.
-            if let runtime::SandboxTransformError::InvalidPolicy(
-                policy::SandboxPolicyError::DangerousWritableRoot { root, reason },
-            ) = &err
-            {
-                let event = evidence::SandboxEvidenceEvent::WritableRootRejected {
+            // Doc contract: `docs/improvement/sandbox.md:143`, L162,
+            // L373 — writable_root rejections AND enforcement
+            // failures must surface as structured Evidence in
+            // addition to the propagated error string. The default
+            // `TracingSandboxEvidenceSink` keeps the existing log
+            // shape; opt-in agent-runtime sinks fan out to
+            // `AgentEvidence` rows.
+            let event = match &err {
+                runtime::SandboxTransformError::InvalidPolicy(
+                    policy::SandboxPolicyError::DangerousWritableRoot { root, reason },
+                ) => Some(evidence::SandboxEvidenceEvent::WritableRootRejected {
                     root: root.clone(),
                     reason: (*reason).to_string(),
-                };
+                }),
+                runtime::SandboxTransformError::EnforcementFailed { reason } => {
+                    Some(evidence::SandboxEvidenceEvent::EnforcementFailed {
+                        reason: reason.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
                 if let Some(sink) = sandbox_runtime.and_then(|c| c.evidence_sink.as_deref()) {
                     sink.record(event);
                 } else {
@@ -2185,6 +2193,89 @@ mod tests {
             sink.events().is_empty(),
             "successful cleanup must not emit an Evidence event"
         );
+    }
+
+    /// Pin the structured `EnforcementFailed` Evidence event the
+    /// sandbox emits when `SandboxEnforcement::Required` cannot
+    /// produce an effective backend (Linux without
+    /// `LIBRA_LINUX_SANDBOX_EXE`). See
+    /// `docs/improvement/sandbox.md:143`, L162, L373. Linux-only
+    /// because the EnforcementFailed branch fires on the missing-
+    /// helper path; on macOS the seatbelt helper is always
+    /// available so the same inputs select `MacosSeatbelt` instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_command_from_spec_records_evidence_on_enforcement_failed() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::{
+            evidence::{InMemorySandboxEvidenceSink, SandboxEvidenceEvent},
+            policy::SandboxPolicy,
+        };
+
+        // Clear any ambient `LIBRA_LINUX_SANDBOX_EXE` so the
+        // missing-helper branch fires deterministically. Use a
+        // serial guard if other tests touch the same env in this
+        // suite.
+        // SAFETY: tests run with `--test-threads=1` under CI for
+        // the offline-core matrix; for the dev-local run we
+        // accept best-effort isolation.
+        let _ambient = std::env::var_os("LIBRA_LINUX_SANDBOX_EXE");
+        // SAFETY: setting an env var in tests; restored below.
+        unsafe {
+            std::env::remove_var("LIBRA_LINUX_SANDBOX_EXE");
+        }
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_runtime = SandboxRuntimeConfig {
+            enforcement: runtime::SandboxEnforcement::Required,
+            evidence_sink: Some(sink.clone()),
+            ..SandboxRuntimeConfig::default()
+        };
+        let sandbox_context = ToolSandboxContext {
+            policy: SandboxPolicy::WorkspaceWrite {
+                writable_roots: Vec::new(),
+                network_access: false,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            },
+            permissions: SandboxPermissions::default(),
+        };
+        let spec = CommandSpec {
+            program: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: None,
+            sandbox_permissions: SandboxPermissions::default(),
+            justification: None,
+        };
+
+        let result = build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime));
+
+        // SAFETY: restore the ambient env var.
+        unsafe {
+            if let Some(value) = _ambient {
+                std::env::set_var("LIBRA_LINUX_SANDBOX_EXE", value);
+            }
+        }
+
+        assert!(
+            result.is_err(),
+            "Required enforcement without a helper must abort build"
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
+        match &events[0] {
+            SandboxEvidenceEvent::EnforcementFailed { reason } => {
+                assert!(
+                    reason.contains("enforcement is required"),
+                    "reason must echo the doc's enforcement phrase: {reason}"
+                );
+            }
+            other => panic!("expected EnforcementFailed, got {other:?}"),
+        }
     }
 
     /// Pin the structured `WritableRootRejected` Evidence event

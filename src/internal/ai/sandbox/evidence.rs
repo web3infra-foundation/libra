@@ -63,6 +63,22 @@ pub enum SandboxEvidenceEvent {
         /// [`crate::internal::ai::sandbox::policy::SandboxPolicyError::DangerousWritableRoot`].
         reason: String,
     },
+    /// `SandboxManager::transform` refused to build a command because
+    /// `SandboxEnforcement::Required` (or `PreferStrict` after a
+    /// failed downgrade prompt) demanded an effective sandbox the
+    /// host could not provide — typically a missing
+    /// `LIBRA_LINUX_SANDBOX_EXE` helper on Linux, or an unsupported
+    /// platform / policy combination elsewhere. Doc reference:
+    /// `docs/improvement/sandbox.md:143`, L162, L373 ("enforcement
+    /// 失败 必须落到 ... `Evidence[E]`，不能藏在 tracing 日志里").
+    EnforcementFailed {
+        /// Verbatim `reason` string from
+        /// [`crate::internal::ai::sandbox::runtime::SandboxTransformError::EnforcementFailed`].
+        /// Carried as `String` so sink implementations can route
+        /// the reason to audit storage without depending on the
+        /// concrete error type.
+        reason: String,
+    },
 }
 
 /// Object-safe sink the sandbox calls at each structured event
@@ -100,6 +116,12 @@ impl SandboxEvidenceSink for TracingSandboxEvidenceSink {
                     root = %root.display(),
                     reason = %reason,
                     "sandbox.evidence writable_root_rejected",
+                );
+            }
+            SandboxEvidenceEvent::EnforcementFailed { reason } => {
+                tracing::warn!(
+                    reason = %reason,
+                    "sandbox.evidence enforcement_failed",
                 );
             }
         }
@@ -161,12 +183,17 @@ mod tests {
             root: PathBuf::from("/var/run/docker.sock"),
             reason: "matches dangerous mount pattern".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::EnforcementFailed {
+            reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured".to_string(),
+        });
     }
 
     /// `InMemorySandboxEvidenceSink` captures events in the order
     /// the sandbox emits them. Pins the FIFO contract so a test
     /// asserting "tmpdir cleanup failure came after writable root
-    /// rejection" remains meaningful.
+    /// rejection" remains meaningful. Also covers the
+    /// `EnforcementFailed` variant so future drift in the
+    /// enforcement wiring is loud.
     #[test]
     fn in_memory_sink_preserves_record_order() {
         let sink = InMemorySandboxEvidenceSink::new();
@@ -178,8 +205,11 @@ mod tests {
             root: PathBuf::from("/dev"),
             reason: "device root".to_string(),
         });
+        sink.record(SandboxEvidenceEvent::EnforcementFailed {
+            reason: "missing helper".to_string(),
+        });
         let recorded = sink.events();
-        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.len(), 3);
         assert!(matches!(
             &recorded[0],
             SandboxEvidenceEvent::TmpdirCleanupFailed { path, .. }
@@ -189,6 +219,11 @@ mod tests {
             &recorded[1],
             SandboxEvidenceEvent::WritableRootRejected { root, .. }
                 if root == &PathBuf::from("/dev")
+        ));
+        assert!(matches!(
+            &recorded[2],
+            SandboxEvidenceEvent::EnforcementFailed { reason }
+                if reason == "missing helper"
         ));
     }
 
