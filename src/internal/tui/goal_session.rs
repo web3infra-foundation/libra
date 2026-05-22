@@ -33,8 +33,8 @@ use super::goal_command::{
     GoalCommandParseError, validate_objective as validate_objective_via_command,
 };
 use crate::internal::ai::goal::{
-    GoalActor, GoalBudget, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy, GoalSpec,
-    GoalSpecError, GoalState, apply,
+    GoalActor, GoalBudget, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
+    GoalSpec, GoalSpecError, GoalState, apply,
 };
 
 /// Schema-floor wrapper that re-runs `GoalSpec::new`'s objective
@@ -213,6 +213,66 @@ impl GoalSession {
         })
     }
 
+    /// Append a `CriteriaRevised` envelope that adds a single
+    /// user-authored criterion to the active Goal. Implements the
+    /// `/goal criteria add <text>` flow from
+    /// `docs/improvement/opencode.md` line 690 — the criterion id is
+    /// minted server-side as `user-<n>` where `n` is the count of
+    /// existing `user-` prefixed criteria + 1, so two consecutive
+    /// `/goal criteria add` calls produce distinct ids without
+    /// requiring the caller to know about prior revisions.
+    ///
+    /// The new criterion defaults to `required = true` and
+    /// `requires_workspace_change = false`. Required keeps the
+    /// schema honest (a criterion added mid-Goal must be satisfied
+    /// before completion is allowed); workspace-change defaults
+    /// `false` because the natural-language description rarely
+    /// implies a file edit at parse time. The verifier upgrades the
+    /// gate when the user's evidence ref actually shows a `git
+    /// status` change.
+    ///
+    /// Returns the rendered `GoalState` so the caller can echo it
+    /// without a follow-up `status` call.
+    pub fn revise_criteria_add(
+        &mut self,
+        description: String,
+        revised_by: GoalActor,
+    ) -> Result<GoalState, GoalSessionError> {
+        if self.state.status.is_terminal() {
+            return Err(GoalSessionError::NotActive);
+        }
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            return Err(GoalSessionError::InvalidObjective {
+                source: GoalSpecError::EmptyObjective,
+            });
+        }
+        let next_id = next_user_criterion_id(&self.state.spec.acceptance_criteria);
+        let mut criteria = self.state.spec.acceptance_criteria.clone();
+        criteria.push(GoalCriterion {
+            id: next_id,
+            description: trimmed.to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        });
+        let now = Utc::now();
+        let envelope = GoalEventEnvelope {
+            envelope_id: Uuid::new_v4(),
+            goal_id: self.state.spec.goal_id,
+            recorded_at: now.max(self.state.updated_at),
+            event: GoalEvent::CriteriaRevised {
+                criteria,
+                revised_by,
+            },
+        };
+        apply(&mut self.state, &envelope).map_err(|reject| GoalSessionError::InternalApply {
+            detail: reject.to_string(),
+        })?;
+        self.events.push(envelope);
+        Ok(self.state.clone())
+    }
+
     /// Append envelopes emitted by the Goal supervisor and apply
     /// them through the same schema floor used by slash-command
     /// mutations. This is the only path for runtime envelopes such
@@ -293,6 +353,24 @@ pub fn render_goal_status(state: &GoalState) -> String {
         ));
     }
     out
+}
+
+/// Mint the next `user-<n>` criterion id, skipping any ids already
+/// present (whether minted by an earlier `/goal criteria add` or
+/// authored by the supervisor under the same naming convention).
+/// Iterates from 1 upward so the first `/goal criteria add` always
+/// becomes `user-1` regardless of how many supervisor-authored
+/// criteria already exist.
+fn next_user_criterion_id(existing: &[GoalCriterion]) -> String {
+    let used: std::collections::HashSet<&str> = existing.iter().map(|c| c.id.as_str()).collect();
+    let mut n: u32 = 1;
+    loop {
+        let candidate = format!("user-{n}");
+        if !used.contains(candidate.as_str()) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +472,146 @@ mod tests {
             .cancel("second cancel".to_string(), user_actor())
             .unwrap_err();
         assert_eq!(err, GoalSessionError::NotActive);
+    }
+
+    /// `/goal criteria add <text>` ships a single `CriteriaRevised`
+    /// envelope, appends the new criterion (minted as `user-1` when
+    /// the existing list has no `user-` prefixed ids), and keeps the
+    /// state non-terminal so the supervisor can continue.
+    #[test]
+    fn revise_criteria_add_mints_user_one_and_emits_envelope() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let prior_event_count = session.events().len();
+        let state = session
+            .revise_criteria_add("tests pass".to_string(), user_actor())
+            .expect("revise must succeed on an active session");
+
+        // One new envelope of the expected shape.
+        assert_eq!(session.events().len(), prior_event_count + 1);
+        let appended = session.events().last().expect("envelope appended");
+        match &appended.event {
+            GoalEvent::CriteriaRevised { criteria, .. } => {
+                assert_eq!(criteria.len(), 1);
+                assert_eq!(criteria[0].id, "user-1");
+                assert_eq!(criteria[0].description, "tests pass");
+                assert!(criteria[0].required);
+                assert!(!criteria[0].requires_workspace_change);
+            }
+            other => panic!("expected CriteriaRevised, got {other:?}"),
+        }
+
+        // Folded into the state's spec.
+        assert_eq!(state.spec.acceptance_criteria.len(), 1);
+        assert_eq!(state.spec.acceptance_criteria[0].id, "user-1");
+        // Session remains active — adding criteria mid-Goal is not
+        // a terminal boundary.
+        assert_eq!(state.status, GoalStatus::Active);
+    }
+
+    /// Two consecutive `/goal criteria add` calls mint `user-1` then
+    /// `user-2`. Pins the minter's monotonic stepping so a future
+    /// "tidy" that collapses to a constant id is loud.
+    #[test]
+    fn revise_criteria_add_mints_distinct_ids_on_successive_calls() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .revise_criteria_add("first crit".to_string(), user_actor())
+            .unwrap();
+        let state = session
+            .revise_criteria_add("second crit".to_string(), user_actor())
+            .unwrap();
+        let ids: Vec<&str> = state
+            .spec
+            .acceptance_criteria
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["user-1", "user-2"]);
+    }
+
+    /// A blank description is rejected at the session boundary
+    /// before any envelope is appended — same pattern the
+    /// `GoalCommand` parser uses for `criteria add` with empty
+    /// trailing args, but the session enforces it independently so
+    /// the NDJSON / future automation surfaces stay protected.
+    #[test]
+    fn revise_criteria_add_rejects_blank_description() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let prior_event_count = session.events().len();
+        let err = session
+            .revise_criteria_add("   ".to_string(), user_actor())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GoalSessionError::InvalidObjective {
+                source: GoalSpecError::EmptyObjective,
+            }
+        ));
+        // No envelope written when the description fails the
+        // trimmed-emptiness gate.
+        assert_eq!(session.events().len(), prior_event_count);
+    }
+
+    /// A terminal (Cancelled) session refuses further revisions —
+    /// matches the same gate `cancel()` uses.
+    #[test]
+    fn revise_criteria_add_refuses_when_session_is_terminal() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session.cancel("dropped".to_string(), user_actor()).unwrap();
+        let err = session
+            .revise_criteria_add("late add".to_string(), user_actor())
+            .unwrap_err();
+        assert_eq!(err, GoalSessionError::NotActive);
+    }
+
+    /// `next_user_criterion_id` walks past any pre-existing
+    /// `user-<n>` ids so a session that already has `user-1` and
+    /// `user-3` gets `user-2` next (filling the gap), and one with
+    /// `user-1` and `user-2` jumps to `user-3`.
+    #[test]
+    fn next_user_criterion_id_fills_gaps_and_appends() {
+        let mk = |id: &str| GoalCriterion {
+            id: id.to_string(),
+            description: "x".to_string(),
+            required: false,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        };
+        // Empty list → user-1.
+        assert_eq!(next_user_criterion_id(&[]), "user-1");
+        // Fill gap.
+        let existing = vec![mk("user-1"), mk("user-3")];
+        assert_eq!(next_user_criterion_id(&existing), "user-2");
+        // No gap → append.
+        let existing = vec![mk("user-1"), mk("user-2")];
+        assert_eq!(next_user_criterion_id(&existing), "user-3");
+        // Non-user-prefixed ids are ignored.
+        let existing = vec![mk("supervisor-x"), mk("user-1")];
+        assert_eq!(next_user_criterion_id(&existing), "user-2");
     }
 
     #[test]

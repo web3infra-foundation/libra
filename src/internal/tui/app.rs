@@ -1150,6 +1150,42 @@ where
         }
     }
 
+    /// `/goal criteria add <text>` — append a single user-authored
+    /// acceptance criterion to the active Goal via a
+    /// `CriteriaRevised` envelope. The dispatcher delegates id
+    /// minting to `GoalSession::revise_criteria_add`; the user only
+    /// supplies the natural-language description. Refuses with
+    /// `GoalNotActive` when no Goal is in flight (mirrors the
+    /// `/goal status` and `/goal cancel` shape).
+    fn goal_session_criteria_add_from_control(
+        &mut self,
+        description: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSessionError, render_goal_status};
+        let actor = goal_actor_for_session(self);
+        let session_root = self.session_store.session_root(&self.session.id);
+        let Some(session) = self.goal_session.as_mut() else {
+            return Err(TuiControlError::GoalNotActive);
+        };
+        let previous_event_count = session.events().len();
+        match session.revise_criteria_add(description, actor) {
+            Ok(state) => {
+                let new_events = session.events()[previous_event_count..].to_vec();
+                if let Err(error) = persist_goal_events_to_session_root(session_root, &new_events) {
+                    return Err(TuiControlError::Internal(format!(
+                        "failed to persist Goal criteria revision: {error}"
+                    )));
+                }
+                Ok(render_goal_status(&state))
+            }
+            Err(GoalSessionError::NotActive) => Err(TuiControlError::GoalNotActive),
+            Err(GoalSessionError::InvalidObjective { source }) => {
+                Err(TuiControlError::GoalInvalidObjective(source.to_string()))
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
+        }
+    }
+
     fn persist_goal_events_to_jsonl(&self, events: &[GoalEventEnvelope]) -> std::io::Result<()> {
         persist_goal_events_to_session_root(
             self.session_store.session_root(&self.session.id),
@@ -4983,11 +5019,12 @@ where
                     Err(err) => format!("`/goal cancel` failed: {}", err.message()),
                 }
             }
-            Ok(GoalSubcommand::CriteriaAdd { text }) => format!(
-                "`/goal criteria add` parsed.\n  Description: {text}\n\
-                 Appending criteria mid-Goal needs the supervisor's `CriteriaRevised` \
-                 envelope path, which lands once `run_tool_loop` integrates."
-            ),
+            Ok(GoalSubcommand::CriteriaAdd { text }) => {
+                match self.goal_session_criteria_add_from_control(text) {
+                    Ok(rendered) => format!("Goal criteria revised.\n{rendered}"),
+                    Err(err) => format!("`/goal criteria add` failed: {}", err.message()),
+                }
+            }
             Err(err) => err.to_string(),
         }
     }
