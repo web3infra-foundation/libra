@@ -30,16 +30,30 @@
 //!
 //! `Spawned` / `Completed` AgentRun lifecycle events are written into
 //! the parent session JSONL as soon as gates clear — P3.5 partial
-//! (v0.17.739). `Failed` / `Cancelled` / `TimedOut` wait for the real
-//! child loop where actual failure modes exist.
+//! (v0.17.739). When a [`SubAgentChildRunner`] is attached via
+//! [`DefaultSubAgentDispatcher::with_child_runner`] (v0.17.756), the
+//! dispatcher delegates the post-gate work to the runner and maps
+//! its `TaskFailure` into the matching `AgentRunEvent` terminal
+//! variant — `Cancelled` / `TimedOut` / `BudgetExceeded` /
+//! `Failed { reason }` — via [`map_failure_to_terminal_event`]
+//! (v0.17.757). The runner trait itself is the OC-Phase 3 P3.4
+//! entry seam.
 //!
 //! Steps 9–13 (model build, handoff via `ContextHandoffBuilder`,
-//! child JSONL session, child run_tool_loop) stay deferred to P3.4
-//! follow-ups: the OC-Phase 4 ContextHandoffBuilder + the
-//! ContextFrameLoader real-shape API are now in place (v0.17.740 +
-//! v0.17.744), but the tool-loop integration that drives a child
-//! `run_tool_loop_with_history_and_observer` from inside the
-//! dispatcher tail still needs to land.
+//! child JSONL session, child run_tool_loop) have shipped as
+//! callable helpers — [`DispatchContext::resolve_provider_build_options`]
+//! (v0.17.752), [`DispatchContext::build_child_model`] (v0.17.755),
+//! [`ContextFrameLoader::latest_frame_for_session`] (v0.17.744), and
+//! [`crate::internal::ai::context_budget::ContextHandoffBuilder`]
+//! (v0.17.740). The remaining P3.4 work is purely to implement the
+//! `SubAgentChildRunner` that drives those helpers through
+//! `run_tool_loop_with_history_and_observer` for the child run. No
+//! restructure of the dispatcher itself is required to land it.
+//!
+//! [`SubAgentChildRunner`]: super::sub_agent::SubAgentChildRunner
+//! [`DispatchContext::resolve_provider_build_options`]: super::sub_agent::DispatchContext::resolve_provider_build_options
+//! [`DispatchContext::build_child_model`]: super::sub_agent::DispatchContext::build_child_model
+//! [`ContextFrameLoader::latest_frame_for_session`]: super::sub_agent::ContextFrameLoader::latest_frame_for_session
 //! Callers that pass step 8 still see the placeholder
 //! [`TaskResult`] from P3.3 — empty `final_text`, zero `steps_used`,
 //! the spec-derived agent / provider / model identities. Tests pin
