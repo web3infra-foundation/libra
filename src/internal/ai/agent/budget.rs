@@ -156,6 +156,24 @@ pub struct BudgetWarning {
     pub actual: String,
 }
 
+impl std::fmt::Display for BudgetWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope_label = match &self.scope {
+            BudgetScope::Session => "session".to_string(),
+            BudgetScope::Agent { name } => format!("agent `{name}`"),
+            BudgetScope::Goal => "goal".to_string(),
+        };
+        write!(
+            f,
+            "budget warning: {scope} {axis} reached {actual} (warn threshold {threshold})",
+            scope = scope_label,
+            axis = self.axis.as_str(),
+            actual = self.actual,
+            threshold = self.threshold,
+        )
+    }
+}
+
 /// Accumulator of one session's running totals across all agents.
 /// Constructed fresh per `libra code` session; dropped at session
 /// teardown.
@@ -699,5 +717,58 @@ mod tests {
             Some(2.5)
         );
         assert!(BudgetMeasurement::Tokens(100).as_threshold_usd().is_none());
+    }
+
+    /// Pin the human-readable shape of a session-scope cost warning.
+    /// The TUI history cell speaks this string verbatim, so a
+    /// regression that drops the scope label or the axis would change
+    /// what the user sees mid-session — surface it as a test failure.
+    #[test]
+    fn budget_warning_display_session_cost_format_is_stable() {
+        let warning = BudgetWarning {
+            axis: BudgetAxis::Cost,
+            scope: BudgetScope::Session,
+            threshold: "$2.0000".to_string(),
+            actual: "$2.5000".to_string(),
+        };
+        assert_eq!(
+            warning.to_string(),
+            "budget warning: session cost reached $2.5000 (warn threshold $2.0000)",
+        );
+    }
+
+    /// Per-agent budgets carry an agent name; the Display impl must
+    /// reach into the `Agent { name }` variant and quote the name so
+    /// the user can recognise which sub-agent tripped the warning.
+    #[test]
+    fn budget_warning_display_agent_scope_quotes_name() {
+        let warning = BudgetWarning {
+            axis: BudgetAxis::Cost,
+            scope: BudgetScope::Agent {
+                name: "explorer".to_string(),
+            },
+            threshold: "$0.5000".to_string(),
+            actual: "$0.6000".to_string(),
+        };
+        assert_eq!(
+            warning.to_string(),
+            "budget warning: agent `explorer` cost reached $0.6000 (warn threshold $0.5000)",
+        );
+    }
+
+    /// Goal-scope wall-clock warnings render with the same template,
+    /// pinning the cross-axis stability of the format.
+    #[test]
+    fn budget_warning_display_goal_wall_clock_format() {
+        let warning = BudgetWarning {
+            axis: BudgetAxis::WallClockMinutes,
+            scope: BudgetScope::Goal,
+            threshold: "30m".to_string(),
+            actual: "32.50m".to_string(),
+        };
+        assert_eq!(
+            warning.to_string(),
+            "budget warning: goal wall_clock_minutes reached 32.50m (warn threshold 30m)",
+        );
     }
 }

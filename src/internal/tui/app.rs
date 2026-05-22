@@ -3216,6 +3216,18 @@ where
                     } => {
                         self.budget_tracker
                             .accumulate(&usage, Some(wall_clock_ms), None);
+                        // OC-Phase 5 budget warnings: surface any axis
+                        // that just crossed its `warn_*` threshold via
+                        // a one-shot history cell so the operator sees
+                        // the alert inline with the conversation. The
+                        // tracker's `warnings_emitted` table guarantees
+                        // each (scope, axis) fires at most once per
+                        // session — back-to-back UsageUpdated events
+                        // do not spam.
+                        for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
+                        }
                         apply_final_usage_update(
                             &mut self.usage_snapshot,
                             &usage,
