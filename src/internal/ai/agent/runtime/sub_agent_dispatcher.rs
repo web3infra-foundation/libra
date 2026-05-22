@@ -482,6 +482,22 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // runner branch is the seam OC-Phase 3 P3.4 fills in;
             // today every test path takes the placeholder branch.
             let outcome = if let Some(runner) = self.child_runner.as_ref() {
+                // OC-Phase 4 minimum-viable handoff (v0.17.773):
+                // load the parent's latest `ContextFrameEvent` from
+                // the session JSONL and materialise it into the
+                // child's history before the user prompt lands.
+                // Failures (no frame yet, IO error) fall through to
+                // empty history — the child still sees the prompt
+                // and works, just without parent context. This is
+                // the same fail-soft posture the runner uses for
+                // the post-Spawned cancel race.
+                let history = ctx
+                    .context_frame_loader
+                    .latest_frame_for_session(ctx.session_store)
+                    .ok()
+                    .flatten()
+                    .map(|frame| frame.to_handoff_messages())
+                    .unwrap_or_default();
                 let request = super::sub_agent::SubAgentChildRunRequest {
                     ctx: &ctx,
                     invocation: &invocation,
@@ -489,7 +505,7 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     effective_ruleset: &_effective,
                     task_id: task_id.clone(),
                     agent_run_id,
-                    history: Vec::new(),
+                    history,
                 };
                 runner.run(request).await
             } else {

@@ -161,6 +161,48 @@ impl ContextFrameEvent {
             .filter_map(|segment| segment.attachment.clone())
             .collect()
     }
+
+    /// Materialise this frame's segments into a `Vec<Message>` the
+    /// child sub-agent's tool loop can consume as
+    /// pre-populated history before its own user prompt lands.
+    ///
+    /// This is OC-Phase 4 P4.4's "minimum-viable handoff" — the
+    /// compaction-agent SUMMARY step lands as a follow-up that
+    /// replaces the raw segment dump with a parser-validated
+    /// 8-section template via `ContextHandoffBuilder` (v0.17.740).
+    /// Until that lands, the child sees the parent's working
+    /// context as User messages, each prefixed with a
+    /// `[<segment_kind>:<source_kind>:<source_label>]` header so
+    /// the model can attribute the content.
+    ///
+    /// Filter rule: only segments with `content = Some` are
+    /// surfaced. Attachment-only segments (where the content was
+    /// externalised to a sidecar file) are skipped because the
+    /// child cannot meaningfully act on a path it has not yet
+    /// read — the `attachment_refs` array on the handoff carries
+    /// the references separately, and a future tool call from
+    /// the child resolves them. Empty-content segments produce no
+    /// message.
+    pub fn to_handoff_messages(&self) -> Vec<crate::internal::ai::completion::Message> {
+        use crate::internal::ai::completion::Message;
+        self.segments
+            .iter()
+            .filter_map(|segment| {
+                let content = segment.content.as_deref()?;
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let header = format!(
+                    "[{}:{:?}:{}]",
+                    segment.segment.as_str(),
+                    segment.source.kind,
+                    segment.source.label,
+                );
+                Some(Message::user(format!("{header}\n{trimmed}")))
+            })
+            .collect()
+    }
 }
 
 impl Event for ContextFrameEvent {
@@ -463,4 +505,149 @@ fn count_lines(content: &str) -> usize {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(digest(&SHA256, bytes).as_ref())
+}
+
+#[cfg(test)]
+mod handoff_message_tests {
+    use super::*;
+    use crate::internal::ai::completion::{Message, UserContent};
+
+    fn segment(
+        id: &str,
+        kind: ContextSegmentKind,
+        source_kind: ContextFrameSourceKind,
+        label: &str,
+        content: Option<&str>,
+    ) -> ContextFrameSegment {
+        ContextFrameSegment {
+            id: id.to_string(),
+            segment: kind,
+            source: ContextFrameSource {
+                kind: source_kind,
+                label: label.to_string(),
+                detail: None,
+            },
+            trust: ContextTrustLevel::Trusted,
+            token_estimate: 0,
+            content: content.map(|s| s.to_string()),
+            summary: None,
+            attachment: None,
+            non_compressible: false,
+        }
+    }
+
+    fn frame_with_segments(segments: Vec<ContextFrameSegment>) -> ContextFrameEvent {
+        ContextFrameEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            kind: ContextFrameKind::ToolResult,
+            prompt_id: None,
+            segments,
+            omissions: Vec::new(),
+            total_candidate_tokens: 0,
+            total_selected_tokens: 0,
+            budget_exceeded_by: 0,
+        }
+    }
+
+    /// Each segment with non-empty content becomes one User message
+    /// whose body starts with a `[kind:source:label]` header line.
+    /// The header lets the model attribute the content while
+    /// reading the handoff.
+    #[test]
+    fn to_handoff_messages_wraps_each_content_segment_with_header() {
+        let frame = frame_with_segments(vec![
+            segment(
+                "seg-1",
+                ContextSegmentKind::RecentMessages,
+                ContextFrameSourceKind::Runtime,
+                "transcript",
+                Some("hello from the parent"),
+            ),
+            segment(
+                "seg-2",
+                ContextSegmentKind::ToolResults,
+                ContextFrameSourceKind::Tool,
+                "shell",
+                Some("$ ls\nfile.txt"),
+            ),
+        ]);
+
+        let messages = frame.to_handoff_messages();
+        assert_eq!(messages.len(), 2);
+
+        let texts: Vec<String> = messages
+            .iter()
+            .map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => panic!("handoff must produce User messages, got: {m:?}"),
+            })
+            .collect();
+
+        assert!(
+            texts[0].starts_with("[recent_messages:Runtime:transcript]\n"),
+            "first message must carry the segment header, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[0].contains("hello from the parent"),
+            "first message must include the trimmed segment content, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[1].starts_with("[tool_results:Tool:shell]\n"),
+            "second message header must reflect its segment kind/source, got: {}",
+            texts[1],
+        );
+    }
+
+    /// Segments with `content = None` (externalised to attachment)
+    /// AND segments whose content is whitespace-only do NOT produce
+    /// messages. The attachment_refs path carries the externalised
+    /// data separately; an empty user message would just waste the
+    /// child's token budget without adding signal.
+    #[test]
+    fn to_handoff_messages_skips_attachment_only_and_empty_content_segments() {
+        let frame = frame_with_segments(vec![
+            // Attachment-only: content = None
+            segment(
+                "seg-attach",
+                ContextSegmentKind::ToolResults,
+                ContextFrameSourceKind::Tool,
+                "build",
+                None,
+            ),
+            // Whitespace-only content
+            segment(
+                "seg-blank",
+                ContextSegmentKind::RecentMessages,
+                ContextFrameSourceKind::Runtime,
+                "user",
+                Some("   \n\t  "),
+            ),
+            // Real content survives
+            segment(
+                "seg-real",
+                ContextSegmentKind::SystemRules,
+                ContextFrameSourceKind::Runtime,
+                "preamble",
+                Some("system rule"),
+            ),
+        ]);
+
+        let messages = frame.to_handoff_messages();
+        assert_eq!(
+            messages.len(),
+            1,
+            "only the real-content segment should produce a message; got {messages:?}",
+        );
+    }
 }
