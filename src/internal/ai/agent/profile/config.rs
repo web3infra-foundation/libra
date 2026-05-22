@@ -36,6 +36,8 @@
 //!   (so warnings fire before the hard cap).
 //! - `max_concurrent_subagents` and `max_subagent_depth` are at
 //!   least 1 when `multi_agent.enabled = true`.
+//! - `subagent_timeout_ms` is greater than 0 when
+//!   `multi_agent.enabled = true`.
 //! - `auto_continue_on_resume` is one of `"ask"`, `"auto"`, `"never"`.
 //! - Per-agent `[code.budget.per_agent.<name>]` references an agent
 //!   declared under `[code.agents.<name>]`.
@@ -44,12 +46,14 @@
 //! provider exists) are NOT enforced here; the factory layer
 //! (OC-Phase 1) owns those.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::spec::{AgentMode, ModelBinding, ToolSelection};
+use super::spec::{
+    AgentExecutionSpec, AgentMode, AgentPermissionSpec, ModelBinding, ToolSelection,
+};
 
 /// Top-level config. Every subsection is optional so a partial
 /// `agents.toml` (e.g. only `[code.multi_agent]`) parses cleanly and
@@ -108,6 +112,9 @@ pub struct MultiAgentConfig {
 
     #[serde(default = "default_max_concurrent_subagents")]
     pub max_concurrent_subagents: u32,
+
+    #[serde(default = "default_subagent_timeout_ms")]
+    pub subagent_timeout_ms: u64,
 }
 
 impl Default for MultiAgentConfig {
@@ -116,6 +123,7 @@ impl Default for MultiAgentConfig {
             enabled: false,
             max_subagent_depth: default_max_subagent_depth(),
             max_concurrent_subagents: default_max_concurrent_subagents(),
+            subagent_timeout_ms: default_subagent_timeout_ms(),
         }
     }
 }
@@ -125,6 +133,9 @@ fn default_max_subagent_depth() -> u32 {
 }
 fn default_max_concurrent_subagents() -> u32 {
     1
+}
+fn default_subagent_timeout_ms() -> u64 {
+    600_000
 }
 
 /// `[code.sub_agents]` — CEX-S2-12 sub-agent runtime gate.
@@ -307,6 +318,70 @@ impl AgentConfigEntry {
             ToolSelection::Allow(self.tools.iter().map(|t| t.trim().to_string()).collect())
         }
     }
+
+    /// Convert a validated TOML entry into the runtime
+    /// [`AgentExecutionSpec`] shape.
+    ///
+    /// Returns a validation-style error instead of panicking so callers
+    /// can surface one user-friendly config error path whether the
+    /// failure was found during `validate()` or during conversion.
+    pub fn to_execution_spec(
+        &self,
+        name: &str,
+    ) -> Result<AgentExecutionSpec, AgentsConfigValidationError> {
+        let model = ModelBinding::parse(&self.model).ok_or_else(|| {
+            AgentsConfigValidationError::InvalidModelBinding {
+                name: name.to_string(),
+                value: self.model.clone(),
+            }
+        })?;
+        let mode = parse_agent_mode(&self.mode).ok_or_else(|| {
+            AgentsConfigValidationError::InvalidAgentMode {
+                name: name.to_string(),
+                value: self.mode.clone(),
+            }
+        })?;
+        Ok(AgentExecutionSpec {
+            name: name.to_string(),
+            mode,
+            model: Some(model),
+            tools: self.tool_selection(),
+            permission: permission_spec_from_config(&self.permission),
+            max_steps: self.steps,
+            ..AgentExecutionSpec::default()
+        })
+    }
+}
+
+fn permission_spec_from_config(
+    permissions: &BTreeMap<String, PermissionPolicy>,
+) -> AgentPermissionSpec {
+    let mut allowed_tools = BTreeSet::new();
+    let mut denied_tools = BTreeSet::new();
+    for (permission, policy) in permissions {
+        let key = normalize_permission_key(permission);
+        match policy {
+            PermissionPolicy::Allow | PermissionPolicy::Ask => {
+                allowed_tools.insert(key);
+            }
+            PermissionPolicy::Deny => {
+                denied_tools.insert(key);
+            }
+        }
+    }
+    AgentPermissionSpec {
+        allowed_tools,
+        denied_tools,
+        ..AgentPermissionSpec::default()
+    }
+}
+
+fn normalize_permission_key(permission: &str) -> String {
+    match permission.trim() {
+        "write" => "edit".to_string(),
+        "bash" => "shell".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn default_agent_mode_string() -> String {
@@ -421,6 +496,11 @@ pub enum AgentsConfigValidationError {
     MultiAgentMustBePositive { field: &'static str, value: u32 },
 
     #[error(
+        "multi_agent.subagent_timeout_ms must be greater than 0 when multi_agent.enabled is true"
+    )]
+    MultiAgentTimeoutMustBePositive,
+
+    #[error(
         "sub_agents.max_parallel must be at least 1 when sub_agents.enabled is true (got {value})"
     )]
     SubAgentsMaxParallelMustBePositive { value: u32 },
@@ -483,6 +563,29 @@ impl AgentsConfig {
         toml::to_string_pretty(&Wrapper { code: self })
     }
 
+    /// Convert every `[code.agents.<name>]` entry into executable
+    /// specs after running the same validation pass used at load time.
+    pub fn execution_specs(
+        &self,
+    ) -> Result<BTreeMap<String, AgentExecutionSpec>, AgentsConfigValidationErrors> {
+        self.validate()?;
+        let mut specs = BTreeMap::new();
+        let mut errors = Vec::new();
+        for (name, agent) in &self.agents {
+            match agent.to_execution_spec(name) {
+                Ok(spec) => {
+                    specs.insert(name.clone(), spec);
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        if errors.is_empty() {
+            Ok(specs)
+        } else {
+            Err(AgentsConfigValidationErrors { errors })
+        }
+    }
+
     /// Run the full validation pass. See module-level docs for the
     /// rules. Returns `Ok(())` only when the punch list is empty.
     pub fn validate(&self) -> Result<(), AgentsConfigValidationErrors> {
@@ -501,6 +604,9 @@ impl AgentsConfig {
                     field: "max_concurrent_subagents",
                     value: 0,
                 });
+            }
+            if self.multi_agent.subagent_timeout_ms == 0 {
+                errors.push(AgentsConfigValidationError::MultiAgentTimeoutMustBePositive);
             }
         }
 
@@ -633,6 +739,7 @@ mod tests {
 enabled = false
 max_subagent_depth = 1
 max_concurrent_subagents = 1
+subagent_timeout_ms = 600000
 
 [code.goal]
 enabled = false
@@ -706,6 +813,7 @@ max_steps = 20
         assert!(!cfg.multi_agent.enabled);
         assert_eq!(cfg.multi_agent.max_subagent_depth, 1);
         assert_eq!(cfg.multi_agent.max_concurrent_subagents, 1);
+        assert_eq!(cfg.multi_agent.subagent_timeout_ms, 600_000);
         // CEX-S2-12 sub_agents flag — default off, max_parallel = 2 per
         // the scheduler-side observer budget in CEX-S2-14.
         assert!(!cfg.sub_agents.enabled);
@@ -1042,6 +1150,7 @@ auto_continue_on_resume = "yolo"
 enabled = true
 max_subagent_depth = 0
 max_concurrent_subagents = 0
+subagent_timeout_ms = 0
 "#;
         let cfg = AgentsConfig::from_toml_str(toml_str).unwrap();
         let err = cfg.validate().expect_err("zero caps must fail");
@@ -1057,6 +1166,10 @@ max_concurrent_subagents = 0
             fields,
             vec!["max_subagent_depth", "max_concurrent_subagents"]
         );
+        assert!(err.errors.iter().any(|e| matches!(
+            e,
+            AgentsConfigValidationError::MultiAgentTimeoutMustBePositive
+        )));
     }
 
     #[test]
@@ -1220,6 +1333,31 @@ permission = { write = "deny", read = "allow", shell = "ask" }
     }
 
     #[test]
+    fn execution_specs_convert_toml_agents_for_runtime_dispatch() {
+        let cfg = AgentsConfig::from_toml_str(
+            r#"
+[code.agents.explorer]
+model = "deepseek/deepseek-chat"
+mode = "subagent"
+tools = ["read_file", "grep_files"]
+permission = { write = "deny", bash = "ask" }
+steps = 12
+"#,
+        )
+        .unwrap();
+
+        let specs = cfg.execution_specs().expect("valid config converts");
+        let spec = specs.get("explorer").expect("explorer spec");
+        assert_eq!(spec.name, "explorer");
+        assert_eq!(spec.mode, AgentMode::Subagent);
+        assert_eq!(spec.model.as_ref().unwrap().provider_id, "deepseek");
+        assert_eq!(spec.max_steps, Some(12));
+        assert!(matches!(spec.tools, ToolSelection::Allow(_)));
+        assert!(spec.permission.denied_tools.contains("edit"));
+        assert!(spec.permission.allowed_tools.contains("shell"));
+    }
+
+    #[test]
     fn agents_config_validation_error_display_pins_each_variant() {
         assert_eq!(
             AgentsConfigValidationError::InvalidModelBinding {
@@ -1267,6 +1405,11 @@ permission = { write = "deny", read = "allow", shell = "ask" }
             .to_string(),
             "multi_agent.max_subagent_depth must be at least 1 when multi_agent.enabled is true \
              (got 0)",
+        );
+        assert_eq!(
+            AgentsConfigValidationError::MultiAgentTimeoutMustBePositive.to_string(),
+            "multi_agent.subagent_timeout_ms must be greater than 0 when multi_agent.enabled is \
+             true",
         );
         assert_eq!(
             AgentsConfigValidationError::SubAgentsMaxParallelMustBePositive { value: 0 }

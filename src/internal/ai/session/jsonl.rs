@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::state::SessionState;
 use crate::internal::ai::{
+    agent_run::{AgentRunEvent, AgentRunEventEnvelope},
     context_budget::{CompactionEvent, ContextFrameEvent, MemoryAnchorEvent, MemoryAnchorReplay},
     goal::GoalEventEnvelope,
     runtime::event::Event,
@@ -33,11 +34,15 @@ pub enum SessionEvent {
     ContextFrame(ContextFrameEvent),
     CompactionEvent(CompactionEvent),
     MemoryAnchor(MemoryAnchorEvent),
-    /// OC-Phase 6 Goal mode envelope (P6.1 schema only — supervisor wiring
-    /// in P6.3). The variant exists from day one so the JSONL stream
-    /// stays byte-stable as later PRs start emitting Goal events; readers
-    /// running an older binary skip unknown `goal_event` payloads via
-    /// the `parse_session_event_value` `unknown` branch.
+    /// OC-Phase 3 sub-agent lifecycle event. These do not mutate the
+    /// legacy `SessionState`; they are replayed by agent-run specific
+    /// projections and skipped by older binaries through the unknown
+    /// event branch.
+    AgentRun(AgentRunEventEnvelope),
+    /// OC-Phase 6 Goal mode envelope. Goal supervisor wiring emits these
+    /// alongside normal session events; older binaries still skip unknown
+    /// `goal_event` payloads via the `parse_session_event_value` `unknown`
+    /// branch.
     Goal(GoalEventEnvelope),
 }
 
@@ -75,6 +80,10 @@ impl SessionEvent {
         Self::MemoryAnchor(event)
     }
 
+    pub fn agent_run(event: AgentRunEvent) -> Self {
+        Self::AgentRun(event.into())
+    }
+
     pub fn goal(event: GoalEventEnvelope) -> Self {
         Self::Goal(event)
     }
@@ -84,15 +93,15 @@ impl SessionEvent {
             Self::SessionSnapshot(event) => {
                 *current = Some(event.state.clone());
             }
-            // P6.1 schema-only: Goal envelopes do NOT mutate the
-            // legacy `SessionState`. Replay into a `GoalState` lives
-            // in `crate::internal::ai::goal::state::replay`, called
-            // by the supervisor (P6.3). Listing the variant here
-            // makes the no-op explicit so a future maintainer does
-            // not assume an oversight.
+            // Goal envelopes do NOT mutate the legacy `SessionState`.
+            // Replay into a `GoalState` lives in
+            // `crate::internal::ai::goal::state::replay`. Listing the
+            // variant here makes the no-op explicit so a future
+            // maintainer does not assume an oversight.
             Self::ContextFrame(_)
             | Self::CompactionEvent(_)
             | Self::MemoryAnchor(_)
+            | Self::AgentRun(_)
             | Self::Goal(_) => {}
         }
     }
@@ -105,6 +114,7 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_kind(),
             Self::CompactionEvent(event) => event.event_kind(),
             Self::MemoryAnchor(event) => event.event_kind(),
+            Self::AgentRun(_) => "agent_run",
             Self::Goal(event) => event.event_kind(),
         }
     }
@@ -115,6 +125,10 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_id(),
             Self::CompactionEvent(event) => event.event_id(),
             Self::MemoryAnchor(event) => event.event_id(),
+            Self::AgentRun(event) => event
+                .known()
+                .map(crate::internal::ai::runtime::Event::event_id)
+                .unwrap_or_else(uuid::Uuid::nil),
             Self::Goal(event) => event.event_id(),
         }
     }
@@ -129,6 +143,10 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_summary(),
             Self::CompactionEvent(event) => event.event_summary(),
             Self::MemoryAnchor(event) => event.event_summary(),
+            Self::AgentRun(event) => event
+                .known()
+                .map(crate::internal::ai::runtime::Event::event_summary)
+                .unwrap_or_else(|| "unknown agent_run event".to_string()),
             Self::Goal(event) => event.event_summary(),
         }
     }
@@ -148,6 +166,18 @@ pub struct SessionJsonlStore {
 impl SessionJsonlStore {
     pub fn new(session_root: PathBuf) -> Self {
         Self { session_root }
+    }
+
+    pub fn session_root(&self) -> &Path {
+        &self.session_root
+    }
+
+    pub fn child(&self, child_id: &str) -> Self {
+        Self::new(
+            self.session_root
+                .join("subagents")
+                .join(child_dir_name(child_id)),
+        )
     }
 
     pub fn events_path(&self) -> PathBuf {
@@ -275,6 +305,7 @@ impl SessionJsonlStore {
                 }
                 SessionEvent::SessionSnapshot(_) => {}
                 SessionEvent::MemoryAnchor(_) => {}
+                SessionEvent::AgentRun(_) => {}
                 // OC-Phase 6 P6.1: Goal envelopes do not contribute to
                 // `SessionContextReplay`. Goal state is replayed by
                 // `crate::internal::ai::goal::state::replay`, called by
@@ -312,6 +343,11 @@ impl SessionJsonlStore {
     }
 }
 
+fn child_dir_name(child_id: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, child_id.as_bytes());
+    format!("task-{}", hex::encode(digest.as_ref()))
+}
+
 fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde_json::Error> {
     let Some(kind) = value.get("kind").and_then(Value::as_str) else {
         return Ok(None);
@@ -322,6 +358,7 @@ fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde
         "context_frame" => serde_json::from_value(value).map(Some),
         "compaction_event" => serde_json::from_value(value).map(Some),
         "memory_anchor" => serde_json::from_value(value).map(Some),
+        "agent_run" => serde_json::from_value(value).map(Some),
         // OC-Phase 6 P6.1: Goal envelope. Old binaries that predate
         // P6.1 fall through to the `unknown` branch below and skip
         // the event without surfacing an error; this branch lets a
@@ -355,6 +392,29 @@ mod tests {
         assert_eq!(store.events_path(), expected);
         assert_eq!(session_events_path(tmp.path()), expected);
         assert_eq!(SESSION_EVENTS_FILE, "events.jsonl");
+    }
+
+    /// Child session ids are untrusted (`task_id` can come from a model
+    /// tool call), so they must never become raw path segments. The
+    /// child store hashes the id into one fixed directory name under
+    /// `<parent>/subagents/`.
+    #[test]
+    fn child_store_hashes_untrusted_id_into_single_path_segment() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let child = store.child("../outside/../../secret");
+        let relative = child
+            .session_root()
+            .strip_prefix(store.session_root())
+            .expect("child must stay below parent");
+        let components: Vec<_> = relative.components().collect();
+
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].as_os_str().to_string_lossy(), "subagents");
+        let child_dir = components[1].as_os_str().to_string_lossy();
+        assert!(child_dir.starts_with("task-"));
+        assert_eq!(child_dir.len(), "task-".len() + 64);
+        assert!(!child.session_root().ends_with("secret"));
     }
 
     /// `has_events()` returns `false` for a missing JSONL file (no

@@ -16,12 +16,11 @@
 //! * The state is mutated only through the [`apply`] path (schema
 //!   floor), so any consumer reading `state` sees a verifier-safe
 //!   projection.
-//! * Exactly one envelope is appended per public mutation method
-//!   (`create`, `cancel`); the supervisor (P6.3) integration ships
-//!   later and will append the in-flight envelopes (`Created` is
-//!   appended *here* by `create`, but `CompletionClaimed`,
-//!   `Completed`, `CompletionRejected`, `Blocked`, `ProgressRecorded`
-//!   ride on the supervisor's path once `run_tool_loop` integrates).
+//! * Exactly one envelope is appended by `create` and `cancel`; the
+//!   Goal supervisor appends in-flight envelopes
+//!   (`CompletionClaimed`, `Completed`, `CompletionRejected`,
+//!   `Blocked`, `ProgressRecorded`) through
+//!   [`GoalSession::append_supervisor_events`].
 //!
 //! User-facing surfaces (TUI `/goal` slash commands and Code Control
 //! NDJSON `goal.*` methods) both bottom out in the App methods that
@@ -109,14 +108,10 @@ impl GoalSession {
         &self.state
     }
 
-    /// Read-only access to the cumulative event log. Used by the
-    /// future persistence layer (P6.7) to flush envelopes to the
-    /// session JSONL on demand. The `#[allow(dead_code)]` keeps the
-    /// API surface stable until that consumer lands; without it,
-    /// `cargo clippy --tests -p libra --no-deps -- -D warnings`
-    /// would refuse the compile because P6.6 itself does not yet
-    /// drive event flushing.
-    #[allow(dead_code)]
+    /// Read-only access to the cumulative event log. The TUI flushes
+    /// new envelopes to the session JSONL whenever a Goal mutation
+    /// succeeds; tests also use this to assert the schema-floor event
+    /// order.
     pub fn events(&self) -> &[GoalEventEnvelope] {
         &self.events
     }
@@ -217,6 +212,27 @@ impl GoalSession {
             state: self.state.clone(),
         })
     }
+
+    /// Append envelopes emitted by the Goal supervisor and apply
+    /// them through the same schema floor used by slash-command
+    /// mutations. This is the only path for runtime envelopes such
+    /// as `ProgressRecorded`, `CompletionClaimed`,
+    /// `CompletionRejected`, `Blocked`, and `Completed`.
+    pub fn append_supervisor_events(
+        &mut self,
+        events: &[GoalEventEnvelope],
+    ) -> Result<(), GoalSessionError> {
+        if self.state.status.is_terminal() {
+            return Err(GoalSessionError::NotActive);
+        }
+        for envelope in events {
+            apply(&mut self.state, envelope).map_err(|reject| GoalSessionError::InternalApply {
+                detail: reject.to_string(),
+            })?;
+            self.events.push(envelope.clone());
+        }
+        Ok(())
+    }
 }
 
 /// Render `state` as a multi-line human-readable summary — used by
@@ -282,7 +298,9 @@ pub fn render_goal_status(state: &GoalState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::goal::{GoalEvent, GoalStatus, MAX_OBJECTIVE_LEN};
+    use crate::internal::ai::goal::{
+        GoalEvent, GoalEventEnvelope, GoalProgressRecord, GoalStatus, MAX_OBJECTIVE_LEN,
+    };
 
     fn user_actor() -> GoalActor {
         GoalActor::User { id: None }
@@ -376,6 +394,37 @@ mod tests {
             .cancel("second cancel".to_string(), user_actor())
             .unwrap_err();
         assert_eq!(err, GoalSessionError::NotActive);
+    }
+
+    #[test]
+    fn append_supervisor_events_replays_and_extends_log() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let event = GoalEventEnvelope::new(
+            session.state().spec.goal_id,
+            session.state().updated_at + chrono::Duration::seconds(1),
+            GoalEvent::ProgressRecorded(GoalProgressRecord {
+                summary: "implemented first slice".to_string(),
+                completed_criteria: Vec::new(),
+                evidence_refs: Vec::new(),
+                next_steps: vec!["run tests".to_string()],
+            }),
+        );
+
+        session
+            .append_supervisor_events(std::slice::from_ref(&event))
+            .expect("supervisor event should apply");
+
+        assert_eq!(session.events().last(), Some(&event));
+        assert_eq!(
+            session.state().last_assistant_summary,
+            Some("implemented first slice".to_string())
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Codex-like Goal mode runtime contract (OC-Phase 6 P6.1 — schema only).
+//! Codex-like Goal mode runtime contract (OC-Phase 6).
 //!
 //! Per `docs/improvement/opencode.md` line 532, Goal mode is a runtime layer
 //! that **prevents the assistant's normal final answer from putting the
@@ -8,13 +8,12 @@
 //! stream (what has happened), and the replayable [`state::GoalState`]
 //! projection (what currently is).
 //!
-//! The supervisor (P6.3), verifier (P6.2), tools (P6.4), CLI/TUI (P6.5),
-//! Code Control NDJSON (P6.6), and end-to-end tests (P6.7) will plug into
-//! this schema in later PRs. P6.1 deliberately stays schema-only — no
-//! observer wiring, no tool registration, no CLI surface. The downstream
-//! integrations all read and write the types defined here, so the schema
-//! must round-trip through JSON cleanly and replay deterministically before
-//! any executable behaviour ships.
+//! The schema, deterministic verifier, supervisor loop, Goal protocol tools,
+//! CLI/TUI surface, Code Control NDJSON methods, resume replay, and flag-off
+//! regression coverage all read and write the types defined here. Goal events
+//! must round-trip through JSON cleanly and replay deterministically because
+//! the runtime persists supervisor envelopes in the same session JSONL stream
+//! as the rest of `libra code`.
 //!
 //! # Module map
 //!
@@ -57,9 +56,9 @@ pub use state::{
     GoalVerificationRecord, MAX_REPLAY_REJECTIONS, PendingGoalClaim, apply, replay,
 };
 pub use supervisor::{
-    GoalEventClock, GoalLoopDecision, GoalStopPolicy, GoalSupervisedRun, GoalSupervisor,
-    GoalSupervisorStep, GoalTurnOutcome, goal_turn_outcome_from_tool_loop_turn,
-    run_goal_supervised_tool_loop,
+    GoalEventClock, GoalLoopDecision, GoalStopPolicy, GoalSupervisedRun,
+    GoalSupervisedToolLoopRequest, GoalSupervisor, GoalSupervisorStep, GoalTurnOutcome,
+    goal_turn_outcome_from_tool_loop_turn, run_goal_supervised_tool_loop,
 };
 pub use verifier::{
     DeterministicGoalVerifier, GoalVerifier, GoalVerifierContext, GoalVerifyOutcome,

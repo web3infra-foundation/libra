@@ -54,10 +54,8 @@
 pub mod agent;
 // Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
 pub mod automation;
-// Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold).
-// Gated behind `subagent-scaffold` Cargo feature; off by default. See module
-// docs for CP-4 gate-violation note.
-#[cfg(feature = "subagent-scaffold")]
+// Step 2 sub-agent contracts. The OC-Phase 3 runtime uses the event
+// vocabulary; richer task/patchset schemas remain schema-first contracts.
 pub mod agent_run;
 // Generic LLM client helpers shared across providers.
 pub mod client;

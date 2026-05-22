@@ -99,7 +99,7 @@ use crate::{
     internal::{
         ai::{
             agent::{
-                TaskIntent,
+                BudgetTracker, TaskIntent,
                 profile::{
                     AgentExecutionSpec, AgentMode, AgentPermissionSpec, AgentProfileRouter,
                     AgentsConfig, ModelBinding, load_profiles,
@@ -144,8 +144,9 @@ use crate::{
                 handlers::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
-                    ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
-                    SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
+                    ShellHandler, SubmitGoalCompleteHandler, SubmitIntentDraftHandler,
+                    SubmitPlanDraftHandler, SubmitTaskCompleteHandler, UpdateGoalProgressHandler,
+                    WebSearchHandler, register_semantic_handlers,
                 },
             },
             usage::{UsageContext, UsagePriceTable, UsageRecorder},
@@ -1543,6 +1544,8 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<UserInputRequest>();
     let (exec_approval_tx, exec_approval_rx) =
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
+    let agents_config_for_registry = load_agents_config_from_project(&working_dir)?;
+    let goal_tools_enabled = args.goal.is_some() || agents_config_for_registry.goal.enabled;
 
     // Build registry: basic file tools + MCP workflow tools.
     //
@@ -1570,6 +1573,13 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
+    // Register the handlers unconditionally so `/goal start` and Code
+    // Control `goal.start` can enable Goal mode after launch. The
+    // per-turn allowed-tool policy below keeps both tools hidden on
+    // flag-off turns.
+    builder = builder
+        .register("update_goal_progress", Arc::new(UpdateGoalProgressHandler))
+        .register("submit_goal_complete", Arc::new(SubmitGoalCompleteHandler));
     builder = register_semantic_handlers(builder);
 
     // AI user story: MCP bridge tools let the agent persist intent/task/run,
@@ -1581,7 +1591,10 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let registry = Arc::new(builder.build());
-    let allowed_tools = registry.filter_by_intent(task_intent);
+    let mut allowed_tools = registry.filter_by_intent(task_intent);
+    if !goal_tools_enabled {
+        allowed_tools.retain(|name| !is_goal_protocol_tool(name));
+    }
 
     let approval_config = approval_config_from_project_config(registry.working_dir());
     let approval_ttl = args
@@ -2715,6 +2728,9 @@ where
         preserve_reasoning_content: params.preserve_reasoning_content,
         ..Default::default()
     };
+    if params.initial_goal.is_some() || agents_config.goal.enabled {
+        config.terminal_tools = Some(vec!["submit_goal_complete".to_string()]);
+    }
 
     // Initialize terminal.
     let terminal = match tui_init() {
@@ -3193,6 +3209,10 @@ fn task_intent_for_context(context: Option<CodeContext>) -> TaskIntent {
     }
 }
 
+fn is_goal_protocol_tool(name: &str) -> bool {
+    matches!(name, "update_goal_progress" | "submit_goal_complete")
+}
+
 /// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
 /// the sandbox policy based on the operating context:
 ///
@@ -3408,6 +3428,7 @@ fn runtime_multi_agent_config(
         enabled: config.enabled,
         max_subagent_depth,
         max_concurrent_subagents: config.max_concurrent_subagents,
+        subagent_timeout_ms: Some(config.subagent_timeout_ms),
     })
 }
 
@@ -3509,9 +3530,12 @@ fn configure_multi_agent_runtime(
         network_access,
     }));
     config.subagent_runtime = Some(SubAgentToolLoopRuntime {
-        dispatcher: Arc::new(DefaultSubAgentDispatcher::new(
+        dispatcher: Arc::new(DefaultSubAgentDispatcher::new_with_budget_tracker(
             agent_registry,
             runtime_multi_agent_config(&agents_config.multi_agent)?,
+            Arc::new(crate::internal::ai::agent::runtime::ToolLoopSubAgentChildRunner),
+            agents_config.clone(),
+            Arc::new(std::sync::Mutex::new(BudgetTracker::new())),
         )),
         parent_thread_id: session_canonical_thread_id(session)
             .unwrap_or_else(|| session.id.clone()),
@@ -4744,6 +4768,14 @@ no_cache_unknown_network = true
             TaskIntent::Question
         );
         assert_eq!(task_intent_for_context(None), TaskIntent::Unknown);
+    }
+
+    #[test]
+    fn goal_protocol_tool_filter_is_limited_to_goal_tools() {
+        assert!(is_goal_protocol_tool("update_goal_progress"));
+        assert!(is_goal_protocol_tool("submit_goal_complete"));
+        assert!(!is_goal_protocol_tool("update_plan"));
+        assert!(!is_goal_protocol_tool("submit_task_complete"));
     }
 
     #[test]

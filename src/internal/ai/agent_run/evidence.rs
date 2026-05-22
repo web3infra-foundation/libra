@@ -19,8 +19,6 @@
 //! MUST `use ... as ...` to avoid name collisions. We follow that pattern
 //! below.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use serde::{Deserialize, Serialize};
 
 use super::{AgentRunId, AnchorScope, Confidence, EventId, EvidenceId, SourceCallId, ToolCallId};

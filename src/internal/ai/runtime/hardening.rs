@@ -99,6 +99,42 @@ pub struct ToolOperation {
     pub tool_name: String,
     pub mutates_state: bool,
     pub requires_network: bool,
+    #[serde(default)]
+    pub details: ToolOperationDetails,
+}
+
+impl ToolOperation {
+    pub fn tool(tool_name: impl Into<String>, mutates_state: bool, requires_network: bool) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            mutates_state,
+            requires_network,
+            details: ToolOperationDetails::Tool,
+        }
+    }
+
+    pub fn sub_agent_spawn(name: impl Into<String>, prompt_digest: impl Into<String>) -> Self {
+        Self {
+            tool_name: "task".to_string(),
+            mutates_state: true,
+            requires_network: false,
+            details: ToolOperationDetails::SubAgentSpawn {
+                name: name.into(),
+                prompt_digest: prompt_digest.into(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolOperationDetails {
+    #[default]
+    Tool,
+    SubAgentSpawn {
+        name: String,
+        prompt_digest: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +284,7 @@ impl ToolBoundaryPolicy {
             mutating_tools: [
                 "shell",
                 "apply_patch",
+                "task",
                 "update_plan",
                 "submit_intent_draft",
                 "submit_plan_draft",

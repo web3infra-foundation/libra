@@ -1,8 +1,6 @@
 //! `AgentTask[S]` snapshot: a Phase-2 dispatch unit derived from a confirmed
 //! `Task`. References — does not copy — the persistent `Task` business fields.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

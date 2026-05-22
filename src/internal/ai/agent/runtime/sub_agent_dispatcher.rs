@@ -1,8 +1,8 @@
-//! Default `SubAgentDispatcher` implementation — gates 1–4, 6–8.
+//! Default `SubAgentDispatcher` implementation — gates, ask, and child loop.
 //!
 //! This module ships the dispatcher across OC-Phase 3 P3.3 and P3.4 from
-//! `docs/improvement/opencode.md`. It implements the **gate + ask** half
-//! of the 14-step dispatcher main flow:
+//! `docs/improvement/opencode.md`. It implements the dispatcher main flow
+//! through child model construction and normal tool-loop re-entry:
 //!
 //! 1. validate feature flag (`code.multi_agent.enabled`) — P3.3 implemented
 //! 2. validate `ctx.depth + 1 <= max_subagent_depth` — P3.3 implemented
@@ -11,12 +11,8 @@
 //! 4. resolve `subagent_type` via the spec registry; reject `Primary`
 //!    profiles — P3.3 implemented
 //! 5. `SafetyDecision::evaluate(SubAgentSpawn { name, prompt_digest })`
-//!    — still a TODO no-op. Needs a `SubAgentSpawn`
-//!    [`crate::internal::ai::runtime::ToolOperation`] variant before
-//!    `ToolBoundaryPolicy::decide` can take it. Today the dispatcher
-//!    accepts every sub-spec that survived the prior gates; no
-//!    semantic gap exists because Libra has no `SubAgentSpawn`
-//!    policy configured.
+//!    through the registry's runtime `ToolBoundaryRuntime` when present,
+//!    or a conservative system-principal default policy otherwise.
 //! 6. compute `effective_ruleset` via `child_ruleset(parent, sub_spec)`
 //!    — P3.3 implemented
 //! 7. assert no permission escalation (Permission Escalation Gate)
@@ -26,35 +22,52 @@
 //!    dialog. `Reject{feedback}` surfaces as
 //!    [`TaskFailure::ApprovalRejected`]. — P3.4 implemented
 //!
-//! Steps 9–13 (model build, handoff, child JSONL session,
-//! `AgentRunEvent::Spawned`, child run_tool_loop) stay deferred to
-//! P3.4+ follow-ups: each needs a dependency that has not landed yet
-//! (the OC-Phase 4 context handoff builder, the `agent_run`
-//! schema's child run plumbing, and the tool-loop integration).
-//! Callers that pass step 8 still see the placeholder
-//! [`TaskResult`] from P3.3 — empty `final_text`, zero `steps_used`,
-//! the spec-derived agent / provider / model identities. Tests pin
-//! that shape so a future regression that drops the placeholder
-//! before steps 9–13 land is loud.
+//! 9. build the child model from the child binding (or parent fallback)
+//! 10. pre-filter child tools through `ToolRegistry::available_for`
+//! 11. write a child JSONL session snapshot under `subagents/`
+//! 12. run the child through the normal tool loop with nested `task`
+//!     disabled
+//! 13. append the child completion snapshot and return the child's
+//!     final text / usage summary
+//!
+//! Timeout enforcement, token hard caps, and parent-cancel propagation are
+//! implemented, including a pre-permission gate and an in-flight child-loop
+//! cancellation branch. User-initiated `/task` and Code-Control
+//! `task.dispatch` both route through `TaskEntryKind::UserInitiated`.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
 };
 
 use futures::future::BoxFuture;
 
-use super::sub_agent::{
-    DispatchContext, PermissionAskRequest, PermissionAskSource, PermissionReply,
-    SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+use super::{
+    sub_agent::{
+        BudgetExceededReason, CancellationSource, DispatchContext, PermissionAskRequest,
+        PermissionAskSource, PermissionReply, SafetyDecisionDenial, SubAgentChildRunRequest,
+        SubAgentChildRunner, SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation,
+        TaskResult, ToolLoopError,
+    },
+    tool_loop::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
 };
 use crate::internal::ai::{
-    agent::profile::AgentExecutionSpec,
-    completion::CompletionUsageSummary,
+    agent::{
+        BudgetAxis, BudgetExceededError, BudgetTracker,
+        profile::{AgentExecutionSpec, AgentProfileRouter, ToolSelection, config::AgentsConfig},
+    },
+    agent_run::{AgentRunEvent, AgentRunId},
+    completion::{CompletionError, CompletionUsageSummary, Message},
     permission::{
         EDIT_TOOLS, PermissionRuleset, agent_permission_spec_to_ruleset, assert_no_escalation,
         child_ruleset,
     },
+    runtime::{PrincipalContext, ToolBoundaryPolicy, ToolOperation},
+    session::{SessionState, jsonl::SessionEvent},
+    usage::UsageContext,
 };
 
 /// Runtime configuration for the multi-agent feature gate.
@@ -72,6 +85,7 @@ pub struct MultiAgentConfig {
     pub enabled: bool,
     pub max_subagent_depth: u8,
     pub max_concurrent_subagents: u32,
+    pub subagent_timeout_ms: Option<u64>,
 }
 
 impl Default for MultiAgentConfig {
@@ -80,6 +94,7 @@ impl Default for MultiAgentConfig {
             enabled: false,
             max_subagent_depth: 1,
             max_concurrent_subagents: 1,
+            subagent_timeout_ms: Some(600_000),
         }
     }
 }
@@ -97,6 +112,19 @@ pub trait AgentSpecRegistry: Send + Sync {
     fn registered_names(&self) -> Vec<String>;
 }
 
+impl AgentSpecRegistry for AgentProfileRouter {
+    fn lookup(&self, name: &str) -> Option<AgentExecutionSpec> {
+        self.execution_spec(name)
+    }
+
+    fn registered_names(&self) -> Vec<String> {
+        self.profiles()
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect()
+    }
+}
+
 /// Default dispatcher implementation. Holds a registry, a config, and
 /// a shared concurrency counter that subsequent dispatches increment +
 /// decrement around the gate.
@@ -104,14 +132,59 @@ pub struct DefaultSubAgentDispatcher {
     registry: Arc<dyn AgentSpecRegistry>,
     config: MultiAgentConfig,
     in_flight: Arc<AtomicU32>,
+    child_runner: Arc<dyn SubAgentChildRunner>,
+    budget: Option<SubAgentBudgetRuntime>,
+}
+
+#[derive(Clone)]
+struct SubAgentBudgetRuntime {
+    config: AgentsConfig,
+    tracker: Arc<Mutex<BudgetTracker>>,
 }
 
 impl DefaultSubAgentDispatcher {
     pub fn new(registry: Arc<dyn AgentSpecRegistry>, config: MultiAgentConfig) -> Self {
+        Self::new_with_child_runner(registry, config, Arc::new(ToolLoopSubAgentChildRunner))
+    }
+
+    pub fn new_with_child_runner(
+        registry: Arc<dyn AgentSpecRegistry>,
+        config: MultiAgentConfig,
+        child_runner: Arc<dyn SubAgentChildRunner>,
+    ) -> Self {
+        Self::new_with_child_runner_and_budget(registry, config, child_runner, None)
+    }
+
+    pub fn new_with_budget_tracker(
+        registry: Arc<dyn AgentSpecRegistry>,
+        config: MultiAgentConfig,
+        child_runner: Arc<dyn SubAgentChildRunner>,
+        agents_config: AgentsConfig,
+        tracker: Arc<Mutex<BudgetTracker>>,
+    ) -> Self {
+        Self::new_with_child_runner_and_budget(
+            registry,
+            config,
+            child_runner,
+            Some(SubAgentBudgetRuntime {
+                config: agents_config,
+                tracker,
+            }),
+        )
+    }
+
+    fn new_with_child_runner_and_budget(
+        registry: Arc<dyn AgentSpecRegistry>,
+        config: MultiAgentConfig,
+        child_runner: Arc<dyn SubAgentChildRunner>,
+        budget: Option<SubAgentBudgetRuntime>,
+    ) -> Self {
         Self {
             registry,
             config,
             in_flight: Arc::new(AtomicU32::new(0)),
+            child_runner,
+            budget,
         }
     }
 
@@ -121,10 +194,10 @@ impl DefaultSubAgentDispatcher {
         self.in_flight.load(Ordering::Acquire)
     }
 
-    /// Run the seven gates in order, returning either a placeholder
-    /// [`TaskResult`] (steps 8-13 land in P3.4) or the first
-    /// [`TaskFailure`] that fires.
-    fn run_capability_gates(
+    /// Run the capability gates in order, returning the resolved child
+    /// spec and effective ruleset or the first [`TaskFailure`] that
+    /// fires.
+    async fn run_capability_gates(
         &self,
         ctx: &DispatchContext<'_>,
         invocation: &TaskInvocation,
@@ -169,18 +242,17 @@ impl DefaultSubAgentDispatcher {
             }
         };
 
-        // Step 5: SafetyDecision evaluate.
-        //
-        // TODO(OC-Phase 3 P3.4): wire `ToolBoundaryPolicy::decide`
-        // against a freshly-introduced `ToolOperation::SubAgentSpawn`
-        // variant carrying `{ name, prompt_digest }`. Today this is a
-        // documented no-op — P3.3 ships the gate ordering and the
-        // P3.4 PR will swap this stub for the real call without
-        // touching the surrounding capability gates. The dispatcher
-        // accepts any sub-spec that survived the prior gates; no
-        // semantic gap exists today because Libra has no
-        // `SubAgentSpawn` policy configured.
-        let _safety_decision_stub_marker = ();
+        // Step 5: SafetyDecision evaluate. A sub-agent spawn is a
+        // mutating boundary operation because it may lead to child
+        // tool calls and persistent session events even when the child
+        // is read-only.
+        evaluate_subagent_spawn_safety(ctx, invocation).await?;
+
+        // Step 5b: budget hard caps. Budget checks live after
+        // sub-agent resolution so per-agent caps can name the
+        // resolved profile, but before child construction so an
+        // already-over-cap session cannot start more provider work.
+        self.enforce_budget_before_dispatch(&sub_spec.name)?;
 
         // Step 6: compute effective ruleset for the child.
         let effective = child_ruleset(ctx.parent_ruleset, &sub_spec.permission);
@@ -223,6 +295,35 @@ impl DefaultSubAgentDispatcher {
         names.sort();
         names
     }
+
+    fn enforce_budget_before_dispatch(&self, agent_name: &str) -> Result<(), TaskFailure> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
+        };
+        let tracker = budget.tracker.lock().map_err(|error| {
+            TaskFailure::BudgetExceeded(BudgetExceededReason::Internal {
+                reason: format!("budget tracker lock poisoned: {error}"),
+            })
+        })?;
+        tracker
+            .check_session(&budget.config)
+            .and_then(|()| tracker.check_agent(agent_name, &budget.config))
+            .map_err(budget_error_to_task_failure)
+    }
+
+    fn record_budget_after_success(&self, result: &TaskResult) {
+        let Some(budget) = &self.budget else {
+            return;
+        };
+        let Ok(mut tracker) = budget.tracker.lock() else {
+            tracing::warn!("failed to lock sub-agent budget tracker after successful run");
+            return;
+        };
+        tracker.accumulate(&result.usage, None, Some(&result.agent_name));
+        for _ in 0..result.steps_used {
+            tracker.record_step(Some(&result.agent_name));
+        }
+    }
 }
 
 impl SubAgentDispatcher for DefaultSubAgentDispatcher {
@@ -264,18 +365,24 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
 
             // RAII guard: from here on every exit path (early-return on
             // a TaskFailure from steps 4-7, panic, or normal success at
-            // the end) decrements the counter exactly once. P3.4 will
-            // put real I/O between this guard's creation and the
-            // placeholder result; the guard is what prevents a panic
-            // in that I/O from orphaning the slot.
+            // the end) decrements the counter exactly once. The child
+            // loop does real provider/tool I/O after this point, so the
+            // guard prevents an early failure from orphaning the slot.
             let _slot = ConcurrencyGuard {
                 counter: Arc::clone(&self.in_flight),
             };
 
             // Steps 4-7: capability + permission gates that don't
             // touch the concurrency counter.
-            let (sub_spec, _effective) =
-                self.run_capability_gates(&ctx, &invocation, entry_kind)?;
+            let (sub_spec, effective) = self
+                .run_capability_gates(&ctx, &invocation, entry_kind)
+                .await?;
+
+            if ctx.abort_token.is_cancelled() {
+                return Err(TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort,
+                });
+            }
 
             // Step 8: permission ask. Per the doc's "Two Entry Points"
             // table, only `LlmInitiated` triggers the ask. **All**
@@ -313,38 +420,440 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 }
             }
 
-            // Steps 9-13 land in subsequent OC-Phase 3 PRs. Today the
-            // placeholder tail produces a TaskResult shaped from the
-            // resolved spec so gate-success is observable end-to-end.
-            let result = TaskResult {
-                task_id: invocation.task_id.clone().unwrap_or_else(|| {
-                    // P3.5 will mint a real id from the AgentRunEvent
-                    // chain; for now the synthetic id keeps the test
-                    // surface deterministic.
-                    format!(
-                        "task-placeholder-{}-depth-{}",
-                        invocation.subagent_type, ctx.depth
-                    )
-                }),
-                agent_name: sub_spec.name.clone(),
-                provider_id: sub_spec
-                    .model
-                    .as_ref()
-                    .map(|m| m.provider_id.clone())
-                    .unwrap_or_default(),
-                model_id: sub_spec
-                    .model
-                    .as_ref()
-                    .map(|m| m.model_id.clone())
-                    .unwrap_or_default(),
-                final_text: String::new(),
-                steps_used: 0,
-                usage: CompletionUsageSummary::default(),
-            };
+            let task_id = invocation.task_id.clone().unwrap_or_else(|| {
+                format!(
+                    "task-{}-{}-depth-{}",
+                    invocation.subagent_type,
+                    uuid::Uuid::new_v4(),
+                    ctx.depth
+                )
+            });
+            let agent_run_id = AgentRunId::new();
+            append_agent_run_event(
+                ctx.session_store,
+                AgentRunEvent::Spawned {
+                    agent_run_id,
+                    parent_thread_id: ctx.parent_thread_id.to_string(),
+                    parent_session_id: ctx.parent_session_id.clone(),
+                    parent_message_id: ctx.parent_message_id.clone(),
+                    subagent_name: sub_spec.name.clone(),
+                    provider_id: sub_spec
+                        .model
+                        .as_ref()
+                        .unwrap_or(ctx.parent_model_binding)
+                        .provider_id
+                        .clone(),
+                    model_id: sub_spec
+                        .model
+                        .as_ref()
+                        .unwrap_or(ctx.parent_model_binding)
+                        .model_id
+                        .clone(),
+                    depth: ctx.depth.saturating_add(1),
+                    prompt_digest: digest_for_prompt(&invocation.prompt),
+                },
+            )?;
+            let result = run_child_runner_with_timeout(
+                self.child_runner.as_ref(),
+                SubAgentChildRunRequest {
+                    ctx: &ctx,
+                    invocation: &invocation,
+                    sub_spec: &sub_spec,
+                    effective_ruleset: &effective,
+                    task_id: task_id.clone(),
+                    agent_run_id,
+                },
+                self.config.subagent_timeout_ms,
+            )
+            .await;
+            match &result {
+                Ok(result) => {
+                    self.record_budget_after_success(result);
+                    append_agent_run_event(
+                        ctx.session_store,
+                        AgentRunEvent::Completed { agent_run_id },
+                    )?;
+                }
+                Err(error) => {
+                    if matches!(error, TaskFailure::Timeout { .. }) {
+                        append_child_agent_run_failed(
+                            ctx.session_store,
+                            &task_id,
+                            agent_run_id,
+                            task_failure_event_reason(error),
+                        )?;
+                    }
+                    append_agent_run_event(
+                        ctx.session_store,
+                        AgentRunEvent::Failed {
+                            agent_run_id,
+                            reason: task_failure_event_reason(error),
+                        },
+                    )?;
+                }
+            }
+            let result = result?;
             // `_slot` drops here, releasing the concurrency slot.
             Ok(result)
         })
     }
+}
+
+/// Default tail runner for OC-Phase 3 P3.4: build the child model,
+/// pre-filter the child tool schema, write a minimal child session JSONL
+/// snapshot, and re-enter the normal tool loop with `task` disabled for
+/// the child.
+#[derive(Debug, Default)]
+pub struct ToolLoopSubAgentChildRunner;
+
+impl SubAgentChildRunner for ToolLoopSubAgentChildRunner {
+    fn run<'a>(
+        &'a self,
+        request: SubAgentChildRunRequest<'a>,
+    ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+        Box::pin(async move {
+            let child_store = request.ctx.session_store.child(&request.task_id);
+            let agent_run_id = request.agent_run_id;
+            let result = run_child_tool_loop(request).await;
+            if let Err(error) = &result {
+                let _ = child_store.append(&SessionEvent::agent_run(AgentRunEvent::Failed {
+                    agent_run_id,
+                    reason: task_failure_event_reason(error),
+                }));
+            }
+            result
+        })
+    }
+}
+
+async fn run_child_tool_loop(
+    request: SubAgentChildRunRequest<'_>,
+) -> Result<TaskResult, TaskFailure> {
+    if request.ctx.abort_token.is_cancelled() {
+        return Err(TaskFailure::Cancelled {
+            source: CancellationSource::ParentAbort,
+        });
+    }
+
+    let binding = request
+        .sub_spec
+        .model
+        .as_ref()
+        .unwrap_or(request.ctx.parent_model_binding)
+        .clone();
+    let provider_options = match request.ctx.provider_build_options_resolver {
+        Some(resolver) => resolver.resolve(&binding).map_err(|error| {
+            TaskFailure::ProviderError(CompletionError::ProviderError(format!(
+                "failed to resolve provider options for {}: {error}",
+                binding.to_canonical_string()
+            )))
+        })?,
+        None => request.ctx.provider_build_options.clone(),
+    };
+    let model = request
+        .ctx
+        .provider_factory
+        .build(&binding, provider_options)
+        .map_err(|error| {
+            TaskFailure::ProviderError(CompletionError::ProviderError(error.to_string()))
+        })?;
+
+    let allowed_tools = available_tool_names(
+        request.ctx.tool_registry,
+        request.sub_spec,
+        request.effective_ruleset,
+    );
+    let child_store = request.ctx.session_store.child(&request.task_id);
+    child_store
+        .append(&SessionEvent::agent_run(AgentRunEvent::Started {
+            agent_run_id: request.agent_run_id,
+        }))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append child agent-run start event: {error}"),
+                },
+            )
+        })?;
+    let child_working_dir = request
+        .ctx
+        .tool_registry
+        .working_dir()
+        .to_string_lossy()
+        .to_string();
+    let mut child_session = SessionState::new(&child_working_dir);
+    child_session.id = request.task_id.clone();
+    child_session.metadata.insert(
+        "parent_thread_id".to_string(),
+        serde_json::json!(request.ctx.parent_thread_id),
+    );
+    child_session.metadata.insert(
+        "parent_session_id".to_string(),
+        serde_json::json!(request.ctx.parent_session_id),
+    );
+    child_session.metadata.insert(
+        "parent_message_id".to_string(),
+        serde_json::json!(request.ctx.parent_message_id),
+    );
+    child_session.metadata.insert(
+        "agent_name".to_string(),
+        serde_json::json!(request.sub_spec.name),
+    );
+    child_session.add_user_message(&request.invocation.prompt);
+    child_store
+        .append(&SessionEvent::snapshot(child_session.clone()))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append child session snapshot: {error}"),
+                },
+            )
+        })?;
+
+    let mut observer = ChildLoopObserver::default();
+    let child_loop = run_tool_loop_with_history_and_observer(
+        &model,
+        Vec::new(),
+        request.invocation.prompt.clone(),
+        request.ctx.tool_registry,
+        ToolLoopConfig {
+            preamble: non_empty_string(request.sub_spec.system_prompt.clone()),
+            temperature: request.sub_spec.temperature.map(f64::from),
+            allowed_tools: Some(allowed_tools),
+            runtime_context: request.ctx.runtime_context.clone(),
+            max_turns: request
+                .sub_spec
+                .max_steps
+                .and_then(|steps| usize::try_from(steps).ok()),
+            subagent_runtime: None,
+            context_frame_session_root: Some(child_store.session_root().to_path_buf()),
+            context_frame_prompt_id: Some(format!("subagent:{}", request.task_id)),
+            usage_recorder: Some(request.ctx.usage_recorder.clone()),
+            usage_context: Some(UsageContext {
+                session_id: Some(request.task_id.clone()),
+                thread_id: Some(request.ctx.parent_thread_id.to_string()),
+                agent_run_id: Some(request.task_id.clone()),
+                run_id: Some(request.task_id.clone()),
+                provider: binding.provider_id.clone(),
+                model: binding.model_id.clone(),
+                request_kind: "subagent".to_string(),
+                intent: None,
+                agent_name: Some(request.sub_spec.name.clone()),
+            }),
+            ..Default::default()
+        },
+        &mut observer,
+    );
+    let turn = tokio::select! {
+        result = child_loop => {
+            result.map_err(|error| TaskFailure::ChildToolLoopFailed(ToolLoopError::Completion(error)))?
+        }
+        _ = request.ctx.abort_token.cancelled() => {
+            return Err(TaskFailure::Cancelled {
+                source: CancellationSource::ParentAbort,
+            });
+        }
+    };
+
+    child_session.add_assistant_message(&turn.final_text);
+    child_store
+        .append(&SessionEvent::agent_run(AgentRunEvent::Completed {
+            agent_run_id: request.agent_run_id,
+        }))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append child agent-run completion event: {error}"),
+                },
+            )
+        })?;
+    child_store
+        .append(&SessionEvent::snapshot(child_session))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append child session completion snapshot: {error}"),
+                },
+            )
+        })?;
+
+    Ok(TaskResult {
+        task_id: request.task_id,
+        agent_name: request.sub_spec.name.clone(),
+        provider_id: binding.provider_id,
+        model_id: binding.model_id,
+        final_text: turn.final_text,
+        steps_used: count_assistant_steps(&turn.history),
+        usage: observer.usage,
+    })
+}
+
+async fn run_child_runner_with_timeout<'a>(
+    runner: &'a dyn SubAgentChildRunner,
+    request: SubAgentChildRunRequest<'a>,
+    timeout_ms: Option<u64>,
+) -> Result<TaskResult, TaskFailure> {
+    let run = runner.run(request);
+    match timeout_ms {
+        Some(timeout_ms) => {
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+                Ok(result) => result,
+                Err(_) => Err(TaskFailure::Timeout {
+                    wall_clock_ms: timeout_ms,
+                }),
+            }
+        }
+        None => run.await,
+    }
+}
+
+fn append_agent_run_event(
+    store: &crate::internal::ai::session::jsonl::SessionJsonlStore,
+    event: AgentRunEvent,
+) -> Result<(), TaskFailure> {
+    store
+        .append(&SessionEvent::agent_run(event))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append parent agent-run event: {error}"),
+                },
+            )
+        })
+}
+
+fn append_child_agent_run_failed(
+    store: &crate::internal::ai::session::jsonl::SessionJsonlStore,
+    task_id: &str,
+    agent_run_id: AgentRunId,
+    reason: String,
+) -> Result<(), TaskFailure> {
+    store
+        .child(task_id)
+        .append(&SessionEvent::agent_run(AgentRunEvent::Failed {
+            agent_run_id,
+            reason,
+        }))
+        .map_err(|error| {
+            TaskFailure::ContextHandoffFailed(
+                super::sub_agent::ContextHandoffError::CompactionFailed {
+                    reason: format!("failed to append child agent-run timeout event: {error}"),
+                },
+            )
+        })
+}
+
+fn task_failure_event_reason(error: &TaskFailure) -> String {
+    match error {
+        TaskFailure::Cancelled { source } => format!("Cancelled({source:?})"),
+        _ => error.to_string(),
+    }
+}
+
+fn budget_error_to_task_failure(error: BudgetExceededError) -> TaskFailure {
+    let reason = match error.axis {
+        BudgetAxis::Cost => BudgetExceededReason::CostHardCap,
+        BudgetAxis::Tokens => BudgetExceededReason::TokenHardCap,
+        BudgetAxis::Steps => BudgetExceededReason::Steps,
+        BudgetAxis::WallClockMinutes => BudgetExceededReason::WallClock,
+    };
+    tracing::warn!(
+        stable_code = %error.stable_code().as_str(),
+        scope = ?error.scope,
+        axis = ?error.axis,
+        "sub-agent dispatch rejected by budget hard cap"
+    );
+    TaskFailure::BudgetExceeded(reason)
+}
+
+#[derive(Default)]
+struct ChildLoopObserver {
+    usage: CompletionUsageSummary,
+}
+
+impl ToolLoopObserver for ChildLoopObserver {
+    fn on_model_usage_recorded(&mut self, usage: &CompletionUsageSummary, _wall_clock_ms: u64) {
+        self.usage.merge(usage);
+    }
+}
+
+fn available_tool_names(
+    registry: &crate::internal::ai::tools::ToolRegistry,
+    sub_spec: &AgentExecutionSpec,
+    effective_ruleset: &PermissionRuleset,
+) -> Vec<String> {
+    let mut effective_spec;
+    let spec = match &sub_spec.tools {
+        ToolSelection::Inherit => {
+            effective_spec = sub_spec.clone();
+            effective_spec.tools = ToolSelection::Allow(Vec::new());
+            &effective_spec
+        }
+        _ => sub_spec,
+    };
+    registry
+        .available_for(spec, effective_ruleset)
+        .into_iter()
+        .map(|spec| spec.function.name)
+        .collect()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn count_assistant_steps(history: &[Message]) -> u32 {
+    let count = history
+        .iter()
+        .filter(|message| matches!(message, Message::Assistant { .. }))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+async fn evaluate_subagent_spawn_safety(
+    ctx: &DispatchContext<'_>,
+    invocation: &TaskInvocation,
+) -> Result<(), TaskFailure> {
+    let prompt_digest = digest_for_prompt(&invocation.prompt);
+    let operation = ToolOperation::sub_agent_spawn(&invocation.subagent_type, &prompt_digest);
+    let decision = if let Some(hardening) = ctx.tool_registry.hardening() {
+        let decision = hardening.decide(&operation);
+        hardening
+            .append_audit(
+                "tool_boundary.task",
+                format!(
+                    "operation=sub_agent_spawn name={} prompt_digest={} decision={} approval_required={} reason={}",
+                    invocation.subagent_type,
+                    prompt_digest,
+                    if decision.allowed { "allow" } else { "deny" },
+                    decision.approval_required,
+                    decision.reason
+                ),
+            )
+            .await
+            .map_err(|error| {
+                TaskFailure::SafetyDenied(SafetyDecisionDenial {
+                    reason: format!("failed to persist sub-agent boundary audit event: {error}"),
+                })
+            })?;
+        hardening.flush_audit().await.map_err(|error| {
+            TaskFailure::SafetyDenied(SafetyDecisionDenial {
+                reason: format!("failed to flush sub-agent boundary audit event: {error}"),
+            })
+        })?;
+        decision
+    } else {
+        ToolBoundaryPolicy::default_runtime().decide(&PrincipalContext::system(), &operation)
+    };
+
+    if !decision.allowed {
+        return Err(TaskFailure::SafetyDenied(SafetyDecisionDenial {
+            reason: decision.reason,
+        }));
+    }
+
+    Ok(())
 }
 
 /// RAII handle for a concurrency slot claimed via [`AtomicU32::fetch_add`].
@@ -434,21 +943,29 @@ mod tests {
     use sea_orm::Database;
 
     use super::*;
+    #[cfg(feature = "test-provider")]
+    use crate::internal::ai::agent::runtime::sub_agent::ProviderBuildOptionsResolver;
     use crate::internal::ai::{
         agent::{
             profile::{
                 AgentExecutionSpec, AgentMode, AgentPermissionSpec, ApprovalRoutingSpec,
-                ModelBinding, ToolSelection,
+                BudgetConfig, ModelBinding, ToolSelection,
             },
             runtime::sub_agent::{
                 AbortToken, ContextFrameLoader, DispatchContext, MessageId, PermissionAskRequest,
-                PermissionAsker, PermissionReply, PermissionService, SubAgentDispatcher,
-                TaskEntryKind, TaskFailure, TaskInvocation,
+                PermissionAsker, PermissionReply, PermissionService, SubAgentChildRunRequest,
+                SubAgentChildRunner, SubAgentDispatcher, TaskEntryKind, TaskFailure,
+                TaskInvocation, TaskResult,
             },
         },
         permission::{PermissionAction, PermissionRule, PermissionRuleset},
-        providers::ProviderFactory,
+        providers::{ProviderBuildOptions, ProviderFactory},
+        runtime::{
+            InMemoryAuditSink, PrincipalContext, PrincipalRole, SecretRedactor, ToolBoundaryPolicy,
+            ToolBoundaryRuntime,
+        },
         session::SessionId,
+        tools::{ToolRegistry, ToolRegistryBuilder, handlers::ReadFileHandler},
         usage::UsageRecorder,
     };
 
@@ -477,6 +994,108 @@ mod tests {
             *self.ask_calls.lock().unwrap() += 1;
             let reply = self.reply.clone();
             Box::pin(async move { reply })
+        }
+    }
+
+    #[derive(Default)]
+    struct TestChildRunner {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl SubAgentChildRunner for TestChildRunner {
+        fn run<'a>(
+            &'a self,
+            request: SubAgentChildRunRequest<'a>,
+        ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(request.task_id.clone());
+                let binding = request
+                    .sub_spec
+                    .model
+                    .as_ref()
+                    .unwrap_or(request.ctx.parent_model_binding);
+                Ok(TaskResult {
+                    task_id: request.task_id,
+                    agent_name: request.sub_spec.name.clone(),
+                    provider_id: binding.provider_id.clone(),
+                    model_id: binding.model_id.clone(),
+                    final_text: format!("child result for {}", request.invocation.description),
+                    steps_used: 1,
+                    usage: CompletionUsageSummary::default(),
+                })
+            })
+        }
+    }
+
+    struct FailingChildRunner;
+
+    impl SubAgentChildRunner for FailingChildRunner {
+        fn run<'a>(
+            &'a self,
+            _request: SubAgentChildRunRequest<'a>,
+        ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+            Box::pin(async {
+                Err(TaskFailure::ProviderError(CompletionError::ProviderError(
+                    "fixture child failure".to_string(),
+                )))
+            })
+        }
+    }
+
+    struct SlowChildRunner;
+
+    impl SubAgentChildRunner for SlowChildRunner {
+        fn run<'a>(
+            &'a self,
+            _request: SubAgentChildRunRequest<'a>,
+        ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Err(TaskFailure::ProviderError(CompletionError::ProviderError(
+                    "slow fixture should be timed out".to_string(),
+                )))
+            })
+        }
+    }
+
+    struct CostingChildRunner;
+
+    impl SubAgentChildRunner for CostingChildRunner {
+        fn run<'a>(
+            &'a self,
+            request: SubAgentChildRunRequest<'a>,
+        ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+            Box::pin(async move {
+                Ok(TaskResult {
+                    task_id: request.task_id,
+                    agent_name: request.sub_spec.name.clone(),
+                    provider_id: "fake".to_string(),
+                    model_id: "default".to_string(),
+                    final_text: "budgeted child result".to_string(),
+                    steps_used: 1,
+                    usage: CompletionUsageSummary {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cached_tokens: None,
+                        reasoning_tokens: None,
+                        total_tokens: Some(2),
+                        cost_usd: Some(0.02),
+                    },
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "test-provider")]
+    #[derive(Clone)]
+    struct TestProviderOptionsResolver {
+        options: ProviderBuildOptions,
+    }
+
+    #[cfg(feature = "test-provider")]
+    impl ProviderBuildOptionsResolver for TestProviderOptionsResolver {
+        fn resolve(&self, _binding: &ModelBinding) -> Result<ProviderBuildOptions, String> {
+            Ok(self.options.clone())
         }
     }
 
@@ -569,6 +1188,8 @@ mod tests {
         provider_factory: &'a ProviderFactory,
         usage_recorder: &'a UsageRecorder,
         context_frame_loader: &'a ContextFrameLoader,
+        provider_build_options: &'a ProviderBuildOptions,
+        tool_registry: &'a ToolRegistry,
         depth: u8,
     ) -> DispatchContext<'a> {
         DispatchContext {
@@ -581,6 +1202,10 @@ mod tests {
             permission_service,
             session_store,
             provider_factory,
+            provider_build_options,
+            provider_build_options_resolver: None,
+            tool_registry,
+            runtime_context: None,
             usage_recorder,
             context_frame_loader,
             abort_token: AbortToken::new(),
@@ -596,18 +1221,46 @@ mod tests {
         Arc<TestRegistry>,
         UsageRecorder,
         crate::internal::ai::session::jsonl::SessionJsonlStore,
+        ProviderBuildOptions,
+        ToolRegistry,
+    ) {
+        dispatcher_test_harness_with_runner(config, Arc::new(TestChildRunner::default())).await
+    }
+
+    async fn dispatcher_test_harness_with_runner(
+        config: MultiAgentConfig,
+        child_runner: Arc<dyn SubAgentChildRunner>,
+    ) -> (
+        DefaultSubAgentDispatcher,
+        Arc<TestRegistry>,
+        UsageRecorder,
+        crate::internal::ai::session::jsonl::SessionJsonlStore,
+        ProviderBuildOptions,
+        ToolRegistry,
     ) {
         let registry = Arc::new(TestRegistry::default());
-        let dispatcher = DefaultSubAgentDispatcher::new(registry.clone(), config);
+        let dispatcher = DefaultSubAgentDispatcher::new_with_child_runner(
+            registry.clone(),
+            config,
+            child_runner,
+        );
         let conn = Database::connect("sqlite::memory:").await.unwrap();
         let usage_recorder = UsageRecorder::new(conn);
         let temp = tempfile::tempdir().unwrap();
         let store =
             crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let tool_registry = ToolRegistry::with_working_dir(temp.path().to_path_buf());
         // Leak the temp dir so the SessionJsonlStore reference remains
         // valid for the test duration.
         std::mem::forget(temp);
-        (dispatcher, registry, usage_recorder, store)
+        (
+            dispatcher,
+            registry,
+            usage_recorder,
+            store,
+            ProviderBuildOptions::default(),
+            tool_registry,
+        )
     }
 
     fn invocation(subagent_type: &str) -> TaskInvocation {
@@ -619,6 +1272,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn available_tool_names_treats_subagent_inherit_as_empty_allow_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistryBuilder::with_working_dir(temp.path().to_path_buf())
+            .register("read_file", Arc::new(ReadFileHandler))
+            .build();
+        let mut spec = explore_subagent();
+        spec.tools = ToolSelection::Inherit;
+
+        let allowed = available_tool_names(&registry, &spec, &PermissionRuleset::default());
+
+        assert!(
+            allowed.is_empty(),
+            "sub-agent ToolSelection::Inherit must default to no tools"
+        );
+    }
+
     /// Scenario: with `multi_agent.enabled = false`, the dispatcher
     /// rejects every dispatch with `FeatureDisabled`. This is the
     /// flag-off invariant — even if the tool slipped past the
@@ -627,7 +1297,7 @@ mod tests {
     /// step-5 sandbox rejections in P3.4).
     #[tokio::test]
     async fn dispatch_rejects_when_feature_flag_disabled() {
-        let (dispatcher, registry, usage, store) =
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
             dispatcher_test_harness(MultiAgentConfig::default()).await;
         registry.insert(explore_subagent());
 
@@ -651,6 +1321,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -672,8 +1344,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 1,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
 
         let parent = parent_spec();
@@ -696,6 +1370,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             1, // depth + 1 = 2 > limit 1
         );
 
@@ -720,8 +1396,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 1,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
         // Pre-occupy the only slot.
         dispatcher.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -746,6 +1424,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -772,8 +1452,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent()); // mode = Subagent
         registry.insert(primary_only_agent()); // mode = Primary
 
@@ -797,6 +1479,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -829,8 +1513,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
 
         // Sub-spec opts into edit.
         let mut sub = explore_subagent();
@@ -865,6 +1551,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -886,6 +1574,98 @@ mod tests {
         }
     }
 
+    /// Scenario (OC-Phase 3 P3.4 step 5): the dispatcher evaluates a
+    /// `SubAgentSpawn` safety operation before the permission ask. An
+    /// Observer-bound runtime is read-only, so a `task` spawn is denied,
+    /// audited with redaction, and the asker is not invoked.
+    #[tokio::test]
+    async fn dispatch_rejects_subagent_spawn_denied_by_safety_policy() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
+        };
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let audit_sink = Arc::new(InMemoryAuditSink::default());
+        let hardened_tool_registry =
+            tool_registry
+                .clone()
+                .with_hardening(ToolBoundaryRuntime::new(
+                    uuid::Uuid::new_v4(),
+                    PrincipalContext {
+                        principal_id: "readonly-user".to_string(),
+                        role: PrincipalRole::Observer,
+                    },
+                    ToolBoundaryPolicy::default_runtime(),
+                    SecretRedactor::default_runtime(),
+                    audit_sink.clone(),
+                ));
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &hardened_tool_registry,
+            0,
+        );
+
+        let mut request = invocation("explore");
+        request.prompt = "inspect token=super-secret".to_string();
+        let err = dispatcher
+            .dispatch(context, request, TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("observer-bound safety policy must deny sub-agent spawn");
+
+        match err {
+            TaskFailure::SafetyDenied(denial) => {
+                assert!(denial.reason.contains("observer principals cannot run"));
+            }
+            other => panic!("expected SafetyDenied, got {other:?}"),
+        }
+        assert_eq!(
+            asker.ask_call_count(),
+            0,
+            "safety denial must happen before permission.ask"
+        );
+        assert_eq!(dispatcher.in_flight(), 0);
+
+        let events = audit_sink.events().await;
+        assert_eq!(events.len(), 1, "safety decision must be audited");
+        assert_eq!(events[0].action, "tool_boundary.task");
+        assert!(
+            events[0]
+                .redacted_summary
+                .contains("operation=sub_agent_spawn")
+        );
+        assert!(!events[0].redacted_summary.contains("super-secret"));
+        assert!(
+            store
+                .load_events()
+                .expect("parent events load after safety denial")
+                .is_empty(),
+            "safety denial happens before AgentRunEvent::Spawned"
+        );
+    }
+
     /// Scenario (TOCTOU regression guard): with the only slot already
     /// held, two concurrent dispatches must BOTH receive
     /// `ConcurrencyExceeded` and the counter must remain at the
@@ -899,8 +1679,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 1,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
         // Hold the only slot for the entire test — both concurrent
         // dispatches will see `prev = 1, limit = 1` and roll back.
@@ -927,6 +1709,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
         let context_b = ctx(
@@ -940,6 +1724,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -986,8 +1772,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
 
         let asker = Arc::new(TestAsker::always(PermissionReply::Reject {
@@ -1014,6 +1802,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -1032,7 +1822,7 @@ mod tests {
     }
 
     /// Scenario (P3.4 step 8 — Once allow path): an asker that replies
-    /// `Once` lets the dispatch through to the placeholder tail. The
+    /// `Once` lets the dispatch through to the child-runner tail. The
     /// asker is invoked exactly once, regardless of `Once` vs
     /// `Always` (the asker, not the dispatcher, persists `Always`
     /// rules).
@@ -1042,8 +1832,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
 
         let (permission_service, asker) = allow_once_service();
@@ -1066,6 +1858,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -1089,8 +1883,10 @@ mod tests {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
         registry.insert(explore_subagent());
 
         let asker = Arc::new(TestAsker::always(PermissionReply::Reject {
@@ -1117,6 +1913,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -1138,17 +1936,19 @@ mod tests {
         );
     }
 
-    /// Scenario: every gate passes → the placeholder TaskResult flows
+    /// Scenario: every gate passes → the child runner result flows
     /// through with the resolved provider/model bound to the agent's
     /// spec. The concurrency counter returns to 0 after the call.
     #[tokio::test]
-    async fn dispatch_returns_placeholder_result_when_every_gate_passes() {
+    async fn dispatch_returns_child_runner_result_when_every_gate_passes() {
         let config = MultiAgentConfig {
             enabled: true,
             max_subagent_depth: 4,
             max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
         };
-        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
 
         let mut sub = explore_subagent();
         sub.model = ModelBinding::parse("anthropic/claude-3-5-haiku-latest");
@@ -1174,6 +1974,8 @@ mod tests {
             &provider_factory,
             &usage,
             &context_frame_loader,
+            &provider_options,
+            &tool_registry,
             0,
         );
 
@@ -1185,13 +1987,526 @@ mod tests {
         assert_eq!(result.agent_name, "explore");
         assert_eq!(result.provider_id, "anthropic");
         assert_eq!(result.model_id, "claude-3-5-haiku-latest");
-        // Placeholder tail still leaves these empty/zero — steps
-        // 9–13 (handoff + model build + child loop) fill them in
-        // subsequent OC-Phase 3 sub-PRs.
-        assert_eq!(result.final_text, "");
-        assert_eq!(result.steps_used, 0);
+        assert_eq!(result.final_text, "child result for test invocation");
+        assert_eq!(result.steps_used, 1);
+
+        let events = store.load_events().expect("parent events load");
+        let lifecycle: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lifecycle.len(), 2, "parent lifecycle events: {lifecycle:?}");
+        let spawned_run_id = match lifecycle[0] {
+            AgentRunEvent::Spawned {
+                agent_run_id,
+                parent_thread_id: event_thread,
+                parent_session_id: event_session,
+                subagent_name,
+                provider_id,
+                model_id,
+                depth,
+                ..
+            } => {
+                assert_eq!(event_thread, "thread-1");
+                assert_eq!(event_session, "session-1");
+                assert_eq!(subagent_name, "explore");
+                assert_eq!(provider_id, "anthropic");
+                assert_eq!(model_id, "claude-3-5-haiku-latest");
+                assert_eq!(*depth, 1);
+                *agent_run_id
+            }
+            other => panic!("expected Spawned event, got {other:?}"),
+        };
+        match lifecycle[1] {
+            AgentRunEvent::Completed { agent_run_id } => {
+                assert_eq!(*agent_run_id, spawned_run_id);
+            }
+            other => panic!("expected Completed event, got {other:?}"),
+        }
 
         // Concurrency counter must return to 0 after the call.
         assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (OC-Phase 3 P3.5 failure event): once the dispatcher has
+    /// spawned a child run, a child-runner error must be reflected in
+    /// the parent JSONL as `AgentRunEvent::Failed` with the same
+    /// `agent_run_id` as the preceding `Spawned` event.
+    #[tokio::test]
+    async fn dispatch_writes_failed_agent_run_event_when_child_runner_fails() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
+        };
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness_with_runner(config, Arc::new(FailingChildRunner)).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+
+        let err = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("fixture child runner must fail");
+        assert!(matches!(err, TaskFailure::ProviderError(_)));
+
+        let events = store.load_events().expect("parent events load");
+        let lifecycle: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lifecycle.len(), 2, "parent lifecycle events: {lifecycle:?}");
+        let spawned_run_id = match lifecycle[0] {
+            AgentRunEvent::Spawned { agent_run_id, .. } => *agent_run_id,
+            other => panic!("expected Spawned event, got {other:?}"),
+        };
+        match lifecycle[1] {
+            AgentRunEvent::Failed {
+                agent_run_id,
+                reason,
+            } => {
+                assert_eq!(*agent_run_id, spawned_run_id);
+                assert!(reason.contains("fixture child failure"));
+            }
+            other => panic!("expected Failed event, got {other:?}"),
+        }
+        assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (OC-Phase 3 P3.7 timeout): a child runner that does
+    /// not finish inside `subagent_timeout_ms` returns
+    /// `TaskFailure::Timeout`, writes parent `Spawned` + `Failed`, and
+    /// also appends a child-side `Failed` event so resume/replay sees
+    /// the child run as cleaned up.
+    #[tokio::test]
+    async fn dispatch_times_out_child_runner_and_writes_failed_events() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: Some(10),
+        };
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness_with_runner(config, Arc::new(SlowChildRunner)).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+
+        let err = dispatcher
+            .dispatch(
+                context,
+                TaskInvocation {
+                    task_id: Some("task-timeout".to_string()),
+                    ..invocation("explore")
+                },
+                TaskEntryKind::LlmInitiated,
+            )
+            .await
+            .expect_err("slow child runner must time out");
+        assert!(matches!(err, TaskFailure::Timeout { wall_clock_ms: 10 }));
+
+        let parent_events = store.load_events().expect("parent events load");
+        let parent_lifecycle: Vec<_> = parent_events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(parent_lifecycle.len(), 2);
+        let run_id = match parent_lifecycle[0] {
+            AgentRunEvent::Spawned { agent_run_id, .. } => *agent_run_id,
+            other => panic!("expected parent Spawned, got {other:?}"),
+        };
+        match parent_lifecycle[1] {
+            AgentRunEvent::Failed {
+                agent_run_id,
+                reason,
+            } => {
+                assert_eq!(*agent_run_id, run_id);
+                assert!(reason.contains("timed out"));
+            }
+            other => panic!("expected parent Failed, got {other:?}"),
+        }
+
+        let child_events = store
+            .child("task-timeout")
+            .load_events()
+            .expect("child events load");
+        let child_lifecycle: Vec<_> = child_events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(child_lifecycle.len(), 1);
+        match child_lifecycle[0] {
+            AgentRunEvent::Failed {
+                agent_run_id,
+                reason,
+            } => {
+                assert_eq!(*agent_run_id, run_id);
+                assert!(reason.contains("timed out"));
+            }
+            other => panic!("expected child Failed, got {other:?}"),
+        }
+        assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (OC-Phase 3 P3.7 budget hard cap): successful child
+    /// usage is folded into the dispatcher's budget tracker. Once the
+    /// configured session cap is exceeded, the next dispatch is
+    /// rejected before `permission.ask` and before any child runner
+    /// starts.
+    #[tokio::test]
+    async fn dispatch_rejects_next_child_when_budget_hard_cap_is_already_exceeded() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
+        };
+        let registry = Arc::new(TestRegistry::default());
+        let tracker = Arc::new(Mutex::new(BudgetTracker::new()));
+        let agents_config = AgentsConfig {
+            budget: BudgetConfig {
+                max_session_cost_usd: Some(0.01),
+                ..BudgetConfig::default()
+            },
+            ..AgentsConfig::default()
+        };
+        let dispatcher = DefaultSubAgentDispatcher::new_with_budget_tracker(
+            registry.clone(),
+            config,
+            Arc::new(CostingChildRunner),
+            agents_config,
+            tracker,
+        );
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let usage = UsageRecorder::new(conn);
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let tool_registry = ToolRegistry::with_working_dir(temp.path().to_path_buf());
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let provider_options = ProviderBuildOptions::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+
+        let first_context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+        dispatcher
+            .dispatch(
+                first_context,
+                invocation("explore"),
+                TaskEntryKind::LlmInitiated,
+            )
+            .await
+            .expect("first dispatch starts under cap and records usage");
+
+        let second_context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+        let err = dispatcher
+            .dispatch(
+                second_context,
+                invocation("explore"),
+                TaskEntryKind::LlmInitiated,
+            )
+            .await
+            .expect_err("second dispatch must be rejected by pre-dispatch budget cap");
+
+        assert!(matches!(
+            err,
+            TaskFailure::BudgetExceeded(BudgetExceededReason::CostHardCap)
+        ));
+        assert_eq!(
+            asker.ask_call_count(),
+            1,
+            "budget denial must happen before the second permission.ask"
+        );
+        assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (P3.7 parent-cancel gate): if the parent session has
+    /// already cancelled before the dispatcher reaches the permission
+    /// prompt, dispatch returns a structured cancellation and does not
+    /// ask the user for approval.
+    #[tokio::test]
+    async fn dispatch_rejects_pre_cancelled_parent_without_permission_ask() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
+        };
+        let (dispatcher, registry, usage, store, provider_options, tool_registry) =
+            dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let (permission_service, asker) = allow_once_service();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+        context.abort_token.cancel();
+
+        let err = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("pre-cancelled parent must stop dispatch");
+
+        assert!(matches!(
+            err,
+            TaskFailure::Cancelled {
+                source: CancellationSource::ParentAbort
+            }
+        ));
+        assert_eq!(asker.ask_call_count(), 0);
+        assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (P3.4 steps 9-13): the default child runner builds the
+    /// child model through `ProviderFactory`, re-enters the normal tool
+    /// loop, returns the child's final text, and writes the child
+    /// session under the parent JSONL store's subagent namespace.
+    #[cfg(feature = "test-provider")]
+    #[tokio::test]
+    async fn default_child_runner_executes_fake_provider_child_loop_and_writes_child_session() {
+        use crate::internal::ai::providers::{fake::FAKE_DEFAULT_MODEL, runtime::provider_id};
+
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+            subagent_timeout_ms: None,
+        };
+        let registry = Arc::new(TestRegistry::default());
+        let dispatcher = DefaultSubAgentDispatcher::new(registry.clone(), config);
+
+        let mut sub = explore_subagent();
+        sub.model = Some(ModelBinding {
+            provider_id: provider_id::FAKE.to_string(),
+            model_id: FAKE_DEFAULT_MODEL.to_string(),
+            variant: None,
+        });
+        registry.insert(sub);
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_path = temp.path().join("fake-provider.json");
+        std::fs::write(
+            &fixture_path,
+            serde_json::json!({
+                "responses": [{
+                    "match": { "contains": "grep TODO src/" },
+                    "type": "text",
+                    "text": "Found 3 TODOs in 2 files."
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = crate::internal::ai::session::jsonl::SessionJsonlStore::new(
+            temp.path().join("session"),
+        );
+        let resolved_provider_options = ProviderBuildOptions {
+            fake_fixture_path: Some(fixture_path),
+            accept_unknown_models: true,
+            ..ProviderBuildOptions::default()
+        };
+        let provider_options = ProviderBuildOptions::default();
+        let resolver = TestProviderOptionsResolver {
+            options: resolved_provider_options,
+        };
+        let tool_registry = ToolRegistry::with_working_dir(temp.path().to_path_buf());
+        let usage = UsageRecorder::new(Database::connect("sqlite::memory:").await.unwrap());
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, asker) = allow_once_service();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+
+        let mut context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            &provider_options,
+            &tool_registry,
+            0,
+        );
+        context.provider_build_options_resolver = Some(&resolver);
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                TaskInvocation {
+                    description: "find TODOs".to_string(),
+                    prompt: "grep TODO src/".to_string(),
+                    subagent_type: "explore".to_string(),
+                    task_id: Some("task-explicit".to_string()),
+                },
+                TaskEntryKind::LlmInitiated,
+            )
+            .await
+            .expect("fake child loop should complete");
+
+        assert_eq!(asker.ask_call_count(), 1);
+        assert_eq!(result.task_id, "task-explicit");
+        assert_eq!(result.agent_name, "explore");
+        assert_eq!(result.provider_id, provider_id::FAKE);
+        assert_eq!(result.model_id, FAKE_DEFAULT_MODEL);
+        assert_eq!(result.final_text, "Found 3 TODOs in 2 files.");
+        assert_eq!(result.steps_used, 1);
+
+        let child_state = store
+            .child(&result.task_id)
+            .load_state()
+            .expect("child JSONL should load")
+            .expect("child JSONL should contain snapshots");
+        assert_eq!(child_state.id, "task-explicit");
+        assert_eq!(child_state.messages.len(), 2);
+        assert_eq!(child_state.messages[0].content, "grep TODO src/");
+        assert_eq!(child_state.messages[1].content, "Found 3 TODOs in 2 files.");
+
+        let child_events = store
+            .child(&result.task_id)
+            .load_events()
+            .expect("child JSONL events should load");
+        let child_lifecycle: Vec<_> = child_events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            child_lifecycle.len(),
+            2,
+            "child lifecycle events: {child_lifecycle:?}"
+        );
+        let child_run_id = match child_lifecycle[0] {
+            AgentRunEvent::Started { agent_run_id } => *agent_run_id,
+            other => panic!("expected child Started event, got {other:?}"),
+        };
+        match child_lifecycle[1] {
+            AgentRunEvent::Completed { agent_run_id } => {
+                assert_eq!(*agent_run_id, child_run_id);
+            }
+            other => panic!("expected child Completed event, got {other:?}"),
+        }
     }
 }

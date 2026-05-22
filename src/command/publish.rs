@@ -3375,6 +3375,22 @@ mod tests {
         }
     }
 
+    fn replace_d1_database_id_for_test(wrangler: &str, database_id: &str) -> String {
+        wrangler
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("\"database_id\":") {
+                    let indent = &line[..line.len() - trimmed.len()];
+                    format!("{indent}\"database_id\": \"{database_id}\",")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn materialize_deployable_worker(repo_root: &Path) {
         run_publish_init_at_root(repo_root, &default_init_args())
             .expect("publish init must materialize the template");
@@ -3383,12 +3399,9 @@ mod tests {
             fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
         fs::write(
             &wrangler_path,
-            wrangler.replace(
-                "REPLACE_WITH_D1_DATABASE_ID",
-                "00000000-0000-0000-0000-000000000000",
-            ),
+            replace_d1_database_id_for_test(&wrangler, "00000000-0000-0000-0000-000000000000"),
         )
-        .expect("wrangler config placeholder should be replaceable");
+        .expect("wrangler config database_id should be replaceable");
     }
 
     #[tokio::test]
@@ -4413,6 +4426,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir must be created");
         run_publish_init_at_root(temp.path(), &default_init_args())
             .expect("publish init must materialize the template");
+        let wrangler_path = temp.path().join("worker/wrangler.jsonc");
+        let wrangler =
+            fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
+        fs::write(
+            &wrangler_path,
+            replace_d1_database_id_for_test(&wrangler, "REPLACE_WITH_D1_DATABASE_ID"),
+        )
+        .expect("wrangler config should be writable for placeholder validation test");
         let args = DeployArgs { skip_deploy: true };
         let mut runner = FakePublishWorkerCommandRunner::default();
 

@@ -51,14 +51,6 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::internal::ai::{
-    agent::runtime::tool_loop::{
-        ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop_with_history_and_observer,
-    },
-    completion::{AssistantContent, CompletionModel, CompletionUsage, Message},
-    tools::ToolRegistry,
-};
-
 use super::{
     event::{
         GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalEvent, GoalEventEnvelope,
@@ -68,6 +60,13 @@ use super::{
     spec::GoalActor,
     state::GoalState,
     verifier::{GoalVerifier, GoalVerifierContext, GoalVerifyOutcome},
+};
+use crate::internal::ai::{
+    agent::runtime::tool_loop::{
+        ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop_with_history_and_observer,
+    },
+    completion::{AssistantContent, CompletionModel, CompletionUsage, Message},
+    tools::ToolRegistry,
 };
 
 /// Fresh envelope id + wall-clock instant. Production wires
@@ -201,7 +200,7 @@ pub struct GoalSupervisorStep {
 
 /// Result from running one Goal-bound supervisor loop around the
 /// normal tool loop.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GoalSupervisedRun {
     pub state: GoalState,
     pub events: Vec<GoalEventEnvelope>,
@@ -209,6 +208,29 @@ pub struct GoalSupervisedRun {
     pub final_text: String,
     pub history: Vec<Message>,
     pub loops_run: u32,
+}
+
+/// Input bundle for [`run_goal_supervised_tool_loop`]. The runner has
+/// to coordinate the normal tool-loop dependencies plus Goal state,
+/// verifier context, and event clock; bundling those fields keeps the
+/// public entrypoint readable and avoids positional argument drift.
+pub struct GoalSupervisedToolLoopRequest<'a, M, O, V, P>
+where
+    M: CompletionModel,
+    O: ToolLoopObserver,
+    V: GoalVerifier,
+    P: GoalContinuationPromptBuilder,
+{
+    pub model: &'a M,
+    pub history: Vec<Message>,
+    pub initial_prompt: String,
+    pub registry: &'a ToolRegistry,
+    pub config: ToolLoopConfig,
+    pub observer: &'a mut O,
+    pub state: GoalState,
+    pub supervisor: &'a GoalSupervisor<V, P>,
+    pub verifier_ctx: &'a (dyn GoalVerifierContext + Sync),
+    pub clock: &'a (dyn GoalEventClock + Sync),
 }
 
 // The `GoalContinuationPromptBuilder` trait, the default impl
@@ -536,16 +558,7 @@ where
 /// into `ProgressRecorded`, then the continuation prompt re-enters
 /// the normal tool loop.
 pub async fn run_goal_supervised_tool_loop<M, O, V, P>(
-    model: &M,
-    mut history: Vec<Message>,
-    initial_prompt: impl Into<String>,
-    registry: &ToolRegistry,
-    mut config: ToolLoopConfig,
-    observer: &mut O,
-    mut state: GoalState,
-    supervisor: &GoalSupervisor<V, P>,
-    verifier_ctx: &dyn GoalVerifierContext,
-    clock: &dyn GoalEventClock,
+    request: GoalSupervisedToolLoopRequest<'_, M, O, V, P>,
 ) -> Result<GoalSupervisedRun, crate::internal::ai::completion::CompletionError>
 where
     M: CompletionModel,
@@ -554,12 +567,23 @@ where
     V: GoalVerifier,
     P: GoalContinuationPromptBuilder,
 {
+    let GoalSupervisedToolLoopRequest {
+        model,
+        mut history,
+        initial_prompt,
+        registry,
+        mut config,
+        observer,
+        mut state,
+        supervisor,
+        verifier_ctx,
+        clock,
+    } = request;
     ensure_goal_terminal_tool(&mut config, "submit_goal_complete");
     let max_loops = state.spec.budget.max_continuation_loops.max(1);
-    let mut prompt = initial_prompt.into();
+    let mut prompt = initial_prompt;
     let mut events = Vec::new();
     let mut loops_run = 0u32;
-    let mut final_text = String::new();
 
     loop {
         loops_run = loops_run.saturating_add(1);
@@ -569,10 +593,10 @@ where
             prompt,
             registry,
             config.clone(),
-            observer,
+            &mut *observer,
         )
         .await?;
-        final_text = turn.final_text.clone();
+        let turn_final_text = turn.final_text.clone();
         history = turn.history.clone();
         let outcome = goal_turn_outcome_from_tool_loop_turn(&turn);
         let step = supervisor.step(&state, outcome, verifier_ctx, clock);
@@ -596,7 +620,7 @@ where
                         state,
                         events,
                         decision: cap_step.decision,
-                        final_text,
+                        final_text: turn_final_text,
                         history,
                         loops_run,
                     });
@@ -608,7 +632,7 @@ where
                     state,
                     events,
                     decision,
-                    final_text,
+                    final_text: turn_final_text,
                     history,
                     loops_run,
                 });
@@ -665,7 +689,8 @@ fn latest_assistant_tool_arguments(
         let Message::Assistant { content, .. } = message else {
             return None;
         };
-        content.iter().rev().find_map(|item| {
+        let items = content.iter().collect::<Vec<_>>();
+        items.into_iter().rev().find_map(|item| {
             let AssistantContent::ToolCall(call) = item else {
                 return None;
             };
@@ -725,15 +750,27 @@ fn state_with_events_applied(state: &GoalState, events: &[GoalEventEnvelope]) ->
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use chrono::TimeZone;
+    use serde_json::json;
 
     use super::*;
-    use crate::internal::ai::goal::{
-        DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor, GoalBudget,
-        GoalCompletionClaim, GoalCriterion, GoalEvidencePolicy, GoalEvidenceRef,
-        GoalEvidenceTarget, GoalSpec, GoalStatus, GoalVerificationRecord, RecentToolCall,
+    use crate::internal::ai::{
+        agent::runtime::tool_loop::{ToolLoopConfig, ToolLoopObserver},
+        completion::{
+            AssistantContent, CompletionError, CompletionModel, CompletionRequest,
+            CompletionResponse, Function, Message, Text, ToolCall, UserContent,
+        },
+        goal::{
+            DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor, GoalBudget,
+            GoalCompletionClaim, GoalCriterion, GoalEvidencePolicy, GoalEvidenceRef,
+            GoalEvidenceTarget, GoalSpec, GoalStatus, GoalVerificationRecord, RecentToolCall,
+        },
+        tools::{ToolRegistry, handlers::SubmitGoalCompleteHandler},
     };
 
     fn fixture_now() -> DateTime<Utc> {
@@ -766,26 +803,29 @@ mod tests {
     /// and an advancing wall-clock so tests can assert exact
     /// envelope contents.
     struct FixedClock {
-        next: Cell<u128>,
+        next: Mutex<u128>,
     }
 
     impl FixedClock {
         fn new() -> Self {
-            Self { next: Cell::new(1) }
+            Self {
+                next: Mutex::new(1),
+            }
         }
     }
 
     impl GoalEventClock for FixedClock {
         fn mint_envelope_id(&self) -> Uuid {
-            let n = self.next.get();
-            self.next.set(n + 1);
+            let mut next = self.next.lock().expect("fixed clock mutex poisoned");
+            let n = *next;
+            *next += 1;
             Uuid::from_u128(n)
         }
 
         fn now(&self) -> DateTime<Utc> {
             // Each call advances by 1 second so successive envelopes
             // pass the apply() monotonic guard.
-            let n = self.next.get();
+            let n = *self.next.lock().expect("fixed clock mutex poisoned");
             fixture_now() + chrono::Duration::seconds(n as i64)
         }
     }
@@ -841,6 +881,11 @@ mod tests {
             prompt_builder: DefaultGoalContinuationPromptBuilder,
         }
     }
+
+    #[derive(Default)]
+    struct TestObserver;
+
+    impl ToolLoopObserver for TestObserver {}
 
     /// Happy path: model emits a well-formed CompletionClaim →
     /// supervisor appends CompletionClaimed + Completed and returns
@@ -928,6 +973,126 @@ mod tests {
             panic!("expected Continue decision, got {:?}", step.decision);
         };
         assert!(prompt.contains("Verifier rejected"));
+    }
+
+    /// Integration path: the Goal supervisor wraps the normal
+    /// `run_tool_loop`. Turn 1 returns plain final text and therefore
+    /// must not idle the session; the wrapper records progress and
+    /// re-enters with a continuation prompt. Turn 2 calls
+    /// `submit_goal_complete`; the wrapper parses the tool call,
+    /// invokes the deterministic verifier, and returns Completed.
+    #[tokio::test]
+    async fn supervised_tool_loop_continues_after_final_text_until_completion_claim_accepts() {
+        #[derive(Clone)]
+        struct TwoTurnGoalModel {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl CompletionModel for TwoTurnGoalModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "I think we're done.".to_string(),
+                        })],
+                        reasoning_content: None,
+                        raw_response: (),
+                    });
+                }
+
+                let last_user_text = request.chat_history.iter().rev().find_map(|message| {
+                    let Message::User { content } = message else {
+                        return None;
+                    };
+                    content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                });
+                assert!(
+                    last_user_text.is_some_and(|text| text.contains("submit_goal_complete")),
+                    "second turn must be driven by the continuation prompt"
+                );
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call-goal-complete".to_string(),
+                        name: "submit_goal_complete".to_string(),
+                        function: Function {
+                            name: "submit_goal_complete".to_string(),
+                            arguments: json!({
+                                "summary": "edit landed and tests passed",
+                                "completed_criteria": ["patch"],
+                                "evidence_refs": [{
+                                    "criterion_id": "patch",
+                                    "target": {
+                                        "kind": "file",
+                                        "path": "src/feature.rs",
+                                        "sha256": "deadbeef"
+                                    },
+                                    "description": "feature edit landed"
+                                }],
+                                "verification": [{
+                                    "criterion_id": "patch",
+                                    "method": "cargo check",
+                                    "passed": true
+                                }],
+                                "residual_risks": []
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp.path().to_path_buf());
+        registry.register("submit_goal_complete", Arc::new(SubmitGoalCompleteHandler));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = TwoTurnGoalModel {
+            calls: Arc::clone(&calls),
+        };
+        let mut observer = TestObserver;
+        let supervisor = fixture_supervisor();
+        let state = GoalState::from_spec(fixture_spec());
+        let clock = FixedClock::new();
+
+        let run = run_goal_supervised_tool_loop(GoalSupervisedToolLoopRequest {
+            model: &model,
+            history: Vec::new(),
+            initial_prompt: "Ship feature X".to_string(),
+            registry: &registry,
+            config: ToolLoopConfig::default(),
+            observer: &mut observer,
+            state,
+            supervisor: &supervisor,
+            verifier_ctx: &AcceptingCtx,
+            clock: &clock,
+        })
+        .await
+        .expect("supervised goal loop should complete");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(run.decision, GoalLoopDecision::Completed { .. }));
+        assert_eq!(run.state.status, GoalStatus::Completed);
+        assert_eq!(run.loops_run, 2);
+        assert_eq!(run.events.len(), 3);
+        assert!(matches!(
+            run.events[0].event,
+            GoalEvent::ProgressRecorded(_)
+        ));
+        assert!(matches!(
+            run.events[1].event,
+            GoalEvent::CompletionClaimed(_)
+        ));
+        assert!(matches!(run.events[2].event, GoalEvent::Completed(_)));
     }
 
     /// Final text without a claim: supervisor synthesises a

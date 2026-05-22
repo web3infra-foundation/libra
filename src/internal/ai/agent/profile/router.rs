@@ -24,6 +24,7 @@ const MAX_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
 /// Holds an immutable list of profiles. Selection is purely lexical: the description
 /// of each profile is tokenized into keywords, and the user input is scored by how
 /// many of those keywords appear (case-insensitively).
+#[derive(Clone)]
 pub struct AgentProfileRouter {
     profiles: Vec<AgentProfile>,
 }

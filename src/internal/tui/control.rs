@@ -32,6 +32,14 @@ pub enum TuiControlCommand {
     CancelCurrentTurn {
         ack: oneshot::Sender<Result<(), TuiControlError>>,
     },
+    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
+    /// dispatch from Code Control. Mirrors `/task <agent> <prompt>`
+    /// and returns the rendered task result or failure message.
+    TaskDispatch {
+        agent: String,
+        prompt: String,
+        ack: oneshot::Sender<Result<String, TuiControlError>>,
+    },
     ReclaimController {
         ack: oneshot::Sender<Result<(), TuiControlError>>,
     },
@@ -81,6 +89,9 @@ pub enum TuiControlError {
     /// HTTP boundary (empty / oversized). The wire message
     /// repeats the underlying `GoalSpecError` for client logs.
     GoalInvalidObjective(String),
+    /// `task.dispatch` failed request-shape validation before it
+    /// reached the sub-agent dispatcher.
+    TaskInvalidRequest(String),
 }
 
 impl TuiControlError {
@@ -94,6 +105,7 @@ impl TuiControlError {
             Self::GoalAlreadyActive => 409,
             Self::GoalNotActive => 409,
             Self::GoalInvalidObjective(_) => 422,
+            Self::TaskInvalidRequest(_) => 422,
         }
     }
 
@@ -107,6 +119,7 @@ impl TuiControlError {
             Self::GoalAlreadyActive => "GOAL_ALREADY_ACTIVE",
             Self::GoalNotActive => "GOAL_NOT_ACTIVE",
             Self::GoalInvalidObjective(_) => "GOAL_INVALID_OBJECTIVE",
+            Self::TaskInvalidRequest(_) => "TASK_INVALID_REQUEST",
         }
     }
 
@@ -131,6 +144,9 @@ impl TuiControlError {
             }
             Self::GoalInvalidObjective(detail) => {
                 format!("Goal objective failed validation: {detail}")
+            }
+            Self::TaskInvalidRequest(detail) => {
+                format!("Invalid task.dispatch request: {detail}")
             }
         }
     }
@@ -189,6 +205,10 @@ mod tests {
             TuiControlError::GoalInvalidObjective("empty objective".to_string()).to_string(),
             "Goal objective failed validation: empty objective",
         );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest("missing prompt".to_string()).to_string(),
+            "Invalid task.dispatch request: missing prompt",
+        );
     }
 
     /// Pins the HTTP `status()` mapping for every variant. The wire
@@ -212,6 +232,10 @@ mod tests {
         assert_eq!(TuiControlError::GoalNotActive.status(), 409);
         assert_eq!(
             TuiControlError::GoalInvalidObjective("ignored".to_string()).status(),
+            422,
+        );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest("ignored".to_string()).status(),
             422,
         );
     }
@@ -249,6 +273,10 @@ mod tests {
         assert_eq!(
             TuiControlError::GoalInvalidObjective("ignored".to_string()).code(),
             "GOAL_INVALID_OBJECTIVE",
+        );
+        assert_eq!(
+            TuiControlError::TaskInvalidRequest("ignored".to_string()).code(),
+            "TASK_INVALID_REQUEST",
         );
     }
 }
