@@ -41,9 +41,10 @@ pub use chat::ChatAgent;
 // `task` calls when multi-agent mode is enabled.
 pub mod sub_agent;
 pub use sub_agent::{
-    AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
-    DefaultSubAgentChildRunner, DenyByDefaultPermissionAsker, DispatchContext, MessageId,
-    PermissionAskRequest, PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
+    AbortToken, BudgetExceededReason, CancellationSource, ChannelPermissionAsk,
+    ChannelPermissionAsker, ContextFrameLoader, ContextHandoffError, DefaultSubAgentChildRunner,
+    DenyByDefaultPermissionAsker, DispatchContext, MessageId, PermissionAskRequest,
+    PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
     ProviderBuildOptionsResolver, SafetyDecisionDenial, SubAgentChildRunRequest,
     SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure,
     TaskInvocation, TaskResult, ToolLoopError,

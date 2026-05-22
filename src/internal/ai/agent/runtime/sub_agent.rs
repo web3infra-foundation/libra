@@ -237,6 +237,92 @@ impl PermissionService {
     }
 }
 
+/// One permission ask flowing across the channel-backed asker
+/// (v0.17.787). The TUI widget receives this on its consumer side,
+/// renders the prompt, and sends a `PermissionReply` back through
+/// `reply_tx`. Mirrors the existing exec-approval flow's shape so
+/// the future TUI integration can reuse the same widget skeleton.
+///
+/// `permission`, `patterns`, `thread_id`, `session_id`, `source`
+/// are owned String/clone copies of the original
+/// [`PermissionAskRequest`]'s borrowed shape — the channel needs
+/// 'static data because the asker future is detached from the
+/// dispatch lifetime.
+#[derive(Debug)]
+pub struct ChannelPermissionAsk {
+    pub permission: String,
+    pub patterns: Vec<String>,
+    pub thread_id: String,
+    pub session_id: SessionId,
+    pub source: PermissionAskSource,
+    pub reply_tx: tokio::sync::oneshot::Sender<PermissionReply>,
+}
+
+/// Channel-backed [`PermissionAsker`] that delegates every ask to
+/// a remote consumer (typically the TUI thread). The dispatcher
+/// awaits the consumer's reply via the `oneshot` channel embedded
+/// in each [`ChannelPermissionAsk`].
+///
+/// Failure modes (consumer dropped, channel send error) degrade to
+/// `PermissionReply::Reject { feedback: Some("...") }` so a missing
+/// consumer behaves like an explicit deny rather than hanging the
+/// dispatch. This matches the [`DenyByDefaultPermissionAsker`]
+/// posture: the safer failure is to reject, not to allow.
+///
+/// Construction:
+/// ```ignore
+/// let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+/// let asker = ChannelPermissionAsker::new(tx);
+/// // hand `asker` to PermissionService; consume `rx` in the TUI
+/// // thread, render the prompt, send the reply via
+/// // `ask.reply_tx.send(PermissionReply::Once)`.
+/// ```
+pub struct ChannelPermissionAsker {
+    tx: tokio::sync::mpsc::UnboundedSender<ChannelPermissionAsk>,
+}
+
+impl ChannelPermissionAsker {
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<ChannelPermissionAsk>) -> Self {
+        Self { tx }
+    }
+}
+
+impl PermissionAsker for ChannelPermissionAsker {
+    fn ask<'a>(
+        &'a self,
+        request: PermissionAskRequest<'a>,
+    ) -> futures::future::BoxFuture<'a, PermissionReply> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let ask = ChannelPermissionAsk {
+            permission: request.permission.to_string(),
+            patterns: request.patterns.to_vec(),
+            thread_id: request.thread_id.to_string(),
+            session_id: request.session_id.clone(),
+            source: request.source,
+            reply_tx,
+        };
+        let send_result = self.tx.send(ask);
+        Box::pin(async move {
+            if send_result.is_err() {
+                return PermissionReply::Reject {
+                    feedback: Some(
+                        "permission ask channel closed (TUI consumer dropped); \
+                         dispatch rejected — restart `libra code` to reattach the asker"
+                            .to_string(),
+                    ),
+                };
+            }
+            reply_rx.await.unwrap_or(PermissionReply::Reject {
+                feedback: Some(
+                    "permission ask reply channel closed before TUI consumer answered; \
+                     dispatch rejected — TUI may have exited during the ask"
+                        .to_string(),
+                ),
+            })
+        })
+    }
+}
+
 /// Conservative production fallback asker that rejects every
 /// permission ask with a generic feedback message. Used by the
 /// libra-code session bootstrap (v0.17.776) when sub-agents are
@@ -1095,6 +1181,92 @@ impl SubAgentToolLoopRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scenario: `ChannelPermissionAsker` (v0.17.787) forwards every
+    /// ask to its consumer channel and awaits the reply. With a
+    /// consumer present that replies `Once`, the asker resolves
+    /// with the same reply. With the consumer dropped before
+    /// replying, the asker resolves with a `Reject` carrying the
+    /// reply-channel-closed feedback string. With the asker
+    /// constructed against a dropped receiver, the send fails
+    /// immediately and the asker resolves with a `Reject` carrying
+    /// the ask-channel-closed feedback string.
+    #[tokio::test]
+    async fn channel_permission_asker_round_trips_reply_and_handles_dropped_consumer() {
+        let session_id: SessionId = "sess".to_string();
+        let request = PermissionAskRequest {
+            permission: "shell",
+            patterns: &["ls".to_string()],
+            thread_id: "thread",
+            session_id: &session_id,
+            source: PermissionAskSource::SubAgentSpawn {
+                name: "explore".to_string(),
+                prompt_digest: "abc123".to_string(),
+            },
+        };
+
+        // Happy path: consumer replies with Once.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let asker = ChannelPermissionAsker::new(tx);
+        let ask_future = asker.ask(PermissionAskRequest {
+            source: request.source.clone(),
+            ..request
+        });
+        let consumer = tokio::spawn(async move {
+            let ask = rx.recv().await.expect("consumer should receive ask");
+            assert_eq!(ask.permission, "shell");
+            assert_eq!(ask.patterns, vec!["ls".to_string()]);
+            ask.reply_tx
+                .send(PermissionReply::Once)
+                .expect("reply send must succeed");
+        });
+        let reply = ask_future.await;
+        consumer.await.expect("consumer task should finish");
+        assert_eq!(reply, PermissionReply::Once);
+
+        // Reply-channel dropped: consumer drops the reply_tx
+        // without sending. Asker must surface a Reject.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let asker = ChannelPermissionAsker::new(tx);
+        let ask_future = asker.ask(PermissionAskRequest {
+            source: request.source.clone(),
+            ..request
+        });
+        let consumer = tokio::spawn(async move {
+            let ask = rx.recv().await.expect("consumer should receive ask");
+            drop(ask.reply_tx);
+        });
+        let reply = ask_future.await;
+        consumer.await.expect("consumer task should finish");
+        assert!(
+            matches!(
+                reply,
+                PermissionReply::Reject { feedback: Some(ref feedback) }
+                    if feedback.contains("reply channel closed")
+            ),
+            "expected Reject with reply-channel-closed feedback, got: {reply:?}",
+        );
+
+        // Ask-channel dropped: receiver dropped before the asker
+        // sends. Asker must surface a Reject without awaiting.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChannelPermissionAsk>();
+        drop(rx);
+        let asker = ChannelPermissionAsker::new(tx);
+        let reply = asker
+            .ask(PermissionAskRequest {
+                source: request.source.clone(),
+                ..request
+            })
+            .await;
+        assert!(
+            matches!(
+                reply,
+                PermissionReply::Reject { feedback: Some(ref feedback) }
+                    if feedback.contains("ask channel closed")
+            ),
+            "expected Reject with ask-channel-closed feedback, got: {reply:?}",
+        );
+    }
 
     /// Scenario: `AbortToken` round-trips a cancellation flag through
     /// `cancel()` / `is_cancelled()`, and cancellation propagates to
