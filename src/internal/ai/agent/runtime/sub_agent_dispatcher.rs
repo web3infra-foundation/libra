@@ -482,22 +482,67 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // runner branch is the seam OC-Phase 3 P3.4 fills in;
             // today every test path takes the placeholder branch.
             let outcome = if let Some(runner) = self.child_runner.as_ref() {
-                // OC-Phase 4 minimum-viable handoff (v0.17.773):
-                // load the parent's latest `ContextFrameEvent` from
-                // the session JSONL and materialise it into the
+                // OC-Phase 4 minimum-viable handoff (v0.17.773) +
+                // P4.4 compacted handoff (v0.17.785): load the
+                // parent's latest `ContextFrameEvent` from the
+                // session JSONL and materialise it into the
                 // child's history before the user prompt lands.
-                // Failures (no frame yet, IO error) fall through to
-                // empty history — the child still sees the prompt
-                // and works, just without parent context. This is
-                // the same fail-soft posture the runner uses for
-                // the post-Spawned cancel race.
-                let history = ctx
+                //
+                // Routing rule:
+                //   - parent frame present + `ctx.compaction_model`
+                //     present: run the compaction agent and feed
+                //     the validated `ContextHandoff` via
+                //     `to_handoff_messages()` (v0.17.781).
+                //   - parent frame present + no compaction model:
+                //     fall back to the v0.17.773 raw-segment
+                //     dump.
+                //   - no parent frame: empty history.
+                //
+                // Compaction failures (provider error, malformed
+                // SUMMARY template) emit `tracing::warn!` and
+                // degrade to the raw-segment path. The dispatch
+                // never blocks on a compaction failure — the
+                // child still runs.
+                let parent_frame = ctx
                     .context_frame_loader
                     .latest_frame_for_session(ctx.session_store)
                     .ok()
-                    .flatten()
-                    .map(|frame| frame.to_handoff_messages())
-                    .unwrap_or_default();
+                    .flatten();
+                let history = match (parent_frame.as_ref(), ctx.compaction_model) {
+                    (Some(frame), Some(compaction_model)) => {
+                        let frame_text = frame
+                            .segments
+                            .iter()
+                            .filter_map(|seg| seg.content.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let attachment_refs = frame.attachment_refs();
+                        let system_prompt =
+                            crate::internal::ai::context_budget::embedded_compaction_system_prompt();
+                        match crate::internal::ai::context_budget::run_compaction(
+                            compaction_model,
+                            system_prompt,
+                            &frame_text,
+                            frame.frame_id,
+                            attachment_refs,
+                            Vec::new(),
+                            0,
+                        )
+                        .await
+                        {
+                            Ok(handoff) => handoff.to_handoff_messages(),
+                            Err(err) => {
+                                tracing::warn!(
+                                    %err,
+                                    "compaction agent failed; falling back to raw-segment handoff",
+                                );
+                                frame.to_handoff_messages()
+                            }
+                        }
+                    }
+                    (Some(frame), None) => frame.to_handoff_messages(),
+                    (None, _) => Vec::new(),
+                };
                 let request = super::sub_agent::SubAgentChildRunRequest {
                     ctx: &ctx,
                     invocation: &invocation,
@@ -900,6 +945,7 @@ mod tests {
             context_frame_loader,
             abort_token: AbortToken::new(),
             depth,
+            compaction_model: None,
         }
     }
 
@@ -1577,6 +1623,7 @@ mod tests {
             context_frame_loader: &context_frame_loader,
             abort_token: pre_cancelled,
             depth: 0,
+            compaction_model: None,
         };
 
         let result = dispatcher

@@ -665,6 +665,17 @@ pub struct DispatchContext<'a> {
     /// the first level; the dispatcher rejects `depth + 1 >
     /// max_subagent_depth`.
     pub depth: u8,
+    /// OC-Phase 4 P4.4 compaction model (v0.17.785): when
+    /// configured via `[code.compaction]`, the dispatcher tail
+    /// routes the parent's latest `ContextFrameEvent` through
+    /// `compaction_agent::run_compaction(...)` to produce a
+    /// validated `ContextHandoff`, then materialises it via
+    /// [`ContextHandoff::to_handoff_messages`] (v0.17.781). None
+    /// falls through to [`ContextFrameEvent::to_handoff_messages`]
+    /// (v0.17.773) — same raw-segment path the dispatcher used
+    /// before P4.4 was wired.
+    pub compaction_model:
+        Option<&'a crate::internal::ai::providers::AnyCompletionModel>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -1058,6 +1069,7 @@ impl SubAgentToolLoopRuntime {
             context_frame_loader: self.context_frame_loader.as_ref(),
             abort_token: self.abort_token.child(),
             depth: self.depth,
+            compaction_model: self.compaction_model.as_deref(),
         }
     }
 
@@ -1444,6 +1456,7 @@ mod tests {
             context_frame_loader: &context_frame_loader,
             abort_token: AbortToken::new(),
             depth: 0,
+            compaction_model: None,
         };
 
         let child_binding =
@@ -1524,6 +1537,7 @@ mod tests {
             context_frame_loader: &context_frame_loader,
             abort_token: AbortToken::new(),
             depth: 0,
+            compaction_model: None,
         };
 
         let child_binding = ModelBinding::parse("deepseek/deepseek-chat").unwrap();
@@ -1604,6 +1618,7 @@ mod tests {
             context_frame_loader: &context_frame_loader,
             abort_token: AbortToken::new(),
             depth: 0,
+            compaction_model: None,
         };
 
         f(&context)
@@ -1698,6 +1713,7 @@ mod tests {
             context_frame_loader: &context_frame_loader,
             abort_token,
             depth: 0,
+            compaction_model: None,
         };
 
         let request = SubAgentChildRunRequest {
