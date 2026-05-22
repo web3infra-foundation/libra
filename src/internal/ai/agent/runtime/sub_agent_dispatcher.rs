@@ -749,6 +749,25 @@ mod tests {
             "expected FeatureDisabled when multi_agent.enabled = false, got {:?}",
             result.as_ref().err()
         );
+
+        // P3.8 byte-level flag-off regression contract: a refused
+        // dispatch must NOT mutate the parent session JSONL. If the
+        // events.jsonl file does not exist that is the strongest
+        // possible "no side effects" signal — the dispatcher rejected
+        // on the feature flag before any append could even create the
+        // file. If the file exists from a prior write in the same
+        // test harness, then no new bytes may be appended after the
+        // rejected dispatch.
+        let events_path = store.events_path();
+        let bytes_after = std::fs::read(&events_path).unwrap_or_default();
+        assert!(
+            bytes_after.is_empty(),
+            "flag-off dispatch must NOT mutate parent session JSONL; \
+             found {} bytes at '{}': {:?}",
+            bytes_after.len(),
+            events_path.display(),
+            String::from_utf8_lossy(&bytes_after),
+        );
     }
 
     /// Scenario: depth gate fires when `ctx.depth + 1 > limit`. The
