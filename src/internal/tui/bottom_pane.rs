@@ -107,6 +107,16 @@ pub struct BottomPane {
     usage_line: Option<String>,
     /// Optional usage detail popup shown above the bottom pane.
     usage_detail_panel: Option<String>,
+    /// Optional one-line Goal status indicator. When `Some`, the
+    /// pane prepends the line above the input border so the user
+    /// always sees the active Goal's id-short-code + status without
+    /// running `/goal status`. Per `docs/improvement/opencode.md`
+    /// line 723: "active Goal 的底栏至少显示：goal id 短码、status、
+    /// 当前 step、tokens/cost、blocker 或 next action". This field
+    /// owns the rendered string so the App can update it after
+    /// every Goal mutation without touching the renderer's state
+    /// machine.
+    goal_status_line: Option<String>,
 }
 
 impl BottomPane {
@@ -139,6 +149,7 @@ impl BottomPane {
             input_hint: None,
             usage_line: None,
             usage_detail_panel: None,
+            goal_status_line: None,
         }
     }
 
@@ -379,6 +390,24 @@ impl BottomPane {
         self.usage_line = usage_line;
     }
 
+    /// Set or clear the one-line Goal status indicator surfaced
+    /// above the input box. Pass `None` when the session has no
+    /// active Goal; pass `Some(line)` when a Goal is active so the
+    /// user can see its id-short-code and progress without invoking
+    /// `/goal status`. See [`crate::internal::tui::goal_session::render_goal_status_line`]
+    /// for the canonical formatter.
+    pub fn set_goal_status_line(&mut self, line: Option<String>) {
+        self.goal_status_line = line;
+    }
+
+    /// Read-only access to the current Goal status line. Used by
+    /// the render path and by tests to assert that the App's
+    /// post-mutation refresh reached the pane.
+    #[cfg(test)]
+    pub fn goal_status_line(&self) -> Option<&str> {
+        self.goal_status_line.as_deref()
+    }
+
     pub fn set_usage_detail_panel(&mut self, details: Option<String>) {
         self.usage_detail_panel = details;
     }
@@ -534,8 +563,15 @@ impl BottomPane {
         }
         if self.status != AgentStatus::AwaitingUserInput {
             // Normal mode: rounded input box(5, with 3-line input inner area)
-            // + optional usage line + statusline(1).
-            return if self.usage_line.is_some() { 7 } else { 6 };
+            // + optional Goal status line + optional usage line + statusline(1).
+            let mut height: u16 = 6;
+            if self.usage_line.is_some() {
+                height += 1;
+            }
+            if self.goal_status_line.is_some() {
+                height += 1;
+            }
+            return height;
         }
 
         let questions = match &self.user_input_questions {
@@ -589,29 +625,33 @@ impl BottomPane {
             return self.render_intent_review_dialog(area, buf);
         }
 
-        // Split area into input area and status bar.
-        let constraints = if self.usage_line.is_some() {
-            vec![
-                Constraint::Length(5), // Rounded input box (3-line inner input)
-                Constraint::Length(1), // Usage line
-                Constraint::Length(1), // Status line
-            ]
-        } else {
-            vec![
-                Constraint::Length(5), // Rounded input box (3-line inner input)
-                Constraint::Length(1), // Status line
-            ]
-        };
+        // Split area into input area, optional Goal status row,
+        // optional usage row, and status bar. Goal status sits
+        // directly under the input so it's the first thing the eye
+        // hits after typing.
+        let mut constraints: Vec<Constraint> = Vec::with_capacity(4);
+        constraints.push(Constraint::Length(5)); // Rounded input box (3-line inner input)
+        if self.goal_status_line.is_some() {
+            constraints.push(Constraint::Length(1));
+        }
+        if self.usage_line.is_some() {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(1)); // Status line
         let chunks = Layout::vertical(constraints).split(area);
 
         // Render input area
         let cursor_pos = self.render_input_area(chunks[0], buf);
-        if self.usage_line.is_some() {
-            self.render_usage_line(chunks[1], buf);
-            self.render_status_bar(chunks[2], buf);
-        } else {
-            self.render_status_bar(chunks[1], buf);
+        let mut next_chunk = 1usize;
+        if self.goal_status_line.is_some() {
+            self.render_goal_status_line(chunks[next_chunk], buf);
+            next_chunk += 1;
         }
+        if self.usage_line.is_some() {
+            self.render_usage_line(chunks[next_chunk], buf);
+            next_chunk += 1;
+        }
+        self.render_status_bar(chunks[next_chunk], buf);
 
         // Render command popup (floats above the bottom pane)
         if self.command_popup.visible && self.status == AgentStatus::Idle {
@@ -1117,6 +1157,18 @@ impl BottomPane {
         .render(area, buf);
     }
 
+    /// Render the active Goal indicator (`goal <short_id> · Active …`)
+    /// directly under the input box so the user always sees the
+    /// Goal's status without invoking `/goal status`. No-op when
+    /// the field is `None`; the renderer skips the row entirely via
+    /// the `Constraint::Length(1)` gate in [`Self::render`].
+    fn render_goal_status_line(&self, area: Rect, buf: &mut Buffer) {
+        let Some(line) = self.goal_status_line.as_deref() else {
+            return;
+        };
+        Paragraph::new(Line::styled(line.to_string(), theme::text::muted())).render(area, buf);
+    }
+
     fn render_usage_detail_panel(&self, bottom_area: Rect, buf: &mut Buffer) {
         let Some(details) = self.usage_detail_panel.as_deref() else {
             return;
@@ -1557,6 +1609,60 @@ mod tests {
 
         pane.status = AgentStatus::AwaitingApproval;
         assert_ne!(pane.desired_height(), 7);
+    }
+
+    /// `set_goal_status_line(Some(_))` grows the bottom-pane height
+    /// by one row and the active Goal indicator appears directly
+    /// beneath the input box. Clearing the line shrinks the pane
+    /// back to its base height. Pins the layout contract the App
+    /// relies on when it toggles `refresh_bottom_pane_goal_status`
+    /// between `Some(line)` and `None`.
+    #[test]
+    fn goal_status_line_extends_height_and_renders_above_status_bar() {
+        let mut pane = BottomPane::new();
+        let base_height = pane.desired_height();
+        pane.set_goal_status_line(Some("Goal a1a1a1a1 · Active · 0/1 criteria".to_string()));
+        assert_eq!(pane.desired_height(), base_height + 1);
+        assert_eq!(
+            pane.goal_status_line(),
+            Some("Goal a1a1a1a1 · Active · 0/1 criteria"),
+        );
+
+        let area = Rect::new(0, 0, 80, base_height + 1);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Goal a1a1a1a1 · Active · 0/1 criteria"));
+
+        pane.set_goal_status_line(None);
+        assert_eq!(pane.desired_height(), base_height);
+        assert!(pane.goal_status_line().is_none());
+    }
+
+    /// When both a Goal indicator and a usage line are present the
+    /// bottom pane needs two extra rows (one each) on top of the
+    /// base height. Goal sits directly under the input box; usage
+    /// sits between Goal and the status bar.
+    #[test]
+    fn goal_status_and_usage_line_coexist_with_correct_height() {
+        let mut pane = BottomPane::new();
+        let base = pane.desired_height();
+        pane.set_goal_status_line(Some("Goal abcd1234 · Active · 1/2 criteria".to_string()));
+        pane.set_usage_line(Some("openai/gpt · 10 tok".to_string()));
+        assert_eq!(pane.desired_height(), base + 2);
+
+        let area = Rect::new(0, 0, 80, base + 2);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Goal abcd1234 · Active · 1/2 criteria"));
+        assert!(rendered.contains("usage openai/gpt"));
     }
 
     #[test]

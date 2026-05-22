@@ -815,6 +815,10 @@ where
             )
         }));
         self.widget.bottom_pane.set_command_hints(hints);
+        // Seed the bottom-pane Goal indicator so a `libra code --goal "..."`
+        // launch shows the active Goal on the very first frame (no
+        // need to wait for the first slash-command refresh).
+        self.refresh_bottom_pane_goal_status();
 
         // Initial draw - ensure UI is rendered immediately
         self.draw()?;
@@ -1093,6 +1097,7 @@ where
                 }
                 let rendered = render_goal_status(session.state());
                 self.goal_session = Some(session);
+                self.refresh_bottom_pane_goal_status();
                 Ok(rendered)
             }
             Err(GoalSessionError::InvalidObjective { source }) => {
@@ -1140,10 +1145,12 @@ where
                 // `goal.start` succeeds without an explicit
                 // teardown call.
                 self.goal_session = None;
+                self.refresh_bottom_pane_goal_status();
                 Ok(rendered)
             }
             Err(GoalSessionError::NotActive) => {
                 self.goal_session = None;
+                self.refresh_bottom_pane_goal_status();
                 Err(TuiControlError::GoalNotActive)
             }
             Err(other) => Err(TuiControlError::Internal(other.to_string())),
@@ -1176,7 +1183,9 @@ where
                         "failed to persist Goal criteria revision: {error}"
                     )));
                 }
-                Ok(render_goal_status(&state))
+                let rendered = render_goal_status(&state);
+                self.refresh_bottom_pane_goal_status();
+                Ok(rendered)
             }
             Err(GoalSessionError::NotActive) => Err(TuiControlError::GoalNotActive),
             Err(GoalSessionError::InvalidObjective { source }) => {
@@ -1191,6 +1200,22 @@ where
             self.session_store.session_root(&self.session.id),
             events,
         )
+    }
+
+    /// Refresh the bottom-pane Goal indicator from the current
+    /// `goal_session` slot. Call after every mutation
+    /// (`start` / `cancel` / `criteria add` / supervisor envelope
+    /// fold) so the user sees the live state without invoking
+    /// `/goal status`. Setting the line to `None` when there is no
+    /// active Goal hides the row entirely so the layout shrinks
+    /// back to its non-Goal height.
+    fn refresh_bottom_pane_goal_status(&mut self) {
+        use super::goal_session::render_goal_status_line;
+        let line = self
+            .goal_session
+            .as_ref()
+            .map(|session| render_goal_status_line(session.state()));
+        self.widget.bottom_pane.set_goal_status_line(line);
     }
 
     async fn submit_message_from_code_ui(&mut self, text: String) -> Result<(), TuiControlError> {
@@ -3245,6 +3270,11 @@ where
                                 "failed to persist Goal supervisor events"
                             );
                         }
+                        // Supervisor envelope fold changed the active
+                        // Goal's progress / blocker / completion state;
+                        // refresh the bottom-pane indicator so the
+                        // next frame reflects the new short-line.
+                        self.refresh_bottom_pane_goal_status();
 
                         self.session.add_assistant_message(&rendered_text);
                         self.complete_streaming_assistant_cell(rendered_text.clone());

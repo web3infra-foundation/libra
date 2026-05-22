@@ -295,6 +295,52 @@ impl GoalSession {
     }
 }
 
+/// Render `state` as a compact one-line indicator for the TUI
+/// bottom pane. Per `docs/improvement/opencode.md` line 723 the
+/// active Goal must surface its id short code + status + progress
+/// without requiring the user to invoke `/goal status` every turn.
+///
+/// Shape (stable for golden tests):
+/// `Goal <8-hex-short> · <Status> · <completed>/<total> criteria[ · blocked: <reason>]`
+///
+/// Examples:
+/// * Idle progress:  `Goal a1a1a1a1 · Active · 0/1 criteria`
+/// * Blocked:        `Goal a1a1a1a1 · Active · 0/1 criteria · blocked: BudgetApprovalRequired`
+/// * Completed:      `Goal a1a1a1a1 · Completed · 1/1 criteria`
+///
+/// The short code is the first 8 hex digits of the Goal id; long
+/// enough to disambiguate in any realistic session, short enough to
+/// fit the bottom-pane budget alongside the input hint.
+pub fn render_goal_status_line(state: &GoalState) -> String {
+    let short_id: String = state
+        .spec
+        .goal_id
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect();
+    let total = state.spec.acceptance_criteria.len();
+    let completed = state.completed_criteria.len();
+    let mut line = format!(
+        "Goal {short_id} · {:?} · {completed}/{total} criteria",
+        state.status,
+    );
+    if let Some(blocker) = state.blockers.last() {
+        // `reason` is `GoalBlockReason`; use its Debug discriminant
+        // name (everything before the first `{` / `(`) so a deep
+        // payload doesn't blow past the bottom-pane width.
+        let reason_dbg = format!("{:?}", blocker.reason);
+        let discriminant = reason_dbg
+            .split(['{', '(', ' '])
+            .next()
+            .unwrap_or("Blocked");
+        line.push_str(" · blocked: ");
+        line.push_str(discriminant);
+    }
+    line
+}
+
 /// Render `state` as a multi-line human-readable summary — used by
 /// both the TUI `/goal status` cell and the NDJSON `goal.status`
 /// response body. Stable shape for golden tests.
@@ -643,6 +689,74 @@ mod tests {
             session.state().last_assistant_summary,
             Some("implemented first slice".to_string())
         );
+    }
+
+    /// `render_goal_status_line` produces the canonical one-line
+    /// indicator the bottom pane consumes: `Goal <short> · <Status>
+    /// · <completed>/<total> criteria`. Short id is the first 8 hex
+    /// digits of the Goal id with no dashes.
+    #[test]
+    fn render_goal_status_line_pins_canonical_shape() {
+        let session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let line = render_goal_status_line(session.state());
+        let expected_short: String = session
+            .state()
+            .spec
+            .goal_id
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect();
+        assert_eq!(
+            line,
+            format!("Goal {expected_short} · Active · 0/0 criteria"),
+        );
+    }
+
+    /// Adding a criterion bumps the `<total>` slot and keeps the
+    /// status string as `Active`. Pins the integration between the
+    /// criteria-revision mutator and the bottom-pane renderer so a
+    /// future change to either side breaks loudly.
+    #[test]
+    fn render_goal_status_line_reflects_criteria_revision() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        let line = render_goal_status_line(session.state());
+        assert!(line.contains("0/1 criteria"), "got: {line}");
+    }
+
+    /// A terminal (Cancelled) session shows `Cancelled` in the
+    /// `<Status>` slot and drops the blocker tail (there are none
+    /// on a clean cancel).
+    #[test]
+    fn render_goal_status_line_shows_cancelled_status() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .cancel("user changed mind".to_string(), user_actor())
+            .unwrap();
+        let line = render_goal_status_line(session.state());
+        assert!(line.contains("· Cancelled · "), "got: {line}");
     }
 
     #[test]
