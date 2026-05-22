@@ -2820,6 +2820,24 @@ where
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
+    // OC-Phase 5 P5.1 session bootstrap (v0.17.775): read the
+    // operator's `.libra/agents.toml` if present so
+    // `code.sub_agents.enabled` / `code.multi_agent.enabled` /
+    // `[code.budget]` / `[code.agents.*]` etc. actually take
+    // effect. Missing file degrades to `AgentsConfig::default()`
+    // (the previous hardcoded behavior) per `load_or_default`'s
+    // contract. Parse errors are surfaced as a warning rather than
+    // failing the session — a malformed config should not block an
+    // operator from starting `libra code` to fix it.
+    let agents_config_path = registry.working_dir().join(".libra").join("agents.toml");
+    let agents_config = AgentsConfig::load_or_default(&agents_config_path).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            path = %agents_config_path.display(),
+            "failed to load agents.toml; falling back to AgentsConfig::default()",
+        );
+        AgentsConfig::default()
+    });
     let source_pool = SourcePool::new();
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
@@ -2845,7 +2863,7 @@ where
             command_dispatcher,
             skill_dispatcher,
             agent_router,
-            agents_config: AgentsConfig::default(),
+            agents_config,
             session,
             session_store,
             user_input_rx: params.user_input_rx,
