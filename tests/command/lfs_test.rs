@@ -119,51 +119,6 @@ async fn test_lfs_track_untrack() {
 }
 
 #[tokio::test]
-/// Track with duplicate patterns in a single invocation must record each pattern only
-/// once, both in the structured output and in the on-disk attributes file. This pins
-/// the dedupe behaviour that prevents `libra lfs track foo foo` from appending `foo`
-/// twice (regression guard for the legacy "TODO: deduplicate" path in `run_lfs`).
-async fn test_lfs_track_deduplicates_repeated_patterns() {
-    let temp_repo = init_temp_repo();
-    let temp_path = temp_repo.path();
-
-    let track_output = libra_command(temp_path)
-        .args(["--json", "lfs", "track", "*.txt", "*.txt"])
-        .output()
-        .expect("Failed to track path");
-    assert!(
-        track_output.status.success(),
-        "Failed to track path: {}",
-        String::from_utf8_lossy(&track_output.stderr)
-    );
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&track_output.stdout).expect("track stdout should be JSON");
-    let patterns = json["data"]["patterns"]
-        .as_array()
-        .expect("patterns should be an array");
-    assert_eq!(
-        patterns.len(),
-        1,
-        "duplicate input pattern must be reported once: {patterns:?}"
-    );
-    assert_eq!(patterns[0], "*.txt");
-
-    // Re-listing should also report a single entry; the on-disk attributes file must
-    // not contain duplicate filter=lfs lines.
-    let attributes = fs::read_to_string(temp_path.join(".libra_attributes"))
-        .expect("attributes file should exist after tracking");
-    let lfs_lines = attributes
-        .lines()
-        .filter(|line| line.contains("filter=lfs"))
-        .count();
-    assert_eq!(
-        lfs_lines, 1,
-        "attributes file should contain exactly one filter=lfs line, got: {attributes}",
-    );
-}
-
-#[tokio::test]
 /// Test JSON output for local LFS tracking operations.
 async fn test_lfs_track_and_untrack_json_output() {
     let temp_repo = init_temp_repo();

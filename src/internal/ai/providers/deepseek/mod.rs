@@ -2,7 +2,8 @@
 //!
 //! This module integrates with the [DeepSeek API](https://api-docs.deepseek.com/),
 //! which exposes an OpenAI-compatible Chat Completions endpoint. Authentication
-//! is performed via Bearer token using a `DEEPSEEK_API_KEY` environment variable.
+//! is performed via Bearer token using `vault.env.DEEPSEEK_API_KEY` or the
+//! `DEEPSEEK_API_KEY` environment variable.
 //!
 //! # Example
 //! ```no_run

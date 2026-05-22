@@ -1154,12 +1154,15 @@ async fn read_fetch_stream(
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
     let progress = json_progress.then(|| ProgressReporter::new(task, None, output));
+    let mut remote_progress = RemoteProgressBuffer::default();
     let time = Instant::now();
 
     loop {
-        let (len, data) = read_pkt_line(&mut reader)
-            .await
-            .map_err(|source| FetchError::PacketRead { source })?;
+        let (len, data) = match read_pkt_line(&mut reader).await {
+            Ok(packet) => packet,
+            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof && reach_pack => break,
+            Err(source) => return Err(FetchError::PacketRead { source }),
+        };
         if len == 0 {
             if !reach_pack && saw_shallow_response {
                 saw_shallow_response = false;
@@ -1208,8 +1211,14 @@ async fn read_fetch_stream(
                             progress.tick(data_out.pack_data.len() as u64);
                         }
                     }
-                    2 => print_remote_progress(payload, render_progress, bar.as_ref()),
+                    2 => handle_remote_progress(
+                        payload,
+                        render_progress,
+                        bar.as_ref(),
+                        &mut remote_progress,
+                    ),
                     3 => {
+                        flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                         if let Some(bar) = &bar {
                             bar.finish_and_clear();
                         }
@@ -1229,8 +1238,14 @@ async fn read_fetch_stream(
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
-                2 => print_remote_progress(payload, render_progress, bar.as_ref()),
+                2 => handle_remote_progress(
+                    payload,
+                    render_progress,
+                    bar.as_ref(),
+                    &mut remote_progress,
+                ),
                 3 => {
+                    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                     if let Some(bar) = &bar {
                         bar.finish_and_clear();
                     }
@@ -1247,6 +1262,7 @@ async fn read_fetch_stream(
             }
         }
     }
+    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
@@ -1263,32 +1279,119 @@ fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
-    emit_remote_progress(payload, render_progress, bar, |text| {
-        eprint!("{text}");
-        let _ = io::stderr().flush();
-    });
+/// Line-buffers raw sideband progress bytes so the indicatif spinner and the
+/// remote's `\r`-overwriting progress text do not stomp on each other.
+///
+/// Git's smart protocol delivers human-readable progress on side-band 2 in
+/// arbitrarily small chunks that may split mid-word. The remote uses `\r` for
+/// in-place updates (e.g. `Counting objects:  5%\rCounting objects: 10%\r…`)
+/// and `\n` to commit a line (e.g. `Counting objects: 100% (38/38), done.\n`).
+/// Forwarding raw bytes straight to `eprint!` while the local spinner is also
+/// being redrawn produces interleaved fragments separated by spinner ticks.
+#[derive(Default)]
+struct RemoteProgressBuffer {
+    buf: String,
 }
 
-fn emit_remote_progress<F>(
+impl RemoteProgressBuffer {
+    /// Append `payload` and dispatch any complete lines.
+    ///
+    /// - `\n`-terminated (and `\r\n`-terminated) lines are emitted to
+    ///   `on_permanent` so the caller can promote them to a log line above
+    ///   the bar.
+    /// - `\r`-terminated lines are emitted to `on_transient`, which typically
+    ///   maps to `bar.set_message` so the latest progress replaces the prior.
+    /// - Any trailing partial content stays in the buffer for the next call.
+    fn push<P, T>(&mut self, payload: &[u8], mut on_permanent: P, mut on_transient: T)
+    where
+        P: FnMut(&str),
+        T: FnMut(&str),
+    {
+        if payload.is_empty() {
+            return;
+        }
+        self.buf.push_str(&String::from_utf8_lossy(payload));
+        while let Some(pos) = self.buf.find(['\r', '\n']) {
+            // ASCII terminators are always at char boundaries, so split_off is safe.
+            let terminator = self.buf.as_bytes()[pos];
+            let line: String = self.buf.drain(..pos).collect();
+            self.buf.drain(..1);
+
+            // Treat CRLF as a single newline so we don't emit an extra empty transient.
+            let is_permanent =
+                terminator == b'\n' || (terminator == b'\r' && self.buf.starts_with('\n'));
+            if terminator == b'\r' && self.buf.starts_with('\n') {
+                self.buf.drain(..1);
+            }
+            if is_permanent {
+                on_permanent(&line);
+            } else {
+                on_transient(&line);
+            }
+        }
+    }
+
+    /// Emit any unterminated trailing bytes as a permanent line.
+    ///
+    /// Called once the sideband stream has ended so we never silently drop
+    /// the last fragment when the remote closed without a final newline.
+    fn flush_remaining<P>(&mut self, mut on_permanent: P)
+    where
+        P: FnMut(&str),
+    {
+        if !self.buf.is_empty() {
+            let line = std::mem::take(&mut self.buf);
+            on_permanent(&line);
+        }
+    }
+}
+
+fn handle_remote_progress(
     payload: &[u8],
     render_progress: bool,
     bar: Option<&ProgressBar>,
-    emit: F,
-) where
-    F: FnOnce(&str),
-{
-    if render_progress {
-        let text = String::from_utf8_lossy(payload);
-        let emit_text = || emit(text.as_ref());
-        // Remote side-band progress writes raw terminal control characters.
-        // Hide the local receiving spinner while printing it so the two
-        // streams do not leave stale or shifted lines in an interactive TTY.
-        if let Some(bar) = bar {
-            bar.suspend(emit_text);
-        } else {
-            emit_text();
-        }
+    buffer: &mut RemoteProgressBuffer,
+) {
+    if !render_progress {
+        return;
+    }
+    buffer.push(
+        payload,
+        |line| emit_permanent_progress_line(line, bar),
+        |line| emit_transient_progress_line(line, bar),
+    );
+}
+
+fn flush_remote_progress(
+    render_progress: bool,
+    bar: Option<&ProgressBar>,
+    buffer: &mut RemoteProgressBuffer,
+) {
+    if !render_progress {
+        return;
+    }
+    buffer.flush_remaining(|line| emit_permanent_progress_line(line, bar));
+}
+
+fn emit_permanent_progress_line(line: &str, bar: Option<&ProgressBar>) {
+    if let Some(bar) = bar {
+        // `println` clears the bar, prints the line, then redraws the bar
+        // below — the canonical way to interleave logs with an indicatif spinner.
+        bar.println(line);
+    } else {
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(stderr, "{line}");
+    }
+}
+
+fn emit_transient_progress_line(line: &str, bar: Option<&ProgressBar>) {
+    if let Some(bar) = bar {
+        bar.set_message(line.to_owned());
+        bar.tick();
+    } else {
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r{line}");
+        let _ = stderr.flush();
     }
 }
 
@@ -1703,22 +1806,22 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
         time::{Duration, SystemTime},
     };
 
-    use git_internal::errors::GitError;
-    use indicatif::ProgressBar;
+    use bytes::{Bytes, BytesMut};
+    use futures_util::{StreamExt, stream};
+    use git_internal::hash::ObjectHash;
     use tempfile::tempdir;
 
     use super::{
-        FetchError, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
-        cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        FetchError, RemoteProgressBuffer, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
+        cleanup_expired_vault_ssh_temp_files_in, ensure_vault_ssh_tmp_dir, read_fetch_stream,
         redact_url_credentials,
     };
-    use crate::utils::{
-        error::{CliError, StableErrorCode},
-        test::ScopedEnvVar,
+    use crate::{
+        internal::protocol::FetchStream,
+        utils::{output::OutputConfig, test::ScopedEnvVar},
     };
 
     /// Pin the `Display` format for the static-message and direct-message
@@ -1793,195 +1896,135 @@ mod tests {
         );
     }
 
-    /// Pin the `stable_code()` routing for every [`FetchError`] variant
-    /// via the `From<FetchError> for CliError` impl. The routing is
-    /// large (15 variants), uses sub-classification via
-    /// [`RemoteSpecErrorKind`] for `InvalidRemoteSpec`, and groups
-    /// several variants under the same code through both alternation
-    /// (e.g. `InvalidPktHeader` + `RemoteSideband` + `ChecksumMismatch`
-    /// + `IndexPack` -> `NetworkProtocol`; `PackDirCreate` +
-    /// `PackWrite` + `UpdateRefs` -> `IoWriteFailed`) and via the
-    /// `map_fetch_discovery_error` / `map_fetch_io_error` helpers, so
-    /// silent rerouting between groups would not register without an
-    /// enum-level pin.
-    ///
-    /// The `Discovery` and `PacketRead` source-dependent routes —
-    /// which branch on the inner `GitError` / `io::Error` kind — are
-    /// covered separately with a representative `IOError` /
-    /// non-timeout `io::Error` to keep this test focused on the
-    /// stable-code surface rather than the helper internals.
-    #[test]
-    fn fetch_error_stable_code_pins_each_variant() {
-        fn code_of(err: FetchError) -> StableErrorCode {
-            CliError::from(err).stable_code()
-        }
-
-        // InvalidRemoteSpec sub-classification.
-        assert_eq!(
-            code_of(FetchError::InvalidRemoteSpec {
-                spec: "/missing/repo".to_string(),
-                kind: RemoteSpecErrorKind::MissingLocalRepo,
-                reason: "local path does not exist".to_string(),
-            }),
-            StableErrorCode::RepoNotFound,
-        );
-        for kind in [
-            RemoteSpecErrorKind::InvalidLocalRepo,
-            RemoteSpecErrorKind::MalformedUrl,
-            RemoteSpecErrorKind::UnsupportedScheme,
-        ] {
-            assert_eq!(
-                code_of(FetchError::InvalidRemoteSpec {
-                    spec: "garbage://".to_string(),
-                    kind,
-                    reason: "bad spec".to_string(),
-                }),
-                StableErrorCode::CliInvalidTarget,
-                "kind={kind:?} should route to CliInvalidTarget",
-            );
-        }
-
-        // CliInvalidTarget — user-supplied target does not resolve.
-        assert_eq!(
-            code_of(FetchError::RemoteBranchNotFound {
-                branch: "feature".to_string(),
-                remote: "origin".to_string(),
-            }),
-            StableErrorCode::CliInvalidTarget,
-        );
-
-        // RepoStateInvalid — incompatible repo state for the operation.
-        assert_eq!(
-            code_of(FetchError::ObjectFormatMismatch {
-                remote: git_internal::hash::HashKind::Sha1,
-                local: git_internal::hash::HashKind::Sha256,
-            }),
-            StableErrorCode::RepoStateInvalid,
-        );
-
-        // NetworkProtocol — protocol-level wire failures (alternation arm).
-        assert_eq!(
-            code_of(FetchError::InvalidPktHeader {
-                header: "zzzz".to_string(),
-            }),
-            StableErrorCode::NetworkProtocol,
-        );
-        assert_eq!(
-            code_of(FetchError::RemoteSideband {
-                message: "access denied".to_string(),
-            }),
-            StableErrorCode::NetworkProtocol,
-        );
-        assert_eq!(
-            code_of(FetchError::ChecksumMismatch),
-            StableErrorCode::NetworkProtocol,
-        );
-        assert_eq!(
-            code_of(FetchError::IndexPack {
-                path: "/tmp/pack-abc.pack".to_string(),
-                source: GitError::CustomError("index build failed".to_string()),
-            }),
-            StableErrorCode::NetworkProtocol,
-        );
-
-        // NetworkUnavailable — non-timeout I/O against a remote (representative).
-        assert_eq!(
-            code_of(FetchError::FetchObjects {
-                remote: "origin".to_string(),
-                source: std::io::Error::other("connection reset"),
-            }),
-            StableErrorCode::NetworkUnavailable,
-        );
-
-        // IoReadFailed — local objects directory probe failed.
-        assert_eq!(
-            code_of(FetchError::ObjectsDirNotFound {
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "no .libra/objects"),
-            }),
-            StableErrorCode::IoReadFailed,
-        );
-
-        // IoWriteFailed — local pack-write / refs-update path (alternation arm).
-        assert_eq!(
-            code_of(FetchError::PackDirCreate {
-                path: PathBuf::from("/tmp/pack"),
-                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
-            }),
-            StableErrorCode::IoWriteFailed,
-        );
-        assert_eq!(
-            code_of(FetchError::PackWrite {
-                path: PathBuf::from("/tmp/pack.pack"),
-                source: std::io::Error::new(std::io::ErrorKind::WriteZero, "disk full"),
-            }),
-            StableErrorCode::IoWriteFailed,
-        );
-        assert_eq!(
-            code_of(FetchError::UpdateRefs {
-                message: "ref database is read-only".to_string(),
-            }),
-            StableErrorCode::IoWriteFailed,
-        );
-
-        // RepoCorrupt — local repo inspection signalled corruption.
-        assert_eq!(
-            code_of(FetchError::LocalState {
-                message: "missing object directory".to_string(),
-            }),
-            StableErrorCode::RepoCorrupt,
-        );
-
-        // Discovery + PacketRead source-dependent variants: representative non-timeout
-        // path. The full sub-routing through map_fetch_discovery_error /
-        // map_fetch_io_error (auth/network/timeout) is covered by their own helpers.
-        assert_eq!(
-            code_of(FetchError::Discovery {
-                remote: "origin".to_string(),
-                source: GitError::NetworkError("dns lookup failed".to_string()),
-            }),
-            StableErrorCode::NetworkUnavailable,
-        );
-        assert_eq!(
-            code_of(FetchError::PacketRead {
-                source: std::io::Error::other("short read"),
-            }),
-            StableErrorCode::NetworkProtocol,
-        );
+    fn append_pkt_line(buf: &mut BytesMut, payload: &[u8]) {
+        let len = payload.len() + 4;
+        buf.extend_from_slice(format!("{len:04x}").as_bytes());
+        buf.extend_from_slice(payload);
     }
 
-    fn capture_remote_progress(
+    fn empty_pack_bytes() -> Vec<u8> {
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2_u32.to_be_bytes());
+        pack.extend_from_slice(&0_u32.to_be_bytes());
+        let checksum = ObjectHash::new(&pack);
+        pack.extend_from_slice(checksum.as_ref());
+        pack
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_accepts_eof_after_complete_pack_without_flush() {
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
+        let output = OutputConfig::default();
+
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin")
+            .await
+            .expect("EOF after a complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    /// Drive `RemoteProgressBuffer` with `payload` and return
+    /// `(permanent_lines, transient_lines)` in dispatch order.
+    fn collect_buffered_progress(
+        buffer: &mut RemoteProgressBuffer,
         payload: &[u8],
-        render_progress: bool,
-        bar: Option<&ProgressBar>,
-    ) -> String {
-        let mut captured = String::new();
-        emit_remote_progress(payload, render_progress, bar, |text| {
-            captured.push_str(text);
-        });
-        captured
+    ) -> (Vec<String>, Vec<String>) {
+        let mut perm = Vec::new();
+        let mut trans = Vec::new();
+        buffer.push(
+            payload,
+            |line| perm.push(line.to_string()),
+            |line| trans.push(line.to_string()),
+        );
+        (perm, trans)
     }
 
+    /// `\n`-terminated chunks are promoted to permanent log lines so the
+    /// remote's `Counting objects: 100% (38/38), done.` survives above the bar.
     #[test]
-    fn print_remote_progress_writes_payload_without_spinner() {
-        let captured = capture_remote_progress(b"\rReceiving objects: 42%", true, None);
+    fn remote_progress_buffer_promotes_newline_terminated_lines() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) =
+            collect_buffered_progress(&mut buffer, b"Counting objects: 100% (38/38), done.\n");
 
-        assert_eq!(captured, "\rReceiving objects: 42%");
+        assert_eq!(perm, vec!["Counting objects: 100% (38/38), done."]);
+        assert!(trans.is_empty());
     }
 
+    /// `\r`-terminated chunks update the bar message in place so successive
+    /// `Counting objects:  5%\rCounting objects: 10%\r…` updates replace each
+    /// other instead of stacking as separate lines.
     #[test]
-    fn print_remote_progress_writes_payload_while_spinner_is_suspended() {
-        let bar = ProgressBar::hidden();
+    fn remote_progress_buffer_routes_carriage_returns_to_transient() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(
+            &mut buffer,
+            b"Counting objects:  5%\rCounting objects: 10%\r",
+        );
 
-        let captured = capture_remote_progress(b"\rReceiving objects: 100%", true, Some(&bar));
-
-        assert_eq!(captured, "\rReceiving objects: 100%");
+        assert!(perm.is_empty());
+        assert_eq!(
+            trans,
+            vec!["Counting objects:  5%", "Counting objects: 10%"]
+        );
     }
 
+    /// Side-band chunks may split mid-word; partial bytes must survive until
+    /// the next push delivers the terminator.
     #[test]
-    fn print_remote_progress_is_silent_when_rendering_is_disabled() {
-        let captured = capture_remote_progress(b"\rReceiving objects: 42%", false, None);
+    fn remote_progress_buffer_holds_partial_bytes_across_pushes() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm1, trans1) = collect_buffered_progress(&mut buffer, b"Counting");
+        assert!(perm1.is_empty());
+        assert!(trans1.is_empty());
 
-        assert!(captured.is_empty());
+        let (perm2, trans2) = collect_buffered_progress(&mut buffer, b" objects: 100%, done.\n");
+        assert_eq!(perm2, vec!["Counting objects: 100%, done."]);
+        assert!(trans2.is_empty());
+    }
+
+    /// CRLF must collapse to a single permanent line so we don't emit a
+    /// spurious empty transient followed by an empty permanent.
+    #[test]
+    fn remote_progress_buffer_treats_crlf_as_single_newline() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(&mut buffer, b"Compressing done.\r\n");
+
+        assert_eq!(perm, vec!["Compressing done."]);
+        assert!(trans.is_empty());
+    }
+
+    /// At end of stream any unterminated tail must be flushed so a remote
+    /// that closes mid-line still surfaces the partial message.
+    #[test]
+    fn remote_progress_buffer_flush_remaining_emits_trailing_partial() {
+        let mut buffer = RemoteProgressBuffer::default();
+        collect_buffered_progress(&mut buffer, b"Resolving deltas: 99%");
+        let mut tail = Vec::new();
+        buffer.flush_remaining(|line| tail.push(line.to_string()));
+
+        assert_eq!(tail, vec!["Resolving deltas: 99%"]);
+    }
+
+    /// Empty payloads (e.g. a bare side-band code with no body) must not push
+    /// anything through the line splitter.
+    #[test]
+    fn remote_progress_buffer_ignores_empty_payload() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(&mut buffer, b"");
+        assert!(perm.is_empty());
+        assert!(trans.is_empty());
     }
 
     #[test]

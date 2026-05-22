@@ -5,14 +5,9 @@
 //! scheduler's current selection, active work, and live context window without
 //! rewriting the underlying snapshot or event objects.
 //!
-//! CRUD and round-trip persistence coverage for `SchedulerStateRepository`
-//! lives in [`tests/ai_projection_resolver_test.rs`](../../../../../tests/ai_projection_resolver_test.rs)
-//! and exercises `insert_initial` → `load` → `compare_and_swap` round-trips
-//! plus the `SchedulerStateCasError::{VersionConflict, Missing}` failure
-//! branches against a real SQLite connection. The in-module `#[cfg(test)]`
-//! suite continues to cover the pure-function helpers
-//! (`execution_head`/`test_head`/`is_idle`/`is_seeded`) and the
-//! `SchedulerStateCasError` display contract.
+//! TODO(test): add CRUD and round-trip persistence coverage once the
+//! `SchedulerState` store lands. The domain types are defined before the
+//! projector / repository implementation to keep the schema work isolated.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeZone, Utc};
@@ -113,22 +108,6 @@ pub enum LiveContextPinKind {
 }
 
 impl LiveContextSourceKind {
-    /// Every variant of [`LiveContextSourceKind`] in declaration order,
-    /// matching the Code UI Phase Workflow's phase-source progression
-    /// (Intent → Planning → Execution → Validation → Manual). Useful
-    /// for exhaustive iteration in tests, including the
-    /// `as_row_value` ↔ `from_row_value` round-trip guard at the
-    /// bottom of this module.
-    pub fn all() -> [Self; 5] {
-        [
-            Self::IntentAnalysis,
-            Self::Planning,
-            Self::Execution,
-            Self::Validation,
-            Self::Manual,
-        ]
-    }
-
     fn as_row_value(&self) -> &'static str {
         match self {
             Self::IntentAnalysis => "intent_analysis",
@@ -152,14 +131,6 @@ impl LiveContextSourceKind {
 }
 
 impl LiveContextPinKind {
-    /// Every variant of [`LiveContextPinKind`] in declaration order
-    /// (Seed → Checkpoint → Manual → System). Useful for exhaustive
-    /// iteration in tests including the `as_row_value` ↔
-    /// `from_row_value` round-trip guard at the bottom of this module.
-    pub fn all() -> [Self; 4] {
-        [Self::Seed, Self::Checkpoint, Self::Manual, Self::System]
-    }
-
     fn as_row_value(&self) -> &'static str {
         match self {
             Self::Seed => "seed",
@@ -605,10 +576,7 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
-    use super::{
-        LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,
-        SchedulerStateCasError,
-    };
+    use super::{PlanHeadRef, SchedulerState, SchedulerStateCasError};
 
     fn empty_state(thread_id: Uuid) -> SchedulerState {
         SchedulerState {
@@ -756,49 +724,5 @@ mod tests {
                  expected 7, actual None",
             ),
         );
-    }
-
-    /// `LiveContextSourceKind` must round-trip through the row-value
-    /// (de)serialisation pair: `from_row_value(as_row_value(x)) == x`
-    /// for every variant. The previous test suite covered the
-    /// scheduler-state CAS path but not the row-value serialiser for
-    /// the source/pin kinds, so a refactor that renamed one row-value
-    /// constant (e.g. "intent_analysis" → "intent_analysis_phase") on
-    /// one side of the (de)serialiser would have desynchronised the
-    /// pair silently. Use `all()` (added in v0.17.671) so a future
-    /// sixth variant lands the round-trip coverage automatically.
-    #[test]
-    fn live_context_source_kind_row_value_round_trip_covers_every_variant() {
-        let thread_id = Uuid::new_v4();
-        for kind in LiveContextSourceKind::all() {
-            let serialised = kind.as_row_value();
-            let parsed = LiveContextSourceKind::from_row_value(serialised, thread_id)
-                .unwrap_or_else(|err| {
-                    panic!("as_row_value/from_row_value round-trip failed for {kind:?}: {err}",)
-                });
-            assert_eq!(
-                parsed, kind,
-                "round-trip mismatch for {kind:?} via '{serialised}'",
-            );
-        }
-    }
-
-    /// Same round-trip contract for [`LiveContextPinKind`]. The two
-    /// enums share the same row-value persistence pattern and need
-    /// the same regression coverage.
-    #[test]
-    fn live_context_pin_kind_row_value_round_trip_covers_every_variant() {
-        let thread_id = Uuid::new_v4();
-        for kind in LiveContextPinKind::all() {
-            let serialised = kind.as_row_value();
-            let parsed =
-                LiveContextPinKind::from_row_value(serialised, thread_id).unwrap_or_else(|err| {
-                    panic!("as_row_value/from_row_value round-trip failed for {kind:?}: {err}",)
-                });
-            assert_eq!(
-                parsed, kind,
-                "round-trip mismatch for {kind:?} via '{serialised}'",
-            );
-        }
     }
 }

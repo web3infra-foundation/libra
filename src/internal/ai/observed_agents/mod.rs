@@ -63,13 +63,13 @@ pub use rpc::{
 /// same patch, which is the same compile-time guard the v0.17.660+
 /// `*::all()` enumerators established.
 pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
-    /// Wrappers ensure each `StablePromotedAgent` lives in `'static`
-    /// storage so we can return a borrowed reference. We can't put a
-    /// `StablePromotedAgent` directly in a `static` because it holds a
-    /// `&'static StablePromotedSpec` (which is fine) but Rust 2024 still
-    /// requires the wrapping value's address to be stable for `&'static`
-    /// lifetime extension — `LazyLock<StablePromotedAgent>` provides
-    /// that without an allocation.
+    // Wrappers ensure each `StablePromotedAgent` lives in `'static`
+    // storage so we can return a borrowed reference. We can't put a
+    // `StablePromotedAgent` directly in a `static` because it holds a
+    // `&'static StablePromotedSpec` (which is fine) but Rust 2024 still
+    // requires the wrapping value's address to be stable for `&'static`
+    // lifetime extension — `LazyLock<StablePromotedAgent>` provides
+    // that without an allocation.
     use std::sync::LazyLock;
 
     static CURSOR: LazyLock<StablePromotedAgent> = LazyLock::new(|| {

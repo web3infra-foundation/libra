@@ -10,8 +10,6 @@
 //! field. CEX-S2-15 fills the values. CEX-S2-10 only declares the field
 //! shape via `MergeDecisionPayloadV0`.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use serde::{Deserialize, Serialize};
 
 use super::{AgentPatchSetId, AgentRunId, DecisionId, EvidenceId, MergeCandidateId};

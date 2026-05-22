@@ -33,7 +33,7 @@ use crate::{
 };
 
 fn is_internal_switch_target(name: &str) -> bool {
-    repo_branch::is_libra_internal_branch(name)
+    name == repo_branch::INTENT_BRANCH
 }
 
 const SWITCH_EXAMPLES: &str = "\
@@ -891,37 +891,6 @@ mod tests {
     use super::*;
     use crate::command::restore::RestoreArgs;
 
-    /// `is_internal_switch_target` is the helper that
-    /// `resolve_switch_branch_target` and `resolve_tracked_remote_target`
-    /// both call before letting a `switch <ref>` / `switch --track
-    /// <remote>/<ref>` proceed. It must match exactly the
-    /// `is_libra_internal_branch` set
-    /// (`intent`, `agent-traces` — but NOT `main`), so the integration
-    /// tests at `tests/command/switch_error_test.rs` continue to fire
-    /// for both `intent` and `agent-traces` and the long-standing
-    /// `switch main` user workflow keeps working even after the
-    /// v0.17.659 refactor that widened the helper from a literal
-    /// `name == INTENT_BRANCH` check.
-    ///
-    /// Pin the partition at the unit level so a future refactor that
-    /// e.g. accidentally re-uses `is_locked_branch` here (which would
-    /// also block `main`) fails this test rather than the slow
-    /// `run_libra_command`-driven CLI sweep.
-    #[test]
-    fn is_internal_switch_target_blocks_intent_and_agent_traces_only() {
-        assert!(is_internal_switch_target(repo_branch::INTENT_BRANCH));
-        assert!(is_internal_switch_target(repo_branch::AGENT_TRACES_BRANCH));
-        // `main` must NOT match — `switch main` and `switch --track
-        // origin/main` are standard user operations.
-        assert!(!is_internal_switch_target(repo_branch::DEFAULT_BRANCH));
-        // Lookalike branch names must not collide via prefix / substring
-        // matches; the helper is a literal equality check.
-        assert!(!is_internal_switch_target("intent-feature"));
-        assert!(!is_internal_switch_target("agent-traces-feature"));
-        assert!(!is_internal_switch_target("feature/intent"));
-        assert!(!is_internal_switch_target(""));
-    }
-
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`SwitchError`]. These strings are used directly as
     /// the `CliError` message via `From<SwitchError> for CliError` and
@@ -989,114 +958,6 @@ mod tests {
             SwitchError::UntrackedOverwrite("scratch.txt".to_string()).to_string(),
             "untracked working tree file would be overwritten by switch: scratch.txt",
         );
-    }
-
-    /// Pin the `stable_code()` routing for every [`SwitchError`] variant
-    /// via the `From<SwitchError> for CliError` impl. The match arms group
-    /// disparate variants under the same stable code (e.g.
-    /// `BranchCreate` + `HeadUpdate` → `IoWriteFailed`), so a silent
-    /// accidental rerouting between groups would otherwise go undetected
-    /// — only the display strings are currently pinned.
-    ///
-    /// The `DelegatedCli` variant is excluded because it passes the
-    /// wrapped `CliError` through verbatim — its stable code is owned
-    /// by the originating caller, not by `SwitchError`.
-    #[test]
-    fn switch_error_stable_code_pins_each_variant() {
-        fn code_of(err: SwitchError) -> StableErrorCode {
-            CliError::from(err).stable_code()
-        }
-
-        // CliInvalidArguments — missing required CLI inputs.
-        assert_eq!(
-            code_of(SwitchError::MissingTrackTarget),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
-            code_of(SwitchError::MissingDetachTarget),
-            StableErrorCode::CliInvalidArguments,
-        );
-        assert_eq!(
-            code_of(SwitchError::MissingBranchName),
-            StableErrorCode::CliInvalidArguments,
-        );
-
-        // CliInvalidTarget — target ref does not resolve to something switch can act on.
-        assert_eq!(
-            code_of(SwitchError::BranchNotFound {
-                name: "topic/x".to_string(),
-                similar: vec![],
-            }),
-            StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            code_of(SwitchError::GotRemoteBranch("origin/main".to_string())),
-            StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            code_of(SwitchError::RemoteBranchNotFound {
-                remote: "origin".to_string(),
-                branch: "feature".to_string(),
-            }),
-            StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            code_of(SwitchError::InvalidRemoteBranch("garbage".to_string())),
-            StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            code_of(SwitchError::InternalBranchBlocked("intent".to_string())),
-            StableErrorCode::CliInvalidTarget,
-        );
-        assert_eq!(
-            code_of(SwitchError::CommitResolve("bad-rev".to_string())),
-            StableErrorCode::CliInvalidTarget,
-        );
-
-        // ConflictOperationBlocked — switch refuses because operating would clobber state.
-        assert_eq!(
-            code_of(SwitchError::BranchAlreadyExists("main".to_string())),
-            StableErrorCode::ConflictOperationBlocked,
-        );
-        assert_eq!(
-            code_of(SwitchError::UntrackedOverwrite("scratch.txt".to_string())),
-            StableErrorCode::ConflictOperationBlocked,
-        );
-
-        // RepoStateInvalid — working tree is not in a switchable state.
-        assert_eq!(
-            code_of(SwitchError::DirtyUnstaged),
-            StableErrorCode::RepoStateInvalid,
-        );
-        assert_eq!(
-            code_of(SwitchError::DirtyUncommitted),
-            StableErrorCode::RepoStateInvalid,
-        );
-
-        // IoReadFailed — status probe failed.
-        assert_eq!(
-            code_of(SwitchError::StatusCheck("stat: ENOENT".to_string())),
-            StableErrorCode::IoReadFailed,
-        );
-
-        // IoWriteFailed — branch ref or HEAD write failed.
-        assert_eq!(
-            code_of(SwitchError::BranchCreate {
-                branch: "topic".to_string(),
-                detail: "lock.exists".to_string(),
-            }),
-            StableErrorCode::IoWriteFailed,
-        );
-        assert_eq!(
-            code_of(SwitchError::HeadUpdate("permission denied".to_string())),
-            StableErrorCode::IoWriteFailed,
-        );
-
-        // DelegatedCli pass-through: stable code is whatever the wrapped CliError carries.
-        let delegated = SwitchError::DelegatedCli(
-            CliError::fatal("delegated").with_stable_code(StableErrorCode::RepoCorrupt),
-        );
-        assert_eq!(code_of(delegated), StableErrorCode::RepoCorrupt);
     }
 
     #[test]

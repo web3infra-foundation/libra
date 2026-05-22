@@ -27,18 +27,22 @@
 //!   and method signatures** are the future contract, not the bodies.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 
 use crate::internal::ai::{
     agent::profile::{AgentExecutionSpec, ModelBinding},
+    agent_run::AgentRunId,
     completion::{CompletionError, CompletionUsageSummary},
     permission::PermissionRuleset,
-    providers::ProviderFactory,
+    providers::{ProviderBuildOptions, ProviderFactory},
+    sandbox::ToolRuntimeContext,
     session::{SessionId, jsonl::SessionJsonlStore},
+    tools::ToolRegistry,
     usage::UsageRecorder,
 };
 
@@ -52,17 +56,20 @@ pub type MessageId = String;
 
 /// Cooperative cancellation token threaded through a sub-agent dispatch.
 ///
-/// OC-Phase 3 P3.7 (per `opencode.md` "Cancel / Abort 传播合同") replaces
-/// this with a `tokio_util::sync::CancellationToken` (or equivalent) that
-/// supports the doc's "parent abort must await child cancel completion"
-/// cleanup invariant. P3.2 ships the minimal placeholder so the trait
-/// signature compiles; the dispatcher in P3.3 still does not block on it.
-#[derive(Clone, Debug, Default)]
+/// The token is intentionally small and dependency-free, but it provides
+/// the key P3.7 invariant the dispatcher needs: cancelling a parent
+/// token propagates to every child token created from it, and waiters can
+/// asynchronously observe the cancellation.
+#[derive(Clone, Default)]
 pub struct AbortToken {
-    /// Boolean cancellation flag. The placeholder shape is intentionally
-    /// the simplest one that makes `child()` and `is_cancelled()` work
-    /// without taking on a new crate dependency before P3.7 needs it.
-    inner: Arc<AtomicBool>,
+    inner: Arc<AbortInner>,
+}
+
+#[derive(Default)]
+struct AbortInner {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+    children: Mutex<Vec<AbortToken>>,
 }
 
 impl AbortToken {
@@ -73,19 +80,69 @@ impl AbortToken {
 
     /// Trigger cancellation. After this returns, `is_cancelled()` is true.
     pub fn cancel(&self) {
-        self.inner.store(true, Ordering::Release);
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let children = self
+            .inner
+            .children
+            .lock()
+            .map(|children| children.clone())
+            .unwrap_or_default();
+        for child in children {
+            child.cancel();
+        }
+        self.inner.notify.notify_waiters();
     }
 
     /// Returns `true` once cancellation has been requested on this token.
     pub fn is_cancelled(&self) -> bool {
-        self.inner.load(Ordering::Acquire)
+        self.inner.cancelled.load(Ordering::Acquire)
     }
 
-    /// Spawn a child token. P3.7 will make parent cancellation propagate
-    /// to children automatically; P3.2's placeholder just hands back a
-    /// fresh token so the dispatcher's call-site code compiles.
+    /// Wait until cancellation is requested.
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.inner.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Spawn a child token whose cancellation follows this parent.
     pub fn child(&self) -> Self {
-        Self::default()
+        let child = Self::default();
+        if self.is_cancelled() {
+            child.cancel();
+            return child;
+        }
+
+        match self.inner.children.lock() {
+            Ok(mut children) => children.push(child.clone()),
+            Err(_) => {
+                child.cancel();
+                return child;
+            }
+        }
+
+        if self.is_cancelled() {
+            child.cancel();
+        }
+        child
+    }
+}
+
+impl std::fmt::Debug for AbortToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AbortToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish_non_exhaustive()
     }
 }
 
@@ -201,7 +258,8 @@ pub struct ContextFrameLoader {
 ///
 /// Mirrors `TaskInvocation` from `docs/improvement/opencode.md` and the
 /// JSON schema returned by `ToolSpec::task()` (OC-Phase 3 P3.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskInvocation {
     /// Short human-readable summary surfaced in transcripts and budget logs.
     pub description: String,
@@ -268,11 +326,17 @@ pub enum BudgetExceededReason {
     /// The dispatcher refused to enter because a hard cost cap is
     /// already at or past its limit.
     CostHardCap,
+    /// The dispatcher refused to enter because a hard token cap is
+    /// already at or past its limit.
+    TokenHardCap,
     /// Wall-clock budget for the parent session has expired before the
     /// child started.
     WallClock,
     /// A sub-agent step budget would be violated.
     Steps,
+    /// Budget enforcement itself failed before a safe decision could
+    /// be made. The dispatcher fails closed.
+    Internal { reason: String },
 }
 
 /// Why the dispatcher could not assemble a [`ContextHandoff`] for the
@@ -367,6 +431,68 @@ pub enum TaskFailure {
     Timeout { wall_clock_ms: u64 },
 }
 
+impl std::fmt::Display for TaskFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FeatureDisabled => write!(f, "multi-agent dispatch is disabled"),
+            Self::UnknownSubagent { name, suggestions } => {
+                if suggestions.is_empty() {
+                    write!(f, "unknown sub-agent `{name}`")
+                } else {
+                    write!(
+                        f,
+                        "unknown sub-agent `{name}`; available sub-agents: {}",
+                        suggestions.join(", ")
+                    )
+                }
+            }
+            Self::DepthExceeded { current, limit } => write!(
+                f,
+                "sub-agent depth {current} exceeds configured limit {limit}"
+            ),
+            Self::ConcurrencyExceeded { current, limit } => write!(
+                f,
+                "sub-agent concurrency {current} exceeds configured limit {limit}"
+            ),
+            Self::PermissionEscalationDenied {
+                permission,
+                pattern,
+            } => write!(
+                f,
+                "permission escalation denied for `{permission}:{pattern}`"
+            ),
+            Self::SafetyDenied(denial) => {
+                write!(f, "safety policy denied sub-agent spawn: {}", denial.reason)
+            }
+            Self::ApprovalRejected { feedback } => match feedback {
+                Some(feedback) if !feedback.trim().is_empty() => {
+                    write!(f, "sub-agent dispatch approval rejected: {feedback}")
+                }
+                _ => write!(f, "sub-agent dispatch approval rejected"),
+            },
+            Self::BudgetExceeded(reason) => {
+                write!(f, "sub-agent budget exceeded: {reason:?}")
+            }
+            Self::ContextHandoffFailed(reason) => {
+                write!(f, "failed to prepare sub-agent context handoff: {reason:?}")
+            }
+            Self::ProviderError(error) => write!(f, "sub-agent provider error: {error}"),
+            Self::ChildToolLoopFailed(ToolLoopError::Completion(error)) => {
+                write!(f, "sub-agent tool loop failed: {error}")
+            }
+            Self::ChildToolLoopFailed(ToolLoopError::StepBudgetExhausted { steps }) => {
+                write!(f, "sub-agent step budget exhausted after {steps} step(s)")
+            }
+            Self::Cancelled { source } => write!(f, "sub-agent cancelled by {source:?}"),
+            Self::Timeout { wall_clock_ms } => {
+                write!(f, "sub-agent timed out after {wall_clock_ms} ms")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TaskFailure {}
+
 // ─── DispatchContext + SubAgentDispatcher trait ─────────────────────────
 
 /// Context the parent session passes to the dispatcher.
@@ -406,6 +532,24 @@ pub struct DispatchContext<'a> {
     /// Stateless today (OC-Phase 1 P1.2) — the dispatcher just holds a
     /// reference for parity with the doc's contract.
     pub provider_factory: &'a ProviderFactory,
+    /// Per-provider build options resolved by the parent runtime
+    /// (API key, base URL, fake fixture, compact-tool mode). The
+    /// dispatcher must not read process env directly.
+    pub provider_build_options: &'a ProviderBuildOptions,
+    /// Optional resolver for child-provider-specific build options.
+    /// When absent, the dispatcher falls back to
+    /// [`provider_build_options`](Self::provider_build_options). The
+    /// resolver is what lets a parent and child use different LLM
+    /// providers without letting runtime code read env or config files.
+    pub provider_build_options_resolver: Option<&'a dyn ProviderBuildOptionsResolver>,
+    /// Parent tool registry cloned into the child with schema-level
+    /// pre-filtering. This keeps `task` out of normal ToolHandler
+    /// dispatch while still letting sub-agents use ordinary tools.
+    pub tool_registry: &'a ToolRegistry,
+    /// Runtime sandbox / approval / file-history context inherited by
+    /// child tool invocations. Child rulesets may narrow visible tools,
+    /// but they must not get a fresh approval authority.
+    pub runtime_context: Option<ToolRuntimeContext>,
     /// Usage recorder the child run pipes its rows into. The recorder is
     /// the parent's instance with `agent_run_id` bound to the child's
     /// id; OC-Phase 5 adds the `agent_name` column.
@@ -421,6 +565,38 @@ pub struct DispatchContext<'a> {
     /// the first level; the dispatcher rejects `depth + 1 >
     /// max_subagent_depth`.
     pub depth: u8,
+}
+
+pub struct SubAgentChildRunRequest<'a> {
+    pub ctx: &'a DispatchContext<'a>,
+    pub invocation: &'a TaskInvocation,
+    pub sub_spec: &'a AgentExecutionSpec,
+    pub effective_ruleset: &'a PermissionRuleset,
+    pub task_id: String,
+    pub agent_run_id: AgentRunId,
+}
+
+/// Executes the tail of a dispatch after gates and approvals pass.
+///
+/// Kept as an object-safe seam so tests can exercise dispatcher gate
+/// behavior without constructing live providers, while the default
+/// production runner can build an `AnyCompletionModel` and re-enter the
+/// normal tool loop.
+pub trait SubAgentChildRunner: Send + Sync {
+    fn run<'a>(
+        &'a self,
+        request: SubAgentChildRunRequest<'a>,
+    ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
+}
+
+/// Object-safe provider-options resolver used by the dispatcher tail.
+///
+/// `ProviderFactory` is intentionally env-free. The command layer owns
+/// env-file, Vault, and CLI flag resolution, then exposes this narrow
+/// interface so a child bound to `deepseek/...` can receive DeepSeek
+/// credentials even when the parent model is `ollama/...`.
+pub trait ProviderBuildOptionsResolver: Send + Sync {
+    fn resolve(&self, binding: &ModelBinding) -> Result<ProviderBuildOptions, String>;
 }
 
 /// Object-safe trait the tool loop forwards `task` calls into when
@@ -440,31 +616,125 @@ pub trait SubAgentDispatcher: Send + Sync {
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
 }
 
+/// Owned runtime bundle the parent tool loop uses to intercept the
+/// `task` tool and call a [`SubAgentDispatcher`].
+///
+/// This is deliberately explicit instead of smuggling fields through
+/// [`crate::internal::ai::tools::ToolRuntimeContext`]: a sub-agent
+/// dispatch needs parent session identity, rules, model binding,
+/// approval routing, usage recording, and session JSONL access. Normal
+/// tool handlers do not have that authority, which is exactly why
+/// `task` is intercepted at the tool-loop layer.
+#[derive(Clone)]
+pub struct SubAgentToolLoopRuntime {
+    pub dispatcher: Arc<dyn SubAgentDispatcher>,
+    pub parent_thread_id: String,
+    pub parent_session_id: SessionId,
+    pub parent_agent: AgentExecutionSpec,
+    pub parent_ruleset: PermissionRuleset,
+    pub parent_model_binding: ModelBinding,
+    pub permission_service: Arc<PermissionService>,
+    pub session_store: SessionJsonlStore,
+    pub provider_factory: Arc<ProviderFactory>,
+    pub provider_build_options: ProviderBuildOptions,
+    pub provider_build_options_resolver: Option<Arc<dyn ProviderBuildOptionsResolver>>,
+    pub tool_registry: ToolRegistry,
+    pub runtime_context: Option<ToolRuntimeContext>,
+    pub usage_recorder: Arc<UsageRecorder>,
+    pub context_frame_loader: Arc<ContextFrameLoader>,
+    pub abort_token: AbortToken,
+    pub depth: u8,
+}
+
+impl std::fmt::Debug for SubAgentToolLoopRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubAgentToolLoopRuntime")
+            .field("parent_thread_id", &self.parent_thread_id)
+            .field("parent_session_id", &self.parent_session_id)
+            .field("parent_agent", &self.parent_agent.name)
+            .field("parent_model_binding", &self.parent_model_binding)
+            .field("depth", &self.depth)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SubAgentToolLoopRuntime {
+    pub fn dispatch_context(&self, parent_message_id: MessageId) -> DispatchContext<'_> {
+        DispatchContext {
+            parent_thread_id: &self.parent_thread_id,
+            parent_session_id: &self.parent_session_id,
+            parent_agent: &self.parent_agent,
+            parent_ruleset: &self.parent_ruleset,
+            parent_model_binding: &self.parent_model_binding,
+            parent_message_id,
+            permission_service: self.permission_service.as_ref(),
+            session_store: &self.session_store,
+            provider_factory: self.provider_factory.as_ref(),
+            provider_build_options: &self.provider_build_options,
+            provider_build_options_resolver: self
+                .provider_build_options_resolver
+                .as_ref()
+                .map(|resolver| resolver.as_ref()),
+            tool_registry: &self.tool_registry,
+            runtime_context: self.runtime_context.clone(),
+            usage_recorder: self.usage_recorder.as_ref(),
+            context_frame_loader: self.context_frame_loader.as_ref(),
+            abort_token: self.abort_token.child(),
+            depth: self.depth,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Scenario: `AbortToken` round-trips a cancellation flag through
-    /// `cancel()` / `is_cancelled()`. Child tokens are independent in
-    /// the placeholder implementation (P3.7 will make them propagate);
-    /// the test pins the placeholder semantics so a future regression
-    /// is loud.
+    /// `cancel()` / `is_cancelled()`, and cancellation propagates to
+    /// children created before and after the parent is cancelled.
     #[test]
-    fn abort_token_placeholder_round_trips_cancellation() {
+    fn abort_token_propagates_parent_cancellation_to_children() {
         let root = AbortToken::new();
+        let child = root.child();
         assert!(!root.is_cancelled());
-        root.cancel();
-        assert!(root.is_cancelled());
-
-        // Child is independent today (placeholder behavior).
-        let other_root = AbortToken::new();
-        let child = other_root.child();
         assert!(!child.is_cancelled());
-        other_root.cancel();
+
+        root.cancel();
+
+        assert!(root.is_cancelled());
+        assert!(child.is_cancelled());
+
+        let late_child = root.child();
+        assert!(late_child.is_cancelled());
+    }
+
+    /// Scenario: async waiters are notified when a token is cancelled.
+    /// The child-runner uses this to stop waiting for a provider call
+    /// once the parent session has been cancelled.
+    #[tokio::test]
+    async fn abort_token_cancelled_future_resolves() {
+        let token = AbortToken::new();
+        let waiter = token.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            waiter.cancelled().await;
+            let _ = tx.send(waiter.is_cancelled());
+        });
+
         assert!(
-            !child.is_cancelled(),
-            "P3.2 placeholder does not propagate; P3.7 will fix this"
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut rx)
+                .await
+                .is_err(),
+            "waiter should stay pending before cancellation"
         );
+        token.cancel();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("waiter should resolve after cancellation")
+            .expect("waiter task should send");
+        assert!(observed);
+        handle.await.expect("waiter task should complete");
     }
 
     /// Scenario: every `TaskEntryKind` variant constructs without
@@ -537,6 +807,10 @@ mod tests {
             }),
             TaskFailure::ApprovalRejected { feedback: None },
             TaskFailure::BudgetExceeded(BudgetExceededReason::CostHardCap),
+            TaskFailure::BudgetExceeded(BudgetExceededReason::TokenHardCap),
+            TaskFailure::BudgetExceeded(BudgetExceededReason::Internal {
+                reason: "tracker unavailable".to_string(),
+            }),
             TaskFailure::ContextHandoffFailed(ContextHandoffError::NoFrameAvailable),
             TaskFailure::ProviderError(CompletionError::ProviderError("x".into())),
             TaskFailure::ChildToolLoopFailed(ToolLoopError::StepBudgetExhausted { steps: 1 }),
@@ -550,6 +824,34 @@ mod tests {
         for failure in cases {
             let _ = format!("{failure:?}");
         }
+    }
+
+    /// Scenario: user-facing dispatch errors must render as stable,
+    /// actionable text rather than raw `Debug` output. `/task` and the
+    /// task tool both surface this Display implementation to the
+    /// parent transcript.
+    #[test]
+    fn task_failure_display_is_user_friendly() {
+        assert_eq!(
+            TaskFailure::FeatureDisabled.to_string(),
+            "multi-agent dispatch is disabled"
+        );
+        assert_eq!(
+            TaskFailure::UnknownSubagent {
+                name: "ghost".to_string(),
+                suggestions: vec!["explore".to_string(), "review".to_string()],
+            }
+            .to_string(),
+            "unknown sub-agent `ghost`; available sub-agents: explore, review"
+        );
+        assert_eq!(
+            TaskFailure::PermissionEscalationDenied {
+                permission: "edit".to_string(),
+                pattern: "*".to_string(),
+            }
+            .to_string(),
+            "permission escalation denied for `edit:*`"
+        );
     }
 
     /// Scenario: `SubAgentDispatcher` is object-safe (the trait must be

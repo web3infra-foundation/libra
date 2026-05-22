@@ -8,8 +8,6 @@
 //! a free-form goal string. The struct is forward-stable; CEX-S2-10 will
 //! re-open it once Step 1.3/1.9 ship.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

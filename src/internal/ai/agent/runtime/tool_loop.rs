@@ -27,6 +27,9 @@ use std::{
 
 use serde_json::Value;
 
+use super::sub_agent::{
+    SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+};
 use crate::internal::ai::{
     completion::{
         AssistantContent, CompletionError, CompletionModel, CompletionReasoningEffort,
@@ -44,7 +47,7 @@ use crate::internal::ai::{
     sources::{SourcePool, SourcePoolError, SourceToolNaming},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
-        ToolRuntimeContext,
+        ToolRuntimeContext, ToolSpec,
     },
     usage::{UsageContext, UsageRecorder},
 };
@@ -137,6 +140,10 @@ pub struct ToolLoopConfig {
     pub repeat_abort_threshold: Option<usize>,
     /// Tools that complete the current loop immediately after a successful call.
     pub terminal_tools: Option<Vec<String>>,
+    /// Optional sub-agent runtime. When present, the model sees the
+    /// `task` schema and `task(...)` calls are intercepted here instead
+    /// of being routed through the normal [`ToolRegistry`].
+    pub subagent_runtime: Option<SubAgentToolLoopRuntime>,
     /// Session root used for append-only context-frame recording.
     pub context_frame_session_root: Option<PathBuf>,
     /// Stable prefix for context-frame prompt IDs.
@@ -174,6 +181,7 @@ impl Default for ToolLoopConfig {
             repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
             repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
             terminal_tools: None,
+            subagent_runtime: None,
             context_frame_session_root: None,
             context_frame_prompt_id: None,
             context_frame_budget: None,
@@ -304,12 +312,17 @@ where
     })?;
     let registry = &effective_registry;
     let mut tools = registry_tool_definitions(registry);
+    if config.subagent_runtime.is_some() && !tools.iter().any(|tool| tool.name == "task") {
+        tools.push(tool_definition_from_spec(ToolSpec::task()));
+    }
 
     // Apply agent tool restriction at the *definition* level so the model never sees
     // tools outside its allow-list. The same list is re-checked at execution time
     // below to defend against models that hallucinate names regardless.
     if let Some(ref allowed) = config.allowed_tools {
-        tools.retain(|t| allowed.iter().any(|a| a == &t.name));
+        tools.retain(|t| {
+            allowed.iter().any(|a| a == &t.name) || task_tool_allowed_by_runtime(&config, &t.name)
+        });
     }
 
     loop {
@@ -513,6 +526,7 @@ where
                 // Enforce allowed_tools at execution time (not just definition filtering)
                 if let Some(ref allowed) = config.allowed_tools
                     && !allowed.iter().any(|a| a == &call.function.name)
+                    && !task_tool_allowed_by_runtime(&config, &call.function.name)
                 {
                     let blocked_msg = format!(
                         "Tool '{}' is not in the allowed_tools list for this agent",
@@ -556,11 +570,19 @@ where
                 }
 
                 let tool_name = call.function.name.clone();
-                let mut tool_result: Result<ToolOutput, String> =
+                let mut tool_result: Result<ToolOutput, String> = if tool_name == "task" {
+                    dispatch_task_tool_call(
+                        config.subagent_runtime.as_ref(),
+                        &call.id,
+                        &call.function.arguments,
+                    )
+                    .await
+                } else {
                     match registry.dispatch(invocation).await {
                         Ok(output) => Ok(output),
                         Err(err) => Err(format!("Tool '{}' failed: {}", tool_name, err)),
-                    };
+                    }
+                };
                 blocked_signatures.clear();
                 let repeat_status = record_executed_tool_signature(
                     &mut executed_tool_signatures,
@@ -833,6 +855,113 @@ fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, St
     }
 }
 
+async fn dispatch_task_tool_call(
+    runtime: Option<&SubAgentToolLoopRuntime>,
+    call_id: &str,
+    arguments: &Value,
+) -> Result<ToolOutput, String> {
+    let runtime =
+        runtime.ok_or_else(|| "Tool 'task' is not available in this session".to_string())?;
+    let invocation = parse_task_invocation(arguments)?;
+    let ctx = runtime.dispatch_context(format!("tool-call:{call_id}"));
+    match runtime
+        .dispatcher
+        .dispatch(ctx, invocation, TaskEntryKind::LlmInitiated)
+        .await
+    {
+        Ok(result) => Ok(task_result_output(result)),
+        Err(failure) => Err(format!(
+            "Task dispatch failed: {}",
+            task_failure_label(&failure)
+        )),
+    }
+}
+
+fn parse_task_invocation(arguments: &Value) -> Result<TaskInvocation, String> {
+    let raw = tool_arguments_json(arguments);
+    let mut invocation: TaskInvocation = serde_json::from_str(&raw)
+        .map_err(|error| format!("task arguments must be valid JSON object: {error}"))?;
+    invocation.description = trim_required_task_string("description", invocation.description)?;
+    invocation.prompt = trim_required_task_string("prompt", invocation.prompt)?;
+    invocation.subagent_type =
+        trim_required_task_string("subagent_type", invocation.subagent_type)?;
+    invocation.task_id = invocation
+        .task_id
+        .and_then(|value| non_empty_trimmed_string(value).ok());
+    Ok(invocation)
+}
+
+fn task_tool_allowed_by_runtime(config: &ToolLoopConfig, tool_name: &str) -> bool {
+    tool_name == "task" && config.subagent_runtime.is_some()
+}
+
+fn trim_required_task_string(key: &str, value: String) -> Result<String, String> {
+    non_empty_trimmed_string(value)
+        .map_err(|_| format!("task argument `{key}` must be a non-empty string"))
+}
+
+fn non_empty_trimmed_string(value: String) -> Result<String, ()> {
+    let value = value.trim().to_string();
+    if value.is_empty() { Err(()) } else { Ok(value) }
+}
+
+fn task_result_output(result: TaskResult) -> ToolOutput {
+    ToolOutput::success(format!(
+        "task_id: {}\nagent: {}\nmodel: {}/{}\nsteps_used: {}\n<task_result>\n{}\n</task_result>",
+        result.task_id,
+        result.agent_name,
+        result.provider_id,
+        result.model_id,
+        result.steps_used,
+        result.final_text.trim()
+    ))
+}
+
+fn task_failure_label(failure: &TaskFailure) -> String {
+    match failure {
+        TaskFailure::FeatureDisabled => "multi-agent feature is disabled".to_string(),
+        TaskFailure::UnknownSubagent { name, suggestions } => {
+            if suggestions.is_empty() {
+                format!("unknown sub-agent `{name}`")
+            } else {
+                format!(
+                    "unknown sub-agent `{name}`; available sub-agents: {}",
+                    suggestions.join(", ")
+                )
+            }
+        }
+        TaskFailure::DepthExceeded { current, limit } => {
+            format!("sub-agent depth {current} exceeds configured limit {limit}")
+        }
+        TaskFailure::ConcurrencyExceeded { current, limit } => {
+            format!("sub-agent concurrency {current} exceeds configured limit {limit}")
+        }
+        TaskFailure::PermissionEscalationDenied {
+            permission,
+            pattern,
+        } => {
+            format!("permission escalation denied for `{permission}:{pattern}`")
+        }
+        TaskFailure::SafetyDenied(denial) => {
+            format!("safety policy denied spawn: {}", denial.reason)
+        }
+        TaskFailure::ApprovalRejected { feedback } => feedback
+            .as_deref()
+            .map(|message| format!("approval rejected: {message}"))
+            .unwrap_or_else(|| "approval rejected".to_string()),
+        TaskFailure::BudgetExceeded(reason) => format!("sub-agent budget exceeded: {reason:?}"),
+        TaskFailure::ContextHandoffFailed(reason) => {
+            format!("context handoff failed: {reason:?}")
+        }
+        TaskFailure::ProviderError(error) => format!("provider error: {error}"),
+        TaskFailure::ChildToolLoopFailed(error) => format!("child tool loop failed: {error:?}"),
+        TaskFailure::Cancelled { source } => format!("sub-agent cancelled by {source:?}"),
+        TaskFailure::Timeout { wall_clock_ms } => {
+            format!("sub-agent timed out after {wall_clock_ms} ms")
+        }
+    }
+}
+
 /// Inject the repeat-call warning into the next tool result so the model sees it on
 /// its next turn.
 ///
@@ -909,26 +1038,28 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
     registry
         .tool_specs()
         .into_iter()
-        .map(|spec| {
-            let parameters = match spec.function.parameters {
-                FunctionParameters::Empty => serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-                params => serde_json::to_value(params).unwrap_or_else(|_| {
-                    serde_json::json!({
-                        "type": "object",
-                        "properties": {}
-                    })
-                }),
-            };
-            ToolDefinition {
-                name: spec.function.name,
-                description: spec.function.description,
-                parameters,
-            }
-        })
+        .map(tool_definition_from_spec)
         .collect()
+}
+
+fn tool_definition_from_spec(spec: ToolSpec) -> ToolDefinition {
+    let parameters = match spec.function.parameters {
+        FunctionParameters::Empty => serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+        params => serde_json::to_value(params).unwrap_or_else(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }),
+    };
+    ToolDefinition {
+        name: spec.function.name,
+        description: spec.function.description,
+        parameters,
+    }
 }
 
 fn registry_with_source_tools(
@@ -1266,15 +1397,20 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::{
+        agent::profile::{AgentExecutionSpec, AgentMode, ModelBinding},
         completion::{
             CompletionResponse,
             message::{Function, Text, ToolCall},
         },
+        permission::PermissionRuleset,
+        providers::{ProviderBuildOptions, ProviderFactory},
+        session::jsonl::SessionJsonlStore,
         sources::{
             CapabilityManifest, Source, SourceCallContext, SourceKind, SourcePool,
             SourceToolCapability, TrustTier,
         },
         tools::{ToolHandler, ToolKind, ToolSpec},
+        usage::UsageRecorder,
     };
 
     #[derive(Clone)]
@@ -1627,6 +1763,7 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                subagent_runtime: None,
                 context_frame_session_root: None,
                 context_frame_prompt_id: None,
                 context_frame_budget: None,
@@ -1658,6 +1795,231 @@ mod tests {
         assert!(matches!(&turn.history[1], Message::Assistant { .. }));
         assert!(matches!(&turn.history[2], Message::User { .. }));
         assert!(matches!(&turn.history[3], Message::Assistant { .. }));
+    }
+
+    /// Scenario: the `task` tool is not a normal registry handler.
+    /// When the model emits `task(...)` and the tool-loop config
+    /// carries a sub-agent runtime, the call must route through
+    /// `SubAgentDispatcher`, feed the returned `<task_result>` back
+    /// to the parent model, and preserve the normal observer
+    /// begin/end lifecycle.
+    #[tokio::test]
+    async fn tool_loop_routes_task_tool_to_subagent_dispatcher() {
+        use futures::future::BoxFuture;
+        use sea_orm::Database;
+
+        use crate::internal::ai::agent::runtime::{
+            AbortToken, ContextFrameLoader, DispatchContext, PermissionAskRequest, PermissionAsker,
+            PermissionReply, PermissionService, SubAgentDispatcher, SubAgentToolLoopRuntime,
+            TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+        };
+
+        #[derive(Clone)]
+        struct TaskCallingModel {
+            seen_task_results: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl CompletionModel for TaskCallingModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let task_result = request.chat_history.iter().find_map(|msg| match msg {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::ToolResult(result) if result.name == "task" => {
+                            Some(result.result.to_string())
+                        }
+                        _ => None,
+                    }),
+                    _ => None,
+                });
+
+                if let Some(result) = task_result {
+                    self.seen_task_results.lock().unwrap().push(result);
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "parent saw task result".to_string(),
+                        })],
+                        reasoning_content: None,
+                        raw_response: (),
+                    });
+                }
+
+                assert!(
+                    request.tools.iter().any(|tool| tool.name == "task"),
+                    "sub-agent runtime must expose task schema to the model"
+                );
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_task_1".to_string(),
+                        name: "task".to_string(),
+                        function: Function {
+                            name: "task".to_string(),
+                            arguments: json!({
+                                "description": "find TODOs",
+                                "prompt": "grep TODO src/",
+                                "subagent_type": "explore"
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingDispatcher {
+            calls: Mutex<Vec<TaskInvocation>>,
+        }
+
+        impl SubAgentDispatcher for RecordingDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                ctx: DispatchContext<'a>,
+                invocation: TaskInvocation,
+                entry_kind: TaskEntryKind,
+            ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async move {
+                    assert_eq!(entry_kind, TaskEntryKind::LlmInitiated);
+                    assert_eq!(ctx.parent_thread_id, "thread-task");
+                    assert_eq!(ctx.depth, 0);
+                    self.calls.lock().unwrap().push(invocation.clone());
+                    Ok(TaskResult {
+                        task_id: "task-123".to_string(),
+                        agent_name: invocation.subagent_type,
+                        provider_id: "fake".to_string(),
+                        model_id: "default".to_string(),
+                        final_text: "Found 3 TODOs in 2 files.".to_string(),
+                        steps_used: 2,
+                        usage: CompletionUsageSummary::default(),
+                    })
+                })
+            }
+        }
+
+        struct AllowAsker;
+        impl PermissionAsker for AllowAsker {
+            fn ask<'a>(
+                &'a self,
+                _request: PermissionAskRequest<'a>,
+            ) -> BoxFuture<'a, PermissionReply> {
+                Box::pin(async move { PermissionReply::Once })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let seen_task_results = Arc::new(Mutex::new(Vec::new()));
+        let model = TaskCallingModel {
+            seen_task_results: Arc::clone(&seen_task_results),
+        };
+
+        let runtime = SubAgentToolLoopRuntime {
+            dispatcher: dispatcher.clone(),
+            parent_thread_id: "thread-task".to_string(),
+            parent_session_id: "session-task".to_string(),
+            parent_agent: AgentExecutionSpec {
+                name: "build".to_string(),
+                mode: AgentMode::Primary,
+                model: Some(ModelBinding {
+                    provider_id: "fake".to_string(),
+                    model_id: "default".to_string(),
+                    variant: None,
+                }),
+                ..Default::default()
+            },
+            parent_ruleset: PermissionRuleset::default(),
+            parent_model_binding: ModelBinding {
+                provider_id: "fake".to_string(),
+                model_id: "default".to_string(),
+                variant: None,
+            },
+            permission_service: Arc::new(PermissionService::with_asker(AllowAsker)),
+            session_store: SessionJsonlStore::new(temp_dir.path().join("session-jsonl")),
+            provider_factory: Arc::new(ProviderFactory),
+            provider_build_options: ProviderBuildOptions::default(),
+            provider_build_options_resolver: None,
+            tool_registry: registry.clone(),
+            runtime_context: None,
+            usage_recorder: Arc::new(UsageRecorder::new(conn)),
+            context_frame_loader: Arc::new(ContextFrameLoader::default()),
+            abort_token: AbortToken::new(),
+            depth: 0,
+        };
+
+        let mut observer = RecordingObserver::default();
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "Find all TODOs",
+            &registry,
+            ToolLoopConfig {
+                allowed_tools: Some(vec!["read_file".to_string()]),
+                subagent_runtime: Some(runtime),
+                ..Default::default()
+            },
+            &mut observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "parent saw task result");
+        assert_eq!(
+            dispatcher.calls.lock().unwrap().as_slice(),
+            &[TaskInvocation {
+                description: "find TODOs".to_string(),
+                prompt: "grep TODO src/".to_string(),
+                subagent_type: "explore".to_string(),
+                task_id: None,
+            }]
+        );
+        let seen = seen_task_results.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("task_id: task-123"));
+        assert!(seen[0].contains("<task_result>"));
+        assert!(seen[0].contains("Found 3 TODOs in 2 files."));
+        assert_eq!(
+            observer.begins,
+            vec![("call_task_1".to_string(), "task".to_string())]
+        );
+        assert_eq!(
+            observer.ends,
+            vec![("call_task_1".to_string(), "task".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn parse_task_invocation_rejects_unknown_fields_and_trims_known_values() {
+        let parsed = parse_task_invocation(&json!({
+            "description": " find TODOs ",
+            "prompt": " grep TODO src/ ",
+            "subagent_type": " explore ",
+            "task_id": " explicit "
+        }))
+        .expect("valid task invocation parses");
+
+        assert_eq!(parsed.description, "find TODOs");
+        assert_eq!(parsed.prompt, "grep TODO src/");
+        assert_eq!(parsed.subagent_type, "explore");
+        assert_eq!(parsed.task_id.as_deref(), Some("explicit"));
+
+        let err = parse_task_invocation(&json!({
+            "description": "find TODOs",
+            "prompt": "grep TODO src/",
+            "subagent_type": "explore",
+            "unexpected": true
+        }))
+        .expect_err("unknown task fields must be rejected")
+        .to_string();
+        assert!(
+            err.contains("unexpected") || err.contains("unknown field"),
+            "error should mention the unknown field, got: {err}"
+        );
     }
 
     /// Scenario: every provider request is mirrored as an append-only context frame,
@@ -2080,6 +2442,7 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                subagent_runtime: None,
                 context_frame_session_root: None,
                 context_frame_prompt_id: None,
                 context_frame_budget: None,
@@ -2214,6 +2577,7 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                subagent_runtime: None,
                 context_frame_session_root: None,
                 context_frame_prompt_id: None,
                 context_frame_budget: None,

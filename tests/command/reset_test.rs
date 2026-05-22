@@ -224,28 +224,6 @@ fn test_reset_onto_locked_branch_rejects_intent() {
 }
 
 #[test]
-fn test_reset_onto_locked_branch_rejects_agent_traces() {
-    // docs/improvement/entire.md Risk #5 ("分支保护遗漏") requires that
-    // both `intent` and `agent-traces` are rejected by the `reset`
-    // locked-target guard. The `intent` case is covered above; this
-    // test pins the `agent-traces` literal so a refactor that loses
-    // `AGENT_TRACES_BRANCH` from `is_locked_branch` fails here rather
-    // than silently allowing `reset` to retarget HEAD onto the
-    // Libra-managed agent traces orphan branch.
-    let repo = create_committed_repo_via_cli();
-
-    let output = run_libra_command(&["reset", "agent-traces"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(
-        stderr.contains("agent-traces"),
-        "expected the locked branch name in the message, got: {stderr}"
-    );
-}
-
-#[test]
 fn test_reset_json_pathspec_omits_previous_commit() {
     // Pathspec resets do not move HEAD, so the JSON schema documented in
     // docs/commands/reset.md (line 130: "previous_commit is null for

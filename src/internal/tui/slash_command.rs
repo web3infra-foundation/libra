@@ -49,6 +49,11 @@ pub enum BuiltinCommand {
     Source,
     /// `/undo` — roll back the latest uncommitted AI file-edit batch.
     Undo,
+    /// `/task` — explicitly dispatch a configured sub-agent from the
+    /// current TUI session. This is the user-initiated entry point from
+    /// OC-Phase 3 P3.6; it bypasses the LLM-initiated permission ask
+    /// but still runs the dispatcher gates.
+    Task,
     /// `/agents` — show declarative `[code.agents.<name>]` table from
     /// `agents.toml` (OC-Phase 5 P5.4).
     Agents,
@@ -90,6 +95,7 @@ impl BuiltinCommand {
             Self::Anchors => "anchors",
             Self::Source => "source",
             Self::Undo => "undo",
+            Self::Task => "task",
             Self::Agents => "agents",
             Self::Budget => "budget",
             Self::Goal => "goal",
@@ -120,6 +126,7 @@ impl BuiltinCommand {
             Self::Anchors => "List, draft, confirm, revoke memory anchors",
             Self::Source => "List, enable, disable, or reload sources",
             Self::Undo => "Undo latest AI file edit batch",
+            Self::Task => "Dispatch a sub-agent explicitly",
             Self::Agents => "Show declarative agents.toml table",
             Self::Budget => "Show running budget totals vs configured caps",
             Self::Goal => "Goal mode controls: start/status/cancel/criteria",
@@ -151,6 +158,7 @@ impl BuiltinCommand {
             Self::Anchors,
             Self::Source,
             Self::Undo,
+            Self::Task,
             Self::Agents,
             Self::Budget,
             Self::Goal,
@@ -269,6 +277,10 @@ mod tests {
             Some((BuiltinCommand::Model, "gemini"))
         );
         assert_eq!(parse_builtin("/usage"), Some((BuiltinCommand::Usage, "")));
+        assert_eq!(
+            parse_builtin("/task explorer grep TODO src/"),
+            Some((BuiltinCommand::Task, "explorer grep TODO src/"))
+        );
         assert_eq!(parse_builtin("/agents"), Some((BuiltinCommand::Agents, "")));
         assert_eq!(parse_builtin("/budget"), Some((BuiltinCommand::Budget, "")));
         assert_eq!(
@@ -344,6 +356,7 @@ mod tests {
                 BuiltinCommand::Anchors,
                 BuiltinCommand::Source,
                 BuiltinCommand::Undo,
+                BuiltinCommand::Task,
                 BuiltinCommand::Agents,
                 BuiltinCommand::Budget,
                 BuiltinCommand::Goal,
@@ -358,7 +371,7 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 20);
+        assert_eq!(hints.len(), 21);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "run"));
@@ -373,6 +386,7 @@ mod tests {
         assert!(hints.iter().any(|(n, _)| n == "anchors"));
         assert!(hints.iter().any(|(n, _)| n == "source"));
         assert!(hints.iter().any(|(n, _)| n == "undo"));
+        assert!(hints.iter().any(|(n, _)| n == "task"));
         assert!(hints.iter().any(|(n, _)| n == "agents"));
         assert!(hints.iter().any(|(n, _)| n == "budget"));
     }

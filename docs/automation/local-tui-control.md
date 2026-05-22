@@ -53,10 +53,13 @@ Automation write control currently covers:
 - `POST /api/code/interactions/{id}`
 - `POST /api/code/controller/detach`
 - `POST /api/code/control/cancel`
+- `POST /api/code/task/dispatch`
+- `POST /api/code/goal/start`
+- `POST /api/code/goal/cancel`
 
-Write request bodies are limited to 256KiB. `GET /api/code/session`, `GET /api/code/events`, and `GET /api/code/diagnostics` remain observe-only loopback endpoints. Diagnostics are generated from a whitelist of session fields and must not include the control token, controller token, auth headers, provider request bodies, or environment dumps.
+Write request bodies are limited to 256KiB. `GET /api/code/session`, `GET /api/code/events`, `GET /api/code/diagnostics`, and `GET /api/code/goal/status` remain observe-only loopback endpoints. Diagnostics are generated from a whitelist of session fields and must not include the control token, controller token, auth headers, provider request bodies, or environment dumps.
 
-Control attach, detach, submit, respond, and cancel operations emit `local-tui-control/v1` audit events. Control-specific fields are serialized into the existing `AuditEvent.redacted_summary` JSON string; the audit event schema itself is unchanged.
+Control attach, detach, submit, respond, cancel, task dispatch, and goal mutation operations emit `local-tui-control/v1` audit events. Control-specific fields are serialized into the existing `AuditEvent.redacted_summary` JSON string; the audit event schema itself is unchanged.
 
 `libra code-control --stdio --url <baseUrl> --token-file <path>` provides the local NDJSON JSON-RPC bridge for automation clients. It is distinct from `libra code --stdio`, which remains the MCP stdio transport.
 

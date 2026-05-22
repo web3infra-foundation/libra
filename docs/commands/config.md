@@ -372,9 +372,13 @@ Supported `--usage` values are `signing` and `encrypt`.
 Resolution order for runtime config-backed environment variables is:
 
 1. CLI arguments
-2. Process environment variables
-3. Local config (`vault.env.<NAME>`)
-4. Global config (`vault.env.<NAME>`)
+2. Local config (`vault.env.<NAME>`)
+3. Global config (`vault.env.<NAME>`)
+4. Process environment variables
+
+If no Vault entry or process environment variable supplies a required API key,
+Libra reports the missing key and asks you to set `vault.env.<NAME>` or export
+`<NAME>`.
 
 ## Design Rationale (Why different from Git/jj)
 

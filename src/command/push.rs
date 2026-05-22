@@ -1,7 +1,7 @@
 //! Push command wiring that reads remote configuration, negotiates with servers, and sends local refs and pack data for update.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::Write,
     path::Path,
     str::FromStr,
@@ -935,6 +935,7 @@ fn progress_output_config(output: &OutputConfig) -> OutputConfig {
     let mut config = output.clone();
     if config.is_json() {
         config.progress = ProgressMode::None;
+        config.progress_preference = crate::utils::output::ProgressPreference::None;
     }
     config
 }
@@ -943,6 +944,7 @@ fn silent_output_config(output: &OutputConfig) -> OutputConfig {
     let mut config = output.clone();
     config.quiet = true;
     config.progress = ProgressMode::None;
+    config.progress_preference = crate::utils::output::ProgressPreference::None;
     config
 }
 
@@ -1307,30 +1309,35 @@ fn diff_tree_objs(
     let new_tree = Tree::load(new_tree);
     objs.insert(new_tree.clone().into());
 
-    let old_items = match old_tree {
-        Some(tree) => {
-            let tree = Tree::load(tree);
-            tree.tree_items
-                .iter()
-                .map(|item| item.id)
-                .collect::<HashSet<_>>()
-        }
-        None => HashSet::new(),
-    };
+    let old_items = old_tree
+        .map(|tree| {
+            Tree::load(tree)
+                .tree_items
+                .into_iter()
+                .map(|item| (item.name, (item.id, item.mode)))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     for item in new_tree.tree_items.iter() {
-        if !old_items.contains(&item.id) {
-            match item.mode {
-                TreeItemMode::Tree => {
-                    objs.extend(diff_tree_objs(None, &item.id, warnings));
-                }
-                _ => {
-                    if item.mode == TreeItemMode::Commit {
-                        warnings.push("submodule is not supported yet".to_string());
-                    }
-                    let blob = Blob::load(&item.id);
-                    objs.insert(blob.into());
-                }
+        let old_item = old_items.get(&item.name);
+        if old_item.is_some_and(|(old_id, old_mode)| old_id == &item.id && old_mode == &item.mode) {
+            continue;
+        }
+
+        match item.mode {
+            TreeItemMode::Tree => {
+                let old_subtree = old_item.and_then(|(old_id, old_mode)| {
+                    (*old_mode == TreeItemMode::Tree).then_some(old_id)
+                });
+                objs.extend(diff_tree_objs(old_subtree, &item.id, warnings));
+            }
+            TreeItemMode::Commit => {
+                warnings.push("submodule is not supported yet".to_string());
+            }
+            _ => {
+                let blob = Blob::load(&item.id);
+                objs.insert(blob.into());
             }
         }
     }
@@ -1342,9 +1349,134 @@ fn diff_tree_objs(
 mod test {
     use std::str::FromStr;
 
-    use git_internal::hash::ObjectHash;
+    use git_internal::{
+        hash::ObjectHash,
+        internal::object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    };
 
     use super::*;
+
+    fn save_test_blob(content: &str) -> Blob {
+        let blob = Blob::from_content(content);
+        crate::command::save_object(&blob, &blob.id).expect("test blob should save");
+        blob
+    }
+
+    fn save_test_tree(items: Vec<TreeItem>) -> Tree {
+        let tree = Tree::from_tree_items(items).expect("test tree should be valid");
+        crate::command::save_object(&tree, &tree.id).expect("test tree should save");
+        tree
+    }
+
+    fn save_test_commit(tree_id: ObjectHash, parents: Vec<ObjectHash>, message: &str) -> Commit {
+        let commit = Commit::from_tree_id(tree_id, parents, message);
+        crate::command::save_object(&commit, &commit.id).expect("test commit should save");
+        commit
+    }
+
+    #[tokio::test]
+    async fn incremental_objs_fast_forward_skips_unchanged_subtree_blobs() {
+        let repo = tempfile::tempdir().expect("repo tempdir should be created");
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(repo.path());
+
+        let existing_blob = save_test_blob("existing file content");
+        let added_blob = save_test_blob("ignore rule\n");
+        let old_subtree = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            existing_blob.id,
+            "keep.txt".to_string(),
+        )]);
+        let new_subtree = save_test_tree(vec![
+            TreeItem::new(
+                TreeItemMode::Blob,
+                added_blob.id,
+                ".libraignore".to_string(),
+            ),
+            TreeItem::new(TreeItemMode::Blob, existing_blob.id, "keep.txt".to_string()),
+        ]);
+        let old_root = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Tree,
+            old_subtree.id,
+            "moon".to_string(),
+        )]);
+        let new_root = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Tree,
+            new_subtree.id,
+            "moon".to_string(),
+        )]);
+        let old_commit = save_test_commit(old_root.id, vec![], "initial");
+        let new_commit = save_test_commit(new_root.id, vec![old_commit.id], "add ignore");
+
+        let result = incremental_objs(new_commit.id, old_commit.id);
+        let hashes = result
+            .objs
+            .iter()
+            .map(|entry| entry.hash)
+            .collect::<HashSet<_>>();
+
+        assert!(result.warnings.is_empty());
+        assert!(hashes.contains(&new_commit.id));
+        assert!(hashes.contains(&new_root.id));
+        assert!(hashes.contains(&new_subtree.id));
+        assert!(hashes.contains(&added_blob.id));
+        assert!(
+            !hashes.contains(&existing_blob.id),
+            "fast-forward push must not repack unchanged blobs inside changed subtrees"
+        );
+        assert_eq!(hashes.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn diff_tree_objs_recurses_by_path_for_changed_subtrees() {
+        let repo = tempfile::tempdir().expect("repo tempdir should be created");
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(repo.path());
+
+        let existing_blob = save_test_blob("existing file content");
+        let added_blob = save_test_blob("ignore rule\n");
+        let old_subtree = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            existing_blob.id,
+            "keep.txt".to_string(),
+        )]);
+        let new_subtree = save_test_tree(vec![
+            TreeItem::new(
+                TreeItemMode::Blob,
+                added_blob.id,
+                ".libraignore".to_string(),
+            ),
+            TreeItem::new(TreeItemMode::Blob, existing_blob.id, "keep.txt".to_string()),
+        ]);
+        let old_root = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Tree,
+            old_subtree.id,
+            "moon".to_string(),
+        )]);
+        let new_root = save_test_tree(vec![TreeItem::new(
+            TreeItemMode::Tree,
+            new_subtree.id,
+            "moon".to_string(),
+        )]);
+
+        let mut warnings = Vec::new();
+        let objs = diff_tree_objs(Some(&old_root.id), &new_root.id, &mut warnings);
+        let hashes = objs.iter().map(|entry| entry.hash).collect::<HashSet<_>>();
+
+        assert!(warnings.is_empty());
+        assert!(hashes.contains(&new_root.id));
+        assert!(hashes.contains(&new_subtree.id));
+        assert!(hashes.contains(&added_blob.id));
+        assert!(
+            !hashes.contains(&existing_blob.id),
+            "unchanged blobs inside a changed subtree must not be repacked"
+        );
+        assert_eq!(hashes.len(), 3);
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`PushError`]. These strings are used as the

@@ -52,22 +52,6 @@ pub fn is_locked_branch(name: &str) -> bool {
     name == DEFAULT_BRANCH || name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
 }
 
-/// Return `true` for branches that are owned by Libra's internal subsystems
-/// and must never become the user's working branch.
-///
-/// Functional scope: covers [`INTENT_BRANCH`] and [`AGENT_TRACES_BRANCH`]
-/// but **not** [`DEFAULT_BRANCH`] — `main` is a normal user-facing branch
-/// and the CLI must continue to allow `switch main` / `checkout main`
-/// even though [`is_locked_branch`] reports `true` for it (the lock
-/// stops users from *destroying* `main`, not from working on it).
-///
-/// Use this helper to guard `switch <name>` / `checkout <name>` style
-/// operations that move HEAD onto an existing ref. For create / delete /
-/// rename guards continue to use [`is_locked_branch`].
-pub fn is_libra_internal_branch(name: &str) -> bool {
-    name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
-}
-
 /// Return `true` if the user-supplied revision string targets a locked
 /// branch — including via revision suffixes (`agent-traces~1`,
 /// `intent^`, `agent-traces@{0}`).
@@ -637,26 +621,6 @@ mod tests {
         assert!(!is_locked_branch("agent-traces-feature"));
         assert!(!is_locked_branch("not-locked"));
         assert!(!is_locked_branch(""));
-    }
-
-    /// `is_libra_internal_branch` must cover `intent` and `agent-traces`
-    /// but explicitly **not** `main` — `switch main` / `checkout main` are
-    /// normal user operations that must keep working even though `main`
-    /// is `is_locked_branch` for destructive-op purposes. Pin the
-    /// partition so a future "merge the two helpers" refactor that drops
-    /// the distinction fails this test rather than silently blocking
-    /// `switch main`.
-    #[test]
-    fn is_libra_internal_branch_covers_intent_and_agent_traces_not_main() {
-        assert!(is_libra_internal_branch(INTENT_BRANCH));
-        assert!(is_libra_internal_branch(AGENT_TRACES_BRANCH));
-        // main must NOT be internal — users routinely `switch main`.
-        assert!(!is_libra_internal_branch(DEFAULT_BRANCH));
-        // Lookalike branch names must not collide.
-        assert!(!is_libra_internal_branch("intent-feature"));
-        assert!(!is_libra_internal_branch("agent-traces-feature"));
-        assert!(!is_libra_internal_branch("not-internal"));
-        assert!(!is_libra_internal_branch(""));
     }
 
     /// CEX-EntireIO: `is_locked_revision` must strip `~` / `^` / `@`

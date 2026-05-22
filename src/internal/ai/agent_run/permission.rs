@@ -6,8 +6,6 @@
 //! 1.6 (Approval TTL) — until that lands, this profile uses a forward-stable
 //! placeholder.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
