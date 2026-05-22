@@ -42,10 +42,11 @@ pub use chat::ChatAgent;
 pub mod sub_agent;
 pub use sub_agent::{
     AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
-    DispatchContext, MessageId, PermissionAskRequest, PermissionAskSource, PermissionAsker,
-    PermissionReply, PermissionService, ProviderBuildOptionsResolver, SafetyDecisionDenial,
-    SubAgentChildRunRequest, SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime,
-    TaskEntryKind, TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
+    DefaultSubAgentChildRunner, DispatchContext, MessageId, PermissionAskRequest,
+    PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
+    ProviderBuildOptionsResolver, SafetyDecisionDenial, SubAgentChildRunRequest,
+    SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure,
+    TaskInvocation, TaskResult, ToolLoopError,
 };
 
 // OC-Phase 3 P3.3 + P3.4 + P3.6 + P3.7:

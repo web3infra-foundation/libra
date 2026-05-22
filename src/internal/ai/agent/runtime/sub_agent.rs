@@ -716,6 +716,125 @@ pub trait SubAgentChildRunner: Send + Sync {
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
 }
 
+/// Default production runner that drives a sub-agent through a
+/// single-shot completion call.
+///
+/// This is the OC-Phase 3 P3.4 step 13 minimum viable wiring: the
+/// runner builds an [`AnyCompletionModel`] via
+/// [`DispatchContext::build_child_model`], constructs a
+/// [`CompletionRequest`] from the invocation's prompt, calls
+/// `model.completion(...).await`, and folds the assistant text into a
+/// [`TaskResult`]. Tool-loop integration (`run_tool_loop_with_history_and_observer`),
+/// `ContextHandoff` injection, and child JSONL session creation are
+/// deliberately out of scope here — they ride in follow-up PRs without
+/// changing the runner's public shape because the seam is the
+/// `SubAgentChildRunner` trait.
+///
+/// What this runner DOES today:
+/// - Builds the child model from `sub_spec.model` using the
+///   resolver-aware build helper.
+/// - Sends a single user message with the invocation's `prompt`.
+/// - Aggregates assistant text content into `final_text`.
+/// - Surfaces provider errors verbatim as
+///   `TaskFailure::ProviderError(CompletionError)`.
+/// - Honours `ctx.abort_token.is_cancelled()` pre-call so a parent
+///   abort that fires before we hand off to the provider does not
+///   leak a stale request to the wire.
+///
+/// What this runner does NOT do (yet):
+/// - No tool loop. The child cannot call `read_file`, `apply_patch`,
+///   or any other tool today; that wiring lands as a follow-up.
+/// - No `ContextHandoff`. The child sees only the `invocation.prompt`
+///   user message; parent transcript replay arrives with the handoff
+///   builder integration.
+/// - No child JSONL session. The runner does not write child
+///   per-turn events; the dispatcher continues to write only the
+///   parent-side `Spawned` / terminal events.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultSubAgentChildRunner;
+
+impl DefaultSubAgentChildRunner {
+    /// Construct a fresh runner. Stateless — provided for ergonomics
+    /// alongside [`Default::default`].
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl SubAgentChildRunner for DefaultSubAgentChildRunner {
+    fn run<'a>(
+        &'a self,
+        request: SubAgentChildRunRequest<'a>,
+    ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+        use crate::internal::ai::completion::{
+            CompletionModel, CompletionRequest, CompletionUsage, Message,
+        };
+
+        Box::pin(async move {
+            // Pre-flight cancel: matches the dispatcher's post-ask
+            // cancel check (v0.17.743). If the parent aborted while
+            // the dispatcher was writing the Spawned event we'd
+            // rather skip the provider call than emit a stale wire
+            // request that the parent has already abandoned.
+            if request.ctx.abort_token.is_cancelled() {
+                return Err(TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort,
+                });
+            }
+
+            let model = request.ctx.build_child_model(request.sub_spec)?;
+            let provider_id = request
+                .sub_spec
+                .model
+                .as_ref()
+                .map(|m| m.provider_id.clone())
+                .unwrap_or_default();
+            let model_id = request
+                .sub_spec
+                .model
+                .as_ref()
+                .map(|m| m.model_id.clone())
+                .unwrap_or_default();
+
+            let completion_request =
+                CompletionRequest::new(vec![Message::user(request.invocation.prompt.clone())]);
+            let response = model
+                .completion(completion_request)
+                .await
+                .map_err(|err| TaskFailure::ProviderError(err))?;
+
+            // Aggregate assistant text. Tool-call content blocks are
+            // ignored — the runner does not yet drive a tool loop, so
+            // a tool call from the model is functionally a no-op for
+            // this single-shot wiring. The `steps_used = 1` count
+            // pins the single provider call, NOT a multi-step run;
+            // when the tool loop arrives this becomes the loop step
+            // count.
+            use crate::internal::ai::completion::AssistantContent;
+            let mut final_text = String::new();
+            for block in &response.content {
+                if let AssistantContent::Text(text) = block {
+                    if !final_text.is_empty() {
+                        final_text.push('\n');
+                    }
+                    final_text.push_str(&text.text);
+                }
+            }
+
+            let usage = response.raw_response.usage_summary().unwrap_or_default();
+            Ok(TaskResult {
+                task_id: request.task_id,
+                agent_name: request.sub_spec.name.clone(),
+                provider_id,
+                model_id,
+                final_text,
+                steps_used: 1,
+                usage,
+            })
+        })
+    }
+}
+
 /// Object-safe provider-options resolver used by the dispatcher tail.
 ///
 /// `ProviderFactory` is intentionally env-free. The command layer owns
@@ -1370,6 +1489,91 @@ mod tests {
                 "expected the sub-spec name to be quoted, got: {message}",
             );
         });
+    }
+
+    /// OC-Phase 3 P3.4 step 13 cancel pre-flight: a runner whose
+    /// `ctx.abort_token` is already cancelled must short-circuit with
+    /// `Cancelled { ParentAbort }` BEFORE any provider call. Without
+    /// this guard the runner would emit a stale wire request after
+    /// the parent has already abandoned the dispatch.
+    #[tokio::test]
+    async fn default_child_runner_short_circuits_on_pre_cancelled_abort_token() {
+        use crate::internal::ai::providers::{ProviderBuildOptions, ProviderFactory};
+
+        let sub_spec = AgentExecutionSpec {
+            name: "cancelled".to_string(),
+            model: ModelBinding::parse("anthropic/claude-3-5-haiku-latest"),
+            ..AgentExecutionSpec::default()
+        };
+        let invocation = TaskInvocation {
+            description: "should never reach provider".to_string(),
+            prompt: "ignored".to_string(),
+            subagent_type: "cancelled".to_string(),
+            task_id: None,
+        };
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = ModelBinding::parse("anthropic/claude-3-5-sonnet-latest").unwrap();
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let provider_options = ProviderBuildOptions::default();
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session".to_string();
+        let abort_token = AbortToken::new();
+        abort_token.cancel();
+
+        let context = DispatchContext {
+            parent_thread_id: "thread",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &provider_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token,
+            depth: 0,
+        };
+
+        let request = SubAgentChildRunRequest {
+            ctx: &context,
+            invocation: &invocation,
+            sub_spec: &sub_spec,
+            effective_ruleset: &parent_ruleset,
+            task_id: "task-id".to_string(),
+            agent_run_id: AgentRunId::new(),
+        };
+
+        let runner = DefaultSubAgentChildRunner::new();
+        let err = runner
+            .run(request)
+            .await
+            .expect_err("pre-cancelled token must short-circuit");
+        assert!(
+            matches!(
+                err,
+                TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort
+                }
+            ),
+            "expected Cancelled {{ ParentAbort }}, got: {err:?}",
+        );
     }
 
     /// Scenario: a sub-agent spec with an unknown provider id flows
