@@ -138,7 +138,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，`PreferStrict` 在 approval shell 路径会要求用户确认降级，不再无感知降级。
 - Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `.azure` / `.docker` / `.npmrc` / `.pypirc` / Cargo/Gem credentials / `~/.config/gcloud` / `~/.config/gh` / `~/.config/hub` / `~/.kube` / `.config/libra/vault` / Firefox、Chrome、Chromium、Brave profile / macOS `Library/Cookies` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径。
-- `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
+- `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数已通过 `runtime.rs::create_bwrap_command_args` 落地（v0.17.724），并通过 `exec_env_new_session_runs_child_as_session_leader` 等回归在 Unix 上验证。
 - `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
 - `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，尚未切换为默认强制或默认询问。
@@ -238,7 +238,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 已给 sandbox 子进程加 `setsid`（通过 `Command::pre_exec` 在 Unix 下设置 `setsid()`）
 2. **Linux**（`create_bwrap_command_args` / 外部 helper）
    - 外部 helper sandbox 子进程已通过 `ExecEnv` 进入新 session
-   - 内建 bwrap 参数追加 `--new-session` 仍待阶段 2 落地
+   - 内建 bwrap 参数追加 `--new-session` 已通过 `create_bwrap_command_args` 落地（v0.17.724）
 3. **单元测试**
    - 已通过 Unix 单测验证 `setsid()` 后 child PID 与 session ID 一致；完整 Linux bwrap `tty=?` 覆盖仍待阶段 2
 
