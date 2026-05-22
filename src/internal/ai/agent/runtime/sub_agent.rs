@@ -617,6 +617,30 @@ pub struct DispatchContext<'a> {
     pub depth: u8,
 }
 
+impl<'a> DispatchContext<'a> {
+    /// Resolve [`ProviderBuildOptions`] for a child sub-agent's model
+    /// binding. The OC-Phase 3 step 9 plumbing needs to build an
+    /// `AnyCompletionModel` for the child via
+    /// [`ProviderFactory::build`]; that call needs options. This
+    /// helper centralises the "resolver if present, else fall back to
+    /// the parent's" rule so the dispatcher tail doesn't have to
+    /// repeat the match.
+    ///
+    /// `Err(reason)` surfaces verbatim from the resolver and is
+    /// expected to be mapped by the caller into the right
+    /// `TaskFailure` variant (typically `TaskFailure::Provider` once
+    /// the P3.4 child-loop PR lands the constructor).
+    pub fn resolve_provider_build_options(
+        &self,
+        binding: &ModelBinding,
+    ) -> Result<ProviderBuildOptions, String> {
+        match self.provider_build_options_resolver {
+            Some(resolver) => resolver.resolve(binding),
+            None => Ok(self.provider_build_options.clone()),
+        }
+    }
+}
+
 pub struct SubAgentChildRunRequest<'a> {
     pub ctx: &'a DispatchContext<'a>,
     pub invocation: &'a TaskInvocation,
@@ -1036,5 +1060,173 @@ mod tests {
             latest.is_none(),
             "non-ContextFrame events must not surface as frame loads",
         );
+    }
+
+    /// Scenario: a `DispatchContext` without a per-binding resolver
+    /// returns a clone of the parent's `provider_build_options` for
+    /// any model binding. The P3.4 step 9 plumbing uses this to build
+    /// a child `AnyCompletionModel` when the operator did not declare
+    /// per-provider credentials.
+    #[test]
+    fn dispatch_context_resolve_provider_build_options_falls_back_to_parent_clone() {
+        use crate::internal::ai::providers::{ProviderBuildOptions, ProviderFactory};
+
+        let parent_options = ProviderBuildOptions {
+            api_key: Some("parent-api-key".to_string()),
+            api_base: None,
+            ollama_compact_tools: false,
+            ..ProviderBuildOptions::default()
+        };
+        // Materialise every reference the context borrows. The
+        // helpers from the dispatcher's test harness live in
+        // sub_agent_dispatcher.rs and are private; reconstruct only
+        // the minimum the resolver call needs.
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = ModelBinding::parse("anthropic/claude-3-5-sonnet-latest")
+            .expect("parent binding must parse");
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio rt");
+        let conn = rt
+            .block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("sqlite memory db");
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session".to_string();
+
+        let context = DispatchContext {
+            parent_thread_id: "thread",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &parent_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+        };
+
+        let child_binding =
+            ModelBinding::parse("deepseek/deepseek-chat").expect("child binding must parse");
+        let resolved = context
+            .resolve_provider_build_options(&child_binding)
+            .expect("fallback path must always succeed");
+        assert_eq!(
+            resolved.api_key.as_deref(),
+            Some("parent-api-key"),
+            "absent resolver must hand back a clone of the parent's options",
+        );
+    }
+
+    /// Scenario: a resolver is registered, so the child binding gets
+    /// resolver-supplied credentials, not the parent's. This is the
+    /// path the operator uses to bind a child sub-agent to a
+    /// different provider (e.g. parent on ollama, child on
+    /// deepseek with its own API key).
+    #[test]
+    fn dispatch_context_resolve_provider_build_options_uses_resolver_when_present() {
+        use crate::internal::ai::providers::{ProviderBuildOptions, ProviderFactory};
+
+        let parent_options = ProviderBuildOptions {
+            api_key: Some("parent-api-key".to_string()),
+            ..ProviderBuildOptions::default()
+        };
+
+        struct ChildKeyResolver;
+        impl ProviderBuildOptionsResolver for ChildKeyResolver {
+            fn resolve(&self, _binding: &ModelBinding) -> Result<ProviderBuildOptions, String> {
+                Ok(ProviderBuildOptions {
+                    api_key: Some("child-api-key".to_string()),
+                    ..ProviderBuildOptions::default()
+                })
+            }
+        }
+
+        let resolver: &dyn ProviderBuildOptionsResolver = &ChildKeyResolver;
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = ModelBinding::parse("anthropic/claude-3-5-sonnet-latest").unwrap();
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            crate::internal::ai::session::jsonl::SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let conn = rt
+            .block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .unwrap();
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session".to_string();
+
+        let context = DispatchContext {
+            parent_thread_id: "thread",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &parent_options,
+            provider_build_options_resolver: Some(resolver),
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+        };
+
+        let child_binding = ModelBinding::parse("deepseek/deepseek-chat").unwrap();
+        let resolved = context
+            .resolve_provider_build_options(&child_binding)
+            .expect("resolver must succeed for this fixture");
+        assert_eq!(
+            resolved.api_key.as_deref(),
+            Some("child-api-key"),
+            "resolver path must override the parent's options",
+        );
+    }
+
+    /// Test-only asker placeholder. Constructing a
+    /// `PermissionService` requires *some* asker, but neither test
+    /// above invokes the dispatcher's step 8 ask path, so the asker
+    /// is never called.
+    struct AskerThatNeverFires;
+    impl PermissionAsker for AskerThatNeverFires {
+        fn ask<'a>(
+            &'a self,
+            _request: PermissionAskRequest<'a>,
+        ) -> futures::future::BoxFuture<'a, PermissionReply> {
+            Box::pin(async { unreachable!("resolver fixture never reaches the step-8 ask path") })
+        }
     }
 }
