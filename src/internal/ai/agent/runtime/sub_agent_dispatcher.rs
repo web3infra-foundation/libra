@@ -50,11 +50,13 @@ use super::sub_agent::{
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
+    agent_run::{AgentRunEvent, AgentRunEventEnvelope, AgentRunId},
     completion::CompletionUsageSummary,
     permission::{
         EDIT_TOOLS, PermissionRuleset, agent_permission_spec_to_ruleset, assert_no_escalation,
         child_ruleset,
     },
+    session::jsonl::SessionEvent,
 };
 
 /// Runtime configuration for the multi-agent feature gate.
@@ -277,6 +279,11 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             let (sub_spec, _effective) =
                 self.run_capability_gates(&ctx, &invocation, entry_kind)?;
 
+            // The same prompt digest is used both by the LlmInitiated
+            // permission ask and by the `Spawned` event below, so
+            // compute it once and reuse.
+            let prompt_digest = digest_for_prompt(&invocation.prompt);
+
             // Step 8: permission ask. Per the doc's "Two Entry Points"
             // table, only `LlmInitiated` triggers the ask. **All**
             // `UserInitiated` variants — both `bypass_permission_ask:
@@ -288,7 +295,6 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // actually meaningful; if so, this match arm widens to
             // include it.
             if let TaskEntryKind::LlmInitiated = entry_kind {
-                let prompt_digest = digest_for_prompt(&invocation.prompt);
                 let patterns = vec![invocation.subagent_type.clone()];
                 let request = PermissionAskRequest {
                     permission: "task",
@@ -297,7 +303,7 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     session_id: ctx.parent_session_id,
                     source: PermissionAskSource::SubAgentSpawn {
                         name: invocation.subagent_type.clone(),
-                        prompt_digest,
+                        prompt_digest: prompt_digest.clone(),
                     },
                 };
                 match ctx.permission_service.ask(request).await {
@@ -313,34 +319,90 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 }
             }
 
+            // P3.5: emit the `Spawned` lifecycle event into the parent
+            // session JSONL immediately after every dispatch gate
+            // (capability + concurrency + permission) has cleared.
+            // This is the earliest point at which a child run is
+            // semantically committed; tests and replay tooling rely on
+            // `Spawned` preceding any child-side event. The event is a
+            // best-effort fire-and-forget write — propagating an IO
+            // error here would force the dispatcher to fail dispatches
+            // that have already passed every safety gate, so we log
+            // and continue.
+            let agent_run_id = AgentRunId::new();
+            let provider_id = sub_spec
+                .model
+                .as_ref()
+                .map(|m| m.provider_id.clone())
+                .unwrap_or_default();
+            let model_id = sub_spec
+                .model
+                .as_ref()
+                .map(|m| m.model_id.clone())
+                .unwrap_or_default();
+            if let Err(err) =
+                ctx.session_store
+                    .append(&SessionEvent::AgentRun(AgentRunEventEnvelope::from(
+                        AgentRunEvent::Spawned {
+                            agent_run_id,
+                            parent_thread_id: ctx.parent_thread_id.to_string(),
+                            parent_session_id: ctx.parent_session_id.clone(),
+                            parent_message_id: ctx.parent_message_id.clone(),
+                            subagent_name: invocation.subagent_type.clone(),
+                            provider_id: provider_id.clone(),
+                            model_id: model_id.clone(),
+                            depth: ctx.depth.saturating_add(1),
+                            prompt_digest,
+                        },
+                    )))
+            {
+                tracing::warn!(
+                    error = %err,
+                    agent_run_id = %agent_run_id.0,
+                    subagent = %invocation.subagent_type,
+                    "failed to append AgentRunEvent::Spawned to parent session JSONL"
+                );
+            }
+
             // Steps 9-13 land in subsequent OC-Phase 3 PRs. Today the
             // placeholder tail produces a TaskResult shaped from the
             // resolved spec so gate-success is observable end-to-end.
+            let task_id = invocation.task_id.clone().unwrap_or_else(|| {
+                // Bind the placeholder task id to the run id so future
+                // call sites that grep the JSONL stream can correlate
+                // the synthetic placeholder back to its `Spawned`
+                // event. P3.4 replaces this with a real AgentTaskId
+                // minted alongside the child run.
+                format!("task-placeholder-{}", agent_run_id.0)
+            });
             let result = TaskResult {
-                task_id: invocation.task_id.clone().unwrap_or_else(|| {
-                    // P3.5 will mint a real id from the AgentRunEvent
-                    // chain; for now the synthetic id keeps the test
-                    // surface deterministic.
-                    format!(
-                        "task-placeholder-{}-depth-{}",
-                        invocation.subagent_type, ctx.depth
-                    )
-                }),
+                task_id,
                 agent_name: sub_spec.name.clone(),
-                provider_id: sub_spec
-                    .model
-                    .as_ref()
-                    .map(|m| m.provider_id.clone())
-                    .unwrap_or_default(),
-                model_id: sub_spec
-                    .model
-                    .as_ref()
-                    .map(|m| m.model_id.clone())
-                    .unwrap_or_default(),
+                provider_id,
+                model_id,
                 final_text: String::new(),
                 steps_used: 0,
                 usage: CompletionUsageSummary::default(),
             };
+
+            // P3.5: mirror the dispatch tail with `Completed`. Today
+            // the placeholder result is always successful so this is
+            // the only terminal event; P3.4 adds the real child loop
+            // and the `Failed` / `Cancelled` / `TimedOut` companions.
+            if let Err(err) =
+                ctx.session_store
+                    .append(&SessionEvent::AgentRun(AgentRunEventEnvelope::from(
+                        AgentRunEvent::Completed { agent_run_id },
+                    )))
+            {
+                tracing::warn!(
+                    error = %err,
+                    agent_run_id = %agent_run_id.0,
+                    subagent = %invocation.subagent_type,
+                    "failed to append AgentRunEvent::Completed to parent session JSONL"
+                );
+            }
+
             // `_slot` drops here, releasing the concurrency slot.
             Ok(result)
         })
@@ -1218,5 +1280,117 @@ mod tests {
 
         // Concurrency counter must return to 0 after the call.
         assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// P3.5 wire-up: a successful dispatch writes `Spawned` followed
+    /// immediately by `Completed` into the parent session JSONL. Both
+    /// events share the same `agent_run_id` and carry the spec-resolved
+    /// `provider_id` / `model_id` so replay tooling can correlate the
+    /// pair without re-resolving the registry.
+    #[tokio::test]
+    async fn dispatch_writes_spawned_then_completed_events_to_parent_session() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+
+        let mut sub = explore_subagent();
+        sub.model = ModelBinding::parse("anthropic/claude-3-5-haiku-latest");
+        registry.insert(sub);
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-events".to_string();
+        let parent_session: SessionId = "session-events".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect("every gate should pass");
+
+        let events: Vec<_> = store
+            .load_events()
+            .expect("session JSONL must be readable after dispatch")
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                crate::internal::ai::session::jsonl::SessionEvent::AgentRun(known) => {
+                    known.known().cloned()
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            events.len(),
+            2,
+            "dispatch should emit exactly Spawned + Completed"
+        );
+
+        let (spawned_id, recorded_provider, recorded_model, recorded_depth, recorded_digest) =
+            match &events[0] {
+                AgentRunEvent::Spawned {
+                    agent_run_id,
+                    parent_thread_id,
+                    parent_session_id,
+                    subagent_name,
+                    provider_id,
+                    model_id,
+                    depth,
+                    prompt_digest,
+                    ..
+                } => {
+                    assert_eq!(parent_thread_id, &parent_thread);
+                    assert_eq!(parent_session_id, &parent_session);
+                    assert_eq!(subagent_name, "explore");
+                    (
+                        *agent_run_id,
+                        provider_id.clone(),
+                        model_id.clone(),
+                        *depth,
+                        prompt_digest.clone(),
+                    )
+                }
+                other => panic!("first event must be Spawned, got {other:?}"),
+            };
+        assert_eq!(recorded_provider, "anthropic");
+        assert_eq!(recorded_model, "claude-3-5-haiku-latest");
+        assert_eq!(
+            recorded_depth, 1,
+            "Spawned.depth should be parent depth + 1 (parent was 0)"
+        );
+        assert_eq!(
+            recorded_digest, "do a thing",
+            "prompt digest must equal the invocation's first-line preview"
+        );
+
+        match &events[1] {
+            AgentRunEvent::Completed { agent_run_id } => {
+                assert_eq!(
+                    agent_run_id, &spawned_id,
+                    "Completed must reuse the agent_run_id minted for Spawned"
+                );
+            }
+            other => panic!("second event must be Completed, got {other:?}"),
+        }
     }
 }
