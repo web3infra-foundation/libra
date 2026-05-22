@@ -2848,6 +2848,63 @@ where
     }
     config.source_pool = Some(source_pool.clone());
     config.source_session_id = Some(session.id.clone());
+
+    // OC-Phase 3 P3.4 session bootstrap (v0.17.776): when the
+    // operator's agents.toml flips `code.sub_agents.enabled =
+    // true`, build the full `SubAgentToolLoopRuntime` so the
+    // `task` tool actually routes through the dispatcher.
+    //
+    // Required parent context fields are sourced as:
+    //   - dispatcher: DefaultSubAgentDispatcher::new(registry, cfg)
+    //     .with_default_child_runner()
+    //   - permission_service: a `DenyByDefaultPermissionAsker`
+    //     fallback (interactive prompt wiring is a follow-up).
+    //     `UserInitiated{bypass_permission_ask:true}` /task
+    //     paths work; LlmInitiated paths that need escalation
+    //     get rejected with an actionable feedback message.
+    //   - parent_model_binding: ModelBinding from CLI flags.
+    //   - parent_agent: minimal `AgentExecutionSpec` with the
+    //     CLI-resolved model — enough for dispatcher gates
+    //     (depth/concurrency/feature flag) which never reach
+    //     into the parent_agent's tool/permission spec.
+    //   - All other Arc'd state is sourced from values already
+    //     constructed earlier in this function.
+    //
+    // Failure-to-build is logged and the runtime stays None —
+    // `code.sub_agents.enabled = true` with a malformed agents
+    // block degrades to the same "task tool not available" UX
+    // an operator sees with the flag off.
+    if agents_config.sub_agents.enabled {
+        match build_subagent_runtime_for_session(
+            &agents_config,
+            registry.clone(),
+            &session,
+            &session_store,
+            &storage_root,
+            &model_name,
+            &provider_name,
+        )
+        .await
+        {
+            Ok(runtime) => {
+                tracing::info!(
+                    enabled = true,
+                    max_depth = agents_config.multi_agent.max_subagent_depth,
+                    max_concurrent = agents_config.multi_agent.max_concurrent_subagents,
+                    "sub-agent dispatcher attached to tool_loop config",
+                );
+                config.subagent_runtime = Some(runtime);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to build SubAgentToolLoopRuntime; the `task` tool will surface \
+                     'sub_agents.enabled = true required' until this is resolved",
+                );
+            }
+        }
+    }
+
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
     let auto_classify_first_user_message =
         params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
@@ -3286,6 +3343,113 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
     try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
+}
+
+/// Construct a [`SubAgentToolLoopRuntime`] from the libra-code
+/// session's resolved state. Called from the session bootstrap
+/// when `agents_config.sub_agents.enabled = true`; failures
+/// degrade to "task tool unavailable" rather than blocking
+/// session startup.
+///
+/// The runtime is shared (cloned by `Option<...>::clone()` since
+/// every field is `Arc`-wrapped or trivially copyable inside its
+/// own owning newtype). Per-call `dispatch_context(call_id)`
+/// captures a fresh `parent_message_id` for each `task` tool
+/// invocation; the rest of the parent context is stable for the
+/// session.
+async fn build_subagent_runtime_for_session(
+    agents_config: &AgentsConfig,
+    registry: std::sync::Arc<ToolRegistry>,
+    session: &SessionState,
+    session_store: &SessionStore,
+    storage_root: &Path,
+    model_name: &str,
+    provider_name: &str,
+) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
+    use crate::internal::ai::{
+        agent::{
+            profile::{AgentExecutionSpec, AgentMode, ModelBinding},
+            runtime::{
+                AbortToken, ContextFrameLoader, DefaultSubAgentDispatcher,
+                DenyByDefaultPermissionAsker, MultiAgentConfig, PermissionAsker, PermissionService,
+                SubAgentToolLoopRuntime,
+            },
+        },
+        providers::{ProviderBuildOptions, ProviderFactory},
+        session::jsonl::SessionJsonlStore,
+    };
+
+    let agent_spec_registry = agents_config
+        .build_agent_registry()
+        .map_err(|err| anyhow::anyhow!("agents.toml validation failed: {err}"))?;
+
+    let dispatcher = DefaultSubAgentDispatcher::new(
+        agent_spec_registry,
+        MultiAgentConfig {
+            enabled: agents_config.multi_agent.enabled,
+            // `agents_config.multi_agent` carries u32 for both
+            // limits to preserve TOML round-trip; the runtime's
+            // `MultiAgentConfig` narrows depth to u8 (a depth of
+            // 256+ is meaningless — that's a recursion bug not a
+            // legitimate config). Saturating cast keeps the
+            // semantics safe when an operator sets a huge u32.
+            max_subagent_depth: agents_config.multi_agent.max_subagent_depth.min(u8::MAX as u32)
+                as u8,
+            max_concurrent_subagents: agents_config.multi_agent.max_concurrent_subagents,
+        },
+    )
+    .with_default_child_runner();
+
+    let permission_service =
+        PermissionService::new(std::sync::Arc::new(DenyByDefaultPermissionAsker) as std::sync::Arc<
+            dyn PermissionAsker,
+        >);
+
+    let parent_model_binding = ModelBinding::parse(&format!("{provider_name}/{model_name}"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to parse parent ModelBinding from provider={provider_name} model={model_name}"
+            )
+        })?;
+
+    let parent_agent = AgentExecutionSpec {
+        name: "parent".to_string(),
+        description: "libra-code primary agent (session bootstrap default)".to_string(),
+        mode: AgentMode::Primary,
+        model: Some(parent_model_binding.clone()),
+        ..AgentExecutionSpec::default()
+    };
+
+    let session_jsonl_store = SessionJsonlStore::new(session_store.session_root(&session.id));
+    let usage_recorder = std::sync::Arc::new(
+        build_usage_recorder(storage_root)
+            .await
+            .ok_or_else(|| anyhow::anyhow!(
+                "usage recorder unavailable; sub-agent dispatcher requires the SQLite DB \
+                 — check storage_root permissions"
+            ))?,
+    );
+    let context_frame_loader = std::sync::Arc::new(ContextFrameLoader::default());
+
+    Ok(SubAgentToolLoopRuntime {
+        dispatcher: std::sync::Arc::new(dispatcher),
+        parent_thread_id: session_canonical_thread_id(session).unwrap_or_else(|| session.id.clone()),
+        parent_session_id: session.id.clone(),
+        parent_agent,
+        parent_ruleset: Vec::new(),
+        parent_model_binding,
+        permission_service: std::sync::Arc::new(permission_service),
+        session_store: session_jsonl_store,
+        provider_factory: std::sync::Arc::new(ProviderFactory),
+        provider_build_options: ProviderBuildOptions::default(),
+        provider_build_options_resolver: None,
+        tool_registry: (*registry).clone(),
+        runtime_context: None,
+        usage_recorder,
+        context_frame_loader,
+        abort_token: AbortToken::new(),
+        depth: 0,
+    })
 }
 
 async fn build_usage_recorder(storage_root: &Path) -> Option<UsageRecorder> {

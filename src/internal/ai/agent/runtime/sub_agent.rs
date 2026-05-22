@@ -237,6 +237,40 @@ impl PermissionService {
     }
 }
 
+/// Conservative production fallback asker that rejects every
+/// permission ask with a generic feedback message. Used by the
+/// libra-code session bootstrap (v0.17.776) when sub-agents are
+/// enabled but no interactive prompt path is wired yet — this
+/// keeps `UserInitiated{bypass_permission_ask:true}` dispatches
+/// working (slash-command `/task` paths) while ensuring any
+/// LlmInitiated dispatch that needs an escalation fails fast
+/// rather than silently allowing an unreviewed permission.
+///
+/// A full TUI-bound asker that routes prompts through the same
+/// review widget the existing exec-approval flow uses is the
+/// follow-up; this fallback is intentionally narrow so that
+/// future work has a single replacement target.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DenyByDefaultPermissionAsker;
+
+impl PermissionAsker for DenyByDefaultPermissionAsker {
+    fn ask<'a>(
+        &'a self,
+        _request: PermissionAskRequest<'a>,
+    ) -> futures::future::BoxFuture<'a, PermissionReply> {
+        Box::pin(async {
+            PermissionReply::Reject {
+                feedback: Some(
+                    "permission escalation rejected by the default deny-all asker; \
+                     wire an interactive PermissionAsker via libra-code session bootstrap \
+                     to enable LlmInitiated sub-agent permission grants"
+                        .to_string(),
+                ),
+            }
+        })
+    }
+}
+
 impl std::fmt::Debug for PermissionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The asker is opaque; surface only the wrapper's identity so a

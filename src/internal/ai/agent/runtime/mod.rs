@@ -42,8 +42,8 @@ pub use chat::ChatAgent;
 pub mod sub_agent;
 pub use sub_agent::{
     AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
-    DefaultSubAgentChildRunner, DispatchContext, MessageId, PermissionAskRequest,
-    PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
+    DefaultSubAgentChildRunner, DenyByDefaultPermissionAsker, DispatchContext, MessageId,
+    PermissionAskRequest, PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
     ProviderBuildOptionsResolver, SafetyDecisionDenial, SubAgentChildRunRequest,
     SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure,
     TaskInvocation, TaskResult, ToolLoopError,
