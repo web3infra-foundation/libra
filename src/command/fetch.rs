@@ -1703,9 +1703,11 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
 mod tests {
     use std::{
         fs,
+        path::PathBuf,
         time::{Duration, SystemTime},
     };
 
+    use git_internal::errors::GitError;
     use indicatif::ProgressBar;
     use tempfile::tempdir;
 
@@ -1714,7 +1716,10 @@ mod tests {
         cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
         redact_url_credentials,
     };
-    use crate::utils::test::ScopedEnvVar;
+    use crate::utils::{
+        error::{CliError, StableErrorCode},
+        test::ScopedEnvVar,
+    };
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the
@@ -1785,6 +1790,162 @@ mod tests {
             }
             .to_string(),
             "failed to inspect local repository state: missing object directory",
+        );
+    }
+
+    /// Pin the `stable_code()` routing for every [`FetchError`] variant
+    /// via the `From<FetchError> for CliError` impl. The routing is
+    /// large (15 variants), uses sub-classification via
+    /// [`RemoteSpecErrorKind`] for `InvalidRemoteSpec`, and groups
+    /// several variants under the same code through both alternation
+    /// (e.g. `InvalidPktHeader` + `RemoteSideband` + `ChecksumMismatch`
+    /// + `IndexPack` -> `NetworkProtocol`; `PackDirCreate` +
+    /// `PackWrite` + `UpdateRefs` -> `IoWriteFailed`) and via the
+    /// `map_fetch_discovery_error` / `map_fetch_io_error` helpers, so
+    /// silent rerouting between groups would not register without an
+    /// enum-level pin.
+    ///
+    /// The `Discovery` and `PacketRead` source-dependent routes —
+    /// which branch on the inner `GitError` / `io::Error` kind — are
+    /// covered separately with a representative `IOError` /
+    /// non-timeout `io::Error` to keep this test focused on the
+    /// stable-code surface rather than the helper internals.
+    #[test]
+    fn fetch_error_stable_code_pins_each_variant() {
+        fn code_of(err: FetchError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        // InvalidRemoteSpec sub-classification.
+        assert_eq!(
+            code_of(FetchError::InvalidRemoteSpec {
+                spec: "/missing/repo".to_string(),
+                kind: RemoteSpecErrorKind::MissingLocalRepo,
+                reason: "local path does not exist".to_string(),
+            }),
+            StableErrorCode::RepoNotFound,
+        );
+        for kind in [
+            RemoteSpecErrorKind::InvalidLocalRepo,
+            RemoteSpecErrorKind::MalformedUrl,
+            RemoteSpecErrorKind::UnsupportedScheme,
+        ] {
+            assert_eq!(
+                code_of(FetchError::InvalidRemoteSpec {
+                    spec: "garbage://".to_string(),
+                    kind,
+                    reason: "bad spec".to_string(),
+                }),
+                StableErrorCode::CliInvalidTarget,
+                "kind={kind:?} should route to CliInvalidTarget",
+            );
+        }
+
+        // CliInvalidTarget — user-supplied target does not resolve.
+        assert_eq!(
+            code_of(FetchError::RemoteBranchNotFound {
+                branch: "feature".to_string(),
+                remote: "origin".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+
+        // RepoStateInvalid — incompatible repo state for the operation.
+        assert_eq!(
+            code_of(FetchError::ObjectFormatMismatch {
+                remote: git_internal::hash::HashKind::Sha1,
+                local: git_internal::hash::HashKind::Sha256,
+            }),
+            StableErrorCode::RepoStateInvalid,
+        );
+
+        // NetworkProtocol — protocol-level wire failures (alternation arm).
+        assert_eq!(
+            code_of(FetchError::InvalidPktHeader {
+                header: "zzzz".to_string(),
+            }),
+            StableErrorCode::NetworkProtocol,
+        );
+        assert_eq!(
+            code_of(FetchError::RemoteSideband {
+                message: "access denied".to_string(),
+            }),
+            StableErrorCode::NetworkProtocol,
+        );
+        assert_eq!(
+            code_of(FetchError::ChecksumMismatch),
+            StableErrorCode::NetworkProtocol,
+        );
+        assert_eq!(
+            code_of(FetchError::IndexPack {
+                path: "/tmp/pack-abc.pack".to_string(),
+                source: GitError::CustomError("index build failed".to_string()),
+            }),
+            StableErrorCode::NetworkProtocol,
+        );
+
+        // NetworkUnavailable — non-timeout I/O against a remote (representative).
+        assert_eq!(
+            code_of(FetchError::FetchObjects {
+                remote: "origin".to_string(),
+                source: std::io::Error::other("connection reset"),
+            }),
+            StableErrorCode::NetworkUnavailable,
+        );
+
+        // IoReadFailed — local objects directory probe failed.
+        assert_eq!(
+            code_of(FetchError::ObjectsDirNotFound {
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "no .libra/objects"),
+            }),
+            StableErrorCode::IoReadFailed,
+        );
+
+        // IoWriteFailed — local pack-write / refs-update path (alternation arm).
+        assert_eq!(
+            code_of(FetchError::PackDirCreate {
+                path: PathBuf::from("/tmp/pack"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(FetchError::PackWrite {
+                path: PathBuf::from("/tmp/pack.pack"),
+                source: std::io::Error::new(std::io::ErrorKind::WriteZero, "disk full"),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(FetchError::UpdateRefs {
+                message: "ref database is read-only".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+
+        // RepoCorrupt — local repo inspection signalled corruption.
+        assert_eq!(
+            code_of(FetchError::LocalState {
+                message: "missing object directory".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+
+        // Discovery + PacketRead source-dependent variants: representative non-timeout
+        // path. The full sub-routing through map_fetch_discovery_error /
+        // map_fetch_io_error (auth/network/timeout) is covered by their own helpers.
+        assert_eq!(
+            code_of(FetchError::Discovery {
+                remote: "origin".to_string(),
+                source: GitError::NetworkError("dns lookup failed".to_string()),
+            }),
+            StableErrorCode::NetworkUnavailable,
+        );
+        assert_eq!(
+            code_of(FetchError::PacketRead {
+                source: std::io::Error::other("short read"),
+            }),
+            StableErrorCode::NetworkProtocol,
         );
     }
 
