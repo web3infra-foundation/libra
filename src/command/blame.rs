@@ -501,4 +501,47 @@ mod tests {
         });
         assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
     }
+
+    /// Pin the `stable_code()` routing for every [`BlameError`] variant
+    /// via the `From<BlameError> for CliError` impl. The existing
+    /// `blame_error_mapping_reports_*` tests cover only `ObjectLoad`
+    /// and `FileNotFound`; the remaining three variants
+    /// (`NotInRepo`, `InvalidRevision`, `InvalidLineRange`) were
+    /// unprotected against an accidental rerouting (e.g. swapping
+    /// `CliInvalidTarget` with `CliInvalidArguments` between the
+    /// revision-resolve and line-range variants).
+    #[test]
+    fn blame_error_stable_code_pins_each_variant() {
+        fn code_of(err: BlameError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        assert_eq!(
+            code_of(BlameError::NotInRepo),
+            StableErrorCode::RepoNotFound
+        );
+        assert_eq!(
+            code_of(BlameError::InvalidRevision("HEAD~99".to_string())),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(BlameError::ObjectLoad {
+                kind: "tree",
+                object_id: "abc123".to_string(),
+                detail: "corrupt object".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(BlameError::FileNotFound {
+                path: "tracked.txt".to_string(),
+                revision: "HEAD".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(BlameError::InvalidLineRange("10,5".to_string())),
+            StableErrorCode::CliInvalidArguments,
+        );
+    }
 }
