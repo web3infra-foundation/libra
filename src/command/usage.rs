@@ -192,6 +192,64 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
     Ok(())
 }
 
+/// Session-bootstrap auto-prune (v0.17.791): if `[usage]
+/// retention_days = N` is configured in the repo's
+/// `config.toml`, prune usage rows older than `N` days. Called
+/// once per `libra code` session start so long-running operators
+/// don't accumulate unbounded usage history.
+///
+/// Soft-failure: every error path emits `tracing::warn!` and
+/// returns without bubbling — a malformed config or DB error
+/// must not block session startup. Returns the number of rows
+/// pruned (or 0 if no retention is configured / on any error).
+pub async fn auto_prune_at_session_start(storage_root: &Path) -> u64 {
+    let config_path = storage_root.join("config.toml");
+    let retention_days = match read_usage_retention_days_config(&config_path) {
+        Ok(Some(days)) => days,
+        Ok(None) => return 0,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                path = %config_path.display(),
+                "failed to read usage retention config at session bootstrap; \
+                 skipping auto-prune",
+            );
+            return 0;
+        }
+    };
+    let conn = match open_repo_db_at(storage_root).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "failed to open repo DB for usage auto-prune; skipping",
+            );
+            return 0;
+        }
+    };
+    let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+    match crate::internal::ai::usage::UsageRecorder::new(conn)
+        .prune_before(&cutoff.to_rfc3339())
+        .await
+    {
+        Ok(deleted) => {
+            if deleted > 0 {
+                tracing::info!(
+                    deleted,
+                    retention_days,
+                    cutoff = %cutoff.to_rfc3339(),
+                    "session-bootstrap pruned old usage rows",
+                );
+            }
+            deleted
+        }
+        Err(err) => {
+            tracing::warn!(%err, "usage auto-prune failed; skipping");
+            0
+        }
+    }
+}
+
 async fn prune_usage(retention_days: Option<u32>, output: &OutputConfig) -> CliResult<()> {
     let retention_days = resolve_usage_retention_days(retention_days)?;
     let db = open_repo_db().await?;
@@ -398,6 +456,18 @@ async fn open_repo_db() -> CliResult<sea_orm::DatabaseConnection> {
                 db_path.display()
             ))
         })
+}
+
+/// Variant of [`open_repo_db`] that takes an explicit
+/// `storage_root` instead of resolving via the working
+/// directory. Used by the v0.17.791 session-bootstrap
+/// auto-prune path which already has the resolved storage
+/// root in scope.
+async fn open_repo_db_at(storage_root: &Path) -> anyhow::Result<sea_orm::DatabaseConnection> {
+    let db_path = storage_root.join(DATABASE);
+    get_db_conn_instance_for_path(&db_path)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to open repository database {}: {err}", db_path.display()))
 }
 
 #[cfg(test)]

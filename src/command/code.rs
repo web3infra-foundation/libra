@@ -2631,6 +2631,13 @@ where
     } else {
         SessionState::new(&working_dir_str)
     };
+    // v0.17.791 session-bootstrap usage auto-prune: if the
+    // operator configured `[usage] retention_days = N` in
+    // `config.toml`, drop usage rows older than N days at session
+    // start. Soft-failure (logs warn + continues) so a malformed
+    // config or DB error doesn't block startup.
+    crate::command::usage::auto_prune_at_session_start(&storage_root).await;
+
     if let Some(usage_recorder) = build_usage_recorder(&storage_root).await {
         config.usage_recorder = Some(usage_recorder);
         config.usage_context = Some(UsageContext {
