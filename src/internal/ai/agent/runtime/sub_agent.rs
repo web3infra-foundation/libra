@@ -1048,6 +1048,24 @@ impl SubAgentToolLoopRuntime {
             depth: self.depth,
         }
     }
+
+    /// Return a clone of this runtime with the `abort_token` field
+    /// swapped for a turn-scoped token. Used by the App's turn
+    /// handler to attach a per-turn cancel signal that's distinct
+    /// from the session-level token: `Ctrl-C` during a turn
+    /// cancels only the in-flight sub-agent dispatch via this
+    /// turn token, while the session token survives for
+    /// subsequent turns.
+    ///
+    /// The returned runtime shares every other field with `self`
+    /// (Arc-wrapped or owned by-value), so attaching a per-turn
+    /// token costs one clone of the wrapping struct, not of the
+    /// state behind it.
+    pub fn with_abort_token(&self, abort_token: AbortToken) -> Self {
+        let mut clone = self.clone();
+        clone.abort_token = abort_token;
+        clone
+    }
 }
 
 #[cfg(test)]
