@@ -470,6 +470,13 @@ pub struct App<M: CompletionModel> {
     last_draw_time: Instant,
     /// Background agent task handle (used for interrupt).
     agent_task: Option<JoinHandle<()>>,
+    /// Per-turn `AbortToken` shared with `config.subagent_runtime`'s
+    /// (v0.17.786). `cancel_current_turn` cancels this so any
+    /// in-flight sub-agent dispatch short-circuits via the
+    /// runner's `tokio::select!` (v0.17.767). Reset at every
+    /// turn start; cleared when the turn ends.
+    current_turn_abort_token:
+        Option<crate::internal::ai::agent::runtime::AbortToken>,
     /// Delayed draw task for frame coalescing inside frame interval.
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
@@ -696,6 +703,7 @@ where
             exit_info: None,
             last_draw_time: Instant::now(),
             agent_task: None,
+            current_turn_abort_token: None,
             scheduled_draw_task: None,
             welcome_message: app_config.welcome_message,
             welcome_active: true,
@@ -2847,6 +2855,20 @@ where
                 let mut config = self.config.clone();
                 if source == TurnInputSource::Automation {
                     apply_automation_approval_scope(&mut config, turn_id);
+                }
+                // OC-Phase 3 P3.7 per-turn abort token (v0.17.786):
+                // attach a fresh `AbortToken` to the sub-agent
+                // runtime via the v0.17.779 `with_abort_token`
+                // builder. `cancel_current_turn` cancels this
+                // token to short-circuit any in-flight sub-agent
+                // dispatch independent of the session-level token,
+                // while the session token survives for subsequent
+                // turns. No-op when sub-agents are disabled.
+                if let Some(rt) = config.subagent_runtime.clone() {
+                    let turn_token =
+                        crate::internal::ai::agent::runtime::AbortToken::new();
+                    self.current_turn_abort_token = Some(turn_token.clone());
+                    config.subagent_runtime = Some(rt.with_abort_token(turn_token));
                 }
                 let session_root = self.session_store.session_root(&self.session.id);
                 attach_file_history_context(&mut config, session_root.clone(), turn_id);
@@ -7495,6 +7517,14 @@ where
     }
 
     fn interrupt_agent_task(&mut self) {
+        // v0.17.786: cancel the per-turn sub-agent abort token
+        // BEFORE aborting the JoinHandle so cooperative-cancel
+        // paths (the runner's `tokio::select!`) get the signal
+        // even when the JoinHandle drop alone wouldn't unwind a
+        // detached worker future.
+        if let Some(token) = self.current_turn_abort_token.take() {
+            token.cancel();
+        }
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
