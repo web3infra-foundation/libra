@@ -404,6 +404,42 @@ pub struct CompactionConfig {
     pub preserve_recent_tokens: Option<u64>,
 }
 
+impl CompactionConfig {
+    /// Parse `self.model` (`provider/model[@variant]`) into a
+    /// [`ModelBinding`] suitable for `ProviderFactory::build`.
+    /// `validate()` already rejects malformed strings, so a
+    /// post-validate caller can safely `.expect()` — but the
+    /// fallible signature here lets the sub-agent dispatcher
+    /// integration log a diagnostic on the unlikely "validate
+    /// returned Ok but we lost the binding" path instead of
+    /// panicking inside the dispatch tail.
+    pub fn model_binding(&self) -> Option<ModelBinding> {
+        ModelBinding::parse(&self.model)
+    }
+}
+
+impl AgentsConfig {
+    /// Resolve the operator's compaction model binding, if
+    /// `[code.compaction]` is present in `agents.toml`. Returns
+    /// `None` when the section is absent (use the embedded
+    /// compaction defaults) or when the model string fails to
+    /// parse (validate() should have caught this; a None return
+    /// is the safe degrade for callers that load
+    /// late-binding profiles).
+    ///
+    /// Production wire-up: the OC-Phase 4 P4.4 dispatcher
+    /// integration calls this from `build_subagent_runtime_for_session`
+    /// (or its compaction-aware successor) to decide whether to
+    /// build a compaction `CompletionModel` and route the parent
+    /// frame through `run_compaction(...)` before feeding the
+    /// child via `ContextHandoff::to_handoff_messages` (v0.17.781).
+    pub fn compaction_model_binding(&self) -> Option<ModelBinding> {
+        self.compaction
+            .as_ref()
+            .and_then(CompactionConfig::model_binding)
+    }
+}
+
 /// `[code.budget]` and its nested goal / per-agent subsections. Every
 /// threshold is optional so an operator can opt into per-axis caps
 /// (e.g. only cost; only wall-clock) independently.
@@ -1467,6 +1503,36 @@ steps = 12
         assert!(matches!(spec.tools, ToolSelection::Allow(_)));
         assert!(spec.permission.denied_tools.contains("edit"));
         assert!(spec.permission.allowed_tools.contains("shell"));
+    }
+
+    /// OC-Phase 4 P4.4 prerequisite (v0.17.782):
+    /// `AgentsConfig::compaction_model_binding()` returns the
+    /// parsed binding when `[code.compaction]` is present, or
+    /// `None` for "use embedded defaults". Pins the round trip
+    /// through `ModelBinding::parse` so a future
+    /// dispatcher-side integration can resolve the binding
+    /// once at session bootstrap without reparsing.
+    #[test]
+    fn compaction_model_binding_resolves_provider_model_from_toml() {
+        let cfg = AgentsConfig::from_toml_str(
+            r#"
+[code.compaction]
+model = "deepseek/deepseek-chat"
+tail_turns = 4
+"#,
+        )
+        .expect("compaction section must parse");
+        let binding = cfg
+            .compaction_model_binding()
+            .expect("present [code.compaction] must resolve a binding");
+        assert_eq!(binding.provider_id, "deepseek");
+        assert_eq!(binding.model_id, "deepseek-chat");
+
+        let empty = AgentsConfig::from_toml_str("").expect("empty TOML must parse");
+        assert!(
+            empty.compaction_model_binding().is_none(),
+            "absent [code.compaction] must resolve None (use embedded defaults)",
+        );
     }
 
     /// OC-Phase 3 P3.4 production wire-up prerequisite (v0.17.772):
