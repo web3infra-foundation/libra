@@ -361,14 +361,44 @@ impl SandboxManager {
                             Some("libra-linux-sandbox".to_string()),
                             SandboxType::LinuxSeccomp,
                         )
+                    } else if let Some(bwrap_path) = locate_bwrap_binary() {
+                        // OC-Phase 7 P0 #2: built-in bwrap real-execution
+                        // path. When the external `libra-linux-sandbox`
+                        // helper is not configured but `bwrap` is on the
+                        // host PATH, construct the bwrap command directly
+                        // via `create_bwrap_command_args` instead of
+                        // falling back to no-sandbox. This closes the
+                        // doc gap at sandbox.md L26 ("内建 bwrap 执行
+                        // 选择...仍未进入主干实现") and the previous
+                        // EnforcementFailed reason string that
+                        // explicitly named "the built-in bwrap sandbox
+                        // is not available yet".
+                        let mut bwrap_args = create_bwrap_command_args(
+                            command,
+                            policy,
+                            sandbox_policy_cwd,
+                            deny_read_paths,
+                        );
+                        let mut full = Vec::with_capacity(1 + bwrap_args.len());
+                        full.push(bwrap_path.to_string_lossy().into_owned());
+                        full.append(&mut bwrap_args);
+                        tracing::info!(
+                            bwrap = %bwrap_path.display(),
+                            "using built-in bwrap sandbox (LIBRA_LINUX_SANDBOX_EXE unset; helper-less path)",
+                        );
+                        (
+                            full,
+                            Some("libra-linux-sandbox-bwrap".to_string()),
+                            SandboxType::LinuxSeccomp,
+                        )
                     } else {
                         if enforcement.requires_effective_sandbox() {
                             return Err(SandboxTransformError::EnforcementFailed {
-                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and the built-in bwrap sandbox is not available yet".to_string(),
+                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and `bwrap` was not found on PATH; install bubblewrap (apt install bubblewrap / dnf install bubblewrap) or set LIBRA_LINUX_SANDBOX_EXE to the helper path".to_string(),
                             });
                         }
                         tracing::warn!(
-                            "linux sandbox executable not configured; running command without linux sandbox"
+                            "linux sandbox executable not configured and bwrap not on PATH; running command without linux sandbox"
                         );
                         (command, None, SandboxType::None)
                     }
@@ -492,6 +522,72 @@ pub fn create_bwrap_command_args(
     args.push("--".to_string());
     args.extend(command);
     args
+}
+
+/// Locate `bwrap` on the host PATH and return the resolved
+/// absolute path. Used by the built-in (helper-less) Linux
+/// sandbox path in [`SandboxManager::transform`] — when
+/// `LIBRA_LINUX_SANDBOX_EXE` is unset, the runtime falls back to
+/// constructing a `bwrap …` command directly via
+/// [`create_bwrap_command_args`].
+///
+/// The first non-empty `PATH` entry that contains an executable
+/// `bwrap` file wins. The probe is intentionally **not** cached:
+/// `which`-style discovery is cheap (one stat per PATH entry,
+/// typically <10 lookups) and a stale cache would mislead a user
+/// that just installed bubblewrap mid-session. Tests that need a
+/// deterministic answer can set `LIBRA_BWRAP_BINARY` to bypass
+/// the PATH walk entirely.
+///
+/// Returns `None` on non-Linux platforms (the built-in bwrap
+/// path is Linux-only) or when no `bwrap` is reachable. Callers
+/// must handle the `None` case before deciding whether to fail
+/// closed or fall back to the unsandboxed path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn locate_bwrap_binary() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("LIBRA_BWRAP_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.is_absolute() && path.exists() {
+            return Some(path);
+        }
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("bwrap");
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// `true` when `path` exists, is a regular file, and the
+/// owner/group/world execute bit is set. Used by
+/// [`locate_bwrap_binary`] to filter PATH entries that exist as
+/// names but are not invocable (a hand-edited symlink, a stale
+/// init artifact, etc.).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 fn bwrap_read_only_host_paths() -> Vec<PathBuf> {
@@ -847,6 +943,165 @@ mod tests {
         let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[secret]);
 
         assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
+    }
+
+    /// `locate_bwrap_binary` honours the `LIBRA_BWRAP_BINARY`
+    /// override env var: an absolute path that exists is returned
+    /// verbatim; a non-existent override returns None even when
+    /// `bwrap` is on PATH. Pins the test escape hatch so a CI
+    /// matrix can run the built-in bwrap path without relying on
+    /// host-installed bubblewrap.
+    #[test]
+    fn locate_bwrap_binary_honours_override_env_var() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for override probe");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").expect("write fake bwrap");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+        }
+
+        // SAFETY: test-only env mutation; restored after the
+        // probe so other tests in the suite remain isolated.
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+        let found = locate_bwrap_binary();
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        assert_eq!(found.as_deref(), Some(fake_bwrap.as_path()));
+
+        // Non-existent override: probe returns None even though
+        // bwrap might be on PATH (we explicitly opt out of PATH
+        // walking when the override is set).
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", "/does/not/exist/bwrap");
+        }
+        let found = locate_bwrap_binary();
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        assert!(found.is_none());
+    }
+
+    /// `is_executable_file` returns true only for regular files
+    /// with the execute bit set; rejects directories and
+    /// permission-less files. Pin the predicate so the probe's
+    /// PATH walk doesn't accidentally accept a `bwrap` directory
+    /// or a non-executable shim.
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_file_filters_directories_and_non_exec() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tempdir for exec probe");
+
+        // Directory: not executable in the sense `which` uses
+        // (it's not a regular file).
+        let dir = tmpdir.path().join("bwrap-dir");
+        std::fs::create_dir(&dir).expect("create bwrap-dir");
+        assert!(!is_executable_file(&dir));
+
+        // Regular file without execute bit.
+        let no_exec = tmpdir.path().join("bwrap-noexec");
+        std::fs::write(&no_exec, b"not exec").unwrap();
+        let mut perms = std::fs::metadata(&no_exec).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&no_exec, perms).unwrap();
+        assert!(!is_executable_file(&no_exec));
+
+        // Regular file with execute bit.
+        let exec = tmpdir.path().join("bwrap-exec");
+        std::fs::write(&exec, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&exec).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exec, perms).unwrap();
+        assert!(is_executable_file(&exec));
+    }
+
+    /// Pin the built-in bwrap real-execution path: when
+    /// `LIBRA_LINUX_SANDBOX_EXE` is unset and the override probe
+    /// finds a `bwrap` binary, `transform` constructs the bwrap
+    /// command directly (no external helper) and returns
+    /// `SandboxType::LinuxSeccomp` with the bwrap path as the
+    /// program. Linux-only because the bwrap fallback branch is
+    /// gated behind `#[cfg(target_os = "linux")]`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_uses_built_in_bwrap_when_helper_is_missing_but_bwrap_is_available() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for built-in bwrap test");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").expect("write fake bwrap");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        // SAFETY: test-only env mutation; restored below.
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Denied,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+        };
+
+        let result = manager.transform(request);
+
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+
+        let env = result.expect("built-in bwrap path must succeed");
+        assert_eq!(env.sandbox, SandboxType::LinuxSeccomp);
+        let program = env
+            .command
+            .first()
+            .cloned()
+            .expect("transform must yield a non-empty command vector");
+        assert_eq!(program, fake_bwrap.to_string_lossy());
+        assert!(
+            env.command.iter().any(|arg| arg == "--unshare-all"),
+            "built-in bwrap command must include --unshare-all",
+        );
     }
 
     #[test]
