@@ -73,6 +73,62 @@ pub struct ContextHandoff {
     pub created_at: DateTime<Utc>,
 }
 
+impl ContextHandoff {
+    /// Materialise the handoff into a `Vec<Message>` the child
+    /// sub-agent's tool loop can consume as pre-populated history.
+    /// This is the OC-Phase 4 P4.4 compacted counterpart to
+    /// `ContextFrameEvent::to_handoff_messages` (v0.17.773): the
+    /// raw-segment path feeds the child the parent's working
+    /// context verbatim; this path feeds it the compaction agent's
+    /// validated SUMMARY plus the retained tail segments.
+    ///
+    /// Message layout, in order:
+    /// 1. One System-style header user message announcing the
+    ///    handoff. The literal `[parent-handoff]` prefix lets the
+    ///    child model attribute the content the same way it does
+    ///    raw-segment handoffs.
+    /// 2. One user message carrying the SUMMARY text verbatim.
+    /// 3. Per-segment user messages for each `recent_tail` entry,
+    ///    using the same `[kind:source_kind:label]` header format
+    ///    as `ContextFrameEvent::to_handoff_messages` so the
+    ///    serialisation surface stays uniform across the two
+    ///    paths.
+    ///
+    /// `attachment_refs` are NOT inlined — they live on the
+    /// handoff itself; a future tool call from the child resolves
+    /// them via the runtime context. Inlining would either bloat
+    /// the prompt or require sidecar reads here.
+    pub fn to_handoff_messages(&self) -> Vec<crate::internal::ai::completion::Message> {
+        use crate::internal::ai::completion::Message;
+        let mut messages = Vec::with_capacity(2 + self.recent_tail.len());
+        messages.push(Message::user(format!(
+            "[parent-handoff:source_frame={}:budget_tokens={}]",
+            self.source_frame_id, self.remaining_budget_tokens,
+        )));
+        messages.push(Message::user(format!(
+            "[parent-handoff:summary]\n{}",
+            self.summary.trim(),
+        )));
+        for segment in &self.recent_tail {
+            let content = segment
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty());
+            if let Some(content) = content {
+                messages.push(Message::user(format!(
+                    "[parent-handoff:tail:{}:{:?}:{}]\n{}",
+                    segment.segment.as_str(),
+                    segment.source.kind,
+                    segment.source.label,
+                    content,
+                )));
+            }
+        }
+        messages
+    }
+}
+
 /// Build a validated [`ContextHandoff`] from a parent
 /// [`super::frame::ContextFrameEvent`] and a compaction-agent-produced
 /// summary.
@@ -1206,5 +1262,82 @@ This is prose, not a bullet.
             "recent_tail must default to empty, not inherit parent.segments"
         );
         assert_eq!(handoff.remaining_budget_tokens, 0);
+    }
+
+    /// OC-Phase 4 P4.4 (v0.17.781): `ContextHandoff::to_handoff_messages`
+    /// produces the literal `[parent-handoff:source_frame=…]` /
+    /// `[parent-handoff:summary]` envelope plus one
+    /// `[parent-handoff:tail:…]` message per non-empty recent_tail
+    /// segment.
+    #[test]
+    fn handoff_to_handoff_messages_emits_header_summary_and_per_tail_segment() {
+        use crate::internal::ai::completion::{Message, UserContent};
+
+        let parent = parent_frame_with_attachment();
+        // Build a segment WITH content for the tail; the
+        // attachment-only segment from `parent_frame_with_attachment`
+        // would be filtered out by `to_handoff_messages` because
+        // its content is None.
+        let tail_seg = super::super::frame::ContextFrameSegment {
+            id: "seg-tail".to_string(),
+            segment: super::super::ContextSegmentKind::RecentMessages,
+            source: super::super::frame::ContextFrameSource::runtime("transcript"),
+            trust: super::super::frame::ContextTrustLevel::Trusted,
+            token_estimate: 128,
+            content: Some("last message from the parent before compaction".to_string()),
+            summary: None,
+            attachment: None,
+            non_compressible: false,
+        };
+        let handoff = ContextHandoffBuilder::from_parent_frame(&parent)
+            .with_summary(CANONICAL_FILLED)
+            .with_recent_tail(vec![tail_seg])
+            .with_remaining_budget_tokens(123)
+            .build()
+            .unwrap();
+
+        let messages = handoff.to_handoff_messages();
+        // Expect: 1 header + 1 summary + 1 tail segment = 3 total.
+        assert_eq!(
+            messages.len(),
+            3,
+            "handoff with 1 tail segment must produce 3 messages, got: {messages:?}",
+        );
+
+        let texts: Vec<String> = messages
+            .iter()
+            .map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => panic!("expected User message"),
+            })
+            .collect();
+
+        assert!(
+            texts[0].starts_with("[parent-handoff:source_frame="),
+            "first message must be the parent-handoff header, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[0].contains("budget_tokens=123"),
+            "header must carry remaining_budget_tokens, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[1].starts_with("[parent-handoff:summary]\n"),
+            "second message must be the summary, got: {}",
+            texts[1],
+        );
+        assert!(
+            texts[2].starts_with("[parent-handoff:tail:"),
+            "third message must be the tail segment, got: {}",
+            texts[2],
+        );
     }
 }
