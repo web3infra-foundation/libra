@@ -459,6 +459,34 @@ pub struct AgentsConfigValidationErrors {
     pub errors: Vec<AgentsConfigValidationError>,
 }
 
+/// Failure modes from [`AgentsConfig::from_path`] /
+/// [`AgentsConfig::load_or_default`]. Distinct from
+/// [`AgentsConfigValidationErrors`] (post-parse rule violations) so
+/// the surface can render the right hint ("file missing" vs "rules
+/// not satisfied"). Path is captured by-value (lossy string) so
+/// the error survives the file handle going out of scope.
+#[derive(Debug, Error)]
+pub enum AgentsConfigLoadError {
+    /// `std::fs::read_to_string` failed. Usually surfaces
+    /// permission errors or "no such file" when the operator
+    /// passed an explicit path.
+    #[error("failed to read agents config at '{path}': {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// File read succeeded but TOML parsing rejected the contents.
+    /// Includes the path so the diagnostic doesn't lose the
+    /// "which file" context after the source is consumed.
+    #[error("failed to parse agents config at '{path}': {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
 impl std::fmt::Display for AgentsConfigValidationErrors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -549,6 +577,38 @@ impl AgentsConfig {
         }
         let wrapper: Wrapper = toml::from_str(toml_str)?;
         Ok(wrapper.code)
+    }
+
+    /// Load an `AgentsConfig` from a TOML file on disk. Convenience
+    /// wrapper around [`Self::from_toml_str`] that reads the file
+    /// first and surfaces IO errors next to parse errors in the
+    /// returned `AgentsConfigLoadError`. Production code (libra
+    /// code's session bootstrap) calls this when reading
+    /// `.libra/agents.toml`; tests prefer [`Self::from_toml_str`]
+    /// directly with inline TOML strings.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, AgentsConfigLoadError> {
+        let text = std::fs::read_to_string(path).map_err(|source| AgentsConfigLoadError::Read {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Self::from_toml_str(&text).map_err(|source| AgentsConfigLoadError::Parse {
+            path: path.display().to_string(),
+            source,
+        })
+    }
+
+    /// Load an `AgentsConfig` from `path` if the file exists,
+    /// otherwise return `Default::default()`. Used by libra code's
+    /// session bootstrap to make "no `agents.toml`" a silent
+    /// fallback to the conservative defaults (multi_agent disabled,
+    /// no agents declared) rather than an error every operator
+    /// without an explicit config sees.
+    pub fn load_or_default(path: &std::path::Path) -> Result<Self, AgentsConfigLoadError> {
+        if path.is_file() {
+            Self::from_path(path)
+        } else {
+            Ok(Self::default())
+        }
     }
 
     /// Render back to the canonical TOML form (with the leading
@@ -1416,6 +1476,75 @@ steps = 12
     /// `DefaultSubAgentDispatcher::new(registry, config)`.
     /// `lookup(name)` returns clones; `registered_names()` returns
     /// the BTreeMap key order (sorted).
+    /// `load_or_default` returns the default `AgentsConfig` when
+    /// no file exists at `path` (the common case for operators
+    /// without an explicit `.libra/agents.toml`). A regression that
+    /// surfaced the missing-file IO error would force every libra
+    /// code session bootstrap to handle the absent-config case
+    /// itself.
+    #[test]
+    fn load_or_default_returns_default_when_path_does_not_exist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = temp.path().join("agents.toml");
+        let cfg =
+            AgentsConfig::load_or_default(&nonexistent).expect("absent file must not be an error");
+        let defaults = AgentsConfig::default();
+        assert_eq!(cfg.multi_agent.enabled, defaults.multi_agent.enabled);
+        assert_eq!(cfg.sub_agents.enabled, defaults.sub_agents.enabled);
+        assert!(cfg.agents.is_empty());
+    }
+
+    /// `load_or_default` reads the file when it exists and parses
+    /// it with the same wrapper-required `[code]` table shape that
+    /// `from_toml_str` accepts. A round trip via disk pins the
+    /// TOML-on-disk path against `from_toml_str` for the inline
+    /// path.
+    #[test]
+    fn load_or_default_reads_existing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agents.toml");
+        std::fs::write(
+            &path,
+            r#"
+[code.agents.explorer]
+model = "deepseek/deepseek-chat"
+mode = "subagent"
+tools = ["read_file"]
+"#,
+        )
+        .expect("write fixture");
+        let cfg = AgentsConfig::load_or_default(&path).expect("file must parse");
+        assert!(
+            cfg.agents.contains_key("explorer"),
+            "explorer agent must round-trip through the on-disk loader",
+        );
+    }
+
+    /// `from_path` on a malformed file surfaces the parse error
+    /// path (not the Read variant) and includes the path so the
+    /// diagnostic does not lose the file context after the source
+    /// is consumed.
+    #[test]
+    fn from_path_surfaces_parse_errors_with_path_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("malformed.toml");
+        std::fs::write(&path, "this is not valid toml = [\n").expect("write fixture");
+        let err =
+            AgentsConfig::from_path(&path).expect_err("malformed TOML must surface as an error");
+        match err {
+            AgentsConfigLoadError::Parse {
+                path: reported_path,
+                ..
+            } => {
+                assert!(
+                    reported_path.contains("malformed.toml"),
+                    "Parse error must carry the path; got: {reported_path}",
+                );
+            }
+            other => panic!("expected Parse error, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn build_agent_registry_exposes_validated_specs_via_registry_trait() {
         let cfg = AgentsConfig::from_toml_str(
