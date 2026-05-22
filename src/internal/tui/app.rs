@@ -2966,6 +2966,34 @@ where
                             });
                         }
 
+                        fn on_sub_agent_completed(
+                            &mut self,
+                            agent_name: &str,
+                            usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                        ) {
+                            // OC-Phase 5 P5.3 per-agent budget
+                            // attribution. The dispatcher already
+                            // returned the sub-agent's accumulated
+                            // usage on the TaskResult; route it
+                            // through a dedicated AppEvent so the
+                            // budget tracker can call
+                            // `accumulate(usage, _, Some(agent))`
+                            // and `check_agent` enforces per-agent
+                            // caps. The trait's default impl folds
+                            // this into the parent's anonymous
+                            // bucket via `on_model_usage`, so a
+                            // future regression that drops this
+                            // override would silently degrade to
+                            // session-only enforcement.
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::SubAgentUsageUpdated {
+                                    agent_name: agent_name.to_string(),
+                                    usage: usage.clone(),
+                                },
+                            });
+                        }
+
                         fn on_tool_call_begin(
                             &mut self,
                             call_id: &str,
@@ -3211,6 +3239,32 @@ where
                 event: agent_event,
             } => {
                 match agent_event {
+                    AgentEvent::SubAgentUsageUpdated { agent_name, usage } => {
+                        // OC-Phase 5 P5.3: attribute the sub-agent's
+                        // cost to the per-agent bucket so
+                        // `check_agent` enforces per-agent caps.
+                        // wall_clock_ms = None (the dispatcher does
+                        // not yet thread the wall-clock through;
+                        // child loop turns each record their own
+                        // wall-clock via the parent observer's
+                        // `on_model_usage_recorded`).
+                        self.budget_tracker
+                            .accumulate(&usage, None, Some(agent_name.as_str()));
+                        for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
+                        }
+                        let agent_budget_breach = self
+                            .budget_tracker
+                            .check_agent(&agent_name, &self.agents_config)
+                            .err();
+                        if let Some(error) = agent_budget_breach {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                            let _ = self.cancel_current_turn(CancelSource::Budget).await;
+                        }
+                        self.schedule_draw();
+                    }
                     AgentEvent::UsageUpdated {
                         usage,
                         wall_clock_ms,

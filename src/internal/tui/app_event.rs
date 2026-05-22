@@ -97,6 +97,17 @@ pub enum AgentEvent {
         usage: CompletionUsageSummary,
         wall_clock_ms: u64,
     },
+    /// OC-Phase 5 P5.3 per-agent attribution: a sub-agent
+    /// dispatch completed and its accumulated `CompletionUsageSummary`
+    /// is being routed to the parent's `BudgetTracker` with the
+    /// child's spec name attached so `check_agent` can enforce
+    /// per-agent caps. Distinct from `UsageUpdated` because the
+    /// latter carries no agent name and would silently accumulate
+    /// sub-agent cost into the session-wide bucket only.
+    SubAgentUsageUpdated {
+        agent_name: String,
+        usage: CompletionUsageSummary,
+    },
 }
 
 /// Current status of the agent.
