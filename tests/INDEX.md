@@ -105,6 +105,7 @@
 | `ai_storage_flow_test` | 2 | Integration tests for AI object storage on local and R2 backends | `src/utils/storage/` |
 | `ai_subagent_contract_test` | 2 | CEX-S2-10 schema contract tests | `src/internal/ai/agent_run/` |
 | `ai_subagent_llm_initiated_test` | 3 | OC-Phase 3 LlmInitiated E2E: fake provider → dispatcher → `DefaultSubAgentChildRunner` → tool loop → parent JSONL `Spawned + Completed` | `src/internal/ai/agent/runtime/`, `src/internal/ai/providers/fake/`. Gated `--features test-provider`. |
+| `ai_subagent_user_initiated_test` | 3 | OC-Phase 3 UserInitiated{bypass_permission_ask:true} E2E: rejecting asker proves bypass really skips step 8; rest of the chain matches the LlmInitiated sibling | `src/internal/ai/agent/runtime/`, `src/internal/ai/providers/fake/`. Gated `--features test-provider`. |
 | `ai_subagent_worktree_readonly_test` | 3 | OC-Phase 3 sub-agent registry pre-filter pins `apply_patch` + EDIT_TOOLS stripped under `[{edit:*:deny}]` | `src/internal/ai/tools/registry.rs`, `src/internal/ai/permission/` |
 | `ai_usage_stats_test` | 2 | CEX-16 usage stats persistence and aggregation tests | `src/internal/ai/usage/` |
 | `ai_usage_tui_test` | 2 | CEX-16 usage display formatting tests | `src/internal/ai/usage/` |
