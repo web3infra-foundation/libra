@@ -45,8 +45,8 @@ use std::sync::{
 use futures::future::BoxFuture;
 
 use super::sub_agent::{
-    DispatchContext, PermissionAskRequest, PermissionAskSource, PermissionReply,
-    SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+    CancellationSource, DispatchContext, PermissionAskRequest, PermissionAskSource,
+    PermissionReply, SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
@@ -235,6 +235,21 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
         entry_kind: TaskEntryKind,
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
         Box::pin(async move {
+            // P3.7 cancel propagation pre-check: if the parent's abort
+            // token has already been cancelled before the call even
+            // reaches us, refuse the dispatch up front rather than
+            // claiming a concurrency slot, writing a `Spawned` event,
+            // or invoking the asker. This matches opencode PR #25798's
+            // "parent abort short-circuits the whole subtree"
+            // semantics — running a now-stale dispatch through to
+            // `Completed` would let the parent observe a successful
+            // child run after the user already pressed `Ctrl-C`.
+            if ctx.abort_token.is_cancelled() {
+                return Err(TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort,
+                });
+            }
+
             // Steps 1, 2: feature flag + depth. These cannot mutate
             // shared state, so they run before any concurrency slot
             // is claimed. (Step 3 follows with an atomic claim.)
@@ -317,6 +332,17 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                         return Err(TaskFailure::ApprovalRejected { feedback });
                     }
                 }
+            }
+
+            // P3.7: a second cancel check after step 8 covers the
+            // window where the asker awaited a human reply long
+            // enough that the parent aborted in between. Failing
+            // closed here means we never write a `Spawned` event for
+            // a dispatch that the caller has already abandoned.
+            if ctx.abort_token.is_cancelled() {
+                return Err(TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort,
+                });
             }
 
             // P3.5: emit the `Spawned` lifecycle event into the parent
@@ -1299,6 +1325,93 @@ mod tests {
 
         // Concurrency counter must return to 0 after the call.
         assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// P3.7 cancel propagation: a dispatch whose context carries an
+    /// already-cancelled `abort_token` short-circuits with
+    /// `TaskFailure::Cancelled { source: ParentAbort }` BEFORE any
+    /// gate runs. Neither the concurrency slot nor the session JSONL
+    /// must be touched, otherwise a `Ctrl-C` between the parent
+    /// awaiting the asker and the dispatcher returning would leak a
+    /// half-committed dispatch.
+    #[tokio::test]
+    async fn dispatch_short_circuits_when_parent_abort_already_fired() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let asker = Arc::new(TestAsker::always(PermissionReply::Once));
+        let permission_service = PermissionService::new(asker.clone());
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-cancelled".to_string();
+        let parent_session: SessionId = "session-cancelled".to_string();
+
+        // Build a context whose abort token is already cancelled.
+        let pre_cancelled = AbortToken::new();
+        pre_cancelled.cancel();
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-cancelled"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: default_tool_registry(),
+            runtime_context: None,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: pre_cancelled,
+            depth: 0,
+        };
+
+        let result = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(TaskFailure::Cancelled {
+                    source: CancellationSource::ParentAbort,
+                }),
+            ),
+            "expected Cancelled{{ParentAbort}} when abort already fired, got {:?}",
+            result.as_ref().err()
+        );
+
+        assert_eq!(
+            asker.ask_call_count(),
+            0,
+            "pre-cancelled dispatch must NOT call the asker"
+        );
+        assert_eq!(
+            dispatcher.in_flight(),
+            0,
+            "pre-cancelled dispatch must NOT claim a concurrency slot"
+        );
+
+        let events_path = store.events_path();
+        let bytes = std::fs::read(&events_path).unwrap_or_default();
+        assert!(
+            bytes.is_empty(),
+            "pre-cancelled dispatch must NOT write any Spawned/Completed bytes; \
+             found {} bytes at '{}': {:?}",
+            bytes.len(),
+            events_path.display(),
+            String::from_utf8_lossy(&bytes),
+        );
     }
 
     /// P3.5 wire-up: a successful dispatch writes `Spawned` followed
