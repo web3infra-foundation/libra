@@ -646,7 +646,27 @@ where
                 }
             }
         });
-        if let Some(session) = initial_goal_session.as_ref() {
+        // OC-Phase 6 P6.7 — `--resume <thread>` replays the
+        // session's Goal envelope stream so the resumed TUI shows
+        // the same active Goal it left. We only do this when no
+        // `--goal "..."` flag was supplied (the explicit-objective
+        // path takes precedence so the user can start a fresh Goal
+        // even mid-thread). The replay surfaces `GoalReplayOutcome`'s
+        // rejection list as a single warn-level trace event so a
+        // forged JSONL slice is observable without crashing the
+        // resume.
+        let initial_goal_session = initial_goal_session.or_else(|| {
+            let session_root = app_config
+                .session_store
+                .session_root(&app_config.session.id);
+            replay_goal_session_from_session_root(&session_root)
+        });
+        if let Some(session) = initial_goal_session.as_ref()
+            && app_config.initial_goal.is_some()
+        {
+            // Only persist when we built the session from a fresh
+            // `--goal` flag; a resumed session already has its
+            // events on disk.
             let session_root = app_config
                 .session_store
                 .session_root(&app_config.session.id);
@@ -11432,6 +11452,78 @@ fn persist_goal_events_to_session_root(
         store.append(&SessionEvent::goal(event.clone()))?;
     }
     Ok(())
+}
+
+/// Replay the resumed session's Goal envelope stream into a fresh
+/// [`super::goal_session::GoalSession`].
+///
+/// Returns `None` when:
+/// * The session JSONL is missing or has no [`SessionEvent::Goal`]
+///   envelopes (the resumed thread never started a Goal).
+/// * The envelope stream fails `goal::state::replay`'s shape checks
+///   (no leading `Created`, mismatched `goal_id`, invalid spec).
+///
+/// On success the projected state is logged together with the
+/// rejection count so a forged or corrupted JSONL slice surfaces
+/// in `tracing` instead of silently producing a nonsense state.
+/// I/O failures are downgraded to a warn-level trace and an
+/// empty-replay return because the resume path must not abort on
+/// a broken events.jsonl.
+fn replay_goal_session_from_session_root(
+    session_root: &Path,
+) -> Option<super::goal_session::GoalSession> {
+    let store = SessionJsonlStore::new(session_root.to_path_buf());
+    match store.has_events() {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_root = %session_root.display(),
+                "failed to probe session events while replaying active Goal on resume — continuing without Goal session"
+            );
+            return None;
+        }
+    }
+    let events = match store.load_events() {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_root = %session_root.display(),
+                "failed to load session events while replaying active Goal on resume — continuing without Goal session"
+            );
+            return None;
+        }
+    };
+    let envelopes: Vec<GoalEventEnvelope> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::Goal(envelope) => Some(envelope),
+            _ => None,
+        })
+        .collect();
+    if envelopes.is_empty() {
+        return None;
+    }
+    let (session, outcome) =
+        super::goal_session::GoalSession::from_replay(envelopes.clone()).or_else(|| {
+            tracing::warn!(
+                envelope_count = envelopes.len(),
+                session_root = %session_root.display(),
+                "Goal replay returned None on resume — first envelope is not Created or the spec failed validation"
+            );
+            None
+        })?;
+    if !outcome.rejected.is_empty() || outcome.truncated_rejection_count > 0 {
+        tracing::warn!(
+            rejected = outcome.rejected.len(),
+            truncated = outcome.truncated_rejection_count,
+            session_root = %session_root.display(),
+            "Goal replay dropped envelopes on resume — partial state surfaced; check events.jsonl for corruption"
+        );
+    }
+    Some(session)
 }
 
 fn render_goal_response_text(text: &str, decision: &GoalLoopDecision) -> String {

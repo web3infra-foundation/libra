@@ -34,7 +34,7 @@ use super::goal_command::{
 };
 use crate::internal::ai::goal::{
     GoalActor, GoalBudget, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
-    GoalSpec, GoalSpecError, GoalState, apply,
+    GoalReplayOutcome, GoalSpec, GoalSpecError, GoalState, apply, replay,
 };
 
 /// Schema-floor wrapper that re-runs `GoalSpec::new`'s objective
@@ -211,6 +211,35 @@ impl GoalSession {
         Ok(GoalCancelOutcome {
             state: self.state.clone(),
         })
+    }
+
+    /// Reconstruct a `GoalSession` by replaying a chronological
+    /// slice of [`GoalEventEnvelope`]s — used by the `--resume
+    /// <thread>` flow in `libra code` (OC-Phase 6 P6.7). The
+    /// envelopes must start with a [`GoalEvent::Created`] (per
+    /// [`crate::internal::ai::goal::replay`]); otherwise this
+    /// returns `None` so the caller can ignore a malformed slice
+    /// rather than seeding a nonsense state.
+    ///
+    /// Skipped (rejected) envelopes are surfaced via the returned
+    /// [`GoalReplayOutcome::rejected`] field so the caller can log
+    /// the gaps; the projected [`GoalState`] folds in every
+    /// envelope that passed `apply()`.
+    ///
+    /// Terminal sessions (`Completed` / `Cancelled`) are still
+    /// returned so callers can render the final status; the App's
+    /// "already active" gate (`self.goal_session.as_ref().is_some_and(|s|
+    /// !s.is_terminal())`) lets a follow-up `/goal start` succeed
+    /// even when the resumed slot holds a terminal session.
+    pub fn from_replay(envelopes: Vec<GoalEventEnvelope>) -> Option<(Self, GoalReplayOutcome)> {
+        let outcome = replay(envelopes.iter())?;
+        Some((
+            Self {
+                state: outcome.state.clone(),
+                events: envelopes,
+            },
+            outcome,
+        ))
     }
 
     /// Append a `CriteriaRevised` envelope that adds a single
@@ -658,6 +687,53 @@ mod tests {
         // Non-user-prefixed ids are ignored.
         let existing = vec![mk("supervisor-x"), mk("user-1")];
         assert_eq!(next_user_criterion_id(&existing), "user-2");
+    }
+
+    /// `from_replay` rebuilds a `GoalSession` from a previously
+    /// emitted envelope stream — used by the `libra code --resume
+    /// <thread>` path. The reconstructed session must agree with
+    /// what would have been produced live.
+    #[test]
+    fn from_replay_reconstructs_session_state_and_events() {
+        let mut live = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        live.revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        let envelopes = live.events().to_vec();
+
+        let (resumed, outcome) =
+            GoalSession::from_replay(envelopes.clone()).expect("replay must succeed");
+
+        assert_eq!(resumed.state(), live.state());
+        assert_eq!(resumed.events(), envelopes.as_slice());
+        assert!(outcome.rejected.is_empty());
+        assert_eq!(outcome.truncated_rejection_count, 0);
+    }
+
+    /// `from_replay` rejects a stream that does not start with a
+    /// `Created` envelope — the underlying `goal::state::replay`
+    /// guard. The session slot stays empty so the resumed TUI
+    /// behaves as if no Goal was active.
+    #[test]
+    fn from_replay_returns_none_when_first_envelope_is_not_created() {
+        let mut live = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        live.revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        // Drop the `Created` envelope, keep only the
+        // `CriteriaRevised` tail — replay must refuse.
+        let envelopes: Vec<GoalEventEnvelope> = live.events().iter().skip(1).cloned().collect();
+        assert!(GoalSession::from_replay(envelopes).is_none());
     }
 
     #[test]
