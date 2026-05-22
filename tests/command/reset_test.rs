@@ -223,6 +223,43 @@ fn test_reset_onto_locked_branch_rejects_intent() {
     );
 }
 
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `reset` refuse to land user work on `agent-traces`, the same way
+/// the existing `intent` guard does. Functionally
+/// `is_locked_revision` already covers both branches, but missing
+/// integration coverage means a regression that pulled
+/// `AGENT_TRACES_BRANCH` out of `is_locked_branch` would ship
+/// silently. This test pins the contract end-to-end.
+#[test]
+fn test_reset_onto_locked_branch_rejects_agent_traces() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "agent-traces"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
+/// Revision suffixes (`agent-traces~1`, `agent-traces^`) must also
+/// be refused. `is_locked_revision` strips revision modifiers
+/// before checking the locked list; without this regression a
+/// user-typed `reset agent-traces~2` would escape the guard.
+#[test]
+fn test_reset_onto_locked_branch_rejects_agent_traces_suffix() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["reset", "agent-traces~1"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
 #[test]
 fn test_reset_json_pathspec_omits_previous_commit() {
     // Pathspec resets do not move HEAD, so the JSON schema documented in

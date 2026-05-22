@@ -17,6 +17,45 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("branch 'no-such' not found"));
 }
 
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `switch` refuse to create a branch named `intent` or
+/// `agent-traces`. The runtime guard at
+/// `src/command/switch.rs::is_locked_branch` covers both, but the
+/// `switch_test` suite previously had no coverage at all for the
+/// locked-name refusal — a regression that dropped the guard could
+/// have shipped silently.
+#[test]
+fn test_switch_create_intent_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "intent"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("intent"),
+        "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+/// Companion to `test_switch_create_intent_branch_is_blocked` for the
+/// `agent-traces` locked name. Without the guard, `switch -c
+/// agent-traces` could shadow the reserved capture ref locally and
+/// then propagate via `push`.
+#[test]
+fn test_switch_create_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "agent-traces"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
 #[test]
 fn test_switch_json_create_output_reports_new_branch() {
     let repo = create_committed_repo_via_cli();
