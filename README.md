@@ -65,10 +65,12 @@ Commands:
   worktree      Manage multiple working trees attached to this repository
   cloud         Cloud backup and restore operations (D1/R2)
   publish       Manage read-only Cloudflare Worker publishing
+  sandbox       Inspect AI sandbox diagnostics for tool execution
   agent         Manage external-agent capture (Claude Code, Gemini, ...)
   cat-file      Provide content, type or size info for repository objects
   hash-object   Compute Git-compatible object IDs
   verify-pack   Validate pack index files against pack archives
+  fsck          Verify the integrity of objects, refs, and index
   checkout      Branch compatibility surface; prefer 'switch' for branches and 'restore' for files
   bisect        Use binary search to find the commit that introduced a bug
   help          Print this message or the help of the given subcommand(s)
