@@ -16,7 +16,7 @@ src/
 ├── lib.rs                       # Library root, sync/async exec helpers
 ├── cli.rs                       # Clap CLI definition, subcommand dispatch, hash-kind preflight
 ├── common_utils.rs, git_protocol.rs, lfs_structs.rs
-├── command/                     # All subcommand implementations (~57 modules)
+├── command/                     # All subcommand implementations (~61 top-level modules + 9 under agent/)
 │   ├── mod.rs                   # Re-exports, shared helpers (load/save objects, auth)
 │   ├── init.rs, clone.rs, add.rs, commit.rs, push.rs, pull.rs, fetch.rs, fsck.rs
 │   ├── status.rs, log.rs, show.rs, diff.rs, blame.rs, shortlog.rs, describe.rs

@@ -6,7 +6,7 @@
 
 **已完成的基础设施：**
 - 全局 `--json`/`--machine`/`--quiet`/`--color`/`--no-pager`/`--progress`/`--exit-code-on-warning` 标志 (`src/cli.rs`)
-- 稳定错误码体系 18 个错误码 (`src/utils/error.rs`)
+- 稳定错误码体系 22 个错误码 (`src/utils/error.rs`)
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架 (`src/utils/output.rs`)
 - `CommandOutput` trait 支持结构化输出
 - 错误码文档 (`docs/error-codes.md`)
