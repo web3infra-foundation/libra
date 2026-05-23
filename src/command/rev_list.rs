@@ -14,7 +14,24 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra rev-list --help` output.
+///
+/// `rev-list` walks the commit graph from the given spec (default
+/// `HEAD`) and prints each reachable commit hash on its own line. The
+/// banner pins the default `HEAD` walk, an explicit branch walk, a
+/// quiet form, and a JSON variant for agents so users see all
+/// supported forms without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REV_LIST_EXAMPLES: &str = "\
+EXAMPLES:
+    libra rev-list                  Walk ancestry from HEAD (one hash per line)
+    libra rev-list main             Walk ancestry from refs/heads/main
+    libra rev-list HEAD~5           Walk ancestry from a relative ref
+    libra rev-list --json HEAD      Structured JSON output (input + commits[] + total)
+    libra rev-list --quiet HEAD     Suppress stdout (use exit code as truthy probe)";
+
 #[derive(Parser, Debug)]
+#[command(after_help = REV_LIST_EXAMPLES)]
 pub struct RevListArgs {
     /// Revision to list from. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
