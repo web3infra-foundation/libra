@@ -115,11 +115,16 @@ const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 pub type Client = GenericClient<KimiProvider>;
 
 impl Client {
-    /// Creates a Kimi client from Vault or environment variables.
+    /// Creates a Kimi client from environment variables or Vault.
     ///
-    /// Reads `vault.env.MOONSHOT_API_KEY` first, then `MOONSHOT_API_KEY`.
+    /// Priority chain for `MOONSHOT_API_KEY` (12-Factor, see
+    /// `docs/improvement/config.md`):
+    /// 1. Process env `MOONSHOT_API_KEY`
+    /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY`)
+    /// 3. Global config (`vault.env.MOONSHOT_API_KEY`)
+    ///
     /// The base URL defaults to `https://api.moonshot.cn/v1` and can be
-    /// overridden with `vault.env.MOONSHOT_BASE_URL` / `MOONSHOT_BASE_URL`
+    /// overridden with `MOONSHOT_BASE_URL` / `vault.env.MOONSHOT_BASE_URL`
     /// (useful for the international endpoint or a self-hosted proxy).
     ///
     /// New call sites should prefer [`Client::from_resolved_env`], which
@@ -146,10 +151,10 @@ impl Client {
     /// store credentials in repo-local or global `vault.env.*` config without
     /// also exporting them into the process environment.
     ///
-    /// Priority order:
-    /// 1. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
-    /// 2. Global config
-    /// 3. Process env var
+    /// Priority order (12-Factor):
+    /// 1. Process env var (`MOONSHOT_API_KEY` / `MOONSHOT_BASE_URL`)
+    /// 2. Local repo config (`vault.env.MOONSHOT_API_KEY` / `vault.env.MOONSHOT_BASE_URL`)
+    /// 3. Global config
     ///
     /// `MOONSHOT_BASE_URL` falls back to the canonical Kimi cn endpoint when
     /// no layer supplies it.

@@ -64,11 +64,16 @@ impl Provider for OpenAIProvider {
 pub type Client = GenericClient<OpenAIProvider>;
 
 impl Client {
-    /// Creates an OpenAI client from Vault or environment variables.
+    /// Creates an OpenAI client from environment variables or Vault.
     ///
-    /// Reads `vault.env.OPENAI_API_KEY` first, then `OPENAI_API_KEY`.
-    /// Also supports `vault.env.OPENAI_BASE_URL` / `OPENAI_BASE_URL` for
-    /// custom endpoints.
+    /// Priority chain for `OPENAI_API_KEY` (12-Factor, see
+    /// `docs/improvement/config.md`):
+    /// 1. Process env `OPENAI_API_KEY`
+    /// 2. Local repo config (`vault.env.OPENAI_API_KEY`)
+    /// 3. Global config (`vault.env.OPENAI_API_KEY`)
+    ///
+    /// `OPENAI_BASE_URL` follows the same chain for custom endpoints
+    /// (optional).
     ///
     /// New call sites should prefer [`Client::from_resolved_env`], which
     /// performs the same lookup chain asynchronously and accepts an

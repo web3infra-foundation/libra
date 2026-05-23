@@ -61,11 +61,15 @@ impl Provider for GeminiProvider {
 pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
-    /// Creates a Gemini Client from Vault or environment variables.
+    /// Creates a Gemini Client from environment variables or Vault.
     ///
-    /// Functional scope: reads `vault.env.GEMINI_API_KEY` first, then
-    /// `GEMINI_API_KEY`, and points at the public `generativelanguage.googleapis.com`
-    /// endpoint.
+    /// Functional scope: priority chain (12-Factor, see
+    /// `docs/improvement/config.md`):
+    /// 1. Process env `GEMINI_API_KEY`
+    /// 2. Local repo config (`vault.env.GEMINI_API_KEY`)
+    /// 3. Global config (`vault.env.GEMINI_API_KEY`)
+    ///
+    /// Points at the public `generativelanguage.googleapis.com` endpoint.
     ///
     /// Boundary conditions: returns an actionable error when `GEMINI_API_KEY`
     /// is unset across Vault and process env; the CLI deliberately does not
@@ -89,9 +93,9 @@ impl Client {
     }
 
     /// Constructs a Gemini client whose `GEMINI_API_KEY` is resolved through
-    /// the libra-aware lookup chain: local `.libra/libra.db`
+    /// the libra-aware lookup chain: process env → local `.libra/libra.db`
     /// (`vault.env.GEMINI_API_KEY`, when `local_target` selects a repo) →
-    /// global `~/.libra/config.db` (same key) → process env.
+    /// global `~/.libra/config.db` (same key).
     ///
     /// Differs from [`Self::from_env`] in two ways:
     ///

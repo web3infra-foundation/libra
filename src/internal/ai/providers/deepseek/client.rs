@@ -104,10 +104,14 @@ fn normalize_api_key(api_key: &str) -> String {
 pub type Client = GenericClient<DeepSeekProvider>;
 
 impl Client {
-    /// Creates a DeepSeek client from Vault or environment variables.
+    /// Creates a DeepSeek client from environment variables or Vault.
     ///
-    /// Reads `vault.env.DEEPSEEK_API_KEY` first, then `DEEPSEEK_API_KEY`, and
-    /// uses the default base URL (`https://api.deepseek.com`). DeepSeek does
+    /// Priority chain (12-Factor, see `docs/improvement/config.md`):
+    /// 1. Process env `DEEPSEEK_API_KEY`
+    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 3. Global config (`vault.env.DEEPSEEK_API_KEY`)
+    ///
+    /// Uses the default base URL (`https://api.deepseek.com`). DeepSeek does
     /// **not** honor a `DEEPSEEK_BASE_URL` env var; override the endpoint via
     /// [`Client::with_base_url`] or the `--api-base` CLI flag (which routes
     /// through `ProviderBuildOptions::api_base` in `providers::factory`).
@@ -135,10 +139,10 @@ impl Client {
     /// or global `vault.env.DEEPSEEK_API_KEY` config without exporting it to
     /// the process environment.
     ///
-    /// Priority order:
-    /// 1. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
-    /// 2. Global config
-    /// 3. Process env var
+    /// Priority order (12-Factor):
+    /// 1. Process env `DEEPSEEK_API_KEY`
+    /// 2. Local repo config (`vault.env.DEEPSEEK_API_KEY`)
+    /// 3. Global config (`vault.env.DEEPSEEK_API_KEY`)
     ///
     /// DeepSeek does not expose a base-URL env override. Tests that need a
     /// stub endpoint should keep using [`Client::with_base_url`].

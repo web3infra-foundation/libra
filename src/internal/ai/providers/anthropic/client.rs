@@ -77,12 +77,16 @@ impl Provider for AnthropicProvider {
 pub type Client = GenericClient<AnthropicProvider>;
 
 impl Client {
-    /// Creates an Anthropic client from Vault or environment variables.
+    /// Creates an Anthropic client from environment variables or Vault.
     ///
-    /// Functional scope:
-    /// - Reads `vault.env.ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY` (required).
-    /// - Falls back to `https://api.anthropic.com` when neither
-    ///   `vault.env.ANTHROPIC_BASE_URL` nor `ANTHROPIC_BASE_URL` is set.
+    /// Functional scope: priority chain (12-Factor, see
+    /// `docs/improvement/config.md`):
+    /// 1. Process env `ANTHROPIC_API_KEY` (required)
+    /// 2. Local repo config (`vault.env.ANTHROPIC_API_KEY`)
+    /// 3. Global config (`vault.env.ANTHROPIC_API_KEY`)
+    ///
+    /// `ANTHROPIC_BASE_URL` follows the same chain (optional); falls back to
+    /// `https://api.anthropic.com` when no layer supplies a value.
     ///
     /// Boundary conditions:
     /// - Returns an actionable error when `ANTHROPIC_API_KEY` is missing across
