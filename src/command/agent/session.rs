@@ -53,19 +53,25 @@ pub struct SessionListArgs {
 
 #[derive(Args, Debug)]
 pub struct SessionShowArgs {
+    /// `agent_session.session_id` of the session to inspect (from `libra agent session list`)
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
-    /// Materialise the captured transcript at the given path. Phase 2.
+    /// Materialise the captured transcript at the given path (Phase 2)
     #[arg(long, value_name = "PATH")]
     pub extract_transcript: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct SessionStopArgs {
+    /// `agent_session.session_id` of the session to mark as stopped
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
 }
 
 #[derive(Args, Debug)]
 pub struct SessionResumeArgs {
+    /// `agent_session.session_id` of the stopped session to resume
+    #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
 }
 

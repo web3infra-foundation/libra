@@ -286,6 +286,20 @@ const SUBCOMMANDS: &[&[&str]] = &[
     // db
     &["db", "upgrade"],
     &["db", "status"],
+    // agent sub-subcommands (2 levels deep) — added v0.17.902 after
+    // checkpoint/rewind / session/* were found to ship empty positional
+    // arg descriptions despite the parent-level guard passing.
+    &["agent", "session", "list"],
+    &["agent", "session", "show"],
+    &["agent", "session", "stop"],
+    &["agent", "session", "resume"],
+    &["agent", "session", "promote"],
+    &["agent", "session", "derive-tool-calls"],
+    &["agent", "checkpoint", "list"],
+    &["agent", "checkpoint", "show"],
+    &["agent", "checkpoint", "rewind"],
+    &["agent", "rpc", "list"],
+    &["agent", "rpc", "invoke"],
 ];
 
 #[test]

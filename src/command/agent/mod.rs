@@ -163,23 +163,27 @@ pub enum CheckpointSubcommand {
 
 #[derive(Args, Debug)]
 pub struct CheckpointListArgs {
+    /// Filter checkpoints to those belonging to a single session id
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct CheckpointShowArgs {
+    /// Checkpoint identifier returned by `libra agent checkpoint list`
+    #[arg(value_name = "CHECKPOINT_ID")]
     pub checkpoint_id: String,
 }
 
 #[derive(Args, Debug)]
 pub struct CheckpointRewindArgs {
+    /// Checkpoint identifier to rewind to (from `libra agent checkpoint list`)
+    #[arg(value_name = "CHECKPOINT_ID")]
     pub checkpoint_id: String,
-    /// Show the impact without modifying anything (default).
+    /// Show the impact without modifying anything (default)
     #[arg(long, conflicts_with = "apply")]
     pub dry_run: bool,
-    /// Actually restore. v1 limits this to working-tree restore; the agent's
-    /// transcript file is NOT rewritten and a warning is printed.
+    /// Actually restore. v1 limits this to working-tree restore; the agent's transcript file is NOT rewritten and a warning is printed
     #[arg(long)]
     pub apply: bool,
 }
