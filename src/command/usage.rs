@@ -467,7 +467,12 @@ async fn open_repo_db_at(storage_root: &Path) -> anyhow::Result<sea_orm::Databas
     let db_path = storage_root.join(DATABASE);
     get_db_conn_instance_for_path(&db_path)
         .await
-        .map_err(|err| anyhow::anyhow!("failed to open repository database {}: {err}", db_path.display()))
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed to open repository database {}: {err}",
+                db_path.display()
+            )
+        })
 }
 
 #[cfg(test)]

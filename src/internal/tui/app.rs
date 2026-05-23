@@ -475,8 +475,7 @@ pub struct App<M: CompletionModel> {
     /// in-flight sub-agent dispatch short-circuits via the
     /// runner's `tokio::select!` (v0.17.767). Reset at every
     /// turn start; cleared when the turn ends.
-    current_turn_abort_token:
-        Option<crate::internal::ai::agent::runtime::AbortToken>,
+    current_turn_abort_token: Option<crate::internal::ai::agent::runtime::AbortToken>,
     /// Delayed draw task for frame coalescing inside frame interval.
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
@@ -2891,8 +2890,7 @@ where
                 // while the session token survives for subsequent
                 // turns. No-op when sub-agents are disabled.
                 if let Some(rt) = config.subagent_runtime.clone() {
-                    let turn_token =
-                        crate::internal::ai::agent::runtime::AbortToken::new();
+                    let turn_token = crate::internal::ai::agent::runtime::AbortToken::new();
                     self.current_turn_abort_token = Some(turn_token.clone());
                     config.subagent_runtime = Some(rt.with_abort_token(turn_token));
                 }

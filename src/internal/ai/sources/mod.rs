@@ -434,9 +434,13 @@ impl SourceCallLog {
                         in_memory_copy.registered_tool_name.clone(),
                     ),
                     tool_call_id: sea_orm::ActiveValue::Set(in_memory_copy.tool_call_id.clone()),
-                    credential_ref: sea_orm::ActiveValue::Set(in_memory_copy.credential_ref.clone()),
+                    credential_ref: sea_orm::ActiveValue::Set(
+                        in_memory_copy.credential_ref.clone(),
+                    ),
                     latency_ms: sea_orm::ActiveValue::Set(
-                        in_memory_copy.latency_ms.map(|ms| ms.min(i64::MAX as u128) as i64),
+                        in_memory_copy
+                            .latency_ms
+                            .map(|ms| ms.min(i64::MAX as u128) as i64),
                     ),
                     input_bytes: sea_orm::ActiveValue::Set(in_memory_copy.input_bytes as i64),
                     output_bytes: sea_orm::ActiveValue::Set(in_memory_copy.output_bytes as i64),
@@ -446,7 +450,9 @@ impl SourceCallLog {
                     approval_decision: sea_orm::ActiveValue::Set(
                         in_memory_copy.approval_decision.clone(),
                     ),
-                    state_namespace: sea_orm::ActiveValue::Set(in_memory_copy.state_namespace.clone()),
+                    state_namespace: sea_orm::ActiveValue::Set(
+                        in_memory_copy.state_namespace.clone(),
+                    ),
                     success: sea_orm::ActiveValue::Set(if in_memory_copy.success { 1 } else { 0 }),
                     created_at: sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339()),
                 };
@@ -890,9 +896,11 @@ mod tests {
     /// the same entries.
     #[tokio::test]
     async fn record_with_persistence_writes_seaorm_row_and_keeps_in_memory_copy() {
-        use crate::internal::db::migration::run_builtin_migrations;
-        use sea_orm::{Database, EntityTrait};
         use std::sync::Arc;
+
+        use sea_orm::{Database, EntityTrait};
+
+        use crate::internal::db::migration::run_builtin_migrations;
 
         let conn = Database::connect("sqlite::memory:")
             .await

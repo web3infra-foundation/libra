@@ -494,7 +494,10 @@ mod tests {
                 assert_eq!(actual.artifact_kind, "validation_report");
                 assert_eq!(actual.artifact_id.as_deref(), Some("report-abc"));
                 assert_eq!(
-                    actual.payload.get("policy_version").and_then(|v| v.as_str()),
+                    actual
+                        .payload
+                        .get("policy_version")
+                        .and_then(|v| v.as_str()),
                     Some("v0.17.810"),
                 );
             }
