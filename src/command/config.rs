@@ -376,20 +376,20 @@ pub enum ConfigCommand {
     Edit,
     /// Generate SSH key for a remote
     GenerateSshKey {
-        /// Remote name to generate key for
-        #[clap(long)]
+        /// Remote name to bind the new SSH key to
+        #[clap(long, value_name = "NAME")]
         remote: String,
     },
     /// Generate GPG key for signing
     GenerateGpgKey {
-        /// User name for the key
-        #[clap(long)]
+        /// User name for the key (default: from `user.name` config)
+        #[clap(long, value_name = "NAME")]
         name: Option<String>,
-        /// User email for the key
-        #[clap(long)]
+        /// User email for the key (default: from `user.email` config)
+        #[clap(long, value_name = "EMAIL")]
         email: Option<String>,
-        /// Key usage (signing or encrypt)
-        #[clap(long)]
+        /// Key usage: `signing` (default) or `encrypt`
+        #[clap(long, value_name = "KIND")]
         usage: Option<String>,
     },
 }
@@ -1777,7 +1777,7 @@ async fn handle_generate_gpg_key(
         "encrypt" => "encrypt",
         other => {
             return Err(CliError::from_legacy_string(format!(
-                "error: invalid value '{other}' for '--usage <USAGE>' (expected 'signing' or 'encrypt')"
+                "error: invalid value '{other}' for '--usage <KIND>' (expected 'signing' or 'encrypt')"
             )));
         }
     };

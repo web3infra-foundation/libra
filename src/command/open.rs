@@ -32,7 +32,8 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = OPEN_EXAMPLES)]
 pub struct OpenArgs {
-    /// The remote to open
+    /// Remote name (e.g. `origin`) or a direct URL. Omit to auto-detect from the current branch's upstream
+    #[arg(value_name = "REMOTE_OR_URL")]
     pub remote: Option<String>,
 }
 
