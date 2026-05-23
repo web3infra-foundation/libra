@@ -74,18 +74,12 @@ const CLOUD_CLONE_TEST_R2_ROOT_ENV: &str = "LIBRA_CLOUD_CLONE_TEST_R2_ROOT";
 const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
 
 /// Clone a repository into a new directory.
-///
-/// # Examples
-///
-/// ```text
-/// libra clone git@github.com:user/repo.git             Clone via SSH
-/// libra clone https://github.com/user/repo.git          Clone via HTTPS
-/// libra clone git@github.com:user/repo.git my-dir       Clone to specific directory
-/// libra clone --bare git@github.com:user/repo.git       Create bare clone
-/// libra clone -b develop git@github.com:user/repo.git   Clone specific branch
-/// libra clone --single-branch -b main <url>             Clone only one branch
-/// libra clone --depth 1 <url>                           Shallow clone (latest commit only)
-/// ```
+//
+// The user-visible examples block is rendered by clap via the
+// `after_help = "EXAMPLES:\n    …"` attribute below — not by this
+// rustdoc. Keeping the rustdoc to one summary line stops clap from
+// echoing a markdown `# Examples` heading and triple-backtick fences
+// verbatim into `--help` output (those don't render outside cargo doc).
 #[derive(Parser, Debug, Clone)]
 #[clap(after_help = "EXAMPLES:\n    \
     libra clone git@github.com:user/repo.git             Clone via SSH\n    \

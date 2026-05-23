@@ -143,6 +143,23 @@ const FORBIDDEN_PHRASES: &[(&str, &str)] = &[
          non-doc comment so clap stops rendering it — see \
          src/command/publish.rs for the v0.17.901 cleanup pattern.",
     ),
+    (
+        "```text ",
+        "raw rustdoc code fence ('```text ...```') leaked into clap's \
+         long_about because clap does not render markdown. Move the \
+         examples to `#[command(after_help = \"EXAMPLES:\\n    …\")]` \
+         (or `<CMD>_EXAMPLES` const) and shrink the rustdoc to one \
+         summary line — see src/command/clone.rs for the v0.17.911 \
+         cleanup pattern.",
+    ),
+    (
+        "# Examples",
+        "raw rustdoc markdown heading ('# Examples') leaked into \
+         clap's long_about because clap does not render markdown. \
+         Move the examples to `#[command(after_help = …)]` and shrink \
+         the rustdoc to one summary line — see src/command/clone.rs \
+         for the v0.17.911 cleanup pattern.",
+    ),
 ];
 
 #[test]
