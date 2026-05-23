@@ -300,6 +300,26 @@ const SUBCOMMANDS: &[&[&str]] = &[
     &["agent", "checkpoint", "rewind"],
     &["agent", "rpc", "list"],
     &["agent", "rpc", "invoke"],
+    // remote subcommands — added v0.17.904. Each remote operation
+    // takes 1–2 positional NAME / URL args and a handful of flags
+    // (set-url has --add / --delete / --push / --all).
+    &["remote", "add"],
+    &["remote", "remove"],
+    &["remote", "rename"],
+    &["remote", "show"],
+    &["remote", "get-url"],
+    &["remote", "set-url"],
+    &["remote", "prune"],
+    // config subcommands — added v0.17.904. Includes vault-aware
+    // key generation flows that take destination paths.
+    &["config", "set"],
+    &["config", "get"],
+    &["config", "list"],
+    &["config", "unset"],
+    &["config", "import"],
+    &["config", "path"],
+    &["config", "generate-ssh-key"],
+    &["config", "generate-gpg-key"],
 ];
 
 #[test]
