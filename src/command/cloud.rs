@@ -89,19 +89,29 @@ pub struct SyncArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Batch size for sync operations
-    #[arg(long, default_value = "50")]
+    /// Number of objects to upload per D1/R2 batch (default: 50)
+    #[arg(long, value_name = "N", default_value = "50")]
     pub batch_size: usize,
 }
 
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
-    /// Repository ID to restore
-    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
+    /// Repository ID (UUID) to restore from the cloud (mutually exclusive with --name)
+    #[arg(
+        long,
+        value_name = "UUID",
+        required_unless_present = "name",
+        conflicts_with = "name"
+    )]
     pub repo_id: Option<String>,
 
-    /// Repository name to restore
-    #[arg(long, required_unless_present = "repo_id", conflicts_with = "repo_id")]
+    /// Repository name to restore from the cloud (mutually exclusive with --repo-id)
+    #[arg(
+        long,
+        value_name = "NAME",
+        required_unless_present = "repo_id",
+        conflicts_with = "repo_id"
+    )]
     pub name: Option<String>,
 
     /// Only restore metadata (object index), not objects
