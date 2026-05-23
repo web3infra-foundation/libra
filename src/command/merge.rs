@@ -48,8 +48,8 @@ EXAMPLES:
 
 NOTES:
     Non-fast-forward (true three-way) merges are not yet supported and
-    fail with stable error code MergeNonFastForward; resolve manually
-    with libra rebase or by re-creating the branch.";
+    fail with stable error code LBR-CONFLICT-002 (ConflictOperationBlocked);
+    resolve manually with libra rebase or by re-creating the branch.";
 
 #[derive(Parser, Debug)]
 #[command(after_help = MERGE_EXAMPLES)]
