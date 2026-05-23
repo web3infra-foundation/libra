@@ -19,7 +19,29 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra usage --help` output.
+///
+/// `usage` exposes two sub-commands: `report` (aggregate provider costs
+/// and token totals) and `prune` (delete rows past a retention window).
+/// The banner pins the canonical invocation plus common filter
+/// combinations (`--since 7d`, `--session`, `--include-failed`, csv
+/// format) so users can map intent to invocation without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const USAGE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra usage report                                  Per-model totals across all recorded rows
+    libra usage report --since 24h                      Per-model totals for the last 24 hours
+    libra usage report --since 7d --include-failed      Include failed requests in counts/wall-clock
+    libra usage report --session <session-id>           Restrict report to one session
+    libra usage report --thread <thread-id>             Restrict report to one canonical thread
+    libra usage report --format csv                     CSV table for downstream tooling
+    libra usage --json report --since 7d                Structured JSON output for agents
+    libra usage prune                                   Use the configured retention window
+    libra usage prune --retention-days 30               Delete rows older than 30 days";
+
 #[derive(Parser, Debug)]
+#[command(after_help = USAGE_EXAMPLES)]
 pub struct UsageArgs {
     #[command(subcommand)]
     pub command: UsageSubcommand,
