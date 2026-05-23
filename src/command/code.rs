@@ -425,10 +425,10 @@ impl From<CodeApprovalPolicy> for AskForApproval {
 /// modes: TUI (the default), web-only (`--web` / `--web-only`), or
 /// stdio. The banner pins the most common invocations across modes
 /// (TUI default, web-only with a specific provider, `--browser-control
-/// loopback`, `--control automation` for headless control, resume by
-/// thread id, plan mode, and `--env-file` for vault-less provider
-/// bootstrap) so users see the right entry point without reading the
-/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// loopback`, `--control write` for local automation write control,
+/// resume by thread id, plan mode, and `--env-file` for vault-less
+/// provider bootstrap) so users see the right entry point without
+/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
 /// `docs/improvement/README.md` item B.
 pub const CODE_EXAMPLES: &str = "\
 EXAMPLES:

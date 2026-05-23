@@ -25,9 +25,9 @@ use crate::utils::error::{CliError, CliResult};
 /// session over NDJSON JSON-RPC 2.0 on stdin/stdout. The banner pins
 /// the canonical `--stdio` form (the only supported form today),
 /// shows how to wire it to the discovery file emitted by
-/// `--control automation`, and demonstrates Unix-style piping to feed
-/// a single JSON-RPC request through the shim. Cross-cutting `--help`
-/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+/// `libra code --control write`, and demonstrates Unix-style piping
+/// to feed a single JSON-RPC request through the shim. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
 pub const CODE_CONTROL_EXAMPLES: &str = "\
 EXAMPLES:
     libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token
@@ -35,7 +35,7 @@ EXAMPLES:
     libra code-control --stdio \\
         --url $(jq -r .url .libra/code/control.json) \\
         --token-file .libra/code/control.token
-                                                  Wire from the discovery file emitted by 'libra code --control automation'
+                                                  Wire from the discovery file emitted by 'libra code --control write'
     echo '{\"jsonrpc\":\"2.0\",\"method\":\"attach\",\"params\":{\"clientId\":\"my-script\"},\"id\":1}' | \\
         libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token
                                                   Send a single attach request through the shim";

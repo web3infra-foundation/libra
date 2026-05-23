@@ -9,7 +9,7 @@ use super::*;
 
 /// `libra code-control --help` surfaces the EXAMPLES banner so users
 /// see the canonical `--stdio` form, how to wire it to the discovery
-/// file emitted by `libra code --control automation`, and a piped
+/// file emitted by `libra code --control write`, and a piped
 /// JSON-RPC example without reading the design doc.
 #[test]
 fn test_code_control_help_lists_examples_banner() {
