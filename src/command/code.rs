@@ -419,12 +419,40 @@ impl From<CodeApprovalPolicy> for AskForApproval {
 // CLI argument definition
 // ---------------------------------------------------------------------------
 
+/// `--help` examples shown in `libra code --help` output.
+///
+/// `code` launches the interactive Libra Code session in one of three
+/// modes: TUI (the default), web-only (`--web` / `--web-only`), or
+/// stdio. The banner pins the most common invocations across modes
+/// (TUI default, web-only with a specific provider, `--browser-control
+/// loopback`, `--control automation` for headless control, resume by
+/// thread id, plan mode, and `--env-file` for vault-less provider
+/// bootstrap) so users see the right entry point without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const CODE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra code                                       Launch the default TUI session
+    libra code --provider deepseek --model deepseek-reasoner
+                                                     Pick a provider/model at startup
+    libra code --web                                 Run the web server only (no TUI); alias for --web-only
+    libra code --web-only --provider ollama --port 4400
+                                                     Browser-driven session against a local Ollama
+    libra code --web-only --provider codex --browser-control loopback
+                                                     Allow browser write control over loopback
+    libra code --control automation                  Local TUI automation control mode (token + lease)
+    libra code --resume <thread-uuid>                Resume a prior canonical thread
+    libra code --plan-mode                           Start in plan-only mode (no apply)
+    libra code --env-file .env.test                  Load provider keys from a dotenv-style file
+    libra code --stdio                               Pipe-driven session for embedding";
+
 /// Command-line arguments for `libra code`.
 ///
 /// This struct is parsed by `clap` and drives all three operating modes
 /// (TUI, web-only, stdio). Many flags are mode-specific and validated
 /// at runtime by [`validate_mode_args`].
 #[derive(Parser, Debug)]
+#[command(after_help = CODE_EXAMPLES)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
     #[arg(long, alias = "web", conflicts_with = "stdio")]

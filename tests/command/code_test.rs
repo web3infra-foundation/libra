@@ -200,3 +200,41 @@ fn code_rejects_deepseek_flags_for_other_providers() {
         "expected provider-scoped flag error, got {rendered}"
     );
 }
+
+/// `libra code --help` surfaces the EXAMPLES banner so users see the
+/// most common invocations across the three modes (TUI / --web / --stdio)
+/// plus --browser-control loopback, --control automation, --resume,
+/// --plan-mode, and --env-file without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_code_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for code --help");
+    let output = run_libra_command(&["code", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "code --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "code --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "Launch the default TUI session",
+        "libra code --provider deepseek",
+        "libra code --web",
+        "libra code --web-only --provider ollama",
+        "libra code --web-only --provider codex --browser-control loopback",
+        "libra code --control automation",
+        "libra code --resume <thread-uuid>",
+        "libra code --plan-mode",
+        "libra code --env-file",
+        "libra code --stdio",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "code --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
