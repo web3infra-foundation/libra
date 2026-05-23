@@ -44,6 +44,54 @@ pub enum SessionEvent {
     /// `goal_event` payloads via the `parse_session_event_value` `unknown`
     /// branch.
     Goal(GoalEventEnvelope),
+    /// OC-Phase 4 ArtifactLedger JSONL projection (v0.17.810). The
+    /// `phase3.rs::write_validation_report` and
+    /// `phase4.rs::write_decision_proposal` / `write_risk_score_breakdown`
+    /// paths persist artefacts to `ai_validation_report` /
+    /// `ai_decision_proposal` / `ai_risk_score_breakdown` SQLite
+    /// tables; this variant projects the same write into the
+    /// session JSONL stream so a single tail of the session log
+    /// gives an operator the artefact lifecycle without an
+    /// SQLite join.
+    ///
+    /// Forward-compat: older binaries that don't know this kind
+    /// skip the row via the `parse_session_event_value` unknown
+    /// branch. New schema additions ride additively under
+    /// `payload.payload: serde_json::Value` so a future kind
+    /// extension does not break older readers.
+    AiArtifact(AiArtifactEvent),
+}
+
+/// OC-Phase 4 ArtifactLedger JSONL projection envelope (v0.17.810).
+///
+/// One row per Phase 3/Phase 4 artefact write. The payload itself
+/// is a free-form `serde_json::Value` so callers can attach any
+/// future shape (`ValidationReport`, `RiskScoreBreakdown`,
+/// `DecisionProposal`, …) without a SessionEvent enum bump per
+/// artefact kind. Replay code that wants a typed view does the
+/// `serde_json::from_value::<TypedShape>(payload.payload)` deserialise
+/// at the projection layer instead of in the JSONL parser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiArtifactEvent {
+    pub event_id: Uuid,
+    pub recorded_at: DateTime<Utc>,
+    /// Stable thread id the artefact attaches to. Matches the
+    /// `thread_id` column on each persisted artefact row so a
+    /// session JSONL replay can correlate to the SeaORM rows.
+    pub thread_id: Uuid,
+    /// Short tag identifying the artefact kind. Free-form
+    /// snake_case so a future Phase 5 artefact type can land
+    /// without a SessionEvent enum bump.
+    pub artifact_kind: String,
+    /// Optional artefact-specific id (UUID-as-string today). None
+    /// only for kinds that don't carry their own id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    /// Free-form structured payload. Required field — callers
+    /// must supply a `serde_json::Value` (object preferred). An
+    /// empty `Object({})` is acceptable for kinds whose
+    /// `artifact_id` already carries all the signal.
+    pub payload: serde_json::Value,
 }
 
 /// Full session-state snapshot event.
@@ -88,6 +136,10 @@ impl SessionEvent {
         Self::Goal(event)
     }
 
+    pub fn ai_artifact(event: AiArtifactEvent) -> Self {
+        Self::AiArtifact(event)
+    }
+
     pub fn apply_to(&self, current: &mut Option<SessionState>) {
         match self {
             Self::SessionSnapshot(event) => {
@@ -98,11 +150,18 @@ impl SessionEvent {
             // `crate::internal::ai::goal::state::replay`. Listing the
             // variant here makes the no-op explicit so a future
             // maintainer does not assume an oversight.
+            //
+            // AiArtifact envelopes also do not mutate the legacy
+            // `SessionState`; they're a JSONL projection of
+            // Phase 3/Phase 4 SeaORM writes that the artefact
+            // ledger replay reads through a separate projection
+            // (similar to GoalState replay).
             Self::ContextFrame(_)
             | Self::CompactionEvent(_)
             | Self::MemoryAnchor(_)
             | Self::AgentRun(_)
-            | Self::Goal(_) => {}
+            | Self::Goal(_)
+            | Self::AiArtifact(_) => {}
         }
     }
 }
@@ -116,6 +175,7 @@ impl Event for SessionEvent {
             Self::MemoryAnchor(event) => event.event_kind(),
             Self::AgentRun(_) => "agent_run",
             Self::Goal(event) => event.event_kind(),
+            Self::AiArtifact(_) => "ai_artifact",
         }
     }
 
@@ -130,6 +190,7 @@ impl Event for SessionEvent {
                 .map(crate::internal::ai::runtime::Event::event_id)
                 .unwrap_or_else(uuid::Uuid::nil),
             Self::Goal(event) => event.event_id(),
+            Self::AiArtifact(event) => event.event_id,
         }
     }
 
@@ -148,6 +209,12 @@ impl Event for SessionEvent {
                 .map(crate::internal::ai::runtime::Event::event_summary)
                 .unwrap_or_else(|| "unknown agent_run event".to_string()),
             Self::Goal(event) => event.event_summary(),
+            Self::AiArtifact(event) => format!(
+                "ai_artifact {} (thread {}) {}",
+                event.artifact_kind,
+                event.thread_id,
+                event.artifact_id.as_deref().unwrap_or("-")
+            ),
         }
     }
 }
@@ -312,6 +379,12 @@ impl SessionJsonlStore {
                 // the supervisor (P6.3). Listed explicitly so an
                 // exhaustiveness regression surfaces here.
                 SessionEvent::Goal(_) => {}
+                // OC-Phase 4 ArtifactLedger (v0.17.810): AiArtifact
+                // envelopes do not contribute to context replay —
+                // they're a Phase 3/4 SeaORM-write projection that
+                // a future artefact-ledger replay reads through a
+                // separate projection.
+                SessionEvent::AiArtifact(_) => {}
             }
         }
         Ok(replay)
@@ -364,6 +437,10 @@ fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde
         // the event without surfacing an error; this branch lets a
         // P6.1-aware binary parse the envelope into the `Goal` variant.
         "goal" => serde_json::from_value(value).map(Some),
+        // OC-Phase 4 ArtifactLedger (v0.17.810): same
+        // forward-compat shape as `goal` — older binaries skip
+        // the row via the unknown branch.
+        "ai_artifact" => serde_json::from_value(value).map(Some),
         unknown => {
             tracing::warn!(event_kind = unknown, "skipping unknown session event");
             Ok(None)
@@ -380,6 +457,58 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// OC-Phase 4 ArtifactLedger JSONL projection (v0.17.810):
+    /// `SessionEvent::AiArtifact` round-trips through append +
+    /// load_events without losing its payload. Pins the
+    /// kind/payload serde tag/content shape so a future schema
+    /// extension can't accidentally break older readers'
+    /// unknown-event handling.
+    #[test]
+    fn session_event_ai_artifact_round_trips_through_jsonl() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        let event = SessionEvent::ai_artifact(AiArtifactEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            thread_id: Uuid::new_v4(),
+            artifact_kind: "validation_report".to_string(),
+            artifact_id: Some("report-abc".to_string()),
+            payload: serde_json::json!({
+                "policy_version": "v0.17.810",
+                "stale": false,
+                "is_latest": true,
+            }),
+        });
+        store.append(&event).expect("append must succeed");
+
+        let loaded = store.load_events().expect("load must succeed");
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0] {
+            SessionEvent::AiArtifact(actual) => {
+                let SessionEvent::AiArtifact(expected) = &event else {
+                    panic!("test setup broke")
+                };
+                assert_eq!(actual.event_id, expected.event_id);
+                assert_eq!(actual.thread_id, expected.thread_id);
+                assert_eq!(actual.artifact_kind, "validation_report");
+                assert_eq!(actual.artifact_id.as_deref(), Some("report-abc"));
+                assert_eq!(
+                    actual.payload.get("policy_version").and_then(|v| v.as_str()),
+                    Some("v0.17.810"),
+                );
+            }
+            other => panic!("expected AiArtifact, got: {other:?}"),
+        }
+
+        // The Event trait surface (event_kind / event_summary)
+        // returns the new "ai_artifact" tag so observability
+        // tooling can filter at the kind level without
+        // deserialising the payload.
+        use crate::internal::ai::runtime::event::Event;
+        assert_eq!(event.event_kind(), "ai_artifact");
+        assert!(event.event_summary().starts_with("ai_artifact "));
+    }
 
     /// `session_events_path` + `events_path()` must produce
     /// `<root>/events.jsonl`. Pin the layout — the migrator and
