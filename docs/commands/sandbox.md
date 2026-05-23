@@ -99,3 +99,20 @@ Sandbox status
 | `seatbelt_available` | Whether `/usr/bin/sandbox-exec` is executable |
 | `helper_path` | `LIBRA_LINUX_SANDBOX_EXE` path and executable probe result |
 | `warnings` | Downgrade or unsupported-platform diagnostics |
+
+## Examples
+
+```bash
+# Show effective sandbox diagnostics for AI tool execution
+libra sandbox status
+
+# Structured JSON output for agents
+libra sandbox --json status
+
+# Machine-strict JSON (implies --json=ndjson --no-pager --color=never --quiet)
+libra sandbox --machine status
+```
+
+The same banner is rendered by `libra sandbox --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
