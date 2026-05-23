@@ -91,12 +91,12 @@ pub struct ShortlogArgs {
     #[clap(short = 'e', long = "email")]
     pub email: bool,
 
-    /// Show commits more recent than a specific date
-    #[clap(long = "since")]
+    /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+    #[clap(long = "since", value_name = "DATE")]
     pub since: Option<String>,
 
-    /// Show commits older than a specific date
-    #[clap(long = "until")]
+    /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+    #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
 
     /// Revision to summarize. Defaults to HEAD.

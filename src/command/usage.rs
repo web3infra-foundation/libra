@@ -54,17 +54,17 @@ pub enum UsageSubcommand {
         /// Aggregation dimension. Currently only `model` is supported.
         #[arg(long, default_value = "model", value_parser = ["model"])]
         by: String,
-        /// Start time filter. Accepts RFC3339, YYYY-MM-DD, or relative values like 24h/7d.
-        #[arg(long)]
+        /// Start time filter (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+        #[arg(long, value_name = "DATE")]
         since: Option<String>,
-        /// End time filter. Accepts RFC3339, YYYY-MM-DD, or relative values like 1h.
-        #[arg(long)]
+        /// End time filter (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+        #[arg(long, value_name = "DATE")]
         until: Option<String>,
-        /// Restrict report to a session id.
-        #[arg(long)]
+        /// Restrict report to a single provider session id
+        #[arg(long, value_name = "SESSION_ID")]
         session: Option<String>,
-        /// Restrict report to a canonical thread id.
-        #[arg(long)]
+        /// Restrict report to a single canonical Libra Thread UUID
+        #[arg(long, value_name = "THREAD_UUID")]
         thread: Option<String>,
         /// Include failed provider requests in request counts and wall-clock totals.
         #[arg(long)]
