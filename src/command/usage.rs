@@ -34,7 +34,7 @@ EXAMPLES:
     libra usage report --since 24h                      Per-model totals for the last 24 hours
     libra usage report --since 7d --include-failed      Include failed requests in counts/wall-clock
     libra usage report --session <session-id>           Restrict report to one session
-    libra usage report --thread <thread-id>             Restrict report to one canonical thread
+    libra usage report --thread <thread-uuid>           Restrict report to one canonical thread
     libra usage report --format csv                     CSV table for downstream tooling
     libra usage --json report --since 7d                Structured JSON output for agents
     libra usage prune                                   Use the configured retention window

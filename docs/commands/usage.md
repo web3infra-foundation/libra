@@ -119,7 +119,7 @@ libra usage report --since 7d --include-failed
 libra usage report --session <session-id>
 
 # Restrict the report to a single canonical thread
-libra usage report --thread <thread-id>
+libra usage report --thread <thread-uuid>
 
 # CSV table for downstream tooling (spreadsheets, BI dashboards)
 libra usage report --format csv
