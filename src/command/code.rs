@@ -2845,7 +2845,29 @@ where
         );
         AgentsConfig::default()
     });
-    let source_pool = SourcePool::new();
+    // v0.17.804 source_call_log persistence wire-up: build the
+    // pool with the per-session SeaORM connection so every
+    // SourcePool tool call lands a `source_call_log` row. Soft
+    // fallback to `SourcePool::new()` (in-memory only) if the DB
+    // path can't be resolved or the connection fails — same
+    // posture as `build_usage_recorder` further down so session
+    // bootstrap never blocks on a telemetry-layer issue.
+    let source_pool = {
+        let db_path = storage_root.join(DATABASE);
+        let db_path_str = db_path.to_string_lossy();
+        match establish_connection(&db_path_str).await {
+            Ok(conn) => SourcePool::with_persistence(Arc::new(conn)),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    path = %db_path.display(),
+                    "failed to open repo DB for SourcePool persistence; \
+                     falling back to in-memory-only source call log",
+                );
+                SourcePool::new()
+            }
+        }
+    };
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
         params.mcp_server.clone(),

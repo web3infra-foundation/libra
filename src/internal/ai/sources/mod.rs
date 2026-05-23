@@ -707,6 +707,21 @@ impl SourcePool {
         Self::default()
     }
 
+    /// Construct a pool whose `call_log` is wired to persist each
+    /// `SourceCallRecord` to the supplied `DatabaseConnection` via
+    /// the v0.17.800 `source_call_log` migration. See
+    /// [`SourceCallLog::with_persistence`] for the underlying
+    /// semantics; this is the convenience entry the libra-code
+    /// session bootstrap calls so the call_log replaces the
+    /// `Mutex<Vec>` in-memory-only behaviour with the durable
+    /// SeaORM-backed shape (v0.17.804).
+    pub fn with_persistence(db: Arc<sea_orm::DatabaseConnection>) -> Self {
+        Self {
+            registrations: Arc::default(),
+            call_log: SourceCallLog::new().with_persistence(db),
+        }
+    }
+
     pub fn register_source(&self, source: Arc<dyn Source>) -> Result<(), SourcePoolError> {
         let enablement = SourceEnablement::default_for_trust_tier(source.manifest().trust_tier);
         self.register_source_with_enablement(source, enablement)
