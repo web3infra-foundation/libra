@@ -231,9 +231,14 @@ mod tests {
         drop(global_guard);
     }
 
+    /// Per docs/improvement/config.md (12-Factor priority), process env wins
+    /// over the global vault — `DEEPSEEK_API_KEY=B libra ...` is the sacred
+    /// per-invocation override. Global vault is the fallback when env is
+    /// unset. Mirrors v0.17.906's config_test::resolve_env_for_target_process_
+    /// env_overrides_global_vault fix.
     #[test]
     #[serial]
-    fn from_env_prefers_global_vault_over_process_env() {
+    fn from_env_process_env_overrides_global_vault() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let key_guard = TestEnvGuard::set("DEEPSEEK_API_KEY", Some("ds-env-key"));
         let global_dir = tempfile::tempdir().unwrap();
@@ -252,10 +257,17 @@ mod tests {
         ))
         .unwrap();
 
-        let client = Client::from_env().expect("from_env should read Vault before process env");
+        // env wins.
+        let client = Client::from_env().expect("from_env should pick up env DEEPSEEK_API_KEY");
+        assert_eq!(client.provider.api_key(), "ds-env-key");
+
+        // …and vault is the fallback when env is unset.
+        drop(key_guard);
+        let key_unset = TestEnvGuard::set("DEEPSEEK_API_KEY", None);
+        let client = Client::from_env().expect("from_env should fall back to vault");
         assert_eq!(client.provider.api_key(), "ds-vault-key");
 
-        drop(key_guard);
+        drop(key_unset);
         drop(global_guard);
     }
 

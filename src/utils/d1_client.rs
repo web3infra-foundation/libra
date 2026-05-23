@@ -1981,12 +1981,14 @@ mod tests {
         assert_eq!(client.database_id, "db-from-config");
     }
 
-    /// Scenario: D1 credentials are security-sensitive. If both Vault and the
-    /// process environment provide values, the client must use Vault so shell
-    /// state cannot override the configured account/token/database selection.
+    /// Scenario: D1 credentials follow the same priority chain as the rest of
+    /// the secret surface (docs/improvement/config.md 12-Factor rule):
+    /// process env > local vault > global vault. Local vault is the fallback
+    /// when env is unset. Mirrors v0.17.906's resolve_env_for_target_process_
+    /// env_overrides_local_vault fix.
     #[test]
     #[serial]
-    fn d1_client_from_env_prefers_local_config_over_process_env() {
+    fn d1_client_from_env_process_env_overrides_local_config() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let repo = tempdir().unwrap();
         rt.block_on(setup_with_new_libra_in(repo.path()));
@@ -2011,9 +2013,24 @@ mod tests {
                 .unwrap();
         });
 
+        // env wins.
         let client = rt
             .block_on(D1Client::from_env())
-            .expect("local config values should take priority over env");
+            .expect("D1Client::from_env should pick up env values when present");
+        assert_eq!(client.account_id, "account-from-env");
+        assert_eq!(client.api_token, "token-from-env");
+        assert_eq!(client.database_id, "db-from-env");
+
+        // …and vault is the fallback when env is unset.
+        drop(_account);
+        drop(_token);
+        drop(_database);
+        let _account = ClearedEnvVarGuard::new("LIBRA_D1_ACCOUNT_ID");
+        let _token = ClearedEnvVarGuard::new("LIBRA_D1_API_TOKEN");
+        let _database = ClearedEnvVarGuard::new("LIBRA_D1_DATABASE_ID");
+        let client = rt
+            .block_on(D1Client::from_env())
+            .expect("D1Client::from_env should fall back to vault");
         assert_eq!(client.account_id, "account-from-config");
         assert_eq!(client.api_token, "token-from-config");
         assert_eq!(client.database_id, "db-from-config");
