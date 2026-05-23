@@ -19,7 +19,8 @@
 
 ## 当前未完成
 
-- 仍有 `--onto` / interactive / autosquash / exec / rebase-merges 等历史 git 功能未纳入；本次范围聚焦于结构化输出与状态机收口。
+- 本计划范围内的项目已全部收口；结构化输出、JSON/machine envelope、稳定错误码、replay 内部失败分类、`--abort/--continue/--skip` 状态机均已落地（详见上面"当前已落地"列表）。
+- `--onto` / interactive / autosquash / exec / rebase-merges 等历史 git 功能列在下面"非目标"段，是本计划**显式不实现**的范围，不算未完成项。
 
 ## 后续切片建议
 
