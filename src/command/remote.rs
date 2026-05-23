@@ -107,12 +107,9 @@ pub enum RemoteCmds {
     List,
     /// List configured remote names
     Show,
-    /// Print URLs for the given remote
+    /// Print URLs for the given remote.
     ///
-    /// Examples:
-    /// `libra remote get-url origin` - print the fetch URL (first)
-    /// `libra remote get-url --push origin` - print push URLs
-    /// `libra remote get-url --all origin` - print all configured URLs
+    /// Examples:{n}{n}  libra remote get-url origin              # print the fetch URL (first){n}  libra remote get-url --push origin       # print push URLs{n}  libra remote get-url --all origin        # print all configured URLs
     GetUrl {
         /// Print push URLs instead of fetch URL
         #[arg(long)]
@@ -123,13 +120,9 @@ pub enum RemoteCmds {
         /// Remote name
         name: String,
     },
-    /// Set or modify URLs for the given remote
+    /// Set or modify URLs for the given remote.
     ///
-    /// Examples:
-    /// `libra remote set-url origin newurl` - replace first url
-    /// `libra remote set-url --all origin newurl` - replace all urls
-    /// `libra remote set-url --add origin newurl` - add a new url
-    /// `libra remote set-url --delete origin urlpattern` - delete matching url(s)
+    /// Examples:{n}{n}  libra remote set-url origin newurl              # replace first url{n}  libra remote set-url --all origin newurl        # replace all urls{n}  libra remote set-url --add origin newurl        # add a new url{n}  libra remote set-url --delete origin urlpattern # delete matching url(s)
     SetUrl {
         /// Add the new URL instead of replacing
         #[arg(long)]
@@ -149,11 +142,9 @@ pub enum RemoteCmds {
         value: String,
     },
 
-    /// Delete stale remote-tracking branches
+    /// Delete stale remote-tracking branches.
     ///
-    /// Examples:
-    /// `libra remote prune origin` - prune stale branches for origin
-    /// `libra remote prune --dry-run origin` - preview what would be pruned
+    /// Examples:{n}{n}  libra remote prune origin              # prune stale branches for origin{n}  libra remote prune --dry-run origin   # preview what would be pruned
     Prune {
         /// Remote name
         name: String,
