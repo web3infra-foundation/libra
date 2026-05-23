@@ -23,11 +23,21 @@ Your contributions are highly appreciated. Feel free to ask any questions if you
 
 To comply with the requirements, contributors must include both a `Signed-off-by` line and a PGP signature in their commit messages. You can find more information about how to generate a PGP key [here](https://docs.github.com/en/github/authenticating-to-github/managing-commit-signature-verification/generating-a-new-gpg-key).
 
-Git even has a `-s` command line option to append this automatically to your commit message, and `-S` to sign your commit with your PGP key. For example:
+Both `libra` and `git` accept a `-s` command line option that appends the
+`Signed-off-by` trailer automatically, and a `-S` (or vault-managed identity
+configured via `libra config`) that signs the commit. For example:
 
 ```bash
+# With Libra (recommended — Libra-managed vault signing identity)
+$ libra commit -s -m 'This is my commit message'
+
+# With Git (Git-managed PGP key)
 $ git commit -S -s -m 'This is my commit message'
 ```
+
+Libra commits are vault-signed by default once `vault.signing=true` is
+configured. See [config.md](commands/config.md) for vault key generation
+and identity selection.
 
 ### Rebase the branch
 
