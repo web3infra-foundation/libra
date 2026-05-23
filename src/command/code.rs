@@ -466,13 +466,12 @@ pub struct CodeArgs {
     #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
-    /// Working directory for the code session.
-    #[arg(long)]
+    /// Working directory for the code session (default: current directory)
+    #[arg(long, value_name = "PATH")]
     pub cwd: Option<PathBuf>,
 
-    /// Path to a libra repository. When specified, the code session uses this
-    /// repository instead of discovering one from the current working directory.
-    #[arg(long)]
+    /// Path to a Libra repository (default: discover from current directory)
+    #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 
     /// Load provider environment variables from a dotenv-style file.
@@ -498,12 +497,12 @@ pub struct CodeArgs {
     #[arg(long = "browser-control", value_enum, conflicts_with = "stdio")]
     pub browser_control: Option<BrowserControlMode>,
 
-    /// Path to the local automation control token file.
-    #[arg(long)]
+    /// Path to the local automation control token file
+    #[arg(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 
-    /// Path to the local automation control discovery info file.
-    #[arg(long)]
+    /// Path to the local automation control discovery info file
+    #[arg(long, value_name = "PATH")]
     pub control_info_file: Option<PathBuf>,
 
     /// AI provider backend
@@ -514,8 +513,8 @@ pub struct CodeArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Sampling temperature
-    #[arg(long)]
+    /// Sampling temperature (provider-specific range, typically 0.0–2.0)
+    #[arg(long, value_name = "FLOAT")]
     pub temperature: Option<f64>,
 
     /// Ollama thinking mode: auto, off, on, low, medium, or high.
@@ -568,8 +567,8 @@ pub struct CodeArgs {
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
 
-    /// Resume a canonical Libra thread by thread_id.
-    #[arg(long, value_name = "THREAD_ID")]
+    /// Resume a canonical Libra thread by UUID
+    #[arg(long, value_name = "THREAD_UUID")]
     pub resume: Option<String>,
 
     /// Tool approval policy:
@@ -589,8 +588,8 @@ pub struct CodeArgs {
     #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
     pub network_access: CodeNetworkAccess,
 
-    /// Port to listen on (MCP server)
-    #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
+    /// Port for the embedded MCP server to listen on
+    #[arg(long, value_name = "PORT", default_value_t = DEFAULT_MCP_PORT)]
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
@@ -602,15 +601,15 @@ pub struct CodeArgs {
     /// For Ollama, use a local/remote daemon URL such as
     /// `http://remote-host:11434/v1`, or `https://ollama.com` for direct
     /// Ollama Cloud API access with `OLLAMA_API_KEY`.
-    #[arg(long)]
+    #[arg(long, value_name = "URL")]
     pub api_base: Option<String>,
 
-    /// Codex executable used to launch the managed app-server.
-    #[arg(long, default_value = DEFAULT_CODEX_BIN)]
+    /// Codex executable used to launch the managed app-server
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_CODEX_BIN)]
     pub codex_bin: String,
 
-    /// Override the Codex app-server port. Omit to use a random local free port.
-    #[arg(long)]
+    /// Override the Codex app-server port (default: random local free port)
+    #[arg(long, value_name = "PORT")]
     pub codex_port: Option<u16>,
 
     /// Codex plan-first mode: require an approved plan before execution.
