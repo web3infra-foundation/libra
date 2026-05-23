@@ -141,6 +141,37 @@ fn is_positional_line(line: &str) -> bool {
     trimmed.starts_with('[') || trimmed.starts_with('<')
 }
 
+/// Returns true if `tail` is *only* a clap-generated annotation such
+/// as `[default: ...]`, `[possible values: ...]`, `[aliases: ...]` —
+/// none of which describe what the flag actually does. We treat these
+/// as "no description" so the guard catches `[REPO_DIRECTORY]  [default: .]`
+/// (init's positional argument prior to v0.17.891).
+fn is_only_clap_annotation(tail: &str) -> bool {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut rest = trimmed;
+    while !rest.is_empty() {
+        if !rest.starts_with('[') {
+            return false;
+        }
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let body = &rest[1..end];
+        let kind = body.split(':').next().unwrap_or("").trim();
+        if !matches!(
+            kind,
+            "default" | "possible values" | "aliases" | "alias" | "env"
+        ) {
+            return false;
+        }
+        rest = rest[end + 1..].trim_start();
+    }
+    true
+}
+
 fn entry_has_inline_or_next_line_description(
     lines: &[&str],
     i: usize,
@@ -151,10 +182,10 @@ fn entry_has_inline_or_next_line_description(
     let after_entry = trimmed.trim_start_matches([' ']);
     let two_space = after_entry.find("  ");
     let has_inline_desc = match two_space {
-        Some(pos) => after_entry[pos..]
-            .trim()
-            .chars()
-            .any(|c| !c.is_whitespace()),
+        Some(pos) => {
+            let tail = &after_entry[pos..];
+            tail.trim().chars().any(|c| !c.is_whitespace()) && !is_only_clap_annotation(tail)
+        }
         None => false,
     };
     if has_inline_desc {

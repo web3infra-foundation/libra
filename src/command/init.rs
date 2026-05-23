@@ -263,6 +263,7 @@ pub struct InitArgs {
     #[clap(short = 'b', long, required = false)]
     pub initial_branch: Option<String>,
 
+    /// Directory in which to create the new `.libra` repository (default: current directory)
     #[clap(default_value = ".")]
     pub repo_directory: String,
 

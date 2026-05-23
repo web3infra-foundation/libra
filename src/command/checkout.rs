@@ -41,7 +41,7 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
-    /// Target branch name
+    /// Target branch, commit, or tag to check out (prefer `libra switch` for branches)
     branch: Option<String>,
 
     /// Create and switch to a new branch with the same content as the current branch
