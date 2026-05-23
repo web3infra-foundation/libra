@@ -107,7 +107,10 @@ impl Client {
     /// Creates a DeepSeek client from Vault or environment variables.
     ///
     /// Reads `vault.env.DEEPSEEK_API_KEY` first, then `DEEPSEEK_API_KEY`, and
-    /// uses the default base URL (`https://api.deepseek.com`).
+    /// uses the default base URL (`https://api.deepseek.com`). DeepSeek does
+    /// **not** honor a `DEEPSEEK_BASE_URL` env var; override the endpoint via
+    /// [`Client::with_base_url`] or the `--api-base` CLI flag (which routes
+    /// through `ProviderBuildOptions::api_base` in `providers::factory`).
     ///
     /// New call sites should prefer [`Client::from_resolved_env`], which
     /// performs the same lookup chain asynchronously and accepts an
