@@ -196,13 +196,14 @@ Gate tests with the `require_env!` macro — missing vars print "skipped", never
 ## Testing Guidelines
 
 - **Integration tests** in `tests/command/` mirror real Git workflows; prefer these for new commands
-- **Compatibility-surface tests** in `tests/compat/` guard against regressions in CLI flag/help wording, declined-feature drift, and the production `unwrap()` audit. Each `*.rs` under `tests/compat/` must be registered as a `[[test]]` entry in `Cargo.toml` (Cargo's default discovery only picks up files directly under `tests/`)
+- **Compatibility-surface tests** in `tests/compat/` guard against regressions in CLI flag/help wording, declined-feature drift, and the production `unwrap()` audit. Each `*.rs` under `tests/compat/` must be registered as a `[[test]]` entry in `Cargo.toml` (Cargo's default discovery only picks up files directly under `tests/`). New compat guards must also add a row to the inventory table in [`tests/compat/README.md`](tests/compat/README.md). See [`docs/tests.md`](docs/tests.md) `Compatibility-surface tests` section for the full convention.
+- **Cross-cutting `--help` EXAMPLES contract**: every visible command in `src/cli.rs::Commands` ships with a `pub const <CMD>_EXAMPLES` constant wired via `#[command(after_help = …)]` (or `after_help = command::<name>::<CMD>_EXAMPLES` on the parent subcommand binding in `cli.rs` for `Subcommand`-style commands). Three compat guards protect this contract: `compat_help_examples_banner` (every `<cmd> --help` renders an EXAMPLES section), `cli::tests::root_after_help_lists_every_visible_command` (every non-hidden command appears in a Command Groups row), and `compat_command_docs_examples_section` (every `docs/commands/<name>.md` page carries an Examples / Common Commands heading). New commands must satisfy all three.
 - **Isolation**: Use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state
 - **Serial execution**: Mark tests `#[serial]` (from `serial_test` crate) if they mutate shared state
 - **Async tests**: Use `#[tokio::test]` (or `flavor = "multi_thread"` when needed)
 - **Fixtures**: Keep small and local in `tests/data/` and `tests/fixtures/`; reuse helpers from `tests/command/mod.rs`, `tests/harness/`, and `tests/helpers/`
 - **Gating**: Use the `require_env!` macro for tests that need network or credentials so missing vars skip cleanly. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
-- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface
+- **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface. New `StableErrorCode` variants must also be added to `docs/error-codes.md` (the `compat_error_codes_doc_sync` guard fails the build otherwise).
 
 ## Commit & PR Conventions
 
