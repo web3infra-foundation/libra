@@ -271,7 +271,7 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 | `gemini` | `GEMINI_API_KEY` | — |
 | `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | `DEEPSEEK_API_KEY` | — |
+| `deepseek` | `DEEPSEEK_API_KEY` | `--api-base` only (no env var) |
 | `kimi` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` |
 | `zhipu` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | — | `OLLAMA_BASE_URL` or `--api-base` |
