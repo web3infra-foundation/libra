@@ -137,17 +137,17 @@ pub struct LogArgs {
     /// Show names and status of changed files
     #[clap(long)]
     pub name_status: bool,
-    /// Filter commits by author name or email
-    #[clap(long)]
+    /// Filter commits by author name or email (case-insensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
     pub author: Option<String>,
-    /// Show commits more recent than a specific date
-    #[clap(long)]
+    /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+    #[clap(long, value_name = "DATE")]
     pub since: Option<String>,
-    /// Show commits older than a specific date
-    #[clap(long)]
+    /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+    #[clap(long, value_name = "DATE")]
     pub until: Option<String>,
-    /// Custom pretty format (e.g. `%h - %s`)
-    #[clap(long)]
+    /// Custom pretty format string (e.g. `%h - %s`)
+    #[clap(long, value_name = "FORMAT")]
     pub pretty: Option<String>,
     /// Print out ref names of any commits that are shown
     #[clap(
@@ -171,8 +171,8 @@ pub struct LogArgs {
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 
-    /// Filter commits by message content (case-sensitive substring match)
-    #[clap(long)]
+    /// Filter commits whose message contains PATTERN (case-sensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
 }
 
