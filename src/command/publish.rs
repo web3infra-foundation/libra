@@ -139,41 +139,35 @@ pub struct InitArgs {
     #[arg(long)]
     pub slug: Option<String>,
 
-    /// Public clone domain, e.g. `code.example.com`.
-    #[arg(long)]
+    /// Public clone domain (e.g. `code.example.com`)
+    #[arg(long, value_name = "DOMAIN")]
     pub clone_domain: Option<String>,
 
-    /// Browser-facing origin URL, e.g. `https://code.example.com`.
-    /// Codex pass-8 P2: documented in publish.md / docs/commands.
-    #[arg(long)]
+    /// Browser-facing origin URL (e.g. `https://code.example.com`)
+    #[arg(long, value_name = "URL")]
     pub display_origin: Option<String>,
 
-    /// Display name shown in the Worker UI header.
-    /// Codex pass-8 P2: documented in publish.md / docs/commands.
-    #[arg(long)]
+    /// Display name shown in the Worker UI header
+    #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
-    /// `public` (browser-readable) or `private` (Cloudflare Access).
-    #[arg(long)]
+    /// Site visibility: `public` (browser-readable) or `private` (Cloudflare Access)
+    #[arg(long, value_name = "MODE")]
     pub visibility: Option<String>,
 
-    /// Worker name; defaults to `libra-publish`.
-    #[arg(long)]
+    /// Cloudflare Worker name (default: `libra-publish`)
+    #[arg(long, value_name = "NAME")]
     pub worker_name: Option<String>,
 
-    /// Per-file preview cap in bytes. Files larger than this fall
-    /// back to metadata-only. Must be positive — pass `0` is rejected
-    /// because a zero cap defeats the purpose of code-preview
-    /// publishing. Codex pass-8 P2 + pass-9 P2: documented flag with
-    /// clap-side `> 0` validation.
-    #[arg(long, value_parser = parse_max_preview_bytes)]
+    /// Per-file preview cap in bytes. Files larger than this fall back to metadata-only. Must be > 0 — passing `0` is rejected because a zero cap defeats the purpose of code-preview publishing
+    #[arg(long, value_name = "BYTES", value_parser = parse_max_preview_bytes)]
     pub max_preview_bytes: Option<u64>,
 }
 
 #[derive(Parser, Debug)]
 pub struct SyncArgs {
-    /// Sync only the named ref (`refs/heads/main` or `main`).
-    #[arg(long)]
+    /// Sync only the named ref (e.g. `refs/heads/main` or `main`)
+    #[arg(long, value_name = "REF")]
     pub r#ref: Option<String>,
 
     /// Print the plan without writing to D1/R2.
@@ -184,19 +178,15 @@ pub struct SyncArgs {
     #[arg(long)]
     pub fail_on_dirty: bool,
 
-    /// Redaction policy: `default` or `strict`.
-    #[arg(long, default_value = "default")]
+    /// AI snapshot redaction policy: `default` or `strict`
+    #[arg(long, value_name = "POLICY", default_value = "default")]
     pub ai_redaction: String,
 
-    /// Allow a path that the deny list would normally block. Only
-    /// honored on `private` sites. Codex pass-8 P2: documented in
-    /// publish.md `.librapublishignore` section.
-    #[arg(long, value_name = "path")]
+    /// Allow a path that the deny list would normally block. Only honored on `private` sites
+    #[arg(long, value_name = "PATH")]
     pub allow_sensitive_path: Vec<String>,
 
-    /// Force re-upload of every file/object even if `is_synced`
-    /// is set. Codex pass-8 P2: documented in publish.md hardening
-    /// criteria for the CAS latest-revision conflict path.
+    /// Force re-upload of every file/object even if `is_synced` is set
     #[arg(long)]
     pub force: bool,
 }

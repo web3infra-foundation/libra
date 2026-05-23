@@ -135,6 +135,14 @@ const FORBIDDEN_PHRASES: &[(&str, &str)] = &[
          (e.g. WorktreeArgs). Either rewrite the docstring as user- \
          facing prose or set `#[command(long_about = \"…\")]`.",
     ),
+    (
+        "Codex pass-",
+        "contributor pass-tag (e.g. 'Codex pass-8 P2: documented in \
+         publish.md / docs/commands') leaked from a `///` doc comment \
+         into the user-facing flag description. Move the tag to a `//` \
+         non-doc comment so clap stops rendering it — see \
+         src/command/publish.rs for the v0.17.901 cleanup pattern.",
+    ),
 ];
 
 #[test]
