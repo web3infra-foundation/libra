@@ -39,7 +39,8 @@ fn test_agent_help_lists_examples_banner() {
         "libra agent doctor",
         "libra agent push",
         "libra agent push --remote origin",
-        "libra agent rpc",
+        "libra agent rpc list",
+        "libra agent rpc invoke",
         "libra agent --json status",
     ] {
         assert!(

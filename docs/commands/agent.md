@@ -111,8 +111,11 @@ libra agent push
 # Push refs/libra/agent-traces to a named remote
 libra agent push --remote origin
 
-# Invoke an external libra-agent-<name> RPC binary
-libra agent rpc <name> <method> [args...]
+# Discover libra-agent-<name> RPC binaries on PATH
+libra agent rpc list
+
+# Invoke a single JSON-RPC method on a libra-agent-<slug> binary
+libra agent rpc invoke <slug> <method> --params '<json>'
 
 # Structured JSON envelope for agents
 libra agent --json status

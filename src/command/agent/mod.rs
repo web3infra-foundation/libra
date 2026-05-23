@@ -57,7 +57,8 @@ EXAMPLES:
     libra agent doctor                              Diagnose hook installation and capture state
     libra agent push                                Push refs/libra/agent-traces to the default remote
     libra agent push --remote origin                Push refs/libra/agent-traces to a named remote
-    libra agent rpc <name> <method> [args...]       Invoke an external libra-agent-<name> RPC binary
+    libra agent rpc list                            Discover libra-agent-<name> RPC binaries on PATH
+    libra agent rpc invoke <slug> <method>          Invoke a single JSON-RPC method (use --params '<json>' for arguments)
     libra agent --json status                       Structured JSON output for agents";
 
 #[derive(Args, Debug)]
