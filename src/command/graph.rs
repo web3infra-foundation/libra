@@ -113,8 +113,23 @@ fn status_for_event_kind(event_kind: &str) -> Option<StatusInfo> {
     }
 }
 
+/// `--help` examples shown in `libra graph --help` output.
+///
+/// `graph` renders the version-graph for a canonical Libra Thread ID
+/// (UUID). The banner pins the default invocation, the `--repo` override
+/// for running outside the current repository, and a JSON variant for
+/// agents so users see all supported forms without reading the design
+/// doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const GRAPH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra graph <thread-uuid>                          Render the version-graph for a thread ID
+    libra graph <thread-uuid> --repo /path/to/repo     Inspect a graph in another Libra repository
+    libra graph --json <thread-uuid>                   Structured JSON output for agents";
+
 /// Command-line arguments for `libra graph`.
 #[derive(Parser, Debug)]
+#[command(after_help = GRAPH_EXAMPLES)]
 pub struct GraphArgs {
     /// Canonical Libra Thread ID to inspect.
     pub thread_id: String,
