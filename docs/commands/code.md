@@ -187,6 +187,18 @@ libra code --provider anthropic --model claude-sonnet-4-20250514
 # Bind web-only on all interfaces; remote browsers see a loopback-only notice
 libra code --web-only --port 8080 --host 0.0.0.0
 
+# Browser-driven session against a local Ollama
+libra code --web-only --provider ollama --port 4400
+
+# Allow browser write control over loopback (Codex web-only is loopback by default)
+libra code --web-only --provider codex --browser-control loopback
+
+# Local TUI automation control mode (writes token + lease discovery files)
+libra code --control automation
+
+# Load provider keys from a dotenv-style file (overrides stale shell env vars)
+libra code --env-file .env.test
+
 # Run MCP over stdio for Claude Desktop integration
 libra code --stdio
 
