@@ -251,6 +251,29 @@ fn test_branch_force_delete_outputs_confirmation() {
     );
 }
 
+/// Scenario: `libra branch --help` must render the `--set-upstream-to` doc
+/// in a readable form. Previously the doc comment carried garbled
+/// backtick/angle-bracket escaping (`\`branchname\`>\`'s tracking …`)
+/// which leaked verbatim into the help text. This guard pins the cleaned
+/// wording and prevents the bad pattern from re-appearing.
+#[test]
+fn test_branch_set_upstream_help_is_readable() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["branch", "--help"], repo.path());
+    assert_cli_success(&output, "branch --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("`>`'s"),
+        "branch --help still contains garbled doc fragment `>`'s — see \
+         src/command/branch.rs::set_upstream_to docstring. Got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("tracking information"),
+        "branch --help missing readable --set-upstream-to description. Got:\n{stdout}"
+    );
+}
+
 /// Scenario: in-process happy path for branch creation:
 /// 1. Two empty commits on `main` produce two distinct commit hashes.
 /// 2. Creating `first_branch` at the older hash must record that hash.

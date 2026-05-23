@@ -175,8 +175,8 @@ pub struct BranchArgs {
     #[clap(short = 'd', long = "delete", group = "action")]
     pub delete_safe: Option<String>,
 
-    ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
-    #[clap(short = 'u', long, group = "action")]
+    /// Set up the branch's tracking information so `upstream` is considered its upstream branch.
+    #[clap(short = 'u', long, group = "action", value_name = "UPSTREAM")]
     pub set_upstream_to: Option<String>,
 
     /// show current branch
