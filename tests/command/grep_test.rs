@@ -585,3 +585,41 @@ async fn test_grep_all_match_is_based_on_positive_pattern_presence_even_with_inv
         .collect();
     assert!(paths.iter().all(|path| *path == "both.txt"));
 }
+
+/// `libra grep --help` surfaces the EXAMPLES banner so users see the
+/// canonical invocations (regex vs literal, multi-pattern, --cached,
+/// --tree REV, count, filename listing, --json) without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_grep_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for grep --help");
+    let output = run_libra_command(&["grep", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "grep --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "grep --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra grep 'TODO'",
+        "libra grep -F 'fn foo()'",
+        "libra grep -i 'panic'",
+        "libra grep -n 'TODO' src/",
+        "libra grep -c 'unsafe' src/",
+        "libra grep -l 'unwrap()' src/",
+        "libra grep -e 'TODO' -e 'FIXME'",
+        "libra grep --cached 'TODO'",
+        "libra grep --tree HEAD~5 'TODO'",
+        "libra grep --json 'TODO'",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "grep --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

@@ -32,8 +32,31 @@ enum GrepReadError {
     Fatal(String),
 }
 
+/// `--help` examples shown in `libra grep --help` output.
+///
+/// `grep` searches tracked files in the working tree, index, or a
+/// revision tree. The banner pins the most common invocations
+/// (literal vs regex pattern, multi-pattern, `--cached` index search,
+/// `--tree REV` historical search, count, filename listing, line
+/// numbers, JSON for agents) so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const GREP_EXAMPLES: &str = "\
+EXAMPLES:
+    libra grep 'TODO'                     Search the working tree for the regex 'TODO'
+    libra grep -F 'fn foo()'              Treat the pattern as a literal string
+    libra grep -i 'panic'                 Case-insensitive search
+    libra grep -n 'TODO' src/             Show 1-based line numbers, restricted to src/
+    libra grep -c 'unsafe' src/           Per-file match counts
+    libra grep -l 'unwrap()' src/         Just the filenames that have matches
+    libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
+    libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
+    libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
+    libra grep --json 'TODO'              Structured JSON output for agents";
+
 /// Search for patterns in tracked files in the working tree, index, or commit trees.
 #[derive(Parser, Debug)]
+#[command(after_help = GREP_EXAMPLES)]
 pub struct GrepArgs {
     /// The pattern to search for. Supports regular expressions by default.
     #[clap(value_name = "PATTERN", required_unless_present_any = ["regexp", "pattern_file"])]
