@@ -123,16 +123,17 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
 
     // Rolling back to before agent_capture also rolls back every migration
     // sitting on top of it (parent_commit nullable, approved_permission,
-    // agent_usage_stats agent_name column). Rollback returns versions in
-    // reverse-application order — newest first — so the list reads from
-    // the most recent built-in migration down to the agent_capture itself.
+    // agent_usage_stats agent_name column, source_call_log). Rollback
+    // returns versions in reverse-application order — newest first — so the
+    // list reads from the most recent built-in migration down to
+    // agent_capture itself.
     let rolled_back = runner
         .rollback_to(&conn, 2026050302)
         .await
         .expect("rollback_to(2026050302)");
     assert_eq!(
         rolled_back,
-        vec![2026050801, 2026050601, 2026050501, 2026050303]
+        vec![2026052301, 2026050801, 2026050601, 2026050501, 2026050303]
     );
 
     // agent_capture artifacts gone.

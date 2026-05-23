@@ -42,7 +42,7 @@
 | `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
 | [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
 | `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | ✅ 已落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)）；`branch`（create / delete / rename）、`switch`（create）已直接检查；`restore` 通过 [restore.rs:198-202](../../src/command/restore.rs) 调用 `is_locked_revision` 拒绝 `agent-traces` / `agent-traces~1` 等所有源 revision，`reset` 通过 [reset.rs:335](../../src/command/reset.rs) 同样拒绝 `agent-traces` / `agent-traces^` 等所有目标 revision。回归覆盖：[tests/command/restore_test.rs:305](../../tests/command/restore_test.rs)（`--source agent-traces~1`）+ [tests/command/reset_test.rs:207/339](../../tests/command/reset_test.rs) |
-| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部六个迁移（`2026050301`..`2026050801`）；新增迁移仍需同步更新这三处断言 |
+| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部七个迁移（`2026050301`..`2026052301`，含 v0.17.800 source_call_log）；新增迁移仍需同步更新这三处断言 |
 
 ---
 
@@ -229,9 +229,9 @@ pub fn builtin_migrations() -> Vec<Migration> {
 ### 4.4 测试覆盖
 
 修改 [`tests/db_migration_test.rs`](../../tests/db_migration_test.rs)：
-- 第 47-63 行：`vec![2026050301, …, 2026050801]` / `vec!["automation_log", …, "agent_usage_stats_agent_name"]`
-- 第 68 行：`max_registered_version() == Some(2026050801)`
-- 第 1040 行：`applied == vec![2026050301, …, 2026050801]`
+- 第 47-63 行：`vec![2026050301, …, 2026052301]` / `vec!["automation_log", …, "source_call_log"]`
+- 第 68 行：`max_registered_version() == Some(2026052301)`
+- 第 1040 行：`applied == vec![2026050301, …, 2026052301]`
 - 新增断言：`table_exists(&conn, "agent_session").await` 与 `table_exists(&conn, "agent_checkpoint").await`
 
 新增 [`tests/agent_capture_migration_test.rs`](../../tests/agent_capture_migration_test.rs)：
@@ -751,7 +751,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
-| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部六个迁移版本（`2026050301..2026050801`）与对应表名 |
+| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部七个迁移版本（`2026050301..2026052301`，含 v0.17.800 source_call_log）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
 | `Cargo.toml` | 如需 `regex`、`once_cell`、`fs2` 等新依赖在此声明 |
 

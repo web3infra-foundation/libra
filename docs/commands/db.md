@@ -32,13 +32,13 @@ pending migrations.
 Human `upgrade` output reports whether any migrations were applied:
 
 ```text
-Upgraded repository database schema from 2026050601 to 2026050801 (applied: 2026050801).
+Upgraded repository database schema from 2026050801 to 2026052301 (applied: 2026052301).
 ```
 
 If no migrations are pending:
 
 ```text
-Repository database schema is up to date (version 2026050801).
+Repository database schema is up to date (version 2026052301).
 ```
 
 With `--json`, `db upgrade` emits:
@@ -48,10 +48,10 @@ With `--json`, `db upgrade` emits:
   "ok": true,
   "command": "db.upgrade",
   "data": {
-    "previous_version": 2026050601,
-    "current_version": 2026050801,
-    "latest_version": 2026050801,
-    "applied_versions": [2026050801],
+    "previous_version": 2026050801,
+    "current_version": 2026052301,
+    "latest_version": 2026052301,
+    "applied_versions": [2026052301],
     "upgraded": true
   }
 }
