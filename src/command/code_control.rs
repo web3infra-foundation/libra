@@ -49,8 +49,8 @@ pub struct CodeControlArgs {
     /// Base URL from `.libra/code/control.json`, e.g. http://127.0.0.1:3000.
     #[arg(long)]
     pub url: String,
-    /// Path to the local process-level control token file.
-    #[arg(long)]
+    /// Path to the local process-level control token file
+    #[arg(long, value_name = "PATH")]
     pub token_file: PathBuf,
 }
 

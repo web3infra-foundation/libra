@@ -56,19 +56,20 @@ pub enum AutomationSubcommand {
     List,
     /// Run due cron rules, or one named rule.
     Run {
-        /// Run one rule regardless of whether its cron trigger is due.
-        #[arg(long)]
+        /// Run one rule by name regardless of whether its cron trigger is due
+        #[arg(long, value_name = "NAME")]
         rule: Option<String>,
-        /// Simulated current time as RFC3339. Defaults to now.
-        #[arg(long)]
+        /// Simulated current time as RFC3339 (default: actual now)
+        #[arg(long, value_name = "DATE")]
         now: Option<String>,
-        /// Actually spawn shell actions that pass safety preflight.
+        /// Actually spawn shell actions that pass safety preflight
         #[arg(long)]
         live: bool,
     },
     /// Show recent automation history rows.
     History {
-        #[arg(long, default_value_t = 20)]
+        /// Maximum number of history rows to return (default: 20)
+        #[arg(long, value_name = "N", default_value_t = 20)]
         limit: u64,
     },
 }

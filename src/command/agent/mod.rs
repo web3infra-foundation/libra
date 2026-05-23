@@ -121,6 +121,7 @@ pub struct EnableArgs {
 
 #[derive(Args, Debug)]
 pub struct DisableArgs {
+    /// One or more agent names to disable. Empty means "all stable agents"
     #[arg(long = "agent", value_name = "NAME")]
     pub agents: Vec<String>,
 }
@@ -138,6 +139,7 @@ pub struct DoctorArgs {}
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
+    /// Remote name to push refs/libra/agent-traces to (default: origin)
     #[arg(long, value_name = "NAME")]
     pub remote: Option<String>,
 }

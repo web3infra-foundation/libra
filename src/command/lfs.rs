@@ -57,16 +57,25 @@ EXAMPLES:
 #[derive(Subcommand, Debug)]
 pub enum LfsCmds {
     /// View or add LFS paths to Libra Attributes (root)
-    Track { pattern: Option<Vec<String>> },
+    Track {
+        /// One or more glob patterns to mark as LFS-tracked (e.g. `*.bin`). Omit to list current patterns
+        pattern: Option<Vec<String>>,
+    },
     /// Remove LFS paths from Libra Attributes
-    Untrack { path: Vec<String> },
+    Untrack {
+        /// One or more glob patterns to remove from `.libraattributes`
+        path: Vec<String>,
+    },
     /// Lists currently locked files from the Libra LFS server. (Current Branch)
     Locks {
-        #[clap(long, short)]
+        /// Filter to a single lock id
+        #[clap(long, short, value_name = "ID")]
         id: Option<String>,
-        #[clap(long, short)]
+        /// Filter locks to a specific repository-relative path
+        #[clap(long, short, value_name = "PATH")]
         path: Option<String>,
-        #[clap(long, short)]
+        /// Maximum number of locks to return
+        #[clap(long, short, value_name = "N")]
         limit: Option<u64>,
     },
     /// Set a file as "locked" on the Libra LFS server
@@ -76,10 +85,13 @@ pub enum LfsCmds {
     },
     /// Remove "locked" setting for a file on the Libra LFS server
     Unlock {
+        /// Repository-relative path of the file to unlock
         path: String,
+        /// Force-release a lock you do not own (requires server-side permission)
         #[clap(long, short)]
         force: bool,
-        #[clap(long, short)]
+        /// Unlock by lock id instead of by path
+        #[clap(long, short, value_name = "ID")]
         id: Option<String>,
     },
     /// Show information about Libra LFS files in the index and working tree (current branch)
