@@ -293,9 +293,17 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 - `LIBRA_SSH_COMMAND`, `LIBRA_SSH_STRICT_HOST_KEY_CHECKING` — SSH protocol tuning
 - `LIBRA_CODE_LEASE_DURATION_MS` — `libra code` automation lease length
 - `LIBRA_SANDBOX_ENFORCEMENT`, `LIBRA_SANDBOX_NETWORK_DISABLED`, `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — sandbox toggles (`docs/improvement/sandbox.md`)
-- `LIBRA_VCS_TIMEOUT_SECONDS`, `LIBRA_VCS_DEFAULT_APPROVAL_SCOPE` — AI-VCS tool guardrails
 - `LIBRA_ERROR_JSON`, `LIBRA_FINE_EXIT_CODES` — stable-error-code surface toggles
-- `LIBRA_ISSUES_URL` — override the "report an issue" URL printed on internal errors
+
+The following are baked-in constants (no env-var override) — listed
+here so contributors do not waste time trying to set them at runtime:
+
+- `LIBRA_VCS_TIMEOUT_SECONDS` (`src/internal/ai/mcp/resource.rs:86`) —
+  MCP-side AI-VCS tool timeout, currently fixed at 120 s.
+- `LIBRA_VCS_DEFAULT_APPROVAL_SCOPE` (`src/internal/ai/sources/mcp.rs:28`)
+  — default approval scope for `run_libra_vcs`, currently `interactive`.
+- `LIBRA_ISSUES_URL` (`src/utils/error.rs:59`) — canonical GitHub
+  issues URL appended to internal-invariant error hints.
 
 ### Tests
 - `LIBRA_TEST_GITHUB_TOKEN`, `LIBRA_TEST_GITHUB_NAMESPACE` — L2 GitHub gate (creates/deletes a temporary `libra-test-*` repo)
