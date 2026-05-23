@@ -169,3 +169,34 @@ async fn hash_object_read_only_defaults_sha1_when_config_kv_is_missing() {
         "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
     );
 }
+
+/// `libra db --help` surfaces the EXAMPLES banner so users see the two
+/// sub-commands (`status` / `upgrade`) and the JSON variants without
+/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_db_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for db --help");
+    let output = run_libra_command(&["db", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "db --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "db --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra db status",
+        "libra db --json status",
+        "libra db upgrade",
+        "libra db --json upgrade",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "db --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

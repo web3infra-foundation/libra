@@ -13,7 +13,23 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra db --help` output.
+///
+/// `db` exposes two sub-commands (`status` / `upgrade`) for inspecting
+/// and migrating the repository SQLite schema. The banner pins the
+/// canonical invocation per sub-command plus a JSON variant for agents
+/// so users see all supported forms without reading the design doc.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const DB_EXAMPLES: &str = "\
+EXAMPLES:
+    libra db status                 Show the repository schema version (no writes)
+    libra db --json status          Structured JSON output with current/latest version + state
+    libra db upgrade                Apply pending migrations to bring the schema to this Libra version
+    libra db --json upgrade         Structured JSON output with applied_versions[] for the upgrade";
+
 #[derive(Parser, Debug)]
+#[command(after_help = DB_EXAMPLES)]
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbSubcommand,
