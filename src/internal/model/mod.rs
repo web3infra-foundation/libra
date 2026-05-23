@@ -24,6 +24,7 @@ pub mod object_index;
 pub mod reference;
 pub mod reflog;
 pub mod schema_version;
+pub mod source_call_log;
 
 #[cfg(test)]
 mod reference_test;

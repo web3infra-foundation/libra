@@ -599,6 +599,23 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026050801_agent_usage_stats_agent_name_down.sql"
             )),
         },
+        // v0.17.800 source telemetry persistence: new
+        // `source_call_log` table that mirrors the in-memory
+        // `SourceCallLog::records` Vec<SourceCallRecord> shape with
+        // a UUID primary key + created_at timestamp. Producer wire-up
+        // (replacing the Mutex<Vec> store with a SeaORM-backed
+        // recorder) lands in a follow-up; this migration is the
+        // schema-side prerequisite so the producer change doesn't
+        // need to register the migration itself. See agent.md
+        // Storage / migration row for the gap this closes.
+        Migration {
+            version: 2026052301,
+            name: "source_call_log",
+            up: include_str!("../../../sql/migrations/2026052301_source_call_log.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026052301_source_call_log_down.sql"
+            )),
+        },
     ]
 }
 
@@ -713,9 +730,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 6);
+        assert_eq!(runner.len(), 7);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026050801));
+        assert_eq!(runner.max_registered_version(), Some(2026052301));
     }
 
     #[test]
