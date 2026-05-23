@@ -1181,3 +1181,39 @@ async fn test_remote_remove_works_after_deleting_last_url() {
         result.err()
     );
 }
+
+/// `libra remote --help` surfaces the EXAMPLES banner so users see the
+/// most common invocation per sub-command (`add`, `remove`, `rename`,
+/// `-v`, `get-url --all`, `set-url --push`, `prune --dry-run`, `--json`)
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_remote_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for remote --help");
+    let output = run_libra_command(&["remote", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "remote --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "remote --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra remote -v",
+        "libra remote add origin",
+        "libra remote rename origin upstream",
+        "libra remote remove upstream",
+        "libra remote get-url --all origin",
+        "libra remote set-url --push origin",
+        "libra remote prune --dry-run origin",
+        "libra remote --json -v",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "remote --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

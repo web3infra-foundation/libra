@@ -59,6 +59,28 @@ impl std::fmt::Display for SetUrlMode {
     }
 }
 
+/// `--help` examples shown in `libra remote --help` output (attached
+/// in `src/cli.rs` via `after_help` on the `Remote` subcommand).
+///
+/// `remote` exposes eight sub-commands (`add` / `remove` / `rename`
+/// / `-v` / `show` / `get-url` / `set-url` / `prune`); the banner pins
+/// the most common invocation per sub-command (where it carries enough
+/// signal beyond the sub-command name) plus a JSON variant so users can
+/// map intent to invocation without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REMOTE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra remote -v                                List remotes with fetch/push URLs
+    libra remote add origin git@example.com:org/repo.git
+                                                   Register a new remote
+    libra remote rename origin upstream            Rename an existing remote
+    libra remote remove upstream                   Drop a remote and its tracking refs
+    libra remote get-url --all origin              Print every URL configured for origin
+    libra remote set-url --push origin https://example.com/org/repo.git
+                                                   Replace the push URL only
+    libra remote prune --dry-run origin            Preview which tracking refs would be removed
+    libra remote --json -v                         Structured JSON output for agents";
+
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
     /// Add a remote

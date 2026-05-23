@@ -384,7 +384,11 @@ enum Commands {
     )]
     Bisect(Bisect),
 
-    #[command(subcommand, about = "Manage set of tracked repositories")]
+    #[command(
+        subcommand,
+        about = "Manage set of tracked repositories",
+        after_help = command::remote::REMOTE_EXAMPLES
+    )]
     Remote(command::remote::RemoteCmds),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
