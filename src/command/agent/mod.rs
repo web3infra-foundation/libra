@@ -31,7 +31,37 @@ mod rpc;
 mod session;
 mod status;
 
+/// `--help` examples shown in `libra agent --help` output.
+///
+/// `agent` is the operator surface for the external Agent capture
+/// pipeline. It exposes eight visible sub-commands (status, enable,
+/// disable, session, checkpoint, clean, doctor, push, rpc) plus a
+/// hidden `hooks` entry point invoked by installed provider hooks.
+/// The banner pins the canonical invocation per sub-command plus the
+/// `--all` clean form, a named `--remote` push, and a JSON variant
+/// for agents so users see all supported forms without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const AGENT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra agent status                              Show captured-session counts and recent checkpoint summary
+    libra agent enable --agent claude               Enable Claude Code capture and install its hooks
+    libra agent enable                              Enable every stable external agent
+    libra agent disable --agent claude              Disable Claude Code capture and uninstall its hooks
+    libra agent session list                        List captured sessions
+    libra agent checkpoint list                     List captured checkpoints
+    libra agent checkpoint show <id>                Show a single checkpoint by id
+    libra agent checkpoint rewind <id>              Replay a checkpoint as a JSONL transcript
+    libra agent clean                               Drop temporary checkpoints from the most recent stopped session
+    libra agent clean --all                         Drop temporary checkpoints from every stopped session
+    libra agent doctor                              Diagnose hook installation and capture state
+    libra agent push                                Push refs/libra/agent-traces to the default remote
+    libra agent push --remote origin                Push refs/libra/agent-traces to a named remote
+    libra agent rpc <name> <method> [args...]       Invoke an external libra-agent-<name> RPC binary
+    libra agent --json status                       Structured JSON output for agents";
+
 #[derive(Args, Debug)]
+#[command(after_help = AGENT_EXAMPLES)]
 pub struct AgentArgs {
     #[command(subcommand)]
     pub command: AgentSubcommand,
