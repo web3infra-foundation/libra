@@ -30,15 +30,15 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = DESCRIBE_EXAMPLES)]
 pub struct DescribeArgs {
-    // The commit object name, Defaults to HEAD.
+    /// Commit-ish (hash, ref, or tag) to describe. Defaults to HEAD
     pub commit: Option<String>,
 
     /// Consider any tag in refs/tags (not just annotated tags) when describing
     #[clap(long)]
     pub tags: bool,
 
-    /// Use `n` hex digits for the abbreviated commit hash (default: 7)
-    #[clap(long)]
+    /// Use N hex digits for the abbreviated commit hash (default: 7)
+    #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
 
     /// Show an abbreviated commit hash when no tag can describe the target.

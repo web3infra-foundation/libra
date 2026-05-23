@@ -12,13 +12,15 @@
 //! flag with no documentation at all (e.g. `--bare` with nothing under
 //! it). v0.17.886/v0.17.887 landed several such repairs (tag `--force`,
 //! push `--set-upstream`, all of `init`'s flags); this guard prevents
-//! the regression from re-appearing on any command's visible flags.
+//! the regression from re-appearing on any command's visible flags
+//! AND on positional `Arguments:` (extended v0.17.889 after
+//! `describe [COMMIT]` was found to have no description).
 //!
 //! Approach: scan the `<cmd> --help` output of every visible command
-//! for "Options:" / "Arguments:" sections, then walk each flag line and
-//! the line below it. If the next non-empty line is another flag (or
-//! the end-of-section) instead of an indented description, fail with
-//! a list of the empty flags.
+//! for the `Options:` and `Arguments:` sections, then walk each
+//! flag/argument line and the line below it. If the next non-empty
+//! line is another entry (or the end-of-section) instead of an
+//! indented description, fail with a list of the empty entries.
 
 use std::process::Command;
 
@@ -88,12 +90,9 @@ const COMMANDS: &[&str] = &[
     "usage",
 ];
 
-fn extract_options_section(help: &str) -> Option<&str> {
-    let start = help.find("Options:")?;
+fn extract_section<'a>(help: &'a str, heading: &str) -> Option<&'a str> {
+    let start = help.find(heading)?;
     let after = &help[start..];
-    // Section ends at a blank-blank break before a new heading
-    // (EXAMPLES:, NOTES:, Compatibility Notes:, Command Groups:, Help
-    // Topics:, etc.) — clap prints all such headings at column 0.
     let mut end = after.len();
     for (idx, line) in after.lines().enumerate() {
         if idx == 0 {
@@ -103,9 +102,8 @@ fn extract_options_section(help: &str) -> Option<&str> {
         let is_heading = !trimmed.is_empty()
             && !trimmed.starts_with(' ')
             && !trimmed.starts_with('\t')
-            && trimmed != "Options:";
+            && trimmed != heading;
         if is_heading {
-            // Locate the offset of this line within `after`.
             let pos: usize = after.lines().take(idx).map(|l| l.len() + 1).sum();
             end = pos;
             break;
@@ -120,15 +118,85 @@ fn extract_options_section(help: &str) -> Option<&str> {
 ///   `  -J, --json[=<FORMAT>]    Emit machine-readable JSON…`
 ///   `      --bare`
 fn is_option_line(line: &str) -> bool {
-    if !line.starts_with("  ") || line.starts_with("    ") {
-        // Real flag lines start at column 2 or 6 (long-only) but never
-        // deeper — descriptions live at column 8+.
-        if !line.starts_with("      -") && !line.starts_with("      --") {
-            return false;
-        }
+    if (!line.starts_with("  ") || line.starts_with("    "))
+        && !line.starts_with("      -")
+        && !line.starts_with("      --")
+    {
+        return false;
     }
     let trimmed = line.trim_start();
     trimmed.starts_with('-')
+}
+
+/// Returns true if `line` looks like a clap positional argument line
+/// at the canonical two-space indent. Examples:
+///   `  [COMMIT]`
+///   `  [PATH]...    Files to hash`
+///   `  <REPOSITORY>`
+fn is_positional_line(line: &str) -> bool {
+    if !line.starts_with("  ") || line.starts_with("    ") {
+        return false;
+    }
+    let trimmed = line.trim_start();
+    trimmed.starts_with('[') || trimmed.starts_with('<')
+}
+
+fn entry_has_inline_or_next_line_description(
+    lines: &[&str],
+    i: usize,
+    is_entry_line: fn(&str) -> bool,
+) -> bool {
+    let line = lines[i];
+    let trimmed = line.trim_end();
+    let after_entry = trimmed.trim_start_matches([' ']);
+    let two_space = after_entry.find("  ");
+    let has_inline_desc = match two_space {
+        Some(pos) => after_entry[pos..]
+            .trim()
+            .chars()
+            .any(|c| !c.is_whitespace()),
+        None => false,
+    };
+    if has_inline_desc {
+        return true;
+    }
+
+    let mut j = i + 1;
+    while j < lines.len() {
+        let next = lines[j];
+        if next.trim().is_empty() {
+            j += 1;
+            continue;
+        }
+        if is_entry_line(next) {
+            return false;
+        }
+        if next.starts_with("        ") || next.starts_with("    ") {
+            return true;
+        }
+        return false;
+    }
+    false
+}
+
+fn scan_section(
+    cmd: &str,
+    section: Option<&str>,
+    is_entry_line: fn(&str) -> bool,
+    empty: &mut Vec<(String, String)>,
+) {
+    let Some(section) = section else {
+        return;
+    };
+    let lines: Vec<&str> = section.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !is_entry_line(line) {
+            continue;
+        }
+        if !entry_has_inline_or_next_line_description(&lines, i, is_entry_line) {
+            empty.push(((*cmd).to_string(), line.trim_end().trim().to_string()));
+        }
+    }
 }
 
 #[test]
@@ -143,67 +211,27 @@ fn every_visible_flag_has_a_description() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let Some(opts) = extract_options_section(&stdout) else {
-            continue;
-        };
-
-        let lines: Vec<&str> = opts.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !is_option_line(line) {
-                continue;
-            }
-
-            // Same-line description? Clap puts at least two spaces
-            // between the flag spec and the description.
-            let trimmed = line.trim_end();
-            let after_flag = trimmed.trim_start_matches([' ']);
-            // Find the value-name end (last `>` or last whitespace
-            // gap of two-or-more spaces).
-            let two_space = after_flag.find("  ");
-            let has_inline_desc = match two_space {
-                Some(pos) => after_flag[pos..].trim().chars().any(|c| !c.is_whitespace()),
-                None => false,
-            };
-            if has_inline_desc {
-                continue;
-            }
-
-            // Otherwise, the next non-empty line should be an indented
-            // description (column 8 or deeper).
-            let mut j = i + 1;
-            let mut found_desc = false;
-            while j < lines.len() {
-                let next = lines[j];
-                if next.trim().is_empty() {
-                    j += 1;
-                    continue;
-                }
-                // Another flag at the same column means we never saw
-                // a description for this flag.
-                if is_option_line(next) {
-                    break;
-                }
-                // Description lines indent further than 6 spaces.
-                if next.starts_with("        ") || next.starts_with("    ") {
-                    found_desc = true;
-                }
-                break;
-            }
-
-            if !found_desc {
-                // Extract just the flag name(s) for the failure list.
-                let flag_part = trimmed.trim();
-                empty.push(((*cmd).to_string(), flag_part.to_string()));
-            }
-        }
+        scan_section(
+            cmd,
+            extract_section(&stdout, "Options:"),
+            is_option_line,
+            &mut empty,
+        );
+        scan_section(
+            cmd,
+            extract_section(&stdout, "Arguments:"),
+            is_positional_line,
+            &mut empty,
+        );
     }
 
     assert!(
         empty.is_empty(),
-        "The following flags are visible in `libra <cmd> --help` but have \
-         no description line (clap renders a blank line under the flag). \
-         Add a `///` doc comment on the corresponding `pub <field>: ...` \
-         in `src/command/<cmd>.rs` describing what the flag does.\n\
+        "The following flags/arguments are visible in `libra <cmd> --help` \
+         but have no description line (clap renders a blank line under \
+         them). Add a `///` doc comment on the corresponding `pub <field>: \
+         ...` in `src/command/<cmd>.rs` describing what the flag/argument \
+         does.\n\
          Found: {empty:#?}"
     );
 }
