@@ -1182,12 +1182,13 @@ async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
 }
 
 /// `resolve_env_for_target` is the shared secret resolver used by provider,
-/// D1, R2, and tool credential paths. Local Vault must win over process env so
-/// a checked-in shell profile or sourced `.env` cannot shadow the repository's
-/// encrypted credential selection.
+/// D1, R2, and tool credential paths. Per the 12-Factor / docs/improvement/
+/// config.md spec, the priority is **process env > local vault > global vault**
+/// so a per-process override like `GEMINI_API_KEY=B libra push` always wins.
+/// Local vault is the fallback when env is unset.
 #[tokio::test]
 #[serial]
-async fn resolve_env_for_target_prefers_local_vault_over_process_env() {
+async fn resolve_env_for_target_process_env_overrides_local_vault() {
     use libra::internal::config::{ConfigKv, LocalIdentityTarget, resolve_env_for_target};
 
     let temp_path = tempdir().unwrap();
@@ -1211,6 +1212,17 @@ async fn resolve_env_for_target_prefers_local_vault_over_process_env() {
     .await
     .unwrap();
 
+    // env wins; per-process override is sacred (12-Factor).
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_PRIORITY_KEY",
+        LocalIdentityTarget::CurrentRepo,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("env-value"));
+
+    // …and when the env is unset, the local vault fallback is used.
+    drop(_env);
     let value = resolve_env_for_target(
         "LIBRA_RESOLVE_ENV_PRIORITY_KEY",
         LocalIdentityTarget::CurrentRepo,
@@ -1220,12 +1232,12 @@ async fn resolve_env_for_target_prefers_local_vault_over_process_env() {
     assert_eq!(value.as_deref(), Some("vault-value"));
 }
 
-/// Global Vault also wins over process env when no local repo scope is selected.
-/// This pins the non-repo provider/bootstrap path used by commands that can run
-/// outside a Libra worktree.
+/// Same priority chain in the `LocalIdentityTarget::None` mode used by
+/// commands that can run outside a Libra worktree (provider/bootstrap path).
+/// process env > global vault.
 #[tokio::test]
 #[serial]
-async fn resolve_env_for_target_prefers_global_vault_over_process_env() {
+async fn resolve_env_for_target_process_env_overrides_global_vault() {
     use libra::internal::{
         config::{ConfigKv, LocalIdentityTarget, resolve_env_for_target},
         db,
@@ -1250,6 +1262,17 @@ async fn resolve_env_for_target_prefers_global_vault_over_process_env() {
     .await
     .unwrap();
 
+    // env wins.
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
+        LocalIdentityTarget::None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("env-value"));
+
+    // …and global vault is the fallback when env is unset.
+    drop(_guard);
     let value = resolve_env_for_target(
         "LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
         LocalIdentityTarget::None,
