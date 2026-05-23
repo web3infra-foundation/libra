@@ -32,7 +32,27 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra merge --help` output.
+///
+/// Libra's merge surface today only resolves fast-forward / already-up-to-date
+/// cases (true three-way merge is tracked under the merge batch in
+/// `docs/improvement/merge.md`). The banner covers the two supported
+/// invocations and a remote-ref form so users see what works without
+/// hitting a runtime "non-fast-forward" error. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const MERGE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra merge feature-x          Fast-forward current branch onto feature-x if possible
+    libra merge origin/main        Fast-forward onto a remote-tracking branch
+    libra merge --json feature-x   Structured JSON output for agents
+
+NOTES:
+    Non-fast-forward (true three-way) merges are not yet supported and
+    fail with stable error code MergeNonFastForward; resolve manually
+    with libra rebase or by re-creating the branch.";
+
 #[derive(Parser, Debug)]
+#[command(after_help = MERGE_EXAMPLES)]
 pub struct MergeArgs {
     /// The branch to merge into the current branch, could be remote branch
     pub branch: String,

@@ -424,3 +424,37 @@ fn test_merge_json_diverged_branch_returns_conflict_error() {
             .contains("Not possible to fast-forward merge")
     );
 }
+
+/// `libra merge --help` surfaces the EXAMPLES banner so users see the
+/// supported fast-forward / remote-ref / JSON forms before hitting the
+/// `MergeNonFastForward` runtime error. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_merge_help_lists_examples_banner() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "merge --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "merge --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("NOTES:"),
+        "merge --help should call out the non-fast-forward limitation, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra merge feature-x",
+        "libra merge origin/main",
+        "libra merge --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "merge --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
