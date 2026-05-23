@@ -549,7 +549,7 @@ pub struct CodeArgs {
 
     /// Select an agent profile by name. When the profile carries a structured
     /// `model: provider/model[@variant]` binding, the agent's binding wins
-    /// **atomically** — provider, model id, and variant all come from the
+    /// atomically — provider, model id, and variant all come from the
     /// agent's spec, and a separately-supplied `--model` is ignored to avoid
     /// hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles
     /// without a structured binding fall back to the CLI defaults verbatim.
@@ -614,7 +614,7 @@ pub struct CodeArgs {
 
     /// Codex plan-first mode: require an approved plan before execution.
     ///
-    /// When `--provider=codex`, this defaults to **on** so the session
+    /// When `--provider=codex`, this defaults to ON so the session
     /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
     /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
     /// opt out for a single session. For non-Codex providers, omit the flag —
