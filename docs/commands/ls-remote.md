@@ -57,6 +57,26 @@ With `--json`, output uses the standard command envelope:
 }
 ```
 
+## Examples
+
+```bash
+# List all refs from a named remote
+libra ls-remote origin
+
+# List all refs from a URL directly (no remote registration required)
+libra ls-remote https://example.com/repo.git
+
+# Restrict to branches matching a pattern
+libra ls-remote --heads origin main
+
+# Structured JSON envelope for agents, tags only
+libra --json ls-remote --tags origin
+```
+
+The same banner is rendered by `libra ls-remote --help` so the doc and
+the CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout,
+see `docs/improvement/README.md` item B).
+
 ## Notes
 
 - `ls-remote` performs only protocol discovery (`git-upload-pack --advertise-refs` equivalent for local Git repositories).
