@@ -31,6 +31,28 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra lfs --help` output (attached in
+/// `src/cli.rs` via `after_help` on the `Lfs` subcommand).
+///
+/// `lfs` exposes six sub-commands: `track` (read/add attributes patterns),
+/// `untrack`, `ls-files`, and the three lock-server flows (`locks`,
+/// `lock`, `unlock`). The banner pins the canonical invocation per
+/// sub-command plus a JSON variant so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const LFS_EXAMPLES: &str = "\
+EXAMPLES:
+    libra lfs track                       List currently tracked LFS attribute patterns
+    libra lfs track '*.bin' '*.psd'       Add LFS patterns to .libraattributes
+    libra lfs untrack '*.bin'             Remove an LFS pattern
+    libra lfs ls-files                    List LFS-tracked files in the working tree
+    libra lfs ls-files --long --size      Show full OIDs and sizes
+    libra lfs locks                       List remote locks for the current branch
+    libra lfs lock build/output.bin       Acquire a remote lock on a file
+    libra lfs unlock build/output.bin     Release a lock you own
+    libra lfs unlock --force --id <id>    Force-release a lock owned by someone else
+    libra lfs --json ls-files             Structured JSON output for agents";
+
 /// [Docs](https://github.com/git-lfs/git-lfs/tree/main/docs/man)
 #[derive(Subcommand, Debug)]
 pub enum LfsCmds {

@@ -452,3 +452,42 @@ async fn test_lfs_unlock_cli_success_with_force_and_id() {
     assert_eq!(stdout["data"]["action"], "unlock");
     assert_eq!(stdout["data"]["path"], "tracked.txt");
 }
+
+/// `libra lfs --help` surfaces the EXAMPLES banner so users see the
+/// canonical invocation per sub-command (`track`, `untrack`, `ls-files`,
+/// `locks`, `lock`, `unlock`) plus a JSON variant without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_lfs_help_lists_examples_banner() {
+    let repo = tempfile::tempdir().expect("tempdir for lfs --help");
+    let output = libra_command(repo.path())
+        .args(["lfs", "--help"])
+        .output()
+        .expect("failed to run libra lfs --help");
+    assert!(
+        output.status.success(),
+        "lfs --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "lfs --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra lfs track",
+        "libra lfs untrack",
+        "libra lfs ls-files",
+        "libra lfs locks",
+        "libra lfs lock build/output.bin",
+        "libra lfs unlock build/output.bin",
+        "libra lfs unlock --force",
+        "libra lfs --json ls-files",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "lfs --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

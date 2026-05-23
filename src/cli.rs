@@ -299,7 +299,11 @@ enum Commands {
         after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
-    #[command(subcommand, about = "Large File Storage")]
+    #[command(
+        subcommand,
+        about = "Large File Storage",
+        after_help = command::lfs::LFS_EXAMPLES
+    )]
     Lfs(command::lfs::LfsCmds),
     #[command(
         about = "Manage multiple working trees attached to this repository",
