@@ -72,6 +72,13 @@ impl Client {
     /// expose a base-URL override — Gemini's public API has no stable proxy
     /// contract for end users. Test-only consumers that need to point at a
     /// localhost stub should use [`Client::with_base_url`].
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolver.
     pub fn from_env() -> anyhow::Result<Self> {
         let api_key = crate::internal::config::resolve_required_env_sync("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);

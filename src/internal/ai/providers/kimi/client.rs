@@ -122,6 +122,13 @@ impl Client {
     /// overridden with `vault.env.MOONSHOT_BASE_URL` / `MOONSHOT_BASE_URL`
     /// (useful for the international endpoint or a self-hosted proxy).
     ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers.
+    ///
     /// # Errors
     ///
     /// Returns an actionable error if `MOONSHOT_API_KEY` is not configured.

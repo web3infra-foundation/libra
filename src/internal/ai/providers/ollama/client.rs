@@ -133,6 +133,13 @@ impl Client {
     /// (defaults to `http://127.0.0.1:11434/v1`). When the base URL points at
     /// `https://ollama.com`, `vault.env.OLLAMA_API_KEY` / `OLLAMA_API_KEY` is
     /// used as a bearer token.
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolver.
     pub fn from_env() -> Self {
         let base_url = crate::internal::config::resolve_optional_env_sync("OLLAMA_BASE_URL")
             .map_err(|error| {

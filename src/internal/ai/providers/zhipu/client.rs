@@ -57,6 +57,12 @@ impl Client {
     ///
     /// Reads the `ZHIPU_API_KEY` environment variable.
     /// Also supports `ZHIPU_BASE_URL` for custom endpoints.
+    ///
+    /// Note: unlike the other providers (anthropic / deepseek / gemini /
+    /// kimi / ollama / openai), this constructor reads process env
+    /// **directly** and does not consult vault. New call sites that need
+    /// vault-aware resolution should prefer [`Client::from_resolved_env`].
+    /// `from_env` is retained for backward compatibility.
     pub fn from_env() -> Result<Self, std::env::VarError> {
         let api_key = std::env::var("ZHIPU_API_KEY")?;
         let base_url = std::env::var("ZHIPU_BASE_URL")

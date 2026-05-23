@@ -88,6 +88,13 @@ impl Client {
     /// - Returns an actionable error when `ANTHROPIC_API_KEY` is missing across
     ///   Vault and process env.
     /// - `ANTHROPIC_BASE_URL`, when set, is forwarded verbatim — no scheme validation.
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers (`resolve_required_env_sync` / `resolve_optional_env_sync`).
     pub fn from_env() -> anyhow::Result<Self> {
         let api_key = crate::internal::config::resolve_required_env_sync("ANTHROPIC_API_KEY")?;
         let base_url = crate::internal::config::resolve_optional_env_sync("ANTHROPIC_BASE_URL")?

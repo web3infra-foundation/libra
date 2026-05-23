@@ -69,6 +69,13 @@ impl Client {
     /// Reads `vault.env.OPENAI_API_KEY` first, then `OPENAI_API_KEY`.
     /// Also supports `vault.env.OPENAI_BASE_URL` / `OPENAI_BASE_URL` for
     /// custom endpoints.
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers.
     pub fn from_env() -> anyhow::Result<Self> {
         let api_key = crate::internal::config::resolve_required_env_sync("OPENAI_API_KEY")?;
         let base_url = crate::internal::config::resolve_optional_env_sync("OPENAI_BASE_URL")?

@@ -109,6 +109,13 @@ impl Client {
     /// Reads `vault.env.DEEPSEEK_API_KEY` first, then `DEEPSEEK_API_KEY`, and
     /// uses the default base URL (`https://api.deepseek.com`).
     ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolvers.
+    ///
     /// # Errors
     ///
     /// Returns an actionable error if `DEEPSEEK_API_KEY` is not configured.
