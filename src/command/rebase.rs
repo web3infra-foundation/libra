@@ -493,8 +493,24 @@ impl ReplayResult {
     }
 }
 
+/// `--help` examples shown in `libra rebase --help` output.
+///
+/// Rebase exposes a small four-mode state machine: start (positional
+/// upstream), `--continue`, `--abort`, `--skip`. The banner pins one
+/// example per mode plus a JSON variant so users see all transitions
+/// without reading `docs/improvement/rebase.md`. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REBASE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra rebase main             Replay current branch on top of main
+    libra rebase --continue       Resume an in-progress rebase after fixing conflicts
+    libra rebase --skip           Drop the current conflicting commit and continue
+    libra rebase --abort          Restore the original branch and clear rebase state
+    libra rebase --json main      Structured JSON output for agents";
+
 /// Command-line arguments for the rebase operation
 #[derive(Parser, Debug)]
+#[command(after_help = REBASE_EXAMPLES)]
 pub struct RebaseArgs {
     /// The upstream branch to rebase the current branch onto.
     /// This can be a branch name, commit hash, or other Git reference.

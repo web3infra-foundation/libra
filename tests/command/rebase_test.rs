@@ -3614,3 +3614,36 @@ async fn test_rebase_continue_requires_resolution() {
     })
     .await;
 }
+
+/// `libra rebase --help` surfaces the EXAMPLES banner so users see the
+/// four mode invocations (start / `--continue` / `--skip` / `--abort`)
+/// plus the JSON variant before they have to deal with conflict state.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_rebase_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for rebase --help");
+    let output = run_libra_command(&["rebase", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "rebase --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rebase --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra rebase main",
+        "libra rebase --continue",
+        "libra rebase --skip",
+        "libra rebase --abort",
+        "libra rebase --json main",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "rebase --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
