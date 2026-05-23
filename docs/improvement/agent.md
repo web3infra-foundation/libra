@@ -174,7 +174,7 @@
 | Phase 1 Wave 1C（claudecode 硬删除） | 100% | **100%** | — |
 | Phase 2 Thread ID + Projection Resolver | 100% | ~70% | execution → barrier → test 两阶段语义、ExecutionReport / ExecutionTerminated 显式消费待核 |
 | Phase 3 Code UI Source Of Truth | 100% | ~40% | `CodeUiCommandAdapter` 已存在；完整 unification（typed delta / gap recovery）仍是后续 |
-| Phase 4 ArtifactLedger + ValidatorEngine + DecisionProposal | 100% | ~60% | `ValidationReport` / `RiskScoreBreakdown` 字段是否完整存储待核；`ValidatorEngine` 仍归 planner gate |
+| Phase 4 ArtifactLedger + ValidatorEngine + DecisionProposal | 100% | ~65% | **`ValidationReport` 字段在 `runtime/phase3.rs:115` 已完整定义**（`report_id` / `thread_id` / `run_id` / `policy_version` / `stale` / `is_latest` / `summary` / `created_at` / `updated_at`）；**`RiskScoreBreakdown` 字段在 `runtime/phase4.rs:50` 已完整定义**（`breakdown_id` / `thread_id` / `validation_report_id` / `policy_version` / `stale` / `is_latest` / `summary` / `created_at` / `updated_at`）；`ValidatorEngine` 仍归 planner gate；持久化层（`ai_index_*` 表写入与 projection）仍待复核 |
 | Phase 5 Security / Permission / Diagnostics / Hardening | 100% | **~100%** | `mcp/authz.rs` schema + 全面 server wiring + per-request principal threading 已落地（v0.17.573..v0.17.586，详见 :163 行）；13 个 MCP 入口全部 authz-gated，5 个 create_*_impl 已 per-actor principal threading；TUI direct provider bootstrap 与 Ollama headless web-only bootstrap 已收敛到 `ProviderFactory`；vault/env 统一接入已在 v0.17.549..v0.17.556 完成（`Client::from_resolved_env(LocalIdentityTarget<'_>)` × 7 providers + `resolve_env_sync` 接入 `build_any_completion_model_for_args`）；provider crate 公开 `from_env()` 保留至 v0.18 弃用通告 |
 
 **Wave 1 / Implementation Phase 1-5 总体**：约 50-65% 落地。设计完整且对外契约清晰，主要缺口是"trait 已定义、impl 未补齐"和"按 phase 拆分模块"的工程纪律。
