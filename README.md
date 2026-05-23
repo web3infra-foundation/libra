@@ -64,7 +64,7 @@ Commands:
   reflog        Manage the log of reference changes (e.g., HEAD, branches)
   worktree      Manage multiple working trees attached to this repository
   cloud         Cloud backup and restore operations (D1/R2)
-  publish       Materialise the read-only Cloudflare Worker template; sync/deploy are not yet implemented
+  publish       Manage read-only Cloudflare Worker publishing
   agent         Manage external-agent capture (Claude Code, Gemini, ...)
   cat-file      Provide content, type or size info for repository objects
   hash-object   Compute Git-compatible object IDs
