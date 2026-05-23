@@ -18,7 +18,27 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra show-ref --help` output.
+///
+/// `show-ref` lists local references with their object hashes. The
+/// banner pins the all-refs default, `--heads` / `--tags` scope
+/// filters, the `--head` opt-in for including HEAD, `-s` for hash-only
+/// output, a pattern filter for substring search, and a JSON variant
+/// for agents so users see all supported forms without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const SHOW_REF_EXAMPLES: &str = "\
+EXAMPLES:
+    libra show-ref                   List all local refs with their object hashes
+    libra show-ref --heads           List only branches (refs/heads/)
+    libra show-ref --tags            List only tags (refs/tags/)
+    libra show-ref --head            Include HEAD in the output
+    libra show-ref -s --heads        Print branch hashes only (one per line, scripting-friendly)
+    libra show-ref main              Filter refs by substring match (e.g. only entries containing 'main')
+    libra show-ref --json --heads    Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = SHOW_REF_EXAMPLES)]
 pub struct ShowRefArgs {
     /// Show only branches (refs/heads/)
     #[clap(long)]
