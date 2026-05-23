@@ -91,7 +91,7 @@ sql/
 ├── sqlite_20260415_ai_runtime_contract.sql  # AI runtime contract extension
 ├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
 └── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
-scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh, compare/
+scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh
 template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description)
 web/                             # Next.js 15 frontend (pnpm); built into web/out/ and embedded via rust-embed
 worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
