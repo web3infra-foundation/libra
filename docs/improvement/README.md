@@ -200,7 +200,7 @@
 | 顺序 | 改进项 | 优先级 |
 |------|--------|--------|
 | **A** | 退出码三级模型统一对齐（0/128/129） | 与各命令改进同步进行 |
-| **B** | 每个子命令 --help 添加 EXAMPLES 段 | 与各命令改进同步进行 |
+| **B** | 每个子命令 --help 添加 EXAMPLES 段 | ✅ 已落地（v0.17.812..v0.17.836 完成全量 rollout）：`init` / `add` / `clone` / `status` / `commit` / `branch` / `tag` / `switch` / `checkout` / `reset` / `restore` / `revert` / `cherry-pick` / `stash` / `bisect` / `clean` / `describe` / `shortlog` / `pull` / `fetch` / `push` / `merge` / `rebase` / `reflog` / `log` / `show` / `diff` / `blame` / `show-ref` / `cat-file` / `index-pack` / `hash-object` / `verify-pack` / `ls-remote` / `rev-parse` / `rev-list` / `symbolic-ref` / `remote` / `worktree` / `mv` / `rm` / `grep` / `open` / `cloud` / `lfs` / `usage` / `publish` / `sandbox` / `db` / `automation` / `code` / `code-control` / `graph` / `hooks` / `agent` 均渲染 EXAMPLES；`fsck` / `config` 使用 `after_help` 输出 EXAMPLES 等价段。回归由 `tests/command/*_test.rs` 中各自 `test_<cmd>_help_lists_examples_banner` 与 `*_help_test.rs` 全量覆盖 |
 | **C** | `NO_COLOR` / `TERM=dumb` / `--no-color` 颜色控制 | ✅ 已落地：`--no-color` 等价 `--color=never`，`TERM=dumb` 在 auto 模式禁色，显式 `--color=always` 可覆盖环境禁色 |
 | **D** | log/diff/blame/show TTY 下使用 pager | ✅ 已落地：`log` / `diff` / `blame` / `show` human 输出均走共享 `Pager::with_config()`；`--json` / `--machine` / `--quiet` / `--no-pager` 保持不初始化 pager |
 | **E** | 顶层 help 按场景分组 | ✅ 已落地：根 `libra --help` 按 Repository Setup / Working Tree / History Inspection / Commit And Branching / Remote And Cloud / AI And Automation / Maintenance And Plumbing 分组 |
