@@ -264,3 +264,43 @@ fn publish_sync_dry_run_warns_for_librapublishignore_paths() {
         "dry-run warnings should identify .librapublishignore path: {warnings:?}"
     );
 }
+
+/// `libra publish --help` surfaces the EXAMPLES banner so users see
+/// the canonical invocation per sub-command (`init` / `sync` /
+/// `status` / `deploy` / `unpublish`) plus a dry-run sync, a
+/// sensitive-path allowance, a site-scoped status, and a JSON variant
+/// for agents without reading the design doc. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_publish_help_lists_examples_banner() {
+    let repo = tempfile::tempdir().expect("tempdir for publish --help");
+    let output = run_libra_command(&["publish", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "publish --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "publish --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra publish init",
+        "libra publish status",
+        "libra publish status --site-id",
+        "libra publish sync --dry-run",
+        "libra publish sync --ref refs/heads/main",
+        "libra publish sync --force",
+        "libra publish sync --allow-sensitive-path",
+        "libra publish deploy",
+        "libra publish deploy --skip-deploy",
+        "libra publish unpublish --yes",
+        "libra publish --json sync",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "publish --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

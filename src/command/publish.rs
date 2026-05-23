@@ -84,8 +84,35 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra publish --help` output.
+///
+/// `publish` exposes five sub-commands (init / sync / status / deploy /
+/// unpublish) that together drive the read-only Cloudflare Worker
+/// publishing path. The banner pins the canonical invocation per
+/// sub-command plus a dry-run sync, a sensitive-path allowance, a
+/// site-scoped status, a deploy that skips Cloudflare mutation, and a
+/// JSON variant for agents so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const PUBLISH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra publish init --slug my-site --clone-domain code.example.com
+                                                  Materialise the local Worker template scaffold
+    libra publish status                          Inspect local Worker template / D1 ref drift
+    libra publish status --site-id <uuid>         Inspect a specific published site by UUID
+    libra publish sync --dry-run                  Plan the publish without writing to D1/R2
+    libra publish sync                            Sync default refs to D1/R2
+    libra publish sync --ref refs/heads/main      Sync a single named ref
+    libra publish sync --force                    Re-upload every file/object regardless of CAS
+    libra publish sync --allow-sensitive-path docs/private.md
+                                                  Allow a path the deny list normally blocks (private sites)
+    libra publish deploy                          Build the Worker and deploy to Cloudflare
+    libra publish deploy --skip-deploy            Build only; skip Cloudflare mutation
+    libra publish unpublish --yes                 Disable a published site without deleting D1/R2 data
+    libra publish --json sync --dry-run           Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
-#[command(about = "Manage read-only Cloudflare Worker publishing")]
+#[command(about = "Manage read-only Cloudflare Worker publishing", after_help = PUBLISH_EXAMPLES)]
 pub struct PublishArgs {
     #[command(subcommand)]
     pub command: PublishCommand,
