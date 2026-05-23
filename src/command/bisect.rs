@@ -370,7 +370,9 @@ impl BisectState {
 /// `--help` examples shown in `libra bisect --help` output.
 pub const BISECT_EXAMPLES: &str = "\
 EXAMPLES:
-    libra bisect start <bad> <good>            Begin a session with explicit bounds
+    libra bisect start                         Begin a session; mark bad/good in subsequent steps
+    libra bisect start <bad>                   Begin a session with the bad commit pre-marked
+    libra bisect start <bad> --good <good>     Begin a session with both bounds pre-marked
     libra bisect bad                           Mark the current HEAD as bad
     libra bisect good                          Mark the current HEAD as good
     libra bisect skip                          Skip the current commit and continue
