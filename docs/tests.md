@@ -107,17 +107,30 @@ Tests S3 protocol features (PUT/GET/DELETE, multipart, list, tiered storage). Us
 
 ### Gating tests that require network or credentials
 
-Use the `require_env!` macro. If the variable is unset the test prints "skipped" and returns — it does **not** fail.
+Define a small `env_var_is_set` helper (or reuse one from the test
+file you are extending — see `tests/cloud_storage_backup_test.rs:30`)
+and pair it with an early `eprintln!("skipped (set ...)")` return so
+missing vars print a skip notice and do **not** fail the test.
 
 ```rust
-use super::require_env;
+fn env_var_is_set(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty())
+}
 
 #[tokio::test]
 async fn test_something_with_s3() {
-    require_env!("LIBRA_STORAGE_ENDPOINT");
+    if !env_var_is_set("LIBRA_STORAGE_ENDPOINT") {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_STORAGE_*)");
+        return;
+    }
     // test logic ...
 }
 ```
+
+The skip notice should name both the Cargo feature flag (e.g.
+`--features test-live-cloud`) and the env-var prefix (e.g.
+`LIBRA_STORAGE_*`) so contributors landing on a CI log can tell at
+a glance what is missing.
 
 ### Test isolation
 

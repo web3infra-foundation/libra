@@ -71,7 +71,7 @@ src/
     ├── error.rs, output.rs      # CliError/CliResult + stable error codes; OutputConfig (--json / --machine)
     ├── pager.rs, ignore.rs, lfs.rs, fuse.rs, worktree.rs
     ├── object.rs, object_ext.rs, tree.rs, path.rs, path_ext.rs, storage_ext.rs, text.rs, convert.rs, util.rs
-    └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in, require_env!)
+    └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in)
 
 tests/                           # 98 integration test files, layered L1/L2/L3 (see "Test Layers" below)
 ├── command/                     # Per-command integration tests mirroring real Git workflows
@@ -159,7 +159,7 @@ Libra tests are organised into three layers — `cargo test --all` runs L1 only;
 | **L2 — Network** | GitHub token for temporary repo creation | `LIBRA_TEST_GITHUB_TOKEN` + `LIBRA_TEST_GITHUB_NAMESPACE` |
 | **L3 — Live Services** | Real AI API keys (`DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, …) or cloud credentials (`LIBRA_D1_*`, `LIBRA_STORAGE_*`, `LIBRA_TEST_S3_*`) | Set the relevant env vars |
 
-Gate tests with the `require_env!` macro — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
+Gate L2 / L3 tests with the small `env_var_is_set(name) -> bool` helper (see e.g. [`tests/cloud_storage_backup_test.rs:30`](tests/cloud_storage_backup_test.rs)) followed by an early `eprintln!("skipped (...)")` return when a required var is unset — missing vars print "skipped", never fail. Copy `.env.test.example` → `.env.test` and `source` it before running the full suite (the `export` prefix is required).
 
 ## Coding Conventions
 
@@ -202,7 +202,7 @@ Gate tests with the `require_env!` macro — missing vars print "skipped", never
 - **Serial execution**: Mark tests `#[serial]` (from `serial_test` crate) if they mutate shared state
 - **Async tests**: Use `#[tokio::test]` (or `flavor = "multi_thread"` when needed)
 - **Fixtures**: Keep small and local in `tests/data/` and `tests/fixtures/`; reuse helpers from `tests/command/mod.rs`, `tests/harness/`, and `tests/helpers/`
-- **Gating**: Use the `require_env!` macro for tests that need network or credentials so missing vars skip cleanly. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
+- **Gating**: Use the `env_var_is_set(name)` helper pattern (see `tests/cloud_storage_backup_test.rs:30`) plus an early `eprintln!("skipped (set ...)")` return so missing vars print a skip notice and do not fail the test. Match the L1/L2/L3 layering and the matching `test-network` / `test-live-ai` / `test-live-cloud` Cargo features
 - **Coverage**: Pair new commands/options with at least one end-to-end test plus a focused unit test, and an entry in `COMPATIBILITY.md` if you change the Git surface. New `StableErrorCode` variants must also be added to `docs/error-codes.md` (the `compat_error_codes_doc_sync` guard fails the build otherwise).
 
 ## Commit & PR Conventions
