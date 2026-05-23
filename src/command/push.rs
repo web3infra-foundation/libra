@@ -59,17 +59,25 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Push local refs and objects to a remote repository.
 ///
-/// # Examples
+/// See `libra push --help` for the same examples rendered through clap.
 ///
-/// ```text
-/// libra push                             Push current branch to tracking remote
-/// libra push origin main                 Push main branch to origin
-/// libra push -u origin feature-x         Push and set upstream tracking
-/// libra push --force origin main         Force push (overwrites remote history)
-/// libra push --dry-run                   Preview what would be pushed
-/// libra push --json                      Structured JSON output for agents
-/// ```
+/// `--help` examples shown in `libra push --help` output. The list
+/// covers the six most common scenarios (default upstream push, named
+/// remote/branch push, `-u` upstream setup, forced overwrite, dry-run,
+/// JSON for agents) so a user does not need to read the design doc to
+/// remember the canonical flags. Cross-cutting `--help` EXAMPLES rollout
+/// per `docs/improvement/README.md` item B.
+pub const PUSH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra push                          Push current branch to tracking remote
+    libra push origin main              Push main branch to origin
+    libra push -u origin feature-x      Push and set upstream tracking
+    libra push --force origin main      Force push (overwrites remote history)
+    libra push --dry-run                Preview what would be pushed without sending
+    libra push --json                   Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = PUSH_EXAMPLES)]
 pub struct PushArgs {
     /// repository, e.g. origin
     #[clap(requires("refspec"))]

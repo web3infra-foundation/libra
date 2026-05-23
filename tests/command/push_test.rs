@@ -1184,3 +1184,36 @@ async fn test_push_ssh_host_key_failure_is_reported() {
         "remote branch should not be created when SSH host-key verification fails"
     );
 }
+
+/// `libra push --help` surfaces the EXAMPLES banner so users see the
+/// six canonical invocations (default upstream push, named origin/branch
+/// push, `-u`, `--force`, `--dry-run`, `--json`) without having to read
+/// the design doc. Companion to the cross-cutting `--help` EXAMPLES
+/// rollout from `docs/improvement/README.md` item B.
+#[test]
+fn test_push_help_lists_examples_banner() {
+    let repo = tempfile::tempdir().expect("tempdir for push --help");
+    let output = run_libra_command(&["push", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "push --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "push --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra push origin main",
+        "libra push -u origin feature-x",
+        "libra push --force origin main",
+        "libra push --dry-run",
+        "libra push --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "push --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
