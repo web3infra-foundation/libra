@@ -25,8 +25,7 @@
 //! Both shapes serve the same purpose; a future doc that ships without
 //! either fails this guard.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 fn commands_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -54,12 +53,8 @@ fn every_command_doc_has_examples_or_common_commands_section() {
         if file_name == "README.md" || !file_name.ends_with(".md") {
             continue;
         }
-        let body = fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "failed to read command doc {}: {err}",
-                path.display()
-            )
-        });
+        let body = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read command doc {}: {err}", path.display()));
         let has_examples = body.lines().any(|line| {
             line == "## Examples"
                 || line == "### Examples"
