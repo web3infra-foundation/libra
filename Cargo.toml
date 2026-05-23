@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.850"
+version = "0.17.851"
 edition = "2024"
 
 [features]
@@ -205,3 +205,7 @@ path = "tests/compat/help_examples_banner.rs"
 [[test]]
 name = "compat_error_codes_doc_sync"
 path = "tests/compat/error_codes_doc_sync.rs"
+
+[[test]]
+name = "compat_command_docs_examples_section"
+path = "tests/compat/command_docs_examples_section.rs"
