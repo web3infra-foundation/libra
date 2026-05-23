@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -1305,6 +1305,42 @@ mod tests {
         assert!(preflight.storage.is_some());
         assert!(!preflight.check_schema);
         assert!(preflight.set_hash_kind);
+    }
+
+    /// Scenario: every visible command in [`Commands`] must appear in the
+    /// `Command Groups:` section of `ROOT_AFTER_HELP`. Hidden commands
+    /// (e.g. `index-pack`, `hooks`) are intentionally excluded. This
+    /// guards against new visible commands being added without an
+    /// accompanying group entry, which would make them invisible in
+    /// scenario-grouped `libra --help` output even though they remain
+    /// callable.
+    #[test]
+    fn root_after_help_lists_every_visible_command() {
+        use clap::CommandFactory;
+
+        // Curated allowlist of hidden commands (mirrors `hide = true`
+        // attributes on `Commands::*` variants in this file).
+        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks"];
+
+        let cli = Cli::command();
+        for subcommand in cli.get_subcommands() {
+            let name = subcommand.get_name();
+            if HIDDEN_COMMANDS.contains(&name) || subcommand.is_hide_set() {
+                continue;
+            }
+            // `--help` is registered as an alias; skip it.
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                ROOT_AFTER_HELP.contains(name),
+                "ROOT_AFTER_HELP must list every visible command in some \
+                 'Command Groups:' row; missing: `{name}`. Either add it to \
+                 the appropriate group in src/cli.rs:ROOT_AFTER_HELP or, if \
+                 it should be hidden, mark it `hide = true` and add it to \
+                 HIDDEN_COMMANDS in this test."
+            );
+        }
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the
