@@ -69,6 +69,59 @@ libra --json agent checkpoint list
 libra --json agent rpc list
 ```
 
+## Examples
+
+```bash
+# Show captured-session counts and recent checkpoint summary
+libra agent status
+
+# Enable Claude Code capture and install its hooks
+libra agent enable --agent claude
+
+# Enable every stable external agent at once
+libra agent enable
+
+# Disable Claude Code capture and uninstall its hooks
+libra agent disable --agent claude
+
+# List captured sessions
+libra agent session list
+
+# List captured checkpoints
+libra agent checkpoint list
+
+# Show a single checkpoint by id
+libra agent checkpoint show <id>
+
+# Replay a checkpoint as a JSONL transcript
+libra agent checkpoint rewind <id>
+
+# Drop temporary checkpoints from the most recent stopped session
+libra agent clean
+
+# Drop temporary checkpoints from every stopped session
+libra agent clean --all
+
+# Diagnose hook installation and capture state
+libra agent doctor
+
+# Push refs/libra/agent-traces to the default remote
+libra agent push
+
+# Push refs/libra/agent-traces to a named remote
+libra agent push --remote origin
+
+# Invoke an external libra-agent-<name> RPC binary
+libra agent rpc <name> <method> [args...]
+
+# Structured JSON envelope for agents
+libra agent --json status
+```
+
+The same banner is rendered by `libra agent --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
+
 ## Notes
 
 - The top-level `agent hooks` entry is hidden and intended for hook configs
