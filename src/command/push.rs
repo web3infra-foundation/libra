@@ -86,6 +86,7 @@ pub struct PushArgs {
     #[clap(requires("repository"))]
     refspec: Option<String>,
 
+    /// Record the upstream tracking ref so future pushes/pulls default to it
     #[clap(long, short = 'u', requires("refspec"), requires("repository"))]
     set_upstream: bool,
 

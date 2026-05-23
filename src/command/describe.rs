@@ -33,11 +33,11 @@ pub struct DescribeArgs {
     // The commit object name, Defaults to HEAD.
     pub commit: Option<String>,
 
-    // Instead of only using annotated tags, use any tag found in refs/tags namespace.
+    /// Consider any tag in refs/tags (not just annotated tags) when describing
     #[clap(long)]
     pub tags: bool,
 
-    // Instead of using the default 7 hexadecimal digits as the abbreviated object name, use <n> digits.
+    /// Use `n` hex digits for the abbreviated commit hash (default: 7)
     #[clap(long)]
     pub abbrev: Option<usize>,
 

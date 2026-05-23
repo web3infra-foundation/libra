@@ -76,6 +76,7 @@ EXAMPLES:
 #[derive(Parser, Debug, Default)]
 #[command(after_help = COMMIT_EXAMPLES)]
 pub struct CommitArgs {
+    /// Commit message body (required unless --file or --no-edit is given)
     #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
 
@@ -102,6 +103,7 @@ pub struct CommitArgs {
     #[arg(short = 's', long)]
     pub signoff: bool,
 
+    /// Skip pre-commit hooks for this invocation (narrower than --no-verify, which also skips commit-msg hooks)
     #[arg(long)]
     pub disable_pre: bool,
 

@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.886"
+version = "0.17.887"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -217,3 +217,7 @@ path = "tests/compat/error_codes_doc_sync.rs"
 [[test]]
 name = "compat_command_docs_examples_section"
 path = "tests/compat/command_docs_examples_section.rs"
+
+[[test]]
+name = "compat_help_flag_descriptions"
+path = "tests/compat/help_flag_descriptions.rs"

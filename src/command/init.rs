@@ -251,33 +251,42 @@ pub struct InitOutput {
 #[derive(Parser, Debug, Clone)]
 #[command(after_help = EXAMPLES)]
 pub struct InitArgs {
+    /// Create a bare repository (no working tree; metadata at the target directory itself)
     #[clap(long, required = false)]
     pub bare: bool,
 
+    /// Copy hook and exclude templates from `template-directory` instead of using the built-in defaults
     #[clap(long = "template", name = "template-directory", required = false)]
     pub template: Option<String>,
 
+    /// Override the initial branch name (default: `main`)
     #[clap(short = 'b', long, required = false)]
     pub initial_branch: Option<String>,
 
     #[clap(default_value = ".")]
     pub repo_directory: String,
 
+    /// Suppress the "Initialized empty Libra repository" banner (errors still print)
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
+    /// Filesystem sharing mode for the repository (placeholder — see `git init --shared`)
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
+    /// Object hash algorithm: `sha1` (default) or `sha256`
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
 
+    /// Ref name validation strategy: `strict` (default) or `filesystem`
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
 
+    /// Convert an existing Git repository at `path` into a Libra repository (copies objects, refs, config)
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
     pub from_git_repository: Option<String>,
 
+    /// Initialize the embedded libvault and a PGP signing key (default: true). Pass `--vault false` to skip
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub vault: bool,
 }

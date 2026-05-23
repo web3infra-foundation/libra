@@ -70,7 +70,7 @@ pub struct DiffArgs {
     #[clap(long, default_value = "histogram", value_parser=["histogram", "myers", "myersMinimal"])]
     pub algorithm: Option<String>,
 
-    // Print the result to file
+    /// Write the diff to `FILENAME` instead of stdout
     #[clap(long, value_name = "FILENAME")]
     pub output: Option<String>,
 
