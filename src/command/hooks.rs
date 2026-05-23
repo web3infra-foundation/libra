@@ -24,7 +24,30 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra hooks --help` output.
+///
+/// `hooks` is the entry point invoked by external AI agent hook
+/// configurations (Claude Code, Gemini) — it reads the hook event JSON
+/// on stdin and records it into the libra session store. Each provider
+/// exposes the seven Claude-Code-style lifecycle events; the banner
+/// pins the most commonly wired ones (`session-start`, `prompt`,
+/// `tool-use`, `stop`, `session-end`) for both providers so operators
+/// see what to put in their hook config without reading the design
+/// doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const HOOKS_EXAMPLES: &str = "\
+EXAMPLES:
+    libra hooks claude session-start         Claude SessionStart hook entry (reads JSON on stdin)
+    libra hooks claude prompt                Claude UserPromptSubmit hook entry
+    libra hooks claude tool-use              Claude PreToolUse / PostToolUse hook entry
+    libra hooks claude stop                  Claude Stop hook entry
+    libra hooks claude session-end           Claude SessionEnd hook entry
+    libra hooks gemini session-start         Gemini SessionStart hook entry
+    libra hooks gemini prompt                Gemini UserPromptSubmit hook entry
+    libra hooks gemini tool-use              Gemini PreToolUse / PostToolUse hook entry";
+
 #[derive(Args, Debug)]
+#[command(after_help = HOOKS_EXAMPLES)]
 pub struct HooksArgs {
     #[command(subcommand)]
     pub command: HooksProviderSubcommand,
