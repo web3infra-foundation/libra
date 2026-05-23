@@ -2930,6 +2930,7 @@ where
             &model_name,
             &provider_name,
             &agent_router,
+            config.hook_runner.clone(),
         )
         .await
         {
@@ -3414,6 +3415,7 @@ async fn build_subagent_runtime_for_session(
     model_name: &str,
     provider_name: &str,
     agent_router: &AgentProfileRouter,
+    hook_runner: Option<std::sync::Arc<crate::internal::ai::hooks::HookRunner>>,
 ) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
     use crate::internal::ai::{
         agent::{
@@ -3585,17 +3587,13 @@ async fn build_subagent_runtime_for_session(
         context_frame_loader,
         abort_token: AbortToken::new(),
         depth: 0,
-        // v0.17.806 S2-INV-13 hook dispatch: the parent's
-        // `HookRunner` is stored on the App's `ToolLoopConfig`
-        // (built at `code.rs:2569` with `HookRunner::load(...)`).
-        // The runtime takes None here because the bootstrap site
-        // hasn't loaded the runner yet — the App's tool_loop
-        // path keeps its own runner; sub-agent runtime sees
-        // None today. A follow-up that hoists the parent's
-        // hook_runner out of the App config and threads it
-        // through `build_subagent_runtime_for_session` will
-        // populate this field.
-        hook_runner: None,
+        // v0.17.807 S2-INV-13 hook dispatch: the parent's
+        // `HookRunner` (loaded at `code.rs:2554` via
+        // `HookRunner::load(...)`) is now threaded through here
+        // so child sub-agents inherit the same PreToolUse /
+        // PostToolUse hook surface as the parent. Sub-agents
+        // cannot disable or supersede the parent's runner.
+        hook_runner,
     })
 }
 
