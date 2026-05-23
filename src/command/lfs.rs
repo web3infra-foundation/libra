@@ -82,7 +82,7 @@ pub enum LfsCmds {
         #[clap(long, short)]
         id: Option<String>,
     },
-    /// Show information about Git LFS files in the index and working tree (current branch)
+    /// Show information about Libra LFS files in the index and working tree (current branch)
     LsFiles {
         /// Show the entire 64 character OID, instead of just first 10.
         #[clap(long, short)]
