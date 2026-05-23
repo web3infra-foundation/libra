@@ -131,11 +131,12 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = GRAPH_EXAMPLES)]
 pub struct GraphArgs {
-    /// Canonical Libra Thread ID to inspect.
+    /// Canonical Libra Thread UUID to inspect
+    #[arg(value_name = "THREAD_UUID")]
     pub thread_id: String,
 
-    /// Path to a Libra repository to inspect instead of discovering one from the current directory.
-    #[arg(long)]
+    /// Path to a Libra repository to inspect (default: discover from current directory)
+    #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 }
 
