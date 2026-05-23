@@ -58,8 +58,10 @@ EXAMPLES:
     libra status --quiet --exit-code   Silent dirty check for scripts";
 
 /// Show the working tree status.
-///
-/// See `libra status --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = STATUS_EXAMPLES)]` and render
+// at the bottom of `libra status --help`. The meta-commentary that used to
+// live here as a `///` line leaked into clap's `--help` body (see
+// `tests/command/status_test.rs::test_status_help_does_not_leak_impl_meta`).
 #[derive(Parser, Debug, Default)]
 #[command(after_help = STATUS_EXAMPLES)]
 pub struct StatusArgs {

@@ -64,10 +64,14 @@ pub struct DiffArgs {
     #[clap(help = "Files to compare")]
     pathspec: Vec<String>,
 
-    // TODO: If algorithm support gets added to git-internal
-    /// choose the exact diff algorithm default value is histogram
-    /// support myers and myersMinimal
-    #[clap(long, default_value = "histogram", value_parser=["histogram", "myers", "myersMinimal"])]
+    // TODO: forward selected algorithm to git-internal once it exposes one
+    /// Diff algorithm: `histogram` (default), `myers`, or `myersMinimal`
+    #[clap(
+        long,
+        default_value = "histogram",
+        value_name = "NAME",
+        value_parser = ["histogram", "myers", "myersMinimal"],
+    )]
     pub algorithm: Option<String>,
 
     /// Write the diff to `FILENAME` instead of stdout

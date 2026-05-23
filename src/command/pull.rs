@@ -26,8 +26,9 @@ EXAMPLES:
     libra pull --quiet                     Suppress progress output";
 
 /// Fetch from a remote and integrate changes into the current branch.
-///
-/// See `libra pull --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
+// at the bottom of `libra pull --help`. The meta-commentary that used to live
+// here as a `///` line leaked into clap's `--help` body.
 #[derive(Parser, Debug)]
 #[command(after_help = PULL_EXAMPLES)]
 pub struct PullArgs {
