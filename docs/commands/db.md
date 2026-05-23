@@ -57,6 +57,26 @@ With `--json`, `db upgrade` emits:
 }
 ```
 
+## Examples
+
+```bash
+# Show the repository schema version (no writes)
+libra db status
+
+# Structured JSON output with current/latest version + state
+libra db --json status
+
+# Apply pending migrations to bring the schema to this Libra version
+libra db upgrade
+
+# Structured JSON output with applied_versions[] for the upgrade
+libra db --json upgrade
+```
+
+The same banner is rendered by `libra db --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
+
 ## Safety
 
 - `db status` is read-only.
