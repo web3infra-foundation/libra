@@ -27,7 +27,21 @@ const LINUX_SANDBOX_EXE_ENV: &str = "LIBRA_LINUX_SANDBOX_EXE";
 const LINUX_SANDBOX_BWRAP_ENV: &str = "LIBRA_USE_LINUX_SANDBOX_BWRAP";
 const MACOS_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
+/// `--help` examples shown in `libra sandbox --help` output.
+///
+/// `sandbox` today only exposes the `status` sub-command, which prints
+/// the effective sandbox diagnostics for AI tool execution. The banner
+/// pins the human, JSON, and machine-mode forms so users see the three
+/// supported invocations without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const SANDBOX_EXAMPLES: &str = "\
+EXAMPLES:
+    libra sandbox status            Show effective sandbox diagnostics for AI tool execution
+    libra sandbox --json status     Structured JSON output for agents
+    libra sandbox --machine status  Machine-strict JSON (implies --json=ndjson --no-pager --quiet)";
+
 #[derive(Parser, Debug)]
+#[command(after_help = SANDBOX_EXAMPLES)]
 pub struct SandboxArgs {
     #[command(subcommand)]
     pub command: SandboxSubcommand,

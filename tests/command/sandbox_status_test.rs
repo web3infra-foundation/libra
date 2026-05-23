@@ -166,3 +166,33 @@ fn sandbox_status_prefers_bwrap_when_configured_helper_is_not_executable() {
             .is_some_and(|value| value.contains("not executable; using built-in bwrap"))
     }));
 }
+
+/// `libra sandbox --help` surfaces the EXAMPLES banner so users see the
+/// three supported invocations (human / JSON / machine forms of
+/// `status`) without having to read the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_sandbox_help_lists_examples_banner() {
+    let temp = tempfile::tempdir().expect("failed to create tempdir");
+    let output = run_libra_command(&["sandbox", "--help"], temp.path());
+    assert!(
+        output.status.success(),
+        "sandbox --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "sandbox --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra sandbox status",
+        "libra sandbox --json status",
+        "libra sandbox --machine status",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "sandbox --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
