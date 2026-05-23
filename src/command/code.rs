@@ -3442,8 +3442,10 @@ async fn build_subagent_runtime_for_session(
             // 256+ is meaningless — that's a recursion bug not a
             // legitimate config). Saturating cast keeps the
             // semantics safe when an operator sets a huge u32.
-            max_subagent_depth: agents_config.multi_agent.max_subagent_depth.min(u8::MAX as u32)
-                as u8,
+            max_subagent_depth: agents_config
+                .multi_agent
+                .max_subagent_depth
+                .min(u8::MAX as u32) as u8,
             max_concurrent_subagents: agents_config.multi_agent.max_concurrent_subagents,
         },
     )
@@ -3488,10 +3490,9 @@ async fn build_subagent_runtime_for_session(
             });
         }
     });
-    let permission_service = PermissionService::new(
-        std::sync::Arc::new(ChannelPermissionAsker::new(permission_ask_tx))
-            as std::sync::Arc<dyn PermissionAsker>,
-    );
+    let permission_service = PermissionService::new(std::sync::Arc::new(
+        ChannelPermissionAsker::new(permission_ask_tx),
+    ) as std::sync::Arc<dyn PermissionAsker>);
 
     let parent_model_binding = ModelBinding::parse(&format!("{provider_name}/{model_name}"))
         .ok_or_else(|| {
@@ -3529,14 +3530,13 @@ async fn build_subagent_runtime_for_session(
     };
 
     let session_jsonl_store = SessionJsonlStore::new(session_store.session_root(&session.id));
-    let usage_recorder = std::sync::Arc::new(
-        build_usage_recorder(storage_root)
-            .await
-            .ok_or_else(|| anyhow::anyhow!(
+    let usage_recorder =
+        std::sync::Arc::new(build_usage_recorder(storage_root).await.ok_or_else(|| {
+            anyhow::anyhow!(
                 "usage recorder unavailable; sub-agent dispatcher requires the SQLite DB \
                  — check storage_root permissions"
-            ))?,
-    );
+            )
+        })?);
     let context_frame_loader = std::sync::Arc::new(ContextFrameLoader::default());
 
     // OC-Phase 4 P4.4 compaction model (v0.17.784): when the
@@ -3549,27 +3549,26 @@ async fn build_subagent_runtime_for_session(
     // misconfigured compaction model doesn't break operators
     // who have correctly configured sub-agents.
     let compaction_model = match agents_config.compaction_model_binding() {
-        Some(binding) => {
-            match ProviderFactory.build(&binding, ProviderBuildOptions::default()) {
-                Ok(model) => Some(std::sync::Arc::new(model)),
-                Err(err) => {
-                    tracing::warn!(
-                        %err,
-                        provider = %binding.provider_id,
-                        model = %binding.model_id,
-                        "failed to build compaction model from [code.compaction]; \
-                         falling back to raw-segment handoff",
-                    );
-                    None
-                }
+        Some(binding) => match ProviderFactory.build(&binding, ProviderBuildOptions::default()) {
+            Ok(model) => Some(std::sync::Arc::new(model)),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    provider = %binding.provider_id,
+                    model = %binding.model_id,
+                    "failed to build compaction model from [code.compaction]; \
+                     falling back to raw-segment handoff",
+                );
+                None
             }
-        }
+        },
         None => None,
     };
 
     Ok(SubAgentToolLoopRuntime {
         dispatcher: std::sync::Arc::new(dispatcher),
-        parent_thread_id: session_canonical_thread_id(session).unwrap_or_else(|| session.id.clone()),
+        parent_thread_id: session_canonical_thread_id(session)
+            .unwrap_or_else(|| session.id.clone()),
         parent_session_id: session.id.clone(),
         parent_agent,
         parent_ruleset: Vec::new(),
@@ -3586,6 +3585,17 @@ async fn build_subagent_runtime_for_session(
         context_frame_loader,
         abort_token: AbortToken::new(),
         depth: 0,
+        // v0.17.806 S2-INV-13 hook dispatch: the parent's
+        // `HookRunner` is stored on the App's `ToolLoopConfig`
+        // (built at `code.rs:2569` with `HookRunner::load(...)`).
+        // The runtime takes None here because the bootstrap site
+        // hasn't loaded the runner yet — the App's tool_loop
+        // path keeps its own runner; sub-agent runtime sees
+        // None today. A follow-up that hoists the parent's
+        // hook_runner out of the App config and threads it
+        // through `build_subagent_runtime_for_session` will
+        // populate this field.
+        hook_runner: None,
     })
 }
 

@@ -518,7 +518,8 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                             .join("\n\n");
                         let attachment_refs = frame.attachment_refs();
                         let system_prompt =
-                            crate::internal::ai::context_budget::embedded_compaction_system_prompt();
+                            crate::internal::ai::context_budget::embedded_compaction_system_prompt(
+                            );
                         match crate::internal::ai::context_budget::run_compaction(
                             compaction_model,
                             system_prompt,
@@ -946,6 +947,7 @@ mod tests {
             abort_token: AbortToken::new(),
             depth,
             compaction_model: None,
+            hook_runner: None,
         }
     }
 
@@ -1624,6 +1626,7 @@ mod tests {
             abort_token: pre_cancelled,
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         let result = dispatcher

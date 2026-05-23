@@ -2053,6 +2053,7 @@ mod tests {
             abort_token: AbortToken::new(),
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         let mut observer = RecordingObserver::default();

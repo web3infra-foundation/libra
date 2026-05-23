@@ -184,6 +184,7 @@ async fn user_initiated_bypass_skips_ask_and_runs_child_against_fake_provider() 
         abort_token,
         depth: 0,
         compaction_model: None,
+        hook_runner: None,
     };
 
     let invocation = TaskInvocation {

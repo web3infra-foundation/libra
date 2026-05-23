@@ -760,8 +760,18 @@ pub struct DispatchContext<'a> {
     /// falls through to [`ContextFrameEvent::to_handoff_messages`]
     /// (v0.17.773) — same raw-segment path the dispatcher used
     /// before P4.4 was wired.
-    pub compaction_model:
-        Option<&'a crate::internal::ai::providers::AnyCompletionModel>,
+    pub compaction_model: Option<&'a crate::internal::ai::providers::AnyCompletionModel>,
+    /// OC-Phase 3 S2-INV-13 hook dispatch (v0.17.806): the parent's
+    /// `HookRunner` so the child's tool_loop fires
+    /// `PreToolUse` / `PostToolUse` hooks before / after every
+    /// dispatched tool call. None means hooks are disabled (no
+    /// `.libra/hooks.json` present); the child loop simply skips
+    /// the hook calls in that case, matching the parent's
+    /// behaviour. Forcing the parent's runner (rather than a
+    /// fresh one per child) is required by S2-INV-13: child
+    /// dispatchers must not have private hooks that the operator
+    /// can't see in the project config.
+    pub hook_runner: Option<&'a Arc<crate::internal::ai::hooks::HookRunner>>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -994,6 +1004,11 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
 
             let tool_loop_config = ToolLoopConfig {
                 allowed_tools: Some(allowed_tools),
+                // S2-INV-13 hook dispatch (v0.17.806): forward the
+                // parent's `HookRunner` so PreToolUse / PostToolUse
+                // hooks fire on the child's tool calls — sub-agents
+                // are not allowed to bypass project-level hooks.
+                hook_runner: request.ctx.hook_runner.cloned(),
                 ..ToolLoopConfig::default()
             };
 
@@ -1118,6 +1133,13 @@ pub struct SubAgentToolLoopRuntime {
     /// clone.
     #[allow(clippy::type_complexity)]
     pub compaction_model: Option<Arc<crate::internal::ai::providers::AnyCompletionModel>>,
+    /// OC-Phase 3 S2-INV-13 hook dispatch (v0.17.806): the parent's
+    /// `HookRunner`, forwarded into each sub-agent's tool_loop
+    /// config so `PreToolUse` / `PostToolUse` hooks fire on
+    /// child tool calls. None means no hooks are configured at
+    /// the project level (no `.libra/hooks.json`); the child
+    /// then runs without hook dispatch, matching the parent.
+    pub hook_runner: Option<Arc<crate::internal::ai::hooks::HookRunner>>,
 }
 
 impl std::fmt::Debug for SubAgentToolLoopRuntime {
@@ -1156,6 +1178,7 @@ impl SubAgentToolLoopRuntime {
             abort_token: self.abort_token.child(),
             depth: self.depth,
             compaction_model: self.compaction_model.as_deref(),
+            hook_runner: self.hook_runner.as_ref(),
         }
     }
 
@@ -1629,6 +1652,7 @@ mod tests {
             abort_token: AbortToken::new(),
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         let child_binding =
@@ -1710,6 +1734,7 @@ mod tests {
             abort_token: AbortToken::new(),
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         let child_binding = ModelBinding::parse("deepseek/deepseek-chat").unwrap();
@@ -1791,6 +1816,7 @@ mod tests {
             abort_token: AbortToken::new(),
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         f(&context)
@@ -1886,6 +1912,7 @@ mod tests {
             abort_token,
             depth: 0,
             compaction_model: None,
+            hook_runner: None,
         };
 
         let request = SubAgentChildRunRequest {

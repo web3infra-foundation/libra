@@ -191,6 +191,7 @@ async fn pre_cancelled_user_initiated_dispatch_short_circuits_with_parent_abort(
         abort_token,
         depth: 0,
         compaction_model: None,
+        hook_runner: None,
     };
 
     let invocation = TaskInvocation {
@@ -317,6 +318,7 @@ async fn mid_flight_cancel_during_child_run_writes_cancelled_event() {
         abort_token,
         depth: 0,
         compaction_model: None,
+        hook_runner: None,
     };
 
     let invocation = TaskInvocation {

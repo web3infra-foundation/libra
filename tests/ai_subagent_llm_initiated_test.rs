@@ -173,6 +173,7 @@ async fn llm_initiated_dispatch_with_fake_provider_returns_fixture_response_and_
         abort_token,
         depth: 0,
         compaction_model: None,
+        hook_runner: None,
     };
 
     let invocation = TaskInvocation {
