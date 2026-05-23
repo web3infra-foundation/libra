@@ -248,15 +248,15 @@ libra code --provider ollama --model qwen3.6 --ollama-thinking high
 
 > **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Use `--env-file .env.test` to load provider keys from a dotenv-style file and override stale shell environment variables. DeepSeek reasoning fields are opt-in with `--deepseek-thinking enabled|disabled` and `--deepseek-reasoning-effort low|medium|high|max`; `xhigh` is accepted as an alias for `max`. DeepSeek streaming is opt-in with `--deepseek-stream true`; `--stream` is accepted as a DeepSeek-only alias. Kimi thinking can be overridden with `--kimi-thinking enabled|disabled`; omit it to use the selected model's default. Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` for remote/cloud Ollama endpoints that return 503s when receiving Libra's full tool schemas.
 
-| Provider | Default Model | Auth Env Variable | Base URL Override |
-|----------|--------------|-------------------|-------------------|
-| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
-| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
-| `kimi` | `kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL`, `--kimi-thinking` |
-| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
+| Provider | Default Model | Auth Env Variable | Base URL Override | Provider-specific Tuning |
+|----------|--------------|-------------------|-------------------|-------------------------|
+| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — | — |
+| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | — |
+| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | — |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | `--api-base` only (no env var) | `--deepseek-thinking`, `--deepseek-reasoning-effort`, `--deepseek-stream` |
+| `kimi` | `kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` | `--kimi-thinking` |
+| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` | — |
+| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `--api-base` | `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--ollama-thinking`, `--ollama-compact-tools` |
 
 `libra code` tries the Brave Search API for the `web_search` tool when `BRAVE_SEARCH_API_KEY` is set in the process environment or stored as `vault.env.BRAVE_SEARCH_API_KEY`; if Brave is not configured or the request fails, it falls back to DuckDuckGo HTML search. The session network policy must still allow outbound access.
 
