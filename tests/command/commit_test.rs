@@ -1027,3 +1027,39 @@ async fn test_commit_without_identity_fails_by_default() {
         std::env::remove_var("LIBRA_CONFIG_SYSTEM_DB");
     }
 }
+
+/// `libra commit --help` surfaces the EXAMPLES section so users see the
+/// nine canonical invocations (`-m`, `-a -m`, `--amend`, `--amend
+/// --no-edit`, `-F file`, `-s -m`, `--allow-empty`, `--conventional`,
+/// `--json -m`) without having to read the design doc. Companion to the
+/// global `--help` EXAMPLES rollout tracked in
+/// `docs/improvement/README.md` (cross-cutting item B).
+#[test]
+fn test_commit_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for commit --help");
+    let output = run_libra_command(&["commit", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "commit --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "commit --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra commit -m",
+        "libra commit --amend",
+        "libra commit -a -m",
+        "libra commit -F message.txt",
+        "libra commit -s -m",
+        "libra commit --allow-empty",
+        "libra commit --json -m",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "commit --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

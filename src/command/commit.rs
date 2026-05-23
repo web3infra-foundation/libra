@@ -48,26 +48,33 @@ use crate::{
 
 /// Create a new commit from staged changes.
 ///
-/// # Examples
-///
-/// ```text
-/// libra commit -m "Add new feature"          Create a commit with message
-/// libra commit -m "feat: add login" --conventional  Validate conventional commit format
-/// libra commit --amend                       Amend the last commit
-/// libra commit --amend --no-edit             Amend without changing the message
-/// libra commit -a -m "Fix typo"              Auto-stage tracked changes and commit
-/// libra commit -F message.txt                Read commit message from file
-/// libra commit -s -m "Add feature"           Add Signed-off-by trailer
-/// libra commit --allow-empty -m "Trigger CI" Create an empty commit
-/// libra commit --json -m "Add feature"       Structured JSON output for agents
-/// ```
+/// See `libra commit --help` for the same examples rendered through clap.
 // GitHub Issues URL surfaced on internal-invariant bug paths
 // (`CommitError::TreeCreation`) so users can report unexpected
 // tree-build failures. Mirrors push.rs / tag.rs's hint pattern per
 // Cross-Cutting G.
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
 
+/// `--help` examples shown in `libra commit --help` output.
+///
+/// Per `docs/improvement/commit.md`, the commit command exposes nine
+/// representative scenarios so users see the most common invocations
+/// without having to read the doc. Keep this list and the rustdoc
+/// snippet in `commit.md` in sync.
+pub const COMMIT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra commit -m 'Add new feature'                Create a commit with message
+    libra commit -m 'feat: add login' --conventional Validate conventional commit format
+    libra commit --amend                             Amend the last commit
+    libra commit --amend --no-edit                   Amend without changing the message
+    libra commit -a -m 'Fix typo'                    Auto-stage tracked changes and commit
+    libra commit -F message.txt                      Read commit message from file
+    libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
+    libra commit --allow-empty -m 'Trigger CI'       Create an empty commit
+    libra commit --json -m 'Add feature'             Structured JSON output for agents";
+
 #[derive(Parser, Debug, Default)]
+#[command(after_help = COMMIT_EXAMPLES)]
 pub struct CommitArgs {
     #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
