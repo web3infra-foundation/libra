@@ -359,6 +359,50 @@ the D1 `clone_domain`, set `LIBRA_PUBLISH_LIVE_SLUG` only when probing
 a pre-existing deployed site, and set `LIBRA_PUBLISH_LIVE_FILE_PATH`
 when the root tree has no direct file entry to probe.
 
+## Examples
+
+```bash
+# Materialise the local Worker template scaffold
+libra publish init --slug my-site --clone-domain code.example.com
+
+# Inspect local Worker template / D1 ref drift
+libra publish status
+
+# Inspect a specific published site by UUID
+libra publish status --site-id <uuid>
+
+# Plan the publish without writing to D1/R2
+libra publish sync --dry-run
+
+# Sync default refs to D1/R2
+libra publish sync
+
+# Sync a single named ref
+libra publish sync --ref refs/heads/main
+
+# Re-upload every file/object regardless of CAS revision
+libra publish sync --force
+
+# Allow a path the deny list normally blocks (private sites)
+libra publish sync --allow-sensitive-path docs/private.md
+
+# Build the Worker and deploy to Cloudflare
+libra publish deploy
+
+# Build only; skip Cloudflare mutation
+libra publish deploy --skip-deploy
+
+# Disable a published site without deleting D1/R2 data
+libra publish unpublish --yes
+
+# Structured JSON envelope for agents
+libra publish --json sync --dry-run
+```
+
+The same banner is rendered by `libra publish --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
+
 ## See also
 
 - `libra clone` — restores Cloudflare D1 / R2 publish snapshots via
