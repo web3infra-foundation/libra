@@ -73,7 +73,7 @@ src/
     ├── object.rs, object_ext.rs, tree.rs, path.rs, path_ext.rs, storage_ext.rs, text.rs, convert.rs, util.rs
     └── test.rs                  # Test helpers (ChangeDirGuard, setup_with_new_libra_in)
 
-tests/                           # 98 integration test files, layered L1/L2/L3 (see "Test Layers" below)
+tests/                           # 96 top-level integration test files + 17 tests/compat/ surface guards, layered L1/L2/L3 (see "Test Layers" below)
 ├── command/                     # Per-command integration tests mirroring real Git workflows
 ├── compat/                      # Compatibility-surface guards (must be registered as [[test]] in Cargo.toml)
 ├── harness/, helpers/, fixtures/, data/, objects/
