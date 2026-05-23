@@ -40,12 +40,16 @@ EXAMPLES:
                                                    (refused on a dirty worktree)
     libra worktree repair                          Fix stale or duplicate registry rows";
 
-/// CLI arguments for the `worktree` subcommand.
-///
-/// This type is wired into the top-level CLI and dispatches to individual
-/// worktree subcommands such as `add`, `list`, `move`, etc.
-
+/// Manage multiple working trees attached to this repository.
+//
+// Note: the user-facing summary for `libra worktree --help` is set via
+// `#[command(about = "...", long_about = ...)]` on the Cli enum binding
+// in src/cli.rs. We use `long_about` here so clap renders the same one-
+// liner in both the top-level command list and `worktree --help`'s
+// header, instead of leaking the previous "CLI arguments for the
+// `worktree` subcommand. This type is wired into..." rustdoc body.
 #[derive(Parser, Debug)]
+#[command(long_about = "Manage multiple working trees attached to this repository.")]
 pub struct WorktreeArgs {
     #[clap(subcommand)]
     pub command: WorktreeSubcommand,
