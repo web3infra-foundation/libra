@@ -114,8 +114,8 @@ pub struct CloneArgs {
     #[clap(long)]
     pub bare: bool,
 
-    /// Create a shallow clone with a history truncated to the specified number of commits
-    #[clap(long, value_name = "DEPTH", value_parser = validate_depth)]
+    /// Create a shallow clone with history truncated to N commits (must be > 0)
+    #[clap(long, value_name = "N", value_parser = validate_depth)]
     pub depth: Option<usize>,
 }
 
