@@ -156,3 +156,35 @@ fn symbolic_ref_outside_repo_reports_repo_not_found() {
     );
     assert_eq!(report.error_code, "LBR-REPO-001");
 }
+
+/// `libra symbolic-ref --help` surfaces the EXAMPLES banner so users
+/// see the read, short-read, set, quiet, and JSON forms without
+/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout
+/// per `docs/improvement/README.md` item B.
+#[test]
+fn test_symbolic_ref_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for symbolic-ref --help");
+    let output = run_libra_command(&["symbolic-ref", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "symbolic-ref --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "symbolic-ref --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra symbolic-ref HEAD",
+        "libra symbolic-ref --short HEAD",
+        "libra symbolic-ref HEAD refs/heads/main",
+        "libra symbolic-ref -q HEAD",
+        "libra symbolic-ref --json HEAD",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "symbolic-ref --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
