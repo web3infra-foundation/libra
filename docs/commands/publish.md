@@ -393,7 +393,7 @@ libra publish deploy
 libra publish deploy --skip-deploy
 
 # Disable a published site without deleting D1/R2 data
-libra publish unpublish --yes
+libra publish unpublish --site-id <uuid> --yes
 
 # Structured JSON envelope for agents
 libra publish --json sync --dry-run

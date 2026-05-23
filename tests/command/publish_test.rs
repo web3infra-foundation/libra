@@ -295,7 +295,7 @@ fn test_publish_help_lists_examples_banner() {
         "libra publish sync --allow-sensitive-path",
         "libra publish deploy",
         "libra publish deploy --skip-deploy",
-        "libra publish unpublish --yes",
+        "libra publish unpublish --site-id",
         "libra publish --json sync",
     ] {
         assert!(

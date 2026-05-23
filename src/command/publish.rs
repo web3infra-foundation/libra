@@ -108,7 +108,8 @@ EXAMPLES:
                                                   Allow a path the deny list normally blocks (private sites)
     libra publish deploy                          Build the Worker and deploy to Cloudflare
     libra publish deploy --skip-deploy            Build only; skip Cloudflare mutation
-    libra publish unpublish --yes                 Disable a published site without deleting D1/R2 data
+    libra publish unpublish --site-id <uuid> --yes
+                                                  Disable a published site without deleting D1/R2 data
     libra publish --json sync --dry-run           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
