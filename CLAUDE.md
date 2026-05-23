@@ -92,8 +92,8 @@ sql/
 ├── migrations/                              # Versioned forward + matching `_down.sql` migrations (YYYYMMDDNN naming)
 └── publish/                                 # Publish Worker D1 schema (0001_publish.sql, …)
 scripts/                         # check_compat_matrix.sh, check_docs_consistency.sh, check_integration_plan_consistency.sh
-template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description)
-web/                             # Next.js 15 frontend (pnpm); built into web/out/ and embedded via rust-embed
+template/                        # Git hook templates (pre-commit.sh, pre-commit.ps1, exclude, description) + sandbox seccomp filter (seccomp-default.json)
+web/                             # Next.js 16 frontend (pnpm); built into web/out/ and embedded via rust-embed
 worker/                          # Cloudflare Worker for read-only publishing (OpenNext + wrangler + playwright)
 ```
 
