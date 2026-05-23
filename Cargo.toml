@@ -1,7 +1,15 @@
 [package]
 name = "libra"
-version = "0.17.871"
+version = "0.17.872"
 edition = "2024"
+license = "MIT"
+description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
+repository = "https://github.com/web3infra-foundation/libra"
+homepage = "https://github.com/web3infra-foundation/libra"
+authors = ["Web3 Infrastructure Foundation"]
+keywords = ["git", "version-control", "ai", "agent", "vcs"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [features]
 default        = []
