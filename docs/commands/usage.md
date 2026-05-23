@@ -103,6 +103,41 @@ passed. The flag always wins over the project config.
 `prune` uses `usage.prune` and reports the retention window, cutoff timestamp,
 and deleted row count.
 
+## Examples
+
+```bash
+# Per-model totals across all recorded rows
+libra usage report
+
+# Per-model totals for the last 24 hours
+libra usage report --since 24h
+
+# Include failed requests in counts and wall-clock totals
+libra usage report --since 7d --include-failed
+
+# Restrict the report to a single session
+libra usage report --session <session-id>
+
+# Restrict the report to a single canonical thread
+libra usage report --thread <thread-id>
+
+# CSV table for downstream tooling (spreadsheets, BI dashboards)
+libra usage report --format csv
+
+# Structured JSON envelope for agents
+libra usage --json report --since 7d
+
+# Use the configured retention window (.libra/libra.db config `[usage].retention_days`)
+libra usage prune
+
+# Delete rows older than 30 days
+libra usage prune --retention-days 30
+```
+
+The same banner is rendered by `libra usage --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
+
 ## Notes
 
 - The command requires a Libra repository because usage rows live in
