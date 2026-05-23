@@ -440,7 +440,7 @@ EXAMPLES:
                                                      Browser-driven session against a local Ollama
     libra code --web-only --provider codex --browser-control loopback
                                                      Allow browser write control over loopback
-    libra code --control automation                  Local TUI automation control mode (token + lease)
+    libra code --control write                       Enable local automation write control (token + controller checks)
     libra code --resume <thread-uuid>                Resume a prior canonical thread
     libra code --plan-mode                           Start in plan-only mode (no apply)
     libra code --env-file .env.test                  Load provider keys from a dotenv-style file

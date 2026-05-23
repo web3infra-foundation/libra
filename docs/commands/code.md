@@ -193,8 +193,8 @@ libra code --web-only --provider ollama --port 4400
 # Allow browser write control over loopback (Codex web-only is loopback by default)
 libra code --web-only --provider codex --browser-control loopback
 
-# Local TUI automation control mode (writes token + lease discovery files)
-libra code --control automation
+# Enable local automation write control (writes token + lease discovery files)
+libra code --control write
 
 # Load provider keys from a dotenv-style file (overrides stale shell env vars)
 libra code --env-file .env.test
