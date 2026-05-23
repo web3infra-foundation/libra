@@ -126,11 +126,36 @@ async fn test_something_with_s3() {
 - CLI-level tests should use `run_libra_command()` or a local `libra_command()` helper that sets `HOME` / `XDG_CONFIG_HOME` to a temp path.
 - Mark tests that mutate shared state with `#[serial]`.
 
+### Compatibility-surface tests (`tests/compat/`)
+
+The `tests/compat/` directory holds **cross-cutting** regression guards
+that pin contracts spanning multiple commands or doc artefacts (see
+[`tests/compat/README.md`](../tests/compat/README.md) for the file
+inventory and per-file ownership).
+
+Two operational rules differ from the rest of the suite:
+
+1. **Cargo registration is mandatory.** Cargo's default `tests/*.rs`
+   discovery only walks files directly under `tests/`. Files placed
+   under `tests/compat/` are reachable **only** when registered as a
+   `[[test]]` entry in `Cargo.toml` with an explicit `path =
+   "tests/compat/<name>.rs"`. A new file that compiles but is missing
+   the entry will silently never run.
+2. **Membership reflects an intent, not just a category.** Most compat
+   guards exist because a specific failure mode previously hit
+   production or a Codex review caught it before it did. When adding
+   a new compat guard, also add a one-line entry to the inventory
+   table in `tests/compat/README.md` so future readers can map the
+   guard to its owning batch / version.
+
+All `tests/compat/*` files run in CI under the same `compat-offline-core`
+job that runs L1.
+
 ### CI
 
 | Workflow | Layers | Trigger |
 |----------|--------|---------|
-| `base.yml` (PR gate) | L1 only | Every push / PR |
+| `base.yml` (PR gate) | L1 + `tests/compat/*` | Every push / PR |
 | `live-tests.yml` (nightly) | L1 + L2 + L3 | Cron schedule + manual dispatch |
 
 Nightly CI injects credentials via GitHub Actions secrets.
