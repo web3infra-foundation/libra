@@ -1504,6 +1504,32 @@ where
         self.cancel_pending_exec_approval();
         self.cancel_pending_phase_confirmation_for_control();
         self.clear_pending_code_ui_dialogs().await;
+        // OC-Phase 5 P5.4 usage-row backfill (v0.17.797): when a
+        // turn is cancelled, the tool_loop's `record_summary` /
+        // `record_failure` path never fires (the future tree is
+        // dropped). Record the cancellation as a failure row so
+        // the `agent_usage_stats` audit reflects the abandoned
+        // turn — error_kind carries the CancelSource so an
+        // operator can distinguish Esc / SlashQuit / Automation /
+        // Budget abandons in the rollup.
+        if let (Some(recorder), Some(context)) = (
+            self.config.usage_recorder.as_ref(),
+            self.config.usage_context.as_ref(),
+        ) {
+            let error_kind = match source {
+                CancelSource::Esc => "cancelled_esc",
+                CancelSource::SlashQuit => "cancelled_quit",
+                CancelSource::Automation => "cancelled_automation",
+                CancelSource::Budget => "cancelled_budget",
+            };
+            if let Err(err) = recorder.record_failure(context, error_kind, None).await {
+                tracing::warn!(
+                    %err,
+                    error_kind,
+                    "failed to record cancellation as usage failure row",
+                );
+            }
+        }
         self.interrupt_agent_task();
         self.clear_mcp_run_id();
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
