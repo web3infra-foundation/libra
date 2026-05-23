@@ -121,8 +121,8 @@ pub struct LogArgs {
     /// Show abbreviated commit hash instead of full hash
     #[clap(long)]
     pub abbrev_commit: bool,
-    /// Length of abbreviated commit hash
-    #[clap(long)]
+    /// Number of hex digits for abbreviated commit hash (default: dynamically computed, min 7)
+    #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
     /// Show full hash
     #[clap(long)]
