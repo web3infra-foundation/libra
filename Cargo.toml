@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.841"
+version = "0.17.842"
 edition = "2024"
 
 [features]
@@ -201,3 +201,7 @@ path = "tests/compat/agent_run_non_exhaustive_guard.rs"
 [[test]]
 name = "compat_help_examples_banner"
 path = "tests/compat/help_examples_banner.rs"
+
+[[test]]
+name = "compat_error_codes_doc_sync"
+path = "tests/compat/error_codes_doc_sync.rs"
