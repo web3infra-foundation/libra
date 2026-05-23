@@ -19,7 +19,29 @@ use url::Url;
 
 use crate::utils::error::{CliError, CliResult};
 
+/// `--help` examples shown in `libra code-control --help` output.
+///
+/// `code-control` drives a local Libra Code TUI automation control
+/// session over NDJSON JSON-RPC 2.0 on stdin/stdout. The banner pins
+/// the canonical `--stdio` form (the only supported form today),
+/// shows how to wire it to the discovery file emitted by
+/// `--control automation`, and demonstrates Unix-style piping to feed
+/// a single JSON-RPC request through the shim. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const CODE_CONTROL_EXAMPLES: &str = "\
+EXAMPLES:
+    libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token
+                                                  Run the JSON-RPC shim against a session at the given URL/token
+    libra code-control --stdio \\
+        --url $(jq -r .url .libra/code/control.json) \\
+        --token-file .libra/code/control.token
+                                                  Wire from the discovery file emitted by 'libra code --control automation'
+    echo '{\"jsonrpc\":\"2.0\",\"method\":\"attach\",\"params\":{\"clientId\":\"my-script\"},\"id\":1}' | \\
+        libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token
+                                                  Send a single attach request through the shim";
+
 #[derive(Debug, Clone, Parser)]
+#[command(after_help = CODE_CONTROL_EXAMPLES)]
 pub struct CodeControlArgs {
     /// Run the local automation shim on stdin/stdout as NDJSON JSON-RPC 2.0.
     #[arg(long)]
