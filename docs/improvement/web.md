@@ -10,7 +10,7 @@
 - Wire contract 已固定在 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 与 [web/src/lib/code-ui/types.ts](../../web/src/lib/code-ui/types.ts)。Rust 结构字段使用 `camelCase`，枚举使用 `snake_case`；[tests/ai_code_ui_wire_test.rs](../../tests/ai_code_ui_wire_test.rs) 覆盖 snapshot、controller、capabilities、transcript kinds、interaction kinds、thread list 等 JSON 形态。
 - 前端生产路径已改走 [web/src/lib/code-ui/client.ts](../../web/src/lib/code-ui/client.ts)、[store.tsx](../../web/src/lib/code-ui/store.tsx)、[controller.tsx](../../web/src/lib/code-ui/controller.tsx) 和 [view-model.ts](../../web/src/lib/code-ui/view-model.ts)。`web/src/lib/mock/` 已不存在；`rg 'from "@/lib/mock' web/src` 应无结果。
 - 浏览器写控制已通过 `--browser-control <off|loopback>` 落地。TUI 默认 `off`；`--web-only --provider codex` 默认 `loopback`；非 Codex web-only 默认 `off`。浏览器只持有 `X-Code-Controller-Token` lease；automation 额外需要 `X-Libra-Control-Token`。
-- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、request-user-input / approval interaction surface、session persistence/resume；暂不支持 plan/patchset workflow。
+- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、`update_plan`、request-user-input / approval interaction surface、plan/patchset snapshot projection、session persistence/resume；暂不支持完整 IntentSpec plan approval workflow。
 
 ## 目标与非目标
 
@@ -37,7 +37,7 @@
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
-| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`--resume <thread_id>` 可恢复 transcript/basic history | 缺 plan/patchset |
+| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
 ## API 边界
@@ -64,7 +64,7 @@
 - `CodeUiProvider` 在 SSE 错误后退避重连并重新拉 `GET /api/code/session`；server 端收到 `BroadcastStream::Lagged` 时已发送一次完整 `session_updated` snapshot，避免静默丢事件。
 - `controller.canWrite` 表示当前 controller state，不等价于 capability。UI 写控件必须同时检查 `capabilities.*`、session `status`、controller ownership 和 browser hook error。
 - `LocalTui` 与 `Fixed { Tui }` 语义不同：前者是可被 browser/automation lease 接管的可见 TUI owner，后者是只读观察时的永久阻断。
-- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task`、plan/patchset workflow 仍保持 gated。
+- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task` 和完整 IntentSpec plan approval workflow 仍保持 gated。
 - `web/out/` 是 Rust embed 输入。任何 UI source 变更都必须 `pnpm --dir web build`，否则二进制仍服务旧页面。
 
 ## 后续实施计划
@@ -123,7 +123,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - [x] 为 headless runtime 接入 `ToolRuntimeContext`、sandbox、approval store、network policy；`web_search`、`apply_patch`、`shell` 通过同一 runtime context 执行，mutating tools 必须通过 `CodeUiInteractionRequest` 显示 approval，不允许静默执行。
 - [x] 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
 - [x] 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
-- 支持 plan/patchset 最小投影，打开 `planUpdates` / `patchsets` capability 前必须有测试证明 UI 可重建。
+- [x] 支持 plan/patchset 最小投影：headless observer 将 `update_plan` 投影到 `plans[]`，将 `apply_patch` diff metadata 投影到 `patchsets[]`，并打开 `planUpdates` / `patchsets` capability。
 
 **验收：**
 
@@ -187,7 +187,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 | PR 1 | Phase A：frontend client/store/controller/component tests + SSE lag recover | web lint/build + code_ui scenarios |
 | PR 2 | Phase B：remote notice static assets + `static_handler` remote HTML routing | curl + Rust handler tests |
 | PR 3 | Phase C.1：headless ProviderFactory 收敛与 runtime context 注入已完成 | headless tests + provider smoke |
-| PR 4 | Phase C.2：headless approvals/request-user-input/mutating tools 已完成；剩余 plan/patchset | browser interaction scenarios |
+| PR 4 | Phase C.2：headless approvals/request-user-input/mutating tools 与 plan/patchset 最小投影已完成 | browser interaction scenarios |
 | PR 5 | Phase D：workflow/summary/diff/terminal 完整映射与长数据保护 | component tests + browser smoke |
 | PR 6 | Phase E：CI/docs/release gate | full gate command |
 
@@ -207,7 +207,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 ## 决策与后续触发条件
 
 - Remote notice 页面采用 hand-written static HTML，直接放入 `web/out/remote-notice/`。原因是零 JS、体积和泄露面可控；不得用 Next route 生成含 runtime bundle 的页面。
-- Headless v1 已完成 provider factory、runtime context 与 guarded mutating tools 收敛。后续只在 plan/patchset 投影具备测试证明后打开对应 capability；不能只给某个 provider 打开 workflow 后把其它 provider 留在第二套启动路径。
+- Headless v1 已完成 provider factory、runtime context、guarded mutating tools 与 direct plan/patchset projection 收敛。后续完整 IntentSpec plan approval workflow 必须先抽共享 session driver，不能复制 ratatui `App` 状态机或只给某个 provider 打开第二套 workflow。
 - Thread list v1 不加 `q=` 后端搜索。默认 50 条 + client substring filter 是当前边界；只有当真实数据证明该限制不够，且已有 server-side pagination/search 测试时，才新增 `q=`。
 
 ## 完成定义

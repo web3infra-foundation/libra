@@ -23,9 +23,9 @@
 //! - IntentSpec / Plan workflow integration. The TUI's Phase 0/1 review loop
 //!   is deeply coupled to the ratatui [`crate::internal::tui::app::App`]; this
 //!   runtime treats every browser submit as a single direct turn instead.
-//! - `approval` / `sandbox_approval` interactions are routed through the
-//!   shared approval channel and surfaced as interactive browser interactions.
-//! - Multi-turn conversation history persistence via `SessionStore`.
+//! - Full IntentSpec plan approval remains future work; direct `update_plan`
+//!   and `apply_patch` tool projections are surfaced in the shared Code UI
+//!   snapshot.
 //!
 //! These follow-ups are explicitly called out in
 //! `docs/improvement/web.md` and will land in subsequent phases.
@@ -50,8 +50,9 @@ use tokio::{
 use super::code_ui::{
     CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind,
     CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
-    CodeUiInteractionStatus, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot,
-    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+    CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
+    CodeUiPlanStep, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
+    CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -62,23 +63,26 @@ use crate::internal::ai::{
     sandbox::{ExecApprovalRequest, ReviewDecision},
     session::{SessionState, SessionStore},
     tools::{
-        ToolRegistry,
-        context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
+        ToolOutput, ToolRegistry,
+        context::{
+            StepStatus, UpdatePlanArgs, UserInputAnswer, UserInputQuestion, UserInputRequest,
+            UserInputResponse,
+        },
     },
 };
 
 /// Capabilities advertised by the headless runtime.
 ///
-/// `messageInput` and `streamingText` are the only flags this v0 implementation
-/// can actually deliver. Plan / patchset / interaction surfaces light up once
-/// the corresponding workflow integrations are wired in.
+/// `messageInput`, streaming text, tool calls, direct plan updates, patchsets,
+/// approval interactions, structured questions, and session resume are delivered
+/// by the headless runtime. Full IntentSpec workflow approval stays gated.
 pub fn headless_capabilities() -> CodeUiCapabilities {
     CodeUiCapabilities {
         message_input: true,
         streaming_text: true,
-        plan_updates: false,
+        plan_updates: true,
         tool_calls: true,
-        patchsets: false,
+        patchsets: true,
         interactive_approvals: true,
         structured_questions: true,
         provider_session_resume: true,
@@ -351,6 +355,7 @@ where
             let mut observer = HeadlessTurnObserver {
                 session: session.clone(),
                 assistant_entry_id: task_assistant_entry_id.clone(),
+                tool_arguments: Arc::new(std::sync::Mutex::new(HashMap::new())),
             };
 
             let prior_history = {
@@ -907,6 +912,7 @@ fn user_input_response_from_code_ui_request(
 struct HeadlessTurnObserver {
     session: Arc<CodeUiSession>,
     assistant_entry_id: String,
+    tool_arguments: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 impl super::super::agent::runtime::tool_loop::ToolLoopObserver for HeadlessTurnObserver {
@@ -926,5 +932,283 @@ impl super::super::agent::runtime::tool_loop::ToolLoopObserver for HeadlessTurnO
 
     fn on_model_usage_recorded(&mut self, _usage: &CompletionUsageSummary, _wall_clock_ms: u64) {
         // Phase 3 follow-up: persist usage rows + show them in the Settings tab.
+    }
+
+    fn on_tool_call_begin(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        if let Ok(mut arguments_by_call) = self.tool_arguments.lock() {
+            arguments_by_call.insert(call_id.to_string(), arguments.clone());
+        }
+
+        let session = self.session.clone();
+        let call_id = call_id.to_string();
+        let tool_name = tool_name.to_string();
+        let arguments = arguments.clone();
+        tokio::spawn(async move {
+            let summary = headless_tool_call_summary(&tool_name, &arguments);
+            session
+                .upsert_tool_call(CodeUiToolCallSnapshot {
+                    id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    status: "running".to_string(),
+                    summary: Some(summary.clone()),
+                    details: None,
+                    updated_at: Utc::now(),
+                })
+                .await;
+            session
+                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                    id: call_id.clone(),
+                    kind: CodeUiTranscriptEntryKind::ToolCall,
+                    title: Some(tool_name.clone()),
+                    content: Some(summary),
+                    status: Some("running".to_string()),
+                    streaming: false,
+                    metadata: serde_json::json!({}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .await;
+            if tool_name == "update_plan"
+                && let Some(plan) =
+                    plan_snapshot_from_update_plan_arguments(&call_id, "running", &arguments)
+            {
+                session.upsert_plan(plan).await;
+            }
+            session.set_status(CodeUiSessionStatus::ExecutingTool).await;
+        });
+    }
+
+    fn on_tool_call_end(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        result: &Result<ToolOutput, String>,
+    ) {
+        let arguments = self
+            .tool_arguments
+            .lock()
+            .ok()
+            .and_then(|mut arguments_by_call| arguments_by_call.remove(call_id));
+        let session = self.session.clone();
+        let call_id = call_id.to_string();
+        let tool_name = tool_name.to_string();
+        let result = result.clone();
+        tokio::spawn(async move {
+            let (status, details) = match &result {
+                Ok(output) if output.is_success() => (
+                    "completed".to_string(),
+                    output.as_text().map(ToString::to_string),
+                ),
+                Ok(output) => (
+                    "failed".to_string(),
+                    output.as_text().map(ToString::to_string),
+                ),
+                Err(error) => ("failed".to_string(), Some(error.clone())),
+            };
+
+            session
+                .upsert_tool_call(CodeUiToolCallSnapshot {
+                    id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    status: status.clone(),
+                    summary: None,
+                    details: details.clone(),
+                    updated_at: Utc::now(),
+                })
+                .await;
+            session
+                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                    id: call_id.clone(),
+                    kind: CodeUiTranscriptEntryKind::ToolCall,
+                    title: Some(tool_name.clone()),
+                    content: details,
+                    status: Some(status.clone()),
+                    streaming: false,
+                    metadata: serde_json::json!({}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .await;
+            if tool_name == "apply_patch"
+                && let Some(patchset) =
+                    patchset_snapshot_for_tool_result(&call_id, &status, &result)
+            {
+                session.upsert_patchset(patchset).await;
+            }
+            if tool_name == "update_plan"
+                && let Some(arguments) = arguments.as_ref()
+                && let Some(plan) =
+                    plan_snapshot_from_update_plan_arguments(&call_id, &status, arguments)
+            {
+                session.upsert_plan(plan).await;
+            }
+            session.set_status(CodeUiSessionStatus::Thinking).await;
+        });
+    }
+}
+
+fn headless_tool_call_summary(tool_name: &str, arguments: &serde_json::Value) -> String {
+    if tool_name == "shell"
+        && let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str)
+    {
+        return format!("Run `{command}`");
+    }
+
+    if tool_name == "read_file"
+        && let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str)
+    {
+        return format!("Read {path}");
+    }
+
+    if tool_name == "web_search"
+        && let Some(query) = arguments.get("query").and_then(serde_json::Value::as_str)
+    {
+        return format!("Search {query}");
+    }
+
+    match tool_name {
+        "apply_patch" => "Apply patch".to_string(),
+        "request_user_input" => "Ask for user input".to_string(),
+        "update_plan" => "Update plan".to_string(),
+        _ => tool_name.replace('_', " "),
+    }
+}
+
+fn plan_snapshot_from_update_plan_arguments(
+    call_id: &str,
+    status: &str,
+    arguments: &serde_json::Value,
+) -> Option<CodeUiPlanSnapshot> {
+    let args = serde_json::from_value::<UpdatePlanArgs>(arguments.clone()).ok()?;
+    Some(CodeUiPlanSnapshot {
+        id: call_id.to_string(),
+        title: Some("Current plan".to_string()),
+        summary: args.explanation,
+        status: status.to_string(),
+        steps: args
+            .plan
+            .into_iter()
+            .map(|step| CodeUiPlanStep {
+                step: step.step,
+                status: step_status_label(&step.status).to_string(),
+            })
+            .collect(),
+        updated_at: Utc::now(),
+    })
+}
+
+fn step_status_label(status: &StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "pending",
+        StepStatus::InProgress => "in_progress",
+        StepStatus::Completed => "completed",
+    }
+}
+
+fn patchset_snapshot_for_tool_result(
+    call_id: &str,
+    status: &str,
+    result: &Result<ToolOutput, String>,
+) -> Option<CodeUiPatchsetSnapshot> {
+    let Ok(output) = result else {
+        return None;
+    };
+    let ToolOutput::Function {
+        metadata: Some(metadata),
+        ..
+    } = output
+    else {
+        return None;
+    };
+    let diffs = metadata.get("diffs")?.as_array()?;
+    let changes = diffs
+        .iter()
+        .filter_map(|entry| {
+            Some(CodeUiPatchChange {
+                path: entry.get("path")?.as_str()?.to_string(),
+                change_type: entry
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("update")
+                    .to_string(),
+                diff: entry
+                    .get("diff")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+            })
+        })
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
+        return None;
+    }
+    Some(CodeUiPatchsetSnapshot {
+        id: call_id.to_string(),
+        status: status.to_string(),
+        changes,
+        updated_at: Utc::now(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn headless_capabilities_advertise_projected_plan_and_patchset_surfaces() {
+        let capabilities = headless_capabilities();
+
+        assert!(capabilities.plan_updates);
+        assert!(capabilities.patchsets);
+        assert!(capabilities.tool_calls);
+        assert!(capabilities.interactive_approvals);
+    }
+
+    #[test]
+    fn plan_snapshot_from_update_plan_arguments_maps_steps() {
+        let plan = plan_snapshot_from_update_plan_arguments(
+            "plan-call",
+            "running",
+            &json!({
+                "explanation": "updated",
+                "plan": [
+                    {"step": "Inspect", "status": "completed"},
+                    {"step": "Patch", "status": "in_progress"}
+                ]
+            }),
+        )
+        .expect("valid update_plan arguments should produce a plan snapshot");
+
+        assert_eq!(plan.id, "plan-call");
+        assert_eq!(plan.summary.as_deref(), Some("updated"));
+        assert_eq!(plan.status, "running");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].status, "completed");
+        assert_eq!(plan.steps[1].status, "in_progress");
+    }
+
+    #[test]
+    fn patchset_snapshot_for_tool_result_uses_apply_patch_metadata() {
+        let result = Ok(ToolOutput::success("ok").with_metadata(json!({
+            "diffs": [
+                {"path": "src/lib.rs", "type": "update", "diff": "@@ -1 +1 @@"}
+            ]
+        })));
+
+        let patchset = patchset_snapshot_for_tool_result("patch-call", "completed", &result)
+            .expect("apply_patch diff metadata should produce a patchset");
+
+        assert_eq!(patchset.id, "patch-call");
+        assert_eq!(patchset.status, "completed");
+        assert_eq!(patchset.changes.len(), 1);
+        assert_eq!(patchset.changes[0].path, "src/lib.rs");
+        assert_eq!(patchset.changes[0].change_type, "update");
+        assert_eq!(patchset.changes[0].diff.as_deref(), Some("@@ -1 +1 @@"));
     }
 }

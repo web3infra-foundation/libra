@@ -2089,6 +2089,7 @@ fn build_headless_tool_registry(
         .register("web_search", Arc::new(WebSearchHandler))
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .register("shell", Arc::new(ShellHandler))
+        .register("update_plan", Arc::new(PlanHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),
@@ -5142,10 +5143,11 @@ no_cache_unknown_network = true
         );
     }
 
-    /// Scenario: headless web mode now has a browser approval channel and a
-    /// ToolRuntimeContext, so the registry may expose the same guarded
-    /// network/mutating tools as TUI without bypassing sandbox, approval, or
-    /// `--network-access deny`.
+    /// Scenario: headless web mode now has a browser approval channel, a
+    /// ToolRuntimeContext, and snapshot projection for direct plan updates, so
+    /// the registry may expose the same guarded network/mutating/basic plan
+    /// tools as TUI without bypassing sandbox, approval, or `--network-access
+    /// deny`.
     #[test]
     fn build_headless_tool_registry_exposes_runtime_guarded_tools() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5153,7 +5155,7 @@ no_cache_unknown_network = true
         let registry = build_headless_tool_registry(tmp.path(), tx);
         let names = registry.tool_names();
 
-        for tool in ["web_search", "apply_patch", "shell"] {
+        for tool in ["web_search", "apply_patch", "shell", "update_plan"] {
             assert!(
                 names.iter().any(|name| name == tool),
                 "headless registry must expose guarded tool `{tool}` after runtime context wiring; got {names:?}"
