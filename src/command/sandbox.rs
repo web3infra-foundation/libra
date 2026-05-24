@@ -119,6 +119,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
     if let Some(reason) = network_warning {
         warnings.push(reason);
     }
+    warnings.extend(host_environment_warnings());
 
     let sandbox_type = match env::consts::OS {
         "macos" if seatbelt_available => "macos-seatbelt",
@@ -294,6 +295,74 @@ fn env_sandbox_enforcement(warnings: &mut Vec<String>) -> SandboxEnforcement {
     }
 }
 
+#[derive(Debug)]
+struct HostEnvironmentSignals {
+    os: &'static str,
+    wsl_distro_name: Option<String>,
+    proc_version: Option<String>,
+    docker_env_file_exists: bool,
+    container_env_file_exists: bool,
+    proc_1_cgroup: Option<String>,
+}
+
+fn host_environment_warnings() -> Vec<String> {
+    let wsl_distro_name = env::var("WSL_DISTRO_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let proc_version = std::fs::read_to_string("/proc/version").ok();
+    let proc_1_cgroup = std::fs::read_to_string("/proc/1/cgroup").ok();
+    sandbox_host_environment_warnings(&HostEnvironmentSignals {
+        os: env::consts::OS,
+        wsl_distro_name,
+        proc_version,
+        docker_env_file_exists: Path::new("/.dockerenv").exists(),
+        container_env_file_exists: Path::new("/run/.containerenv").exists(),
+        proc_1_cgroup,
+    })
+}
+
+fn sandbox_host_environment_warnings(signals: &HostEnvironmentSignals) -> Vec<String> {
+    if signals.os != "linux" {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    if is_wsl_environment(signals) {
+        warnings.push(
+            "WSL environment detected; AI sandbox isolation may be constrained by the Windows host/WSL boundary. Verify `libra sandbox status` before relying on OS-level isolation."
+                .to_string(),
+        );
+    }
+    if is_container_environment(signals) {
+        warnings.push(
+            "containerized environment detected; AI sandbox isolation may be constrained by the outer container namespace and mount policy."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+fn is_wsl_environment(signals: &HostEnvironmentSignals) -> bool {
+    signals.wsl_distro_name.is_some()
+        || signals.proc_version.as_deref().is_some_and(|version| {
+            let version = version.to_ascii_lowercase();
+            version.contains("microsoft") || version.contains("wsl")
+        })
+}
+
+fn is_container_environment(signals: &HostEnvironmentSignals) -> bool {
+    if signals.docker_env_file_exists || signals.container_env_file_exists {
+        return true;
+    }
+
+    signals.proc_1_cgroup.as_deref().is_some_and(|cgroup| {
+        let cgroup = cgroup.to_ascii_lowercase();
+        ["docker", "containerd", "kubepods", "libpod", "podman"]
+            .iter()
+            .any(|marker| cgroup.contains(marker))
+    })
+}
+
 #[cfg(not(target_os = "linux"))]
 fn locate_bwrap_binary_for_status() -> Option<PathBuf> {
     None
@@ -431,5 +500,63 @@ impl From<SandboxEnforcement> for ProxyEnforcement {
             SandboxEnforcement::PreferStrict => ProxyEnforcement::PreferStrict,
             SandboxEnforcement::BestEffort => ProxyEnforcement::BestEffort,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HostEnvironmentSignals, sandbox_host_environment_warnings};
+
+    #[test]
+    fn sandbox_host_environment_warnings_detect_wsl_signals() {
+        let warnings = sandbox_host_environment_warnings(&HostEnvironmentSignals {
+            os: "linux",
+            wsl_distro_name: Some("Ubuntu".to_string()),
+            proc_version: None,
+            docker_env_file_exists: false,
+            container_env_file_exists: false,
+            proc_1_cgroup: None,
+        });
+
+        assert!(
+            warnings.iter().any(|warning| warning.contains("WSL")),
+            "expected WSL warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_host_environment_warnings_detect_container_signals() {
+        let warnings = sandbox_host_environment_warnings(&HostEnvironmentSignals {
+            os: "linux",
+            wsl_distro_name: None,
+            proc_version: None,
+            docker_env_file_exists: false,
+            container_env_file_exists: false,
+            proc_1_cgroup: Some("0::/kubepods.slice/docker-123.scope".to_string()),
+        });
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("containerized environment")),
+            "expected container warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_host_environment_warnings_ignore_non_linux() {
+        let warnings = sandbox_host_environment_warnings(&HostEnvironmentSignals {
+            os: "macos",
+            wsl_distro_name: Some("Ubuntu".to_string()),
+            proc_version: Some("microsoft".to_string()),
+            docker_env_file_exists: true,
+            container_env_file_exists: true,
+            proc_1_cgroup: Some("docker".to_string()),
+        });
+
+        assert!(
+            warnings.is_empty(),
+            "non-Linux hosts should not receive Linux sandbox warnings: {warnings:?}"
+        );
     }
 }

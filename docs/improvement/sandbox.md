@@ -180,7 +180,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；Linux 下 `template/seccomp-default.json` 现在可通过 `seccomp_compile::compile_bundled_seccomp_policy()` 即时编译成 BPF 字节（v0.17.770，`seccompiler` crate 0.5.0 + Linux-only `#[cfg(target_os = "linux")]` 门控）；`ensure_compiled_seccomp_policy_at(path)` 提供首次启动幂等地落盘到 `~/.libra/seccomp.bpf` 的 helper | ✅ | 阶段 2 + on-the-fly compile 均已落地 |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
-| G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
+| G9 | 嵌套容器 / WSL 的自适应降级告警 | `libra sandbox status` 已对 WSL 与常见 container/cgroup 信号输出弱隔离告警；执行策略仍保持显式 enforcement 决策 | ✅ | 诊断面已落地，后续仅维护更多宿主信号 |
 | G10 | Windows 规划中 | 同样未实现 | — | 本轮不处理 |
 
 ## 改进阶段
