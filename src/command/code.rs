@@ -1991,14 +1991,12 @@ fn build_headless_tool_registry(
 /// provider is not yet wired into the headless path so the caller can fall
 /// back to the read-only placeholder gracefully.
 ///
-/// v0 supports `--provider ollama` (the canonical Phase 3 verification path
-/// in `docs/improvement/web.md`). Other non-Codex providers continue to
-/// receive the placeholder runtime until each provider's client is wired in.
+/// v0 now routes several non-Codex providers through the same provider-factory
+/// bootstrap used by TUI. This keeps API-key/base-URL resolution centralized and
+/// ensures `--web-only` behavior stays aligned with existing provider construction.
 ///
-/// Ollama now reuses the same [`ProviderFactory`] bootstrap as TUI mode, so
-/// API-key/base-URL resolution stays in one place. Other non-Codex providers
-/// still fall back to the placeholder until the headless runtime has the
-/// provider-specific product contract and tests for them.
+/// The placeholder path is still available for providers that are not in this
+/// dispatch arm or fail during bootstrap for other reasons.
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
@@ -2008,7 +2006,13 @@ async fn build_non_codex_headless_runtime(
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     match args.provider {
-        CodeProvider::Ollama => {
+        CodeProvider::Gemini
+        | CodeProvider::Openai
+        | CodeProvider::Anthropic
+        | CodeProvider::Deepseek
+        | CodeProvider::Kimi
+        | CodeProvider::Zhipu
+        | CodeProvider::Ollama => {
             let (model, model_name, _) =
                 build_any_completion_model_for_args(args, &CodeEnvFile::default(), working_dir)?;
             Ok(Some(
@@ -2027,11 +2031,23 @@ async fn build_non_codex_headless_runtime(
         // Codex is handled by `start_codex_code_ui_runtime` in `execute_web_only`;
         // it must never enter this dispatcher.
         CodeProvider::Codex => Ok(None),
-        // Other providers (Gemini, OpenAI, Anthropic, DeepSeek, Kimi, Zhipu)
-        // can be added incrementally — each needs a `with_api_key`/`from_env`
-        // construction matching the TUI path. Until then, fall back to the
-        // placeholder.
-        _ => Ok(None),
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => {
+            let (model, model_name, _) =
+                build_any_completion_model_for_args(args, &CodeEnvFile::default(), working_dir)?;
+            Ok(Some(
+                build_headless_web_code_ui_runtime(
+                    args,
+                    working_dir,
+                    model,
+                    model_name,
+                    exec_approval_tx,
+                    exec_approval_rx,
+                    browser_write_enabled,
+                )
+                .await?,
+            ))
+        }
     }
 }
 
@@ -5137,6 +5153,33 @@ no_cache_unknown_network = true
         assert_eq!(snapshot.provider.provider, "ollama");
         assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
         assert_eq!(snapshot.provider.model.as_deref(), Some("llama3.2"));
+    }
+
+    #[cfg(feature = "test-provider")]
+    #[tokio::test]
+    async fn headless_non_ollama_provider_reuses_provider_factory_bootstrap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.provider = CodeProvider::Fake;
+        let fixture_path = tmp.path().join("fake-fixture.json");
+        args.fake_fixture = Some({
+            std::fs::write(
+                &fixture_path,
+                r#"{"responses":[],"fallback":{"type":"text","text":"ok"}}"#,
+            )
+                .expect("fixture payload should be written");
+            fixture_path
+        });
+
+        let runtime = build_non_codex_headless_runtime(&args, tmp.path(), false)
+            .await
+            .expect("headless Fake should build through ProviderFactory")
+            .expect("Fake provider is now supported in headless provider factory path");
+        let snapshot = runtime.snapshot().await;
+
+        assert_eq!(snapshot.provider.provider, "fake");
+        assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
+        assert_eq!(snapshot.provider.model.as_deref(), Some("fake-local"));
     }
 
     /// Scenario: `--provider gemini --model gpt-foo --agent planner`

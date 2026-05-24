@@ -319,7 +319,7 @@ where
         interaction_id: &str,
         response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
-        if let Some(mut pending) = {
+        if let Some(pending) = {
             let mut pending = self.pending_exec_approvals.lock().await;
             pending.remove(interaction_id)
         } {
