@@ -64,6 +64,7 @@ pub mod patchset;
 pub mod permission;
 pub mod run;
 pub mod task;
+pub mod workspace_strategy;
 
 // ----------------------------------------------------------------------------
 // Newtype IDs
@@ -212,3 +213,7 @@ pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
+pub use workspace_strategy::{
+    SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
+    resolve_full_copy_fallback, select_preferred_strategy,
+};
