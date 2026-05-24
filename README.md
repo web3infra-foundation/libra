@@ -33,7 +33,7 @@ Commands:
   stash         Stash the changes in a dirty working directory away
   lfs           Large File Storage
   log           Show commit logs
-  shortlog      Summarize 'git log' output
+  shortlog      Summarize commit history by author
   show          Show various types of objects
   show-ref      List references in a local repository
   ls-remote     List references in a remote repository
