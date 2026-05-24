@@ -20,12 +20,12 @@ use crate::{
 
 const DESCRIBE_EXAMPLES: &str = "\
 EXAMPLES:
-  libra describe
-  libra describe --tags
-  libra describe --always
-  libra describe HEAD~1
-  libra describe --json
-";
+    libra describe                  Describe HEAD using the nearest annotated tag
+    libra describe --tags           Include lightweight tags (not just annotated ones) in the search
+    libra describe --always         Fall back to abbreviated commit hash when no tag matches
+    libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
+    libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
+    libra describe --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = DESCRIBE_EXAMPLES)]
