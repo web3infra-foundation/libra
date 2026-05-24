@@ -1460,7 +1460,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
     {
         if candidate
             .as_ref()
-            .is_some_and(|path: &PathBuf| is_executable_file(path))
+            .is_some_and(|path: &PathBuf| is_executable_file(path.as_path()))
         {
             return candidate;
         }
