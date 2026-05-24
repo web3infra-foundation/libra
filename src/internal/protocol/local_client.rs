@@ -18,7 +18,6 @@ use git_internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
             blob::Blob,
-            commit::Commit,
             tree::{Tree, TreeItemMode},
         },
         pack::{encode::PackEncoder, entry::Entry},
@@ -405,25 +404,20 @@ impl LocalClient {
                         seen.insert(hash.clone());
                     });
 
-                    let commits = stream::iter(want)
-                        .then(|branch_hash| async move {
-                            // TODO: `unwrap_or_default` silently swallows storage
-                            // errors. Propagate once the surrounding pipeline
-                            // supports fallible streams.
-                            get_reachable_commits(branch_hash.to_string(), depth)
-                                .await
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(
-                                        %branch_hash,
-                                        error = %e,
-                                        "failed to walk reachable commits; treating as empty"
-                                    );
-                                    Vec::new()
-                                })
-                        })
-                        .flat_map(stream::iter)
-                        .collect::<Vec<Commit>>()
-                        .await
+                    let mut reachable_commits = Vec::new();
+                    for branch_hash in want {
+                        let commits = get_reachable_commits(branch_hash.to_string(), depth)
+                            .await
+                            .map_err(|error| {
+                                IoError::other(format!(
+                                    "failed to walk reachable commits for '{branch_hash}': \
+                                         {error}"
+                                ))
+                            })?;
+                        reachable_commits.extend(commits);
+                    }
+
+                    let commits = reachable_commits
                         .into_iter()
                         .filter(|c| seen.insert(c.id.to_string()))
                         .collect::<Vec<_>>();
@@ -765,6 +759,25 @@ mod tests {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert!(buf.windows(4).any(|w| w == b"PACK"));
+    }
+
+    #[tokio::test]
+    async fn fetch_objects_propagates_reachable_commit_walk_errors() {
+        let repo_dir = tempdir().unwrap();
+        setup_with_new_libra_in(repo_dir.path()).await;
+
+        let client = LocalClient::from_path(repo_dir.path()).unwrap();
+        let want = vec!["not-a-valid-hash".to_string()];
+        let error = match client.fetch_objects(&[], &want, &[], None).await {
+            Ok(_) => panic!("invalid want should fail instead of returning an empty pack"),
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to walk reachable commits for 'not-a-valid-hash'"),
+            "fetch_objects should preserve the failing want hash, got: {message}"
+        );
     }
 
     #[tokio::test]
