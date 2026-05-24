@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::AgentTaskId;
+use super::{AgentTaskId, workspace_strategy::check_write_in_scope};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,4 +35,106 @@ pub struct AgentContextPack {
     /// context from the persistent intent without re-asking Layer 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_intent_id: Option<Uuid>,
+}
+
+impl AgentContextPack {
+    /// `write_scope` entries that are **not** covered by `read_scope`,
+    /// violating the documented "`write_scope` ⊆ `read_scope`"
+    /// invariant (a sub-agent must never be able to write a path it
+    /// cannot read).
+    ///
+    /// Coverage uses the same lexical, component-wise containment as
+    /// [`check_write_in_scope`] — a write entry is covered when it is
+    /// equal to or nested under some `read_scope` entry. Absolute or
+    /// `..`-escaping entries are never covered (they aren't valid
+    /// repo-relative scope paths), so a malformed write entry surfaces
+    /// here too.
+    ///
+    /// An empty vec means the invariant holds. Returned in `write_scope`
+    /// order so callers can report each offending entry.
+    pub fn write_paths_outside_read_scope(&self) -> Vec<&str> {
+        self.write_scope
+            .iter()
+            .filter(|entry| check_write_in_scope(entry, &self.read_scope).is_err())
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// `true` when every `write_scope` entry is covered by `read_scope`
+    /// (the "writable ⊆ readable" invariant holds). Convenience wrapper
+    /// over [`write_paths_outside_read_scope`](Self::write_paths_outside_read_scope).
+    pub fn write_scope_within_read_scope(&self) -> bool {
+        self.write_paths_outside_read_scope().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack(read: &[&str], write: &[&str]) -> AgentContextPack {
+        AgentContextPack {
+            task_id: AgentTaskId::new(),
+            goal: "test".to_string(),
+            read_scope: read.iter().map(|s| s.to_string()).collect(),
+            write_scope: write.iter().map(|s| s.to_string()).collect(),
+            source_intent_id: None,
+        }
+    }
+
+    /// Write entries equal to or nested under a read entry satisfy the
+    /// subset invariant.
+    #[test]
+    fn write_scope_within_read_scope_when_nested() {
+        let p = pack(&["src", "docs"], &["src", "src/foo.rs", "docs/api"]);
+        assert!(p.write_scope_within_read_scope());
+        assert!(p.write_paths_outside_read_scope().is_empty());
+    }
+
+    /// A read scope of `.` (whole repo) covers any write entry.
+    #[test]
+    fn root_read_scope_covers_all_writes() {
+        let p = pack(&["."], &["anything/at/all.rs", "Cargo.toml"]);
+        assert!(p.write_scope_within_read_scope());
+    }
+
+    /// A write entry not covered by any read entry is reported as a
+    /// violation (in `write_scope` order).
+    #[test]
+    fn write_outside_read_scope_is_reported() {
+        let p = pack(&["src"], &["src/ok.rs", "lib/bad.rs", "tests/also_bad.rs"]);
+        assert!(!p.write_scope_within_read_scope());
+        assert_eq!(
+            p.write_paths_outside_read_scope(),
+            vec!["lib/bad.rs", "tests/also_bad.rs"],
+        );
+    }
+
+    /// An empty `read_scope` covers nothing, so any non-empty
+    /// `write_scope` violates the invariant (fail-closed).
+    #[test]
+    fn empty_read_scope_rejects_all_writes() {
+        let p = pack(&[], &["src/foo.rs"]);
+        assert!(!p.write_scope_within_read_scope());
+        assert_eq!(p.write_paths_outside_read_scope(), vec!["src/foo.rs"]);
+    }
+
+    /// Absolute or `..`-escaping write entries are never covered — they
+    /// aren't valid repo-relative paths — so they surface as violations
+    /// even under a permissive `.` read scope.
+    #[test]
+    fn malformed_write_entries_are_violations() {
+        let p = pack(&["."], &["/etc/passwd", "../outside"]);
+        assert_eq!(
+            p.write_paths_outside_read_scope(),
+            vec!["/etc/passwd", "../outside"],
+        );
+    }
+
+    /// No write scope at all trivially satisfies the invariant.
+    #[test]
+    fn empty_write_scope_is_within_any_read_scope() {
+        assert!(pack(&["src"], &[]).write_scope_within_read_scope());
+        assert!(pack(&[], &[]).write_scope_within_read_scope());
+    }
 }
