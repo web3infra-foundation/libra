@@ -33,7 +33,8 @@
   - 损坏对象体的 JSON pretty-print 读取失败
 
 **后续维护目标：**
-- 后续继续把剩余 legacy 错误路径收口到更一致的稳定错误码
+- 本批已完成：已将剩余 legacy 错误路径的 `cat-file` 分支收口到稳定错误码体系；
+- 若未来新增分支，按同样模板继续补齐错误码映射与回归测试。
 
 **本批非目标：**
 - 不重写 `cat-file` 内部 object/AI 双通道实现
@@ -43,5 +44,5 @@
 
 1. `cargo +nightly fmt --all --check`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test cat_file_test`
+3. `cargo test --test command_test cat_file_`
 4. `docs/commands/cat-file.md` 与命令输出保持一致
