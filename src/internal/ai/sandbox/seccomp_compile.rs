@@ -37,9 +37,10 @@ use thiserror::Error;
 
 /// Embedded JSON policy. Lives at `template/seccomp-default.json`
 /// at the repo root; v0.17.730 added it as the bundled baseline.
-/// `include_str!` resolves the path relative to *this* file, so
-/// the `../../../../..` climb maps to the workspace root.
-const BUNDLED_POLICY_JSON: &str = include_str!("../../../../../template/seccomp-default.json");
+/// `include_str!` resolves the path relative to *this* file
+/// (`src/internal/ai/sandbox/`), so the `../../../../` climb maps
+/// to the workspace root.
+const BUNDLED_POLICY_JSON: &str = include_str!("../../../../template/seccomp-default.json");
 
 /// Failure modes from [`compile_bundled_seccomp_policy`].
 ///
