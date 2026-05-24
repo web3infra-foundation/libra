@@ -2071,24 +2071,11 @@ fn build_headless_tool_registry(
     working_dir: &Path,
     user_input_tx: mpsc::UnboundedSender<UserInputRequest>,
 ) -> Arc<ToolRegistry> {
-    // Headless v0 ships **local-read-only** tools.
-    //
-    // The TUI flow attaches a `ToolRuntimeContext` (sandbox policy, approval
-    // store, network policy, user-input channel) to every `ToolLoopConfig`
-    // so `apply_patch` / `shell` invocations route through `LibraSandbox`
-    // and the approval queues, and so `web_search` honors `--network-access
-    // deny`. The headless runtime does not yet wire any of those into the
-    // browser `CodeUiInteractionRequest` surface, so:
-    //
-    // - `apply_patch` / `shell`: registering would let the agent mutate the
-    //   workspace without any sandbox or approval prompt — a security
-    //   regression vs. the TUI path.
-    // - `web_search`: `WebSearchHandler` allows network access whenever no
-    //   runtime context is present, which would silently bypass any
-    //   `--network-access deny` posture set on the CLI.
-    //
-    // Until the interaction-routing follow-up lands, headless mode exposes
-    // local-read-only tools only.
+    // Headless web mode now reuses the same ToolRuntimeContext path as TUI:
+    // shell/apply_patch route through sandbox + exec approval, web_search sees
+    // the CLI network policy, and pending approvals surface through
+    // CodeUiInteractionRequest. Keep workflow-only tools such as `task` gated
+    // until their dispatcher and projection surfaces land.
     let trace_id = uuid::Uuid::new_v4();
     let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
         .hardening(ToolBoundaryRuntime::system(
@@ -2099,6 +2086,9 @@ fn build_headless_tool_registry(
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
         .register("search_files", Arc::new(SearchFilesHandler))
+        .register("web_search", Arc::new(WebSearchHandler))
+        .register("apply_patch", Arc::new(ApplyPatchHandler))
+        .register("shell", Arc::new(ShellHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),
@@ -5150,6 +5140,25 @@ no_cache_unknown_network = true
              headless registry until the dispatcher lands and is gated; \
              got tool_names = {names:?}"
         );
+    }
+
+    /// Scenario: headless web mode now has a browser approval channel and a
+    /// ToolRuntimeContext, so the registry may expose the same guarded
+    /// network/mutating tools as TUI without bypassing sandbox, approval, or
+    /// `--network-access deny`.
+    #[test]
+    fn build_headless_tool_registry_exposes_runtime_guarded_tools() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let registry = build_headless_tool_registry(tmp.path(), tx);
+        let names = registry.tool_names();
+
+        for tool in ["web_search", "apply_patch", "shell"] {
+            assert!(
+                names.iter().any(|name| name == tool),
+                "headless registry must expose guarded tool `{tool}` after runtime context wiring; got {names:?}"
+            );
+        }
     }
 
     /// Scenario: an agent binding whose `provider_id` does NOT match any
