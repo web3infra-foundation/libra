@@ -5,7 +5,7 @@ Inspect Git objects and Libra AI history objects stored in the repository.
 ## Synopsis
 
 ```
-libra cat-file [OPTIONS] [<OBJECT>]
+libra cat-file [OPTIONS] [OBJECT]
 ```
 
 ## Description
