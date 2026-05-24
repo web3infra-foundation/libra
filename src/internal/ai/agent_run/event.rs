@@ -197,6 +197,26 @@ pub struct RunUsage {
     pub tool_call_count: u32,
 }
 
+impl RunUsage {
+    /// Total tokens counted against an [`AgentBudget`]'s `max_tokens`
+    /// dimension: prompt + completion + cached + reasoning (matching the
+    /// `max_tokens` doc — "prompt + completion + cached + reasoning").
+    /// `provider_latency_ms` and `wall_clock_ms` are latency dimensions,
+    /// not token counts, and are excluded.
+    ///
+    /// Uses saturating addition so a pathological provider report can
+    /// never wrap the sum around `u64::MAX` and under-report usage to
+    /// the budget check.
+    ///
+    /// [`AgentBudget`]: super::budget::AgentBudget
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens
+            .saturating_add(self.completion_tokens)
+            .saturating_add(self.cached_tokens)
+            .saturating_add(self.reasoning_tokens)
+    }
+}
+
 // ----------------------------------------------------------------------------
 // AgentRunEvent — append-only stream
 // ----------------------------------------------------------------------------
@@ -525,5 +545,45 @@ impl AgentRunEventEnvelope {
 impl From<AgentRunEvent> for AgentRunEventEnvelope {
     fn from(event: AgentRunEvent) -> Self {
         Self::Known(Box::new(event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `total_tokens` sums the four token dimensions (prompt +
+    /// completion + cached + reasoning) and excludes the latency /
+    /// cost / tool-call fields. Pins the `max_tokens` accounting so a
+    /// future field addition can't silently change what counts against
+    /// the token budget.
+    #[test]
+    fn run_usage_total_tokens_sums_only_token_dimensions() {
+        let usage = RunUsage {
+            prompt_tokens: 100,
+            completion_tokens: 40,
+            cached_tokens: 8,
+            reasoning_tokens: 12,
+            // Non-token dimensions must NOT contribute to the token sum.
+            wall_clock_ms: 9_999,
+            provider_latency_ms: 5_555,
+            cost_estimate_micro_dollars: 1_000_000,
+            tool_call_count: 7,
+        };
+        assert_eq!(usage.total_tokens(), 160);
+        assert_eq!(RunUsage::default().total_tokens(), 0);
+    }
+
+    /// Token totalling saturates instead of wrapping, so a pathological
+    /// provider report near `u64::MAX` can't underflow the budget
+    /// check into reporting tiny usage.
+    #[test]
+    fn run_usage_total_tokens_saturates_on_overflow() {
+        let usage = RunUsage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: 10,
+            ..RunUsage::default()
+        };
+        assert_eq!(usage.total_tokens(), u64::MAX);
     }
 }
