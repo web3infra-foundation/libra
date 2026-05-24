@@ -264,7 +264,7 @@ pub struct InitArgs {
     pub initial_branch: Option<String>,
 
     /// Directory in which to create the new `.libra` repository (default: current directory)
-    #[clap(default_value = ".")]
+    #[clap(value_name = "DIRECTORY", default_value = ".")]
     pub repo_directory: String,
 
     /// Suppress the "Initialized empty Libra repository" banner (errors still print)
