@@ -1522,7 +1522,10 @@ pub fn apply_thread_bundle_to_snapshot(
     } else {
         CodeUiSessionStatus::Idle
     };
-    snapshot.plans = code_ui_plan_snapshots(&bundle.scheduler.selected_plan_ids);
+    snapshot.plans = code_ui_plan_snapshots(
+        &bundle.scheduler.selected_plan_ids,
+        bundle.scheduler.updated_at,
+    );
     snapshot.tasks = bundle
         .scheduler
         .active_task_id
@@ -1538,7 +1541,20 @@ pub fn apply_thread_bundle_to_snapshot(
     snapshot.updated_at = bundle.thread.updated_at.max(bundle.scheduler.updated_at);
 }
 
-fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot> {
+/// Build the [`CodeUiPlanSnapshot`] list for a snapshot from the
+/// scheduler's selected-plan heads.
+///
+/// `scheduler_updated_at` is the upstream `SchedulerState::updated_at`
+/// — *not* `Utc::now()` — so every plan entry surfaces the same
+/// projection revision timestamp as the rest of the snapshot. Using
+/// `Utc::now()` here would make every render emit a different
+/// `updatedAt` even when the underlying projection is unchanged, which
+/// breaks browser change-detection heuristics and makes contract
+/// snapshot tests non-deterministic.
+fn code_ui_plan_snapshots(
+    plan_heads: &[PlanHeadRef],
+    scheduler_updated_at: DateTime<Utc>,
+) -> Vec<CodeUiPlanSnapshot> {
     plan_heads
         .iter()
         .map(|plan| CodeUiPlanSnapshot {
@@ -1547,7 +1563,7 @@ fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot>
             summary: Some(format!("Selected plan ordinal {}", plan.ordinal)),
             status: "selected".to_string(),
             steps: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: scheduler_updated_at,
         })
         .collect()
 }
