@@ -251,7 +251,7 @@ impl NetworkService {
 /// `Full` so existing "is the network available at all" gates keep
 /// working; new sites that need to distinguish the three modes
 /// match on the enum directly.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum NetworkAccess {
     /// No outbound network. Loopback only via the noop proxy.
@@ -270,6 +270,50 @@ pub enum NetworkAccess {
     /// path. The sandbox does NOT set
     /// `LIBRA_SANDBOX_NETWORK_DISABLED`.
     Full,
+}
+
+/// Custom `Deserialize` for [`NetworkAccess`] that accepts both the
+/// current tagged form (`{"mode": "denied" | "allowlist" | "full",
+/// ...}`) and the legacy boolean form
+/// (`true` → [`NetworkAccess::Full`], `false` → [`NetworkAccess::Denied`])
+/// that older `.libra/sandbox.toml` files and persisted
+/// `SandboxPolicy::WorkspaceWrite` JSON envelopes used before the Phase 7
+/// three-state migration (see `docs/improvement/sandbox.md` §7.1).
+///
+/// The legacy form keeps configs and Codex-style JSON envelopes written
+/// against the previous 2-state [`NetworkAccess`] readable after the
+/// upgrade; new writers always emit the tagged form via the derived
+/// `Serialize`.
+impl<'de> Deserialize<'de> for NetworkAccess {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Legacy(bool),
+            Tagged(Tagged),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "mode", rename_all = "kebab-case")]
+        enum Tagged {
+            Denied,
+            Allowlist {
+                #[serde(default)]
+                services: Vec<NetworkService>,
+            },
+            Full,
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Legacy(allowed) => NetworkAccess::from_legacy_bool(allowed),
+            Wire::Tagged(Tagged::Denied) => NetworkAccess::Denied,
+            Wire::Tagged(Tagged::Allowlist { services }) => NetworkAccess::Allowlist { services },
+            Wire::Tagged(Tagged::Full) => NetworkAccess::Full,
+        })
+    }
 }
 
 impl NetworkAccess {
@@ -1029,5 +1073,133 @@ mod tests {
             NetworkAccess::from_legacy_bool(false),
             NetworkAccess::Denied
         );
+    }
+
+    /// Legacy JSON form `network_access: true | false` must deserialize
+    /// straight into the three-state enum so older
+    /// `.libra/sandbox.toml` configs and persisted `SandboxPolicy`
+    /// envelopes from before the Phase 7 migration keep loading.
+    /// Pins `docs/improvement/sandbox.md` §7.1 line 305 and the §
+    /// "验证方式" integration test item 9 contract.
+    #[test]
+    fn network_access_deserialize_accepts_legacy_bool_form() {
+        let full: NetworkAccess =
+            serde_json::from_str("true").expect("legacy `true` must deserialize");
+        assert_eq!(full, NetworkAccess::Full);
+
+        let denied: NetworkAccess =
+            serde_json::from_str("false").expect("legacy `false` must deserialize");
+        assert_eq!(denied, NetworkAccess::Denied);
+    }
+
+    /// `SandboxPolicy::WorkspaceWrite { network_access: true | false }`
+    /// from older Codex-style envelopes must round-trip through the
+    /// three-state enum without serde errors. Pins the second half of
+    /// sandbox.md §7.1 integration test item 9 ("迁移兼容").
+    #[test]
+    fn sandbox_policy_workspace_write_accepts_legacy_network_access_bool() {
+        let legacy_full = r#"{"type": "workspace-write", "network_access": true}"#;
+        let parsed: SandboxPolicy =
+            serde_json::from_str(legacy_full).expect("legacy `true` payload must parse");
+        match parsed {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(network_access, NetworkAccess::Full);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+
+        let legacy_denied = r#"{"type": "workspace-write", "network_access": false}"#;
+        let parsed: SandboxPolicy =
+            serde_json::from_str(legacy_denied).expect("legacy `false` payload must parse");
+        match parsed {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(network_access, NetworkAccess::Denied);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+
+    /// The custom `Deserialize` must still accept the modern tagged
+    /// form (the derived `Serialize` writes this shape). Belt-and-
+    /// suspenders pin in addition to
+    /// [`network_access_three_state_wire_tags_round_trip`] so a future
+    /// refactor of the manual `Deserialize` impl can't silently break
+    /// the canonical wire form.
+    #[test]
+    fn network_access_deserialize_accepts_tagged_form() {
+        let denied: NetworkAccess =
+            serde_json::from_str(r#"{"mode": "denied"}"#).expect("tagged denied must parse");
+        assert_eq!(denied, NetworkAccess::Denied);
+
+        let full: NetworkAccess =
+            serde_json::from_str(r#"{"mode": "full"}"#).expect("tagged full must parse");
+        assert_eq!(full, NetworkAccess::Full);
+
+        let allowlist: NetworkAccess = serde_json::from_str(
+            r#"{"mode": "allowlist", "services": [{"host": "registry.npmjs.org", "ports": [443]}]}"#,
+        )
+        .expect("tagged allowlist must parse");
+        match allowlist {
+            NetworkAccess::Allowlist { services } => {
+                assert_eq!(services.len(), 1);
+                assert_eq!(services[0].host, "registry.npmjs.org");
+            }
+            other => panic!("expected Allowlist, got {other:?}"),
+        }
+    }
+
+    /// `SandboxPolicy::ExternalSandbox { network_access: true | false }`
+    /// envelopes from the pre-Phase-7 wire shape must also accept the
+    /// legacy bool form, not just `WorkspaceWrite`. Both variants share
+    /// the same `network_access: NetworkAccess` field, so the migration
+    /// contract must hold for both. Pin so a future refactor that
+    /// tightens one variant but forgets the other is caught here.
+    #[test]
+    fn sandbox_policy_external_sandbox_accepts_legacy_network_access_bool() {
+        let legacy_full = r#"{"type": "external-sandbox", "network_access": true}"#;
+        let parsed: SandboxPolicy =
+            serde_json::from_str(legacy_full).expect("external-sandbox legacy `true` must parse");
+        match parsed {
+            SandboxPolicy::ExternalSandbox { network_access } => {
+                assert_eq!(network_access, NetworkAccess::Full);
+            }
+            other => panic!("expected ExternalSandbox, got {other:?}"),
+        }
+
+        let legacy_denied = r#"{"type": "external-sandbox", "network_access": false}"#;
+        let parsed: SandboxPolicy = serde_json::from_str(legacy_denied)
+            .expect("external-sandbox legacy `false` must parse");
+        match parsed {
+            SandboxPolicy::ExternalSandbox { network_access } => {
+                assert_eq!(network_access, NetworkAccess::Denied);
+            }
+            other => panic!("expected ExternalSandbox, got {other:?}"),
+        }
+    }
+
+    /// Inputs that are neither bool nor a `{mode: …}` object must
+    /// fail to deserialize — otherwise an accidentally-accepted shape
+    /// (e.g., a bare string like `"full"`, which was never part of
+    /// either the legacy or current wire contract) would silently land
+    /// the wrong variant. The exact error text comes from serde's
+    /// untagged-enum machinery and is intentionally not asserted; only
+    /// the rejection is part of the contract.
+    #[test]
+    fn network_access_deserialize_rejects_non_contract_shapes() {
+        for bad_input in [
+            "null",
+            "0",
+            "1",
+            "\"full\"",
+            "\"denied\"",
+            "[]",
+            r#"{"mode": "unknown"}"#,
+            r#"{"not_mode": "denied"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<NetworkAccess>(bad_input).is_err(),
+                "expected NetworkAccess to reject malformed input `{bad_input}`",
+            );
+        }
     }
 }
