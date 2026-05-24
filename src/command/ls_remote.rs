@@ -24,10 +24,10 @@ use crate::{
 
 const LS_REMOTE_EXAMPLES: &str = "\
 EXAMPLES:
-  libra ls-remote origin
-  libra ls-remote https://example.com/repo.git
-  libra ls-remote --heads origin main
-  libra --json ls-remote --tags origin";
+    libra ls-remote origin                          List all refs on a configured remote
+    libra ls-remote https://example.com/repo.git    List all refs on a remote URL (no remote setup)
+    libra ls-remote --heads origin main             List only branch heads matching `main`
+    libra --json ls-remote --tags origin            Structured JSON output for agents (tags only)";
 
 #[derive(Parser, Debug)]
 #[command(after_help = LS_REMOTE_EXAMPLES)]

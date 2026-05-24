@@ -33,10 +33,9 @@ use crate::utils::{
 
 const INDEX_PACK_EXAMPLES: &str = "\
 EXAMPLES:
-  libra index-pack pack-123.pack
-  libra index-pack pack-123.pack -o pack-123.idx
-  libra index-pack pack-123.pack --json
-";
+    libra index-pack pack-123.pack                  Build pack-123.idx alongside the .pack
+    libra index-pack pack-123.pack -o pack-123.idx  Write the index to a specific path
+    libra index-pack pack-123.pack --json           Structured JSON output for agents";
 const INDEX_WRITE_ERROR_PREFIX: &str = "index write failed";
 
 /// GitHub Issues URL surfaced on the InternalInvariant fall-through path
