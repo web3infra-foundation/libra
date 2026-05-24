@@ -23,8 +23,8 @@
 //! - IntentSpec / Plan workflow integration. The TUI's Phase 0/1 review loop
 //!   is deeply coupled to the ratatui [`crate::internal::tui::app::App`]; this
 //!   runtime treats every browser submit as a single direct turn instead.
-//! - `approval` / `sandbox_approval` interactions are intentionally not yet
-//!   surfaced.
+//! - `approval` / `sandbox_approval` interactions are routed through the
+//!   shared approval channel and surfaced as interactive browser interactions.
 //! - Multi-turn conversation history persistence via `SessionStore`.
 //!
 //! These follow-ups are explicitly called out in
@@ -41,9 +41,11 @@ use tokio::{
 };
 
 use super::code_ui::{
-    CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionRequest, CodeUiInteractionResponse,
+    CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind, CodeUiInteractionOption,
+    CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
     CodeUiReadModel, CodeUiSession, CodeUiSessionStatus, CodeUiTranscriptEntry,
     CodeUiTranscriptEntryKind,
+    CodeUiApplyToFuture,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -51,6 +53,7 @@ use crate::internal::ai::{
         CompletionError, CompletionModel, CompletionStreamEvent, CompletionUsage,
         CompletionUsageSummary, Message,
     },
+    sandbox::{ExecApprovalRequest, ReviewDecision},
     tools::ToolRegistry,
     tools::context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
 };
@@ -76,6 +79,10 @@ pub fn headless_capabilities() -> CodeUiCapabilities {
 struct PendingHeadlessUserInput {
     questions: Vec<UserInputQuestion>,
     response_tx: oneshot::Sender<UserInputResponse>,
+}
+
+struct PendingHeadlessExecApproval {
+    request: ExecApprovalRequest,
 }
 
 /// Adapter that runs an agent tool loop in response to browser-driven messages.
@@ -116,6 +123,8 @@ pub struct HeadlessCodeRuntime<M: CompletionModel + 'static> {
     next_turn_id: Arc<AtomicU64>,
     /// Pending `request_user_input` flows keyed by tool call id.
     pending_user_inputs: Arc<Mutex<HashMap<String, PendingHeadlessUserInput>>>,
+    /// Pending exec approval flows keyed by tool call id.
+    pending_exec_approvals: Arc<Mutex<HashMap<String, PendingHeadlessExecApproval>>>,
 }
 
 impl<M> HeadlessCodeRuntime<M>
@@ -134,6 +143,7 @@ where
         model: M,
         registry: Arc<ToolRegistry>,
         mut user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
+        mut exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
         config_factory: Arc<
             dyn Fn() -> super::super::agent::runtime::tool_loop::ToolLoopConfig + Send + Sync,
         >,
@@ -148,12 +158,16 @@ where
             in_flight: Arc::new(Mutex::new(None)),
             next_turn_id: Arc::new(AtomicU64::new(1)),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+            pending_exec_approvals: Arc::new(Mutex::new(HashMap::new())),
         });
 
         let listener = runtime.clone();
         tokio::spawn(async move {
             listener
-                .run_user_input_request_listener(&mut user_input_rx)
+                .run_user_and_exec_approval_request_listener(
+                    &mut user_input_rx,
+                    &mut exec_approval_rx,
+                )
                 .await;
         });
 
@@ -305,6 +319,24 @@ where
         interaction_id: &str,
         response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
+        if let Some(mut pending) = {
+            let mut pending = self.pending_exec_approvals.lock().await;
+            pending.remove(interaction_id)
+        } {
+            let decision = review_decision_from_interaction_response(response)?;
+            pending.request.response_tx.send(decision).map_err(|_| {
+                anyhow!("The pending execution approval request is no longer awaiting a response")
+            })?;
+
+            self.session
+                .resolve_interaction(interaction_id)
+                .await;
+            self.session
+                .set_status(CodeUiSessionStatus::ExecutingTool)
+                .await;
+            return Ok(());
+        }
+
         let pending = {
             let mut pending = self.pending_user_inputs.lock().await;
             pending
@@ -377,52 +409,114 @@ where
     M: CompletionModel + Clone + Send + Sync + 'static,
     M::Response: CompletionUsage,
 {
-    async fn run_user_input_request_listener(
+    async fn run_user_and_exec_approval_request_listener(
         &self,
         user_input_rx: &mut mpsc::UnboundedReceiver<UserInputRequest>,
+        exec_approval_rx: &mut mpsc::UnboundedReceiver<ExecApprovalRequest>,
     ) {
-        while let Some(request) = user_input_rx.recv().await {
-            let interaction_id = request.call_id.clone();
-            let questions_for_ui = request
-                .questions
-                .iter()
-                .map(request_user_input_question_to_metadata)
-                .collect::<Vec<_>>();
+        let mut user_input_open = true;
+        let mut exec_approval_open = true;
 
-            {
-                let mut pending = self.pending_user_inputs.lock().await;
-                pending.insert(
-                    interaction_id.clone(),
-                    PendingHeadlessUserInput {
-                        questions: request.questions,
-                        response_tx: request.response_tx,
-                    },
-                );
+        while user_input_open || exec_approval_open {
+            tokio::select! {
+                request = user_input_rx.recv(), if user_input_open => {
+                    if let Some(request) = request {
+                        self.handle_user_input_request(request).await;
+                    } else {
+                        user_input_open = false;
+                    }
+                }
+                request = exec_approval_rx.recv(), if exec_approval_open => {
+                    if let Some(request) = request {
+                        self.handle_exec_approval_request(request).await;
+                    } else {
+                        exec_approval_open = false;
+                    }
+                }
             }
-
-            let interaction = CodeUiInteractionRequest {
-                id: interaction_id,
-                kind: crate::internal::ai::web::code_ui::CodeUiInteractionKind::RequestUserInput,
-                title: Some("User input required".to_string()),
-                description: None,
-                prompt: None,
-                options: Vec::new(),
-                status: crate::internal::ai::web::code_ui::CodeUiInteractionStatus::Pending,
-                metadata: serde_json::json!({ "questions": questions_for_ui }),
-                requested_at: Utc::now(),
-                resolved_at: None,
-            };
-
-            self.session.upsert_interaction(interaction).await;
-            self.session
-                .set_status(CodeUiSessionStatus::AwaitingInteraction)
-                .await;
         }
+    }
+
+    async fn handle_user_input_request(&self, request: UserInputRequest) {
+        let interaction_id = request.call_id.clone();
+        let questions_for_ui = request
+            .questions
+            .iter()
+            .map(request_user_input_question_to_metadata)
+            .collect::<Vec<_>>();
+
+        {
+            let mut pending = self.pending_user_inputs.lock().await;
+            pending.insert(
+                interaction_id.clone(),
+                PendingHeadlessUserInput {
+                    questions: request.questions,
+                    response_tx: request.response_tx,
+                },
+            );
+        }
+
+        let interaction = CodeUiInteractionRequest {
+            id: interaction_id,
+            kind: crate::internal::ai::web::code_ui::CodeUiInteractionKind::RequestUserInput,
+            title: Some("User input required".to_string()),
+            description: None,
+            prompt: None,
+            options: Vec::new(),
+            status: crate::internal::ai::web::code_ui::CodeUiInteractionStatus::Pending,
+            metadata: serde_json::json!({ "questions": questions_for_ui }),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
+
+        self.session.upsert_interaction(interaction).await;
+        self.session
+            .set_status(CodeUiSessionStatus::AwaitingInteraction)
+            .await;
+    }
+
+    async fn handle_exec_approval_request(&self, request: ExecApprovalRequest) {
+        let interaction_id = request.call_id.clone();
+        let interaction_kind = if request.sandbox_label == "outside sandbox" {
+            CodeUiInteractionKind::SandboxApproval
+        } else {
+            CodeUiInteractionKind::Approval
+        };
+
+        let interaction = interaction_request_for_exec_approval(
+            interaction_id.clone(),
+            interaction_kind,
+            &request,
+        );
+
+        {
+            let mut pending = self.pending_exec_approvals.lock().await;
+            pending.insert(
+                interaction_id.clone(),
+                PendingHeadlessExecApproval { request },
+            );
+        }
+
+        self.session.upsert_interaction(interaction).await;
+        self.session
+            .set_status(CodeUiSessionStatus::AwaitingInteraction)
+            .await;
     }
 
     async fn clear_pending_user_inputs(&self) {
         let pending_ids = {
             let mut pending = self.pending_user_inputs.lock().await;
+            let ids = pending.keys().cloned().collect::<Vec<_>>();
+            pending.clear();
+            ids
+        };
+
+        for interaction_id in pending_ids {
+            self.session.clear_interaction(&interaction_id).await;
+        }
+
+        let pending_ids = {
+            let mut pending = self.pending_exec_approvals.lock().await;
             let ids = pending.keys().cloned().collect::<Vec<_>>();
             pending.clear();
             ids
@@ -493,6 +587,104 @@ fn request_user_input_question_to_metadata(question: &UserInputQuestion) -> serd
     });
 
     metadata
+}
+
+fn interaction_request_for_exec_approval(
+    interaction_id: String,
+    kind: CodeUiInteractionKind,
+    request: &ExecApprovalRequest,
+) -> CodeUiInteractionRequest {
+    let command = request.command.clone();
+    let reason = request
+        .reason
+        .clone()
+        .unwrap_or_else(|| String::from("Command execution"))
+        .trim()
+        .to_string();
+
+    let title = match kind {
+        CodeUiInteractionKind::Approval => "Approve command execution",
+        CodeUiInteractionKind::SandboxApproval => "Approve sandbox-executed command",
+        _ => "Approval request",
+    };
+
+    let prompt = format!("{command}");
+    CodeUiInteractionRequest {
+        id: interaction_id,
+        kind,
+        title: Some(title.to_string()),
+        description: Some(reason),
+        prompt: Some(prompt),
+        options: vec![
+            CodeUiInteractionOption {
+                id: "approve".to_string(),
+                label: "Approve".to_string(),
+                description: Some("Allow this command once".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "deny".to_string(),
+                label: "Deny".to_string(),
+                description: Some("Skip this command".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "abort".to_string(),
+                label: "Abort".to_string(),
+                description: Some("Cancel this tool run immediately".to_string()),
+            },
+        ],
+        status: CodeUiInteractionStatus::Pending,
+        metadata: exec_approval_request_to_metadata(request),
+        requested_at: Utc::now(),
+        resolved_at: None,
+    }
+}
+
+fn exec_approval_request_to_metadata(request: &ExecApprovalRequest) -> serde_json::Value {
+    serde_json::json!({
+        "command": request.command,
+        "cwd": request.cwd.display().to_string(),
+        "reason": request.reason,
+        "is_retry": request.is_retry,
+        "sandbox_label": request.sandbox_label,
+        "network_access": request.network_access,
+        "writable_roots": request
+            .writable_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "cache_disabled_reason": request.cache_disabled_reason,
+    })
+}
+
+fn review_decision_from_interaction_response(
+    response: CodeUiInteractionResponse,
+) -> anyhow::Result<ReviewDecision> {
+    let approved = response
+        .approved
+        .or(match response.selected_option.as_deref() {
+            Some(option) if option.eq_ignore_ascii_case("approve") => Some(true),
+            Some(option) if option.eq_ignore_ascii_case("allow") => Some(true),
+            Some(option) if option.eq_ignore_ascii_case("approve_all") => Some(true),
+            Some(option) if option.eq_ignore_ascii_case("yes") => Some(true),
+            Some(option) if option.eq_ignore_ascii_case("deny") => Some(false),
+            Some(option) if option.eq_ignore_ascii_case("decline") => Some(false),
+            Some(option) if option.eq_ignore_ascii_case("no") => Some(false),
+            Some(option) if option.eq_ignore_ascii_case("abort") => {
+                return Ok(ReviewDecision::Abort)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("Exec approvals require an explicit decision"))?;
+
+    if !approved {
+        return Ok(ReviewDecision::Denied);
+    }
+
+    match response.apply_to_future {
+        Some(CodeUiApplyToFuture::AcceptAll) => Ok(ReviewDecision::ApprovedForAllCommands),
+        Some(CodeUiApplyToFuture::DeclineAll) => Ok(ReviewDecision::Denied),
+        Some(CodeUiApplyToFuture::No) | None => Ok(ReviewDecision::Approved),
+    }
 }
 
 fn user_input_response_from_code_ui_request(

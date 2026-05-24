@@ -1861,6 +1861,8 @@ pub async fn build_headless_web_code_ui_runtime<M>(
     working_dir: &Path,
     model: M,
     model_name: String,
+    exec_approval_tx: mpsc::UnboundedSender<ExecApprovalRequest>,
+    exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
     browser_write_enabled: bool,
 ) -> CliResult<Arc<CodeUiRuntimeHandle>>
 where
@@ -1886,7 +1888,25 @@ where
     snapshot.status = CodeUiSessionStatus::Idle;
     let session = CodeUiSession::new(snapshot);
 
+    let approval_config = approval_config_from_project_config(working_dir);
+    let approval_ttl = args
+        .approval_ttl
+        .map(Duration::from_secs)
+        .or(approval_config.ttl)
+        .unwrap_or(DEFAULT_APPROVAL_TTL);
     let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
+    let runtime_context = Some(default_tui_runtime_context(
+        working_dir,
+        args.context,
+        DefaultTuiApprovalConfig {
+            policy: args.approval_policy.into(),
+            allow_all_commands: args.approval_policy.allows_all_commands(),
+            ttl: approval_ttl,
+            cache_policy: approval_config.cache_policy,
+        },
+        args.network_access.is_allowed(),
+        exec_approval_tx,
+    ));
 
     let registry = build_headless_tool_registry(working_dir, user_input_tx);
     let preamble = system_preamble(working_dir, args.context, args.provider, Some(&model_name));
@@ -1904,6 +1924,7 @@ where
             reasoning_effort,
             stream,
             preserve_reasoning_content,
+            runtime_context: runtime_context.clone(),
             ..Default::default()
         });
 
@@ -1913,6 +1934,7 @@ where
         model,
         registry,
         user_input_rx,
+        exec_approval_rx,
         config_factory,
     );
 
@@ -1982,6 +2004,9 @@ async fn build_non_codex_headless_runtime(
     working_dir: &Path,
     browser_write_enabled: bool,
 ) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
+    let (exec_approval_tx, exec_approval_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
+
     match args.provider {
         CodeProvider::Ollama => {
             let (model, model_name, _) =
@@ -1992,6 +2017,8 @@ async fn build_non_codex_headless_runtime(
                     working_dir,
                     model,
                     model_name,
+                    exec_approval_tx,
+                    exec_approval_rx,
                     browser_write_enabled,
                 )
                 .await?,

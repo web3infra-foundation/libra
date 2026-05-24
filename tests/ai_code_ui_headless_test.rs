@@ -15,11 +15,13 @@ use libra::internal::ai::{
     agent::runtime::tool_loop::ToolLoopConfig,
     providers::fake,
     runtime::{ToolBoundaryRuntime, TracingAuditSink},
+    sandbox::ExecApprovalRequest,
     tools::context::{UserInputQuestion, UserInputRequest, UserInputResponse},
     tools::{ToolRegistryBuilder, handlers::ReadFileHandler},
     web::{
         code_ui::{
-            CodeUiCommandAdapter, CodeUiInteractionResponse, CodeUiInteractionStatus,
+            CodeUiApplyToFuture, CodeUiCommandAdapter, CodeUiInteractionResponse,
+            CodeUiInteractionStatus,
             CodeUiProviderInfo, CodeUiReadModel, CodeUiSession, CodeUiSessionStatus,
             initial_snapshot,
         },
@@ -42,6 +44,7 @@ fn build_runtime(
 ) -> (
     Arc<HeadlessCodeRuntime<fake::CompletionModel>>,
     mpsc::UnboundedSender<UserInputRequest>,
+    mpsc::UnboundedSender<ExecApprovalRequest>,
 ) {
     let fake_client = fake::Client::from_fixture_path(&fixture_path(fixture))
         .expect("fake provider fixture must load");
@@ -59,6 +62,8 @@ fn build_runtime(
         capabilities.clone(),
     ));
     let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
+    let (exec_approval_tx, exec_approval_rx) =
+        mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)
@@ -80,9 +85,11 @@ fn build_runtime(
             model,
             registry,
             user_input_rx,
+            exec_approval_rx,
             config_factory,
         ),
         user_input_tx,
+        exec_approval_tx,
     )
 }
 
@@ -94,7 +101,7 @@ fn build_runtime(
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_message_streams_assistant_reply_into_snapshot() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     runtime
         .submit_message("hello headless".to_string())
@@ -153,7 +160,7 @@ async fn submit_message_streams_assistant_reply_into_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_message_is_rejected_before_any_transcript_mutation() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let result = runtime.submit_message("   ".to_string()).await;
     assert!(result.is_err(), "whitespace-only messages must be rejected");
@@ -190,7 +197,7 @@ fn headless_capabilities_match_phase3_v0_contract() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_turn_finalizes_streaming_assistant_entry() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, _) = build_runtime("delayed_chat", workdir.path().to_path_buf());
+    let (runtime, _, _) = build_runtime("delayed_chat", workdir.path().to_path_buf());
 
     runtime
         .submit_message("slow".to_string())
@@ -356,7 +363,7 @@ async fn append_assistant_delta_still_accepts_thinking_status() {
 #[tokio::test(flavor = "multi_thread")]
 async fn respond_interaction_unknown_id() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let result = runtime
         .respond_interaction("ignored", CodeUiInteractionResponse::default())
@@ -373,7 +380,7 @@ async fn respond_interaction_unknown_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn request_user_input_request_is_reflected_in_snapshot_and_responded_to() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, user_input_tx) = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, user_input_tx, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let interaction_id = "request-user-input-1".to_string();
     let question_id = "q1".to_string();
@@ -436,6 +443,87 @@ async fn request_user_input_request_is_reflected_in_snapshot_and_responded_to() 
             .expect("response should include requested question")
             .answers,
         vec!["selected option".to_string()]
+    );
+
+    let final_snapshot = runtime.snapshot().await;
+    assert_eq!(
+        final_snapshot.status,
+        CodeUiSessionStatus::ExecutingTool,
+        "respond_interaction should set runtime status to executing tool",
+    );
+    assert!(
+        final_snapshot
+            .interactions
+            .iter()
+            .all(|interaction| interaction.status != CodeUiInteractionStatus::Pending),
+        "all pending interactions should be resolved",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_approval_request_is_reflected_in_snapshot_and_responded_to() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, exec_approval_tx) =
+        build_runtime("basic_chat", workdir.path().to_path_buf());
+
+    let interaction_id = "exec-approval-1".to_string();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    let cwd = workdir.path().to_path_buf();
+
+    exec_approval_tx
+        .send(ExecApprovalRequest {
+            call_id: interaction_id.clone(),
+            command: "cargo check".to_string(),
+            cwd,
+            reason: Some("Run cargo check for repository validation".to_string()),
+            is_retry: false,
+            sandbox_label: "workspace-write".to_string(),
+            network_access: false,
+            writable_roots: Vec::new(),
+            cache_disabled_reason: None,
+            response_tx,
+        })
+        .expect("exec approval request should enqueue in runtime");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_pending = false;
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if snapshot
+            .interactions
+            .iter()
+            .any(|interaction| interaction.id == interaction_id
+                && interaction.status == CodeUiInteractionStatus::Pending)
+        {
+            saw_pending = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        saw_pending,
+        "exec approval request should appear as pending interaction",
+    );
+
+    runtime
+        .respond_interaction(
+            &interaction_id,
+            CodeUiInteractionResponse {
+                selected_option: Some("approve".to_string()),
+                apply_to_future: Some(CodeUiApplyToFuture::AcceptAll),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("respond_interaction should forward to pending execution approval sender");
+
+    let decision = response_rx
+        .await
+        .expect("exec approval request should receive review decision");
+    assert_eq!(
+        decision,
+        libra::internal::ai::sandbox::ReviewDecision::ApprovedForAllCommands,
+        "accept_all should request persistent approval for future commands",
     );
 
     let final_snapshot = runtime.snapshot().await;
