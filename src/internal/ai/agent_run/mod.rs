@@ -215,5 +215,5 @@ pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
-    resolve_full_copy_fallback, select_preferred_strategy,
+    record_materialization, resolve_full_copy_fallback, select_preferred_strategy,
 };

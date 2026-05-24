@@ -22,7 +22,7 @@
 //! decision raised when a sub-agent write escapes the materialized scope,
 //! not a selection-time outcome.
 
-use super::event::WorkspaceStrategy;
+use super::event::{WorkspaceMaterialized, WorkspaceStrategy};
 
 /// `.git` size (bytes) at or above which sparse materialization is
 /// preferred over a full worktree. 1 GiB, per the agent.md workspace
@@ -87,6 +87,35 @@ pub fn select_preferred_strategy(sizing: WorkspaceSizing) -> WorkspaceStrategy {
 /// of silently copying the whole repository.
 pub fn resolve_full_copy_fallback(allow_full_copy: bool) -> Option<WorkspaceStrategy> {
     allow_full_copy.then_some(WorkspaceStrategy::FullCopy)
+}
+
+/// Build the [`WorkspaceMaterialized`] event payload (CEX-S2-11 (3))
+/// emitted once per sub-agent workspace creation.
+///
+/// `source_repo_size` is pulled from the same [`WorkspaceSizing`] the
+/// caller used to pick `strategy`, so the size reported in the audit
+/// event can never drift from the size that drove the selection
+/// decision. `materialized_file_count` and `elapsed_ms` are measured by
+/// the materialization step and passed through verbatim.
+///
+/// `fallback_reason` is normalized: `None` (no fallback) maps to the
+/// empty string the `WorkspaceMaterialized` schema expects, and
+/// `Some(reason)` carries the human-readable explanation for using a
+/// less-preferred strategy (e.g. "worktree reservation failed: <err>").
+pub fn record_materialization(
+    strategy: WorkspaceStrategy,
+    sizing: WorkspaceSizing,
+    materialized_file_count: u64,
+    elapsed_ms: u64,
+    fallback_reason: Option<String>,
+) -> WorkspaceMaterialized {
+    WorkspaceMaterialized {
+        strategy,
+        elapsed_ms,
+        materialized_file_count,
+        source_repo_size: sizing.repo_size_bytes,
+        fallback_reason: fallback_reason.unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +210,70 @@ mod tests {
             Some(WorkspaceStrategy::FullCopy)
         );
         assert_eq!(resolve_full_copy_fallback(false), None);
+    }
+
+    /// `record_materialization` locks `source_repo_size` to the
+    /// sizing used for selection and passes timing / file count
+    /// through verbatim. The `None` fallback maps to the empty string
+    /// the `WorkspaceMaterialized` schema expects.
+    #[test]
+    fn record_materialization_locks_source_size_and_normalizes_no_fallback() {
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 256 * 1024 * 1024,
+            worktree_file_count: 4_000,
+        };
+        let event = record_materialization(WorkspaceStrategy::Worktree, sizing, 4_000, 1_234, None);
+
+        assert_eq!(event.strategy, WorkspaceStrategy::Worktree);
+        assert_eq!(event.source_repo_size, sizing.repo_size_bytes);
+        assert_eq!(event.materialized_file_count, 4_000);
+        assert_eq!(event.elapsed_ms, 1_234);
+        assert_eq!(
+            event.fallback_reason, "",
+            "no fallback must serialize as the empty string, not a sentinel",
+        );
+    }
+
+    /// A `Some(reason)` fallback is carried verbatim — used when a
+    /// less-preferred strategy had to be chosen (e.g. worktree
+    /// reservation failed and we fell back to sparse / full copy).
+    #[test]
+    fn record_materialization_carries_fallback_reason() {
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 2 * SPARSE_REPO_SIZE_THRESHOLD_BYTES,
+            worktree_file_count: 250_000,
+        };
+        let event = record_materialization(
+            WorkspaceStrategy::FullCopy,
+            sizing,
+            250_000,
+            9_000,
+            Some("sparse checkout unavailable: object store offline".to_string()),
+        );
+
+        assert_eq!(event.strategy, WorkspaceStrategy::FullCopy);
+        assert_eq!(event.source_repo_size, sizing.repo_size_bytes);
+        assert_eq!(
+            event.fallback_reason,
+            "sparse checkout unavailable: object store offline",
+        );
+    }
+
+    /// `record_materialization` payloads round-trip through serde so
+    /// they can be appended to `agents/{run_id}.jsonl` and read back by
+    /// projection / audit consumers. Pins the wire shape against the
+    /// `WorkspaceMaterialized` schema (`deny_unknown_fields`).
+    #[test]
+    fn record_materialization_round_trips_through_serde() {
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 12 * 1024 * 1024,
+            worktree_file_count: 900,
+        };
+        let event = record_materialization(WorkspaceStrategy::Sparse, sizing, 120, 42, None);
+        let json = serde_json::to_string(&event).expect("serialize WorkspaceMaterialized");
+        let back: WorkspaceMaterialized =
+            serde_json::from_str(&json).expect("deserialize WorkspaceMaterialized");
+        assert_eq!(back, event);
     }
 
     /// The selection function never emits `FullCopy` or `Blocked` —
