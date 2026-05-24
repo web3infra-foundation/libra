@@ -289,7 +289,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
+        types::{ChangeLogEntry, ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
     };
 
     fn sample_spec() -> IntentSpec {
@@ -491,6 +491,94 @@ mod tests {
                 i.path == "security.toolAcl.allow" && i.message.contains("at least one allow rule")
             }),
             "{issues:?}",
+        );
+    }
+
+    /// Privacy cap invariant: `artifacts.retention.days` must equal
+    /// `min(constraints.privacy.retentionDays, artifacts.retention.days)`.
+    /// An artifact retention that exceeds the privacy cap (retaining
+    /// build/test/SAST artifacts longer than the privacy policy permits)
+    /// must be flagged — a compliance defect if it slipped through.
+    #[test]
+    fn artifact_retention_exceeding_privacy_cap_is_flagged() {
+        let mut spec = sample_spec();
+        spec.constraints.privacy.retention_days = 30;
+        spec.artifacts.retention.days = 90; // > privacy cap → min(30,90)=30 ≠ 90
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "artifacts.retention.days"
+                    // Assert the full message incl the computed expected
+                    // value (= 30) so a wrong `min` result is caught, not
+                    // just the message prefix.
+                    && i.message
+                        == "must be min(constraints.privacy.retentionDays, \
+                            artifacts.retention.days) = 30"
+            }),
+            "artifact retention above the privacy cap must be flagged with expected=30: {issues:?}",
+        );
+    }
+
+    /// Retention within the privacy cap is accepted: when
+    /// `artifacts.retention.days <= constraints.privacy.retentionDays`
+    /// the min equals the artifact value, so the rule is satisfied.
+    #[test]
+    fn artifact_retention_within_privacy_cap_passes() {
+        let mut spec = sample_spec();
+        spec.constraints.privacy.retention_days = 90;
+        spec.artifacts.retention.days = 30; // <= cap → min(90,30)=30 == 30
+        let issues = validate_intentspec(&spec);
+        assert!(
+            !issues.iter().any(|i| i.path == "artifacts.retention.days"),
+            "retention within the privacy cap must not be flagged: {issues:?}",
+        );
+    }
+
+    /// A freshly-resolved IntentSpec must start in
+    /// `LifecycleStatus::Active`; any other initial status is flagged.
+    /// Pin every non-Active variant so the rule can't silently accept
+    /// a spec that begins life Deprecated/Closed/Draft.
+    #[test]
+    fn non_active_initial_lifecycle_status_is_flagged() {
+        for status in [
+            LifecycleStatus::Draft,
+            LifecycleStatus::Deprecated,
+            LifecycleStatus::Closed,
+        ] {
+            let label = status.variant_name();
+            let mut spec = sample_spec();
+            spec.lifecycle.status = status;
+            let issues = validate_intentspec(&spec);
+            assert!(
+                issues.iter().any(|i| {
+                    i.path == "lifecycle.status"
+                        && i.message == "initial lifecycle.status must be active"
+                }),
+                "initial lifecycle.status {label} must be flagged as non-active: {issues:?}",
+            );
+        }
+    }
+
+    /// A freshly-resolved IntentSpec must have an empty
+    /// `lifecycle.changeLog` — change-log entries accrue only as the
+    /// spec is revised, never at creation. A pre-populated changelog on
+    /// a new spec is flagged.
+    #[test]
+    fn non_empty_initial_changelog_is_flagged() {
+        let mut spec = sample_spec();
+        spec.lifecycle.change_log.push(ChangeLogEntry {
+            at: "2026-05-25T00:00:00Z".to_string(),
+            by: "tester".to_string(),
+            reason: "should not be here at creation".to_string(),
+            diff_summary: "n/a".to_string(),
+        });
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "lifecycle.changeLog"
+                    && i.message == "initial lifecycle.changeLog must be empty"
+            }),
+            "a pre-populated initial changelog must be flagged: {issues:?}",
         );
     }
 
