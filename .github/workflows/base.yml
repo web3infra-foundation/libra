@@ -202,7 +202,7 @@ jobs:
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
 
-      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/tui.md).
+      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/agent.md Part C).
       # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
       # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
       # would silently skip them. `--test-threads=1` because each scenario spawns a
