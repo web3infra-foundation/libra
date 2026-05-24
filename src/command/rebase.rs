@@ -2956,22 +2956,140 @@ fn rebuild_index_from_tree(
             format!("{}/{}", prefix, item.name)
         };
 
-        if let git_internal::internal::object::tree::TreeItemMode::Tree = item.mode {
-            // Recursively process subdirectory
-            let subtree: Tree = load_object(&item.id).map_err(|e| e.to_string())?;
-            rebuild_index_from_tree(&subtree, index, &full_path)?;
-        } else {
-            // Add file to index
-            let blob = git_internal::internal::object::blob::Blob::load(&item.id);
-            let entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                full_path,
-                item.id,
-                blob.data.len() as u32,
-            );
-            // TODO: Handle different file modes (executable, symlinks, etc.)
-            // TODO: Add proper error handling for corrupted blob objects
-            index.add(entry);
-        }
+        let index_mode = match item.mode {
+            git_internal::internal::object::tree::TreeItemMode::Tree => {
+                let subtree: Tree = load_object(&item.id).map_err(|e| {
+                    format!(
+                        "failed to load tree {} for rebase index entry '{}': {e}",
+                        item.id, full_path
+                    )
+                })?;
+                rebuild_index_from_tree(&subtree, index, &full_path)?;
+                continue;
+            }
+            git_internal::internal::object::tree::TreeItemMode::Blob => 0o100644,
+            git_internal::internal::object::tree::TreeItemMode::BlobExecutable => 0o100755,
+            git_internal::internal::object::tree::TreeItemMode::Link => 0o120000,
+            git_internal::internal::object::tree::TreeItemMode::Commit => {
+                return Err(format!(
+                    "unsupported gitlink tree entry '{}' while rebuilding rebase index",
+                    full_path
+                ));
+            }
+        };
+
+        let blob: git_internal::internal::object::blob::Blob =
+            load_object(&item.id).map_err(|e| {
+                format!(
+                    "failed to load blob {} for rebase index entry '{}': {e}",
+                    item.id, full_path
+                )
+            })?;
+        let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+            full_path,
+            item.id,
+            blob.data.len() as u32,
+        );
+        entry.mode = index_mode;
+        index.add(entry);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rebuild_index_tests {
+    use std::str::FromStr;
+
+    use git_internal::{
+        hash::ObjectHash,
+        internal::{
+            index::Index,
+            object::{
+                blob::Blob,
+                tree::{Tree, TreeItem, TreeItemMode},
+            },
+        },
+    };
+    use tempfile::tempdir;
+
+    use super::rebuild_index_from_tree;
+    use crate::{
+        command::save_object,
+        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    };
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_preserves_executable_and_symlink_modes() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let executable_blob = Blob::from_content("run\n");
+        save_object(&executable_blob, &executable_blob.id).unwrap();
+        let symlink_blob = Blob::from_content("target.txt");
+        save_object(&symlink_blob, &symlink_blob.id).unwrap();
+        let regular_blob = Blob::from_content("plain\n");
+        save_object(&regular_blob, &regular_blob.id).unwrap();
+
+        let tree = Tree::from_tree_items(vec![
+            TreeItem::new(
+                TreeItemMode::BlobExecutable,
+                executable_blob.id,
+                "run.sh".to_string(),
+            ),
+            TreeItem::new(TreeItemMode::Link, symlink_blob.id, "link".to_string()),
+            TreeItem::new(TreeItemMode::Blob, regular_blob.id, "plain.txt".to_string()),
+        ])
+        .unwrap();
+        let mut index = Index::new();
+
+        rebuild_index_from_tree(&tree, &mut index, "").unwrap();
+
+        assert_eq!(index.get("run.sh", 0).unwrap().mode, 0o100755);
+        assert_eq!(index.get("link", 0).unwrap().mode, 0o120000);
+        assert_eq!(index.get("plain.txt", 0).unwrap().mode, 0o100644);
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_returns_path_context_for_missing_blob() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let missing_blob =
+            ObjectHash::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            missing_blob,
+            "missing.txt".to_string(),
+        )])
+        .unwrap();
+        let mut index = Index::new();
+
+        let err = rebuild_index_from_tree(&tree, &mut index, "").unwrap_err();
+
+        assert!(err.contains("failed to load blob"));
+        assert!(err.contains("missing.txt"));
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_rejects_gitlink_entries() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let gitlink = ObjectHash::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Commit,
+            gitlink,
+            "vendor".to_string(),
+        )])
+        .unwrap();
+        let mut index = Index::new();
+
+        let err = rebuild_index_from_tree(&tree, &mut index, "").unwrap_err();
+
+        assert!(err.contains("unsupported gitlink tree entry"));
+        assert!(err.contains("vendor"));
+    }
 }
