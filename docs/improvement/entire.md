@@ -534,8 +534,8 @@ libra agent
   status                                 # 活跃会话计数 + 最近 checkpoint
   session list [--agent <name>] [--state <s>]
   session show <id> [--extract-transcript <path>]
-  session stop <id>
-  session resume <id>                    # v1 仅恢复 metadata，不恢复 transcript 上下文
+  session stop <id>                      # 标记 metadata state=stopped
+  session resume <id>                    # 标记 metadata state=active，不恢复 transcript 上下文
   checkpoint list [--session <id>]
   checkpoint show <id>                   # metadata + diff 摘要（合并自 explain）
   checkpoint rewind <id> [--dry-run|--apply]   # v1: --apply 仅恢复工作树，不覆写 transcript

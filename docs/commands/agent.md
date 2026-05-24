@@ -35,8 +35,8 @@ their hook installation path is implemented.
 | `disable` | Disable one or more external agents and uninstall hooks |
 | `session list` | List captured sessions |
 | `session show <id>` | Show a captured session |
-| `session stop <id>` | Stop a captured session when supported |
-| `session resume <id>` | Resume a stopped session when supported |
+| `session stop <id>` | Mark a captured session as stopped |
+| `session resume <id>` | Mark a stopped captured session active again |
 | `session promote <id>` | Promote a captured session into Libra intent metadata |
 | `session derive-tool-calls <id>` | Derive tool-call records from a captured session |
 | `checkpoint list` | List captured checkpoints |
@@ -86,6 +86,12 @@ libra agent disable --agent claude
 
 # List captured sessions
 libra agent session list
+
+# Stop a captured session
+libra agent session stop <session-id>
+
+# Resume a stopped captured session
+libra agent session resume <session-id>
 
 # List captured checkpoints
 libra agent checkpoint list
