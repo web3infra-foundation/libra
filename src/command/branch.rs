@@ -53,9 +53,9 @@ pub enum BranchListMode {
 }
 
 const BRANCH_AFTER_HELP: &str = "\
-Compatibility Notes:
-  Libra's global --quiet suppresses the branch listing itself.
-  This differs from `git branch --quiet`, which still prints the primary list.
+NOTES:
+    Libra's global --quiet suppresses the branch listing itself.
+    This differs from `git branch --quiet`, which still prints the primary list.
 
 EXAMPLES:
     libra branch feature-x                Create a branch from HEAD
