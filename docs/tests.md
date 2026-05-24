@@ -168,7 +168,7 @@ job that runs L1.
 
 | Workflow | Layers | Trigger |
 |----------|--------|---------|
-| `base.yml` (PR gate) | L1 + `tests/compat/*` | Every push / PR |
-| `live-tests.yml` (nightly) | L1 + L2 + L3 | Cron schedule + manual dispatch |
+| `base.yml` (PR gate) | L1 + `tests/compat/*` (`compat-offline-core` job); a single L2 file — `tests/network_remotes_test.rs` — via the `compat-network-remotes` job under `--features test-network` | Every push / PR |
+| `model-generation-nightly.yml` (nightly) | One L3 file — `tests/code_ui_remote_model_generation_matrix.rs` — under `LIBRA_RUN_LIVE=1` + `DEEPSEEK_API_KEY` | Daily 03:00 UTC + manual dispatch |
 
-Nightly CI injects credentials via GitHub Actions secrets.
+Other L2 / L3 surfaces (full GitHub-namespace tests, S3/D1 round-trips, broader live-AI suites) are not wired into a scheduled workflow; run them locally by sourcing `.env.test` and invoking `cargo test --all` with the corresponding feature flag.
