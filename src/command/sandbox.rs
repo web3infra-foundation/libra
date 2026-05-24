@@ -814,6 +814,84 @@ mod tests {
         }
     }
 
+    /// `format_network_service` is the shape that
+    /// `libra sandbox status` surfaces for every allowlist entry —
+    /// both in the JSON `data.network.allowlist[]` array and in the
+    /// new human `network_allowlist:` block (v0.17.986). Pin the
+    /// `"{host}:{ports}:{protocol}"` shape across the five branches
+    /// of the formatter (empty / single / multi-port × default /
+    /// explicit-TCP / UDP protocol) so a refactor that changes the
+    /// separator, drops the protocol field, or renames the empty-
+    /// ports placeholder ("any") trips this test rather than
+    /// silently breaking downstream parsers that read these strings.
+    #[test]
+    fn format_network_service_pins_host_ports_protocol_shape() {
+        use crate::internal::ai::sandbox::{NetworkProtocol, NetworkService};
+
+        // Single port + default protocol (None → tcp).
+        assert_eq!(
+            super::format_network_service(&NetworkService {
+                host: "registry.npmjs.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            }),
+            "registry.npmjs.org:443:tcp",
+        );
+
+        // Multiple ports, comma-joined in declared order, default tcp.
+        assert_eq!(
+            super::format_network_service(&NetworkService {
+                host: "github.com".to_string(),
+                ports: vec![22, 443],
+                protocol: Some(NetworkProtocol::Tcp),
+            }),
+            "github.com:22,443:tcp",
+        );
+
+        // Empty ports → "any" placeholder (entry permits every port).
+        //
+        // NOTE: `NetworkService::validate()` *rejects* empty `ports`
+        // (it would implicitly grant the high-sensitivity SSH/RDP
+        // ports), so a well-formed allowlist never contains this
+        // shape. The "any" branch is still reachable in production
+        // because `describe_network_access` formats the policy's raw
+        // `allowlist_services()` *before* validation — when a
+        // misconfigured policy carries an empty-ports service, the
+        // allowlist proxy fails to construct (backend `none` +
+        // warning) yet `network.allowlist` still echoes the raw entry
+        // so the operator can see exactly what was misconfigured.
+        // This case pins the formatter's "any" arm for that
+        // diagnostic path.
+        assert_eq!(
+            super::format_network_service(&NetworkService {
+                host: "*.internal.example".to_string(),
+                ports: Vec::new(),
+                protocol: Some(NetworkProtocol::Tcp),
+            }),
+            "*.internal.example:any:tcp",
+        );
+
+        // Explicit UDP overrides the tcp default.
+        assert_eq!(
+            super::format_network_service(&NetworkService {
+                host: "dns.example".to_string(),
+                ports: vec![53],
+                protocol: Some(NetworkProtocol::Udp),
+            }),
+            "dns.example:53:udp",
+        );
+
+        // Wildcard host with explicit single port + default protocol.
+        assert_eq!(
+            super::format_network_service(&NetworkService {
+                host: "*.pypi.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            }),
+            "*.pypi.org:443:tcp",
+        );
+    }
+
     #[test]
     fn sandbox_host_environment_warnings_detect_wsl_signals() {
         let warnings = sandbox_host_environment_warnings(&HostEnvironmentSignals {
