@@ -834,9 +834,11 @@ pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
 }
 
 fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>, ResetError> {
+    let workdir_buf = workdir.to_path_buf();
     fn remove_empty_dirs_recursive(
         dir: &Path,
         workdir: &Path,
+        workdir_buf: &PathBuf,
         warnings: &mut Vec<String>,
     ) -> Result<bool, ResetError> {
         if !dir.is_dir() || dir == workdir {
@@ -856,11 +858,14 @@ fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>,
             let path = entry.path();
 
             if path.is_dir() {
-                // Don't remove .libra directory
-                if path.file_name().and_then(|n| n.to_str()) == Some(".libra") {
+                // Don't remove .libra directory or ignored directories
+                if path.file_name().and_then(|n| n.to_str()) == Some(".libra")
+                    || util::check_gitignore(workdir_buf, &path)
+                {
                     has_files = true;
                 } else {
-                    has_files |= remove_empty_dirs_recursive(&path, workdir, warnings)?;
+                    has_files |=
+                        remove_empty_dirs_recursive(&path, workdir, workdir_buf, warnings)?;
                 }
             } else {
                 has_files = true;
@@ -894,8 +899,11 @@ fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>,
         })?;
         let path = entry.path();
 
-        if path.is_dir() && path.file_name().and_then(|n| n.to_str()) != Some(".libra") {
-            let _ = remove_empty_dirs_recursive(&path, workdir, &mut warnings)?;
+        if path.is_dir()
+            && path.file_name().and_then(|n| n.to_str()) != Some(".libra")
+            && !util::check_gitignore(&workdir_buf, &path)
+        {
+            let _ = remove_empty_dirs_recursive(&path, workdir, &workdir_buf, &mut warnings)?;
         }
     }
 

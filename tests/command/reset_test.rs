@@ -1264,3 +1264,76 @@ async fn test_reset_on_branch() {
         }
     }
 }
+
+#[tokio::test]
+#[serial]
+/// Tests reset --hard skips and preserves ignored directories and their contents
+async fn test_reset_hard_skips_ignored_directories() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("file1.txt", "initial content\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file1.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("first commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Create .libraignore ignoring a directory
+    fs::write(".libraignore", "ignored_dir/\n").unwrap();
+
+    // Create the ignored directory and a file in it
+    let ignored_dir = temp_path.path().join("ignored_dir");
+    fs::create_dir_all(&ignored_dir).unwrap();
+    let ignored_file = ignored_dir.join("file2.txt");
+    fs::write(&ignored_file, "ignored file content\n").unwrap();
+
+    // Modify the tracked file
+    fs::write("file1.txt", "modified content\n").unwrap();
+
+    // Perform hard reset
+    reset::execute(ResetArgs {
+        target: "HEAD".to_string(),
+        soft: false,
+        mixed: false,
+        hard: true,
+        pathspecs: vec![],
+    })
+    .await;
+
+    // Verify tracked file is restored
+    assert_eq!(
+        fs::read_to_string("file1.txt").unwrap(),
+        "initial content\n"
+    );
+
+    // Verify ignored directory and file are preserved and not deleted
+    assert!(ignored_dir.exists());
+    assert!(ignored_file.exists());
+    assert_eq!(
+        fs::read_to_string(&ignored_file).unwrap(),
+        "ignored file content\n"
+    );
+}
