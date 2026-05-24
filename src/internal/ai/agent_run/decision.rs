@@ -149,3 +149,100 @@ pub struct MergeDecision {
     /// CEX-S2-15-filled payload. CEX-S2-10 always writes V0 default values.
     pub payload: MergeDecisionPayloadV0,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Safety invariant S2-INV-07**: every `MergeCandidate` built
+    /// through the public constructor MUST start in
+    /// `ReviewState::NeedsHumanReview`. Sub-agent patches can never
+    /// reach the main worktree without a human (or, later, an
+    /// explicitly-flag-gated CEX-S2-15 auto-merge path) signing off, so
+    /// a refactor of `MergeCandidate::new` that accidentally defaulted
+    /// to `Accepted` would be a silent security regression. Pin it.
+    #[test]
+    fn merge_candidate_new_defaults_to_needs_human_review() {
+        let candidate = MergeCandidate::new(
+            MergeCandidateId::new(),
+            vec![AgentPatchSetId::new()],
+            vec![AgentRunId::new(), AgentRunId::new()],
+        );
+        assert_eq!(
+            candidate.review_state,
+            ReviewState::NeedsHumanReview,
+            "S2-INV-07: a freshly constructed MergeCandidate must require human review",
+        );
+        assert!(
+            candidate.review_evidence.is_empty(),
+            "review_evidence is the CEX-S2-13 empty placeholder; CEX-S2-15 fills it",
+        );
+    }
+
+    /// The constructor threads the supplied ids through verbatim — the
+    /// aggregate `MergeDecision` later references the candidate's
+    /// `agent_run_ids`, so they must survive construction unchanged.
+    #[test]
+    fn merge_candidate_new_preserves_supplied_ids() {
+        let id = MergeCandidateId::new();
+        let patchsets = vec![AgentPatchSetId::new(), AgentPatchSetId::new()];
+        let runs = vec![AgentRunId::new()];
+        let candidate = MergeCandidate::new(id, patchsets.clone(), runs.clone());
+
+        assert_eq!(candidate.id, id);
+        assert_eq!(candidate.patchset_ids, patchsets);
+        assert_eq!(candidate.agent_run_ids, runs);
+    }
+
+    /// `MergeDecisionPayloadV0::default()` (what CEX-S2-10 always
+    /// writes) must be entirely empty / `None` — CEX-S2-15's
+    /// ValidatorEngine is the only thing that may populate
+    /// `risk_score` / `conflict_list` / `test_evidence` /
+    /// `distillable_evidence_ids`. Pin the empty V0 shape so a stray
+    /// default value can't leak a fabricated risk score into the
+    /// decision record before the validator runs.
+    #[test]
+    fn merge_decision_payload_v0_default_is_empty() {
+        let payload = MergeDecisionPayloadV0::default();
+        assert!(payload.risk_score.is_none());
+        assert!(payload.conflict_list.is_empty());
+        assert!(payload.test_evidence.is_empty());
+        assert!(payload.distillable_evidence_ids.is_empty());
+    }
+
+    /// `ReviewState` serializes to the stable snake_case wire tags that
+    /// JSONL audit consumers and projection readers depend on. Pin the
+    /// exact strings so a rename trips here rather than silently
+    /// desyncing persisted decision records.
+    #[test]
+    fn review_state_serializes_to_stable_snake_case_tags() {
+        for (state, tag) in [
+            (ReviewState::NeedsHumanReview, "\"needs_human_review\""),
+            (ReviewState::Accepted, "\"accepted\""),
+            (ReviewState::Rejected, "\"rejected\""),
+            (ReviewState::RequestChanges, "\"request_changes\""),
+            (ReviewState::Conflict, "\"conflict\""),
+        ] {
+            let wire = serde_json::to_string(&state).expect("serialize ReviewState");
+            assert_eq!(wire, tag, "unexpected wire tag for {state:?}");
+            let back: ReviewState = serde_json::from_str(&wire).expect("deserialize ReviewState");
+            assert_eq!(back, state, "ReviewState wire tag must round-trip");
+        }
+    }
+
+    /// `RiskLevel` wire tags are likewise stable snake_case. Pin them
+    /// so the CEX-S2-15 risk-score payload (which CEX-S2-13 only shapes)
+    /// keeps a consistent serialized vocabulary.
+    #[test]
+    fn risk_level_serializes_to_stable_snake_case_tags() {
+        for (level, tag) in [
+            (RiskLevel::Low, "\"low\""),
+            (RiskLevel::Medium, "\"medium\""),
+            (RiskLevel::High, "\"high\""),
+            (RiskLevel::Critical, "\"critical\""),
+        ] {
+            let wire = serde_json::to_string(&level).expect("serialize RiskLevel");
+            assert_eq!(wire, tag, "unexpected wire tag for {level:?}");
+        }
+    }
+}
