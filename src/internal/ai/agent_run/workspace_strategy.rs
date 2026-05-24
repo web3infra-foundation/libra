@@ -118,6 +118,115 @@ pub fn record_materialization(
     }
 }
 
+/// A sub-agent attempted a write outside the filesystem scope it was
+/// granted in [`AgentContextPack::write_scope`]. Per CEX-S2-11 (4) the
+/// surfaced error must be user-friendly and tell the operator exactly
+/// how to unblock the task (widen the declared write scope), rather
+/// than failing with an opaque permission error.
+///
+/// [`AgentContextPack::write_scope`]: super::context_pack::AgentContextPack::write_scope
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "write to '{path}' is outside the sub-agent's granted write scope; \
+     add a covering path to AgentContextPack.write_scope to allow it, \
+     or route the change through the parent agent"
+)]
+pub struct WriteScopeViolation {
+    /// The offending repo-relative write path, as supplied by the caller.
+    pub path: String,
+}
+
+/// Check whether a repo-relative `write_path` falls within the
+/// sub-agent's declared `write_scope` (CEX-S2-11 (4) — the scope-
+/// containment half of the `Blocked` workspace outcome).
+///
+/// Paths are compared **lexically and component-wise** after dropping
+/// empty / `.` segments and resolving `..`:
+///
+/// - A write equal to or nested under any scope entry is in scope
+///   (`src` covers `src` and `src/foo.rs`, but not the sibling
+///   `srcfoo` — matching is on whole path components, never byte
+///   prefixes).
+/// - A scope entry that normalizes to the repo root (`.` or the empty
+///   string) grants the whole tree.
+/// - A `write_path` that escapes the repo root via `..`
+///   (e.g. `../outside` or `src/../../etc`) is always a violation — it
+///   can never be brought back in scope, so this is the primary
+///   traversal defense.
+/// - An **absolute** `write_path` (leading `/` or `\`) is always a
+///   violation. The scope is repo-relative, so `/etc/passwd` must not
+///   be silently rebased onto a relative `etc` scope entry just
+///   because the leading separator drops an empty segment — that would
+///   let an absolute path escape the sandbox via the relative
+///   namespace.
+///
+/// Returns `Err(WriteScopeViolation)` (carrying the original
+/// `write_path` for the error message) when no scope entry covers the
+/// write; the caller maps this to [`WorkspaceStrategy::Blocked`].
+pub fn check_write_in_scope(
+    write_path: &str,
+    write_scope: &[String],
+) -> Result<(), WriteScopeViolation> {
+    let violation = || WriteScopeViolation {
+        path: write_path.to_string(),
+    };
+
+    // Absolute paths are never repo-relative; reject them before
+    // normalization so a leading separator (which `split('/')` would
+    // otherwise drop as an empty segment) can't rebase `/etc/passwd`
+    // onto a relative `etc` scope entry. Covers Unix-absolute (`/...`)
+    // and Windows UNC / drive-root (`\...`) forms.
+    if is_absolute_path(write_path) {
+        return Err(violation());
+    }
+
+    // A write that escapes the repo root can never be covered by a
+    // repo-relative scope entry — reject before scope matching.
+    let Some(target) = normalize_relative_path(write_path) else {
+        return Err(violation());
+    };
+
+    let covered = write_scope.iter().any(|entry| {
+        normalize_relative_path(entry).is_some_and(|scope| path_is_under(&target, &scope))
+    });
+
+    if covered { Ok(()) } else { Err(violation()) }
+}
+
+/// `true` when `path` is an absolute filesystem path that must never be
+/// treated as repo-relative: a Unix-absolute path (leading `/`), or a
+/// Windows UNC / drive-root path (leading `\`). Repo-relative scope
+/// entries can only ever cover relative paths, so absolute writes are
+/// rejected outright by [`check_write_in_scope`].
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\')
+}
+
+/// Lexically normalize a repo-relative path into its component vector,
+/// dropping empty / `.` segments and resolving `..`. Returns `None`
+/// when the path escapes the repo root (a `..` with no parent left to
+/// pop) — such paths can never be inside a repo-relative scope.
+fn normalize_relative_path(path: &str) -> Option<Vec<&str>> {
+    let mut components: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            other => components.push(other),
+        }
+    }
+    Some(components)
+}
+
+/// `true` when `target` is equal to or nested under `scope`,
+/// component-wise. An empty `scope` (the normalized repo root) covers
+/// every target.
+fn path_is_under(target: &[&str], scope: &[&str]) -> bool {
+    scope.len() <= target.len() && target[..scope.len()] == *scope
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +383,166 @@ mod tests {
         let back: WorkspaceMaterialized =
             serde_json::from_str(&json).expect("deserialize WorkspaceMaterialized");
         assert_eq!(back, event);
+    }
+
+    /// A write equal to or nested under a declared scope entry is in
+    /// scope; matching is component-wise so `src` covers `src` and
+    /// `src/foo.rs` but never the byte-prefix sibling `srcfoo`.
+    #[test]
+    fn write_in_scope_accepts_paths_under_declared_scope() {
+        let scope = vec!["src".to_string(), "docs/commands".to_string()];
+
+        for ok in [
+            "src",
+            "src/foo.rs",
+            "src/internal/ai/mod.rs",
+            "docs/commands",
+            "docs/commands/clean.md",
+            "./src/foo.rs",      // leading "./" normalizes away
+            "src/./bar.rs",      // interior "." normalizes away
+            "src/sub/../baz.rs", // interior ".." stays under src
+        ] {
+            assert!(
+                check_write_in_scope(ok, &scope).is_ok(),
+                "expected `{ok}` to be in scope",
+            );
+        }
+    }
+
+    /// Writes outside every scope entry are violations, including the
+    /// byte-prefix lookalike `srcfoo` (must not match `src`).
+    #[test]
+    fn write_in_scope_rejects_out_of_scope_paths() {
+        let scope = vec!["src".to_string()];
+
+        for bad in [
+            "lib/x.rs",
+            "srcfoo/x.rs",
+            "srcfoo",
+            "Cargo.toml",
+            "tests/t.rs",
+        ] {
+            let err = check_write_in_scope(bad, &scope)
+                .expect_err("expected out-of-scope write to be rejected");
+            assert_eq!(err.path, bad, "violation must echo the offending path");
+        }
+    }
+
+    /// `..` traversal that escapes the repo root is always a violation
+    /// and can never be brought back in scope — this is the primary
+    /// path-traversal defense. Even a permissive whole-repo scope (".")
+    /// must not let a write climb above the root.
+    #[test]
+    fn write_in_scope_rejects_root_escaping_traversal() {
+        let permissive = vec![".".to_string()];
+        for escaping in [
+            "../outside",
+            "../../etc/passwd",
+            "src/../../etc/passwd",
+            "a/b/../../../c",
+        ] {
+            assert!(
+                check_write_in_scope(escaping, &permissive).is_err(),
+                "root-escaping path `{escaping}` must be rejected even under a '.' scope",
+            );
+        }
+    }
+
+    /// Absolute paths must never be treated as repo-relative. A
+    /// Unix-absolute `/etc/passwd` must NOT be rebased onto a relative
+    /// `etc` scope entry just because `split('/')` drops the leading
+    /// empty segment — that was a real escape-via-relative-namespace
+    /// bypass. Windows UNC / drive-root (`\...`) forms are rejected
+    /// too. This holds even under a permissive `.` scope.
+    #[test]
+    fn write_in_scope_rejects_absolute_paths() {
+        // A scope entry that, post-normalization, equals the tail of an
+        // absolute path — the exact shape that bypassed the check before
+        // the absolute-path guard.
+        let etc_scope = vec!["etc".to_string()];
+        for absolute in ["/etc/passwd", "/etc", "//etc/passwd"] {
+            let err = check_write_in_scope(absolute, &etc_scope).expect_err(
+                "absolute path must be rejected, not rebased onto a relative scope entry",
+            );
+            assert_eq!(err.path, absolute);
+        }
+
+        // Windows-style absolute / UNC forms.
+        for absolute in ["\\etc", "\\\\server\\share\\x"] {
+            assert!(
+                check_write_in_scope(absolute, &etc_scope).is_err(),
+                "Windows absolute/UNC path `{absolute}` must be rejected",
+            );
+        }
+
+        // Even a whole-repo `.` scope must not admit an absolute path.
+        let permissive = vec![".".to_string()];
+        for absolute in ["/etc/passwd", "/anything", "\\x"] {
+            assert!(
+                check_write_in_scope(absolute, &permissive).is_err(),
+                "absolute path `{absolute}` must be rejected even under a '.' scope",
+            );
+        }
+    }
+
+    /// `..` that resolves to a sibling (without escaping root) is
+    /// rejected when the sibling is outside scope: `src/../lib/x`
+    /// normalizes to `lib/x`, which is not under `src`.
+    #[test]
+    fn write_in_scope_rejects_sibling_via_dotdot() {
+        let scope = vec!["src".to_string()];
+        let err = check_write_in_scope("src/../lib/x.rs", &scope)
+            .expect_err("dotdot into a sibling must be rejected");
+        assert_eq!(err.path, "src/../lib/x.rs");
+    }
+
+    /// An empty `write_scope` grants nothing — every write is blocked.
+    /// Pins the fail-closed default so a sub-agent with no declared
+    /// write scope can't write anywhere.
+    #[test]
+    fn write_in_scope_empty_scope_blocks_everything() {
+        for any in ["src/foo.rs", "README.md", "."] {
+            assert!(
+                check_write_in_scope(any, &[]).is_err(),
+                "empty write_scope must block `{any}`",
+            );
+        }
+    }
+
+    /// A scope entry that normalizes to the repo root (`.` or the empty
+    /// string) grants the whole in-repo tree (but still not
+    /// root-escaping paths — covered separately).
+    #[test]
+    fn write_in_scope_root_scope_entry_grants_whole_tree() {
+        for root_entry in [".", "", "./"] {
+            let scope = vec![root_entry.to_string()];
+            for target in ["src/foo.rs", "Cargo.toml", "a/b/c/d.rs"] {
+                assert!(
+                    check_write_in_scope(target, &scope).is_ok(),
+                    "root scope `{root_entry}` must cover `{target}`",
+                );
+            }
+        }
+    }
+
+    /// The violation's `Display` is user-friendly and actionable per
+    /// CEX-S2-11 (4): it names the offending path and tells the
+    /// operator to extend `AgentContextPack.write_scope`. Pin the
+    /// wording so a future refactor can't regress it into an opaque
+    /// permission error.
+    #[test]
+    fn write_scope_violation_message_is_actionable() {
+        let err = check_write_in_scope("etc/secret", &["src".to_string()])
+            .expect_err("out-of-scope write must error");
+        let message = err.to_string();
+        assert!(
+            message.contains("etc/secret"),
+            "message must name the path: {message}"
+        );
+        assert!(
+            message.contains("AgentContextPack.write_scope"),
+            "message must point at the write scope to extend: {message}",
+        );
     }
 
     /// The selection function never emits `FullCopy` or `Blocked` —
