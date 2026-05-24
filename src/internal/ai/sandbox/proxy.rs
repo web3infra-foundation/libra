@@ -429,6 +429,36 @@ mod tests {
         }
     }
 
+    /// The three concrete [`NetworkProxy`] backends expose stable
+    /// `backend_name()` strings that `libra sandbox status` surfaces
+    /// verbatim in its `proxy_backend` field, and which audit
+    /// consumers correlate decisions against. Pin all three in one
+    /// place so a rename can't slip through (the per-proxy behaviour
+    /// tests assert their own name, but only this test guarantees the
+    /// *set* of names stays in sync with the
+    /// `docs/commands/sandbox.md` `proxy_backend` field table).
+    ///
+    /// `describe_network_access` also emits the synthetic value
+    /// `"none"` when an allowlist proxy is requested but unavailable
+    /// (degrade / reject branches) — that string is owned by the
+    /// command layer, not a `NetworkProxy::backend_name()`, so it is
+    /// pinned by the `describe_network_access_*` tests in
+    /// `src/command/sandbox.rs` rather than here.
+    #[test]
+    fn proxy_backend_names_are_stable() {
+        assert_eq!(NoopProxy.backend_name(), "noop");
+        assert_eq!(LoopbackOnlyProxy.backend_name(), "loopback-only");
+        assert_eq!(
+            AllowlistProxy::new(&[NetworkService {
+                host: "registry.npmjs.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            }])
+            .backend_name(),
+            "allowlist",
+        );
+    }
+
     /// `NoopProxy::evaluate` must deny every request regardless of
     /// host / port / protocol. Pin the rejection so a future
     /// "smart" NoopProxy that secretly allows some hosts fails this

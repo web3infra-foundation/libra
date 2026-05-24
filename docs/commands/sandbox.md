@@ -93,7 +93,7 @@ Sandbox status
 | `writable_roots` | Default workspace-write roots after resolving the current directory and temporary directories |
 | `network.mode` | Current network policy summary (`denied`, `allowlist`, `full`) |
 | `network.allowlist` | Host/service allowlist when `network.mode` is `allowlist` |
-| `proxy_backend` | Selected network proxy strategy (`none`, `noop`, `loopback-only`) |
+| `proxy_backend` | Selected network proxy strategy: `noop` (deny-all, used by `denied` mode), `allowlist` (per-host allowlist proxy, used by `allowlist` mode), `loopback-only` (the `full`-mode diagnostic placeholder), or `none` (an `allowlist`-mode proxy was requested but could not be constructed — either the `required` enforcement tier rejected the run, or `prefer_strict` / `best_effort` degraded it to deny-all; see `warnings` for the reason) |
 | `bwrap_available` | Whether `bwrap` is executable on `PATH` |
 | `bwrap_requested` | Whether `LIBRA_USE_LINUX_SANDBOX_BWRAP` is enabled |
 | `seatbelt_available` | Whether `/usr/bin/sandbox-exec` is executable |
