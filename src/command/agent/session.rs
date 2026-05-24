@@ -192,6 +192,13 @@ struct SessionMutationOutput {
     last_event_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct TranscriptExtraction {
+    source_path: String,
+    output_path: String,
+    bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SessionMutationKind {
     Stop,
@@ -212,6 +219,50 @@ impl SessionMutationKind {
             SessionMutationKind::Resume => "agent_session_resume",
         }
     }
+}
+
+fn extract_transcript_from_metadata(
+    metadata_json: &str,
+    output_path: &str,
+) -> CliResult<TranscriptExtraction> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json).map_err(|e| {
+        CliError::fatal(format!(
+            "captured session metadata_json is not valid JSON; cannot extract transcript: {e}"
+        ))
+    })?;
+    let source = metadata
+        .get("transcript_path")
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::fatal(
+                "captured session metadata_json does not contain transcript_path; cannot extract transcript",
+            )
+        })?;
+    let source_path = std::path::PathBuf::from(source);
+    let output = std::path::PathBuf::from(output_path);
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to create transcript output directory '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let bytes = std::fs::copy(&source_path, &output).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to copy transcript from '{}' to '{}': {e}",
+            source_path.display(),
+            output.display()
+        ))
+    })?;
+    Ok(TranscriptExtraction {
+        source_path: source_path.display().to_string(),
+        output_path: output.display().to_string(),
+        bytes,
+    })
 }
 
 async fn list(args: SessionListArgs, output: &OutputConfig) -> CliResult<()> {
@@ -286,7 +337,8 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
 
     let stmt = Statement::from_sql_and_values(
         backend,
-        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at \
+        "SELECT session_id, agent_kind, state, working_dir, started_at, last_event_at, \
+                COALESCE(metadata_json, '{}') AS metadata_json \
          FROM agent_session WHERE session_id = ? LIMIT 1",
         [args.session_id.clone().into()],
     );
@@ -312,13 +364,36 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                     .try_get_by::<i64, _>("last_event_at")
                     .unwrap_or_default(),
             };
-            if args.extract_transcript.is_some() && !output.quiet {
-                println!(
-                    "Note: --extract-transcript is not yet implemented in v1 phase 1 \
-                     (transcripts ship in phase 2)."
+            let transcript = if let Some(path) = args.extract_transcript.as_deref() {
+                let metadata_json = row.try_get_by::<String, _>("metadata_json").map_err(|e| {
+                    CliError::fatal(format!(
+                        "agent_session.metadata_json for '{}' could not be decoded as TEXT: {e}",
+                        args.session_id
+                    ))
+                })?;
+                Some(extract_transcript_from_metadata(&metadata_json, path)?)
+            } else {
+                None
+            };
+            if output.is_json() && transcript.is_some() {
+                return emit_json_data(
+                    "agent_session",
+                    &serde_json::json!({
+                        "session": payload,
+                        "extracted_transcript": transcript,
+                    }),
+                    output,
                 );
             }
-            emit_one(&payload, output)
+            emit_one(&payload, output)?;
+            if let Some(transcript) = transcript
+                && !output.quiet
+            {
+                println!("transcript     : {}", transcript.output_path);
+                println!("transcript_src : {}", transcript.source_path);
+                println!("transcript_len : {} bytes", transcript.bytes);
+            }
+            Ok(())
         }
         None => Err(CliError::fatal(format!(
             "no captured session matches id '{}'",
@@ -881,18 +956,29 @@ mod tests {
         state: &str,
         stopped_at: Option<i64>,
     ) {
+        insert_agent_session_fixture_with_metadata(conn, session_id, state, stopped_at, "{}").await;
+    }
+
+    async fn insert_agent_session_fixture_with_metadata(
+        conn: &DatabaseConnection,
+        session_id: &str,
+        state: &str,
+        stopped_at: Option<i64>,
+        metadata_json: &str,
+    ) {
         let backend = conn.get_database_backend();
         conn.execute(Statement::from_sql_and_values(
             backend,
             "INSERT INTO agent_session (
                 session_id, agent_kind, provider_session_id, state, working_dir,
                 metadata_json, redaction_report, started_at, last_event_at, stopped_at
-             ) VALUES (?, 'claude_code', ?, ?, '/tmp/repo', '{}', '{}', 1700000000, \
+             ) VALUES (?, 'claude_code', ?, ?, '/tmp/repo', ?, '{}', 1700000000, \
                        1700000100, ?)",
             vec![
                 session_id.to_string().into(),
                 format!("{session_id}-provider").into(),
                 state.to_string().into(),
+                metadata_json.to_string().into(),
                 stopped_at.into(),
             ],
         ))
@@ -990,6 +1076,29 @@ mod tests {
             err.to_string()
                 .contains("only stopped sessions can be resumed"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn agent_session_extract_transcript_copies_metadata_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("captured.jsonl");
+        let output = dir.path().join("nested").join("copy.jsonl");
+        std::fs::write(&source, "{\"type\":\"message\"}\n").unwrap();
+        let metadata = serde_json::json!({
+            "transcript_path": source,
+        })
+        .to_string();
+
+        let result =
+            extract_transcript_from_metadata(&metadata, output.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(result.bytes, 19);
+        assert_eq!(result.source_path, source.display().to_string());
+        assert_eq!(result.output_path, output.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "{\"type\":\"message\"}\n"
         );
     }
 

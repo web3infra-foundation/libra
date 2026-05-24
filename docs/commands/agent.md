@@ -53,6 +53,7 @@ their hook installation path is implemented.
 | Flag | Subcommand | Description |
 |------|------------|-------------|
 | `--agent <name>` | `enable`, `disable` | Select agent names; omit to target all stable agents |
+| `--extract-transcript <path>` | `session show` | Copy the captured transcript path from session metadata to a local file |
 | `--all` | `clean` | Clean all stopped-session checkpoints instead of only the most recent |
 | `--remote <name>` | `push` | Select the remote used for pushing agent trace refs |
 | `--dry-run` | `checkpoint rewind` | Show the impact without modifying files; this is the default |
@@ -86,6 +87,9 @@ libra agent disable --agent claude
 
 # List captured sessions
 libra agent session list
+
+# Show a session and copy its captured transcript
+libra agent session show <session-id> --extract-transcript /tmp/session.jsonl
 
 # Stop a captured session
 libra agent session stop <session-id>
