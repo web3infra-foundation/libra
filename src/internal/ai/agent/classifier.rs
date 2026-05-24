@@ -310,6 +310,70 @@ mod tests {
         );
     }
 
+    /// `parse_decision` is the boundary where untrusted classifier
+    /// model output enters the system. A model routinely returns a
+    /// `confidence` outside `0.0..=1.0`, omits it, or sends a
+    /// non-numeric value — pin the defensive handling so a refactor
+    /// can't let an out-of-range confidence through to downstream
+    /// routing / thresholding.
+    #[test]
+    fn parse_decision_clamps_and_defaults_confidence() {
+        // Over-range → clamped to 1.0.
+        let over = parse_decision(&serde_json::json!({
+            "intent": "bug_fix",
+            "confidence": 7.5,
+            "rationale": "very sure",
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(over.confidence, 1.0);
+        assert_eq!(over.intent, TaskIntent::BugFix);
+        assert_eq!(over.source, TaskIntentDecisionSource::Model);
+
+        // Negative → clamped to 0.0.
+        let under = parse_decision(&serde_json::json!({
+            "intent": "feature",
+            "confidence": -2.0,
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(under.confidence, 0.0);
+
+        // Missing confidence → default 0.0.
+        let missing = parse_decision(&serde_json::json!({ "intent": "review" }))
+            .expect("valid intent should parse");
+        assert_eq!(missing.confidence, 0.0);
+
+        // Non-numeric confidence → default 0.0 (not an error).
+        let non_numeric = parse_decision(&serde_json::json!({
+            "intent": "chore",
+            "confidence": "high",
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(non_numeric.confidence, 0.0);
+
+        // In-range confidence is preserved exactly.
+        let in_range = parse_decision(&serde_json::json!({
+            "intent": "test",
+            "confidence": 0.625,
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(in_range.confidence, 0.625);
+    }
+
+    /// A response that is not a JSON object, or omits the required
+    /// `intent` string, is a structured `InvalidResponse` error rather
+    /// than a panic or a silent default.
+    #[test]
+    fn parse_decision_rejects_non_object_and_missing_intent() {
+        assert!(matches!(
+            parse_decision(&serde_json::json!("just a string")),
+            Err(TaskIntentClassifierError::InvalidResponse(_)),
+        ));
+        assert!(matches!(
+            parse_decision(&serde_json::json!({ "confidence": 0.9 })),
+            Err(TaskIntentClassifierError::InvalidResponse(_)),
+        ));
+    }
+
     /// `TaskIntent::as_str` must produce snake_case identifiers matching
     /// the serde tag for all 10 variants. Pin so a future enum rename
     /// gets caught at this gate.
