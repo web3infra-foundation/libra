@@ -1273,6 +1273,61 @@ mod test {
         assert!(is_sub_path("src/main.rs", "."));
     }
 
+    /// Containment is **component-wise**, never a byte prefix: a sibling
+    /// whose name merely starts with the parent's name (`srcfoo` vs
+    /// `src`) must NOT be treated as inside the parent, and an unrelated
+    /// sibling is likewise rejected. If `is_sub_path` ever regressed to
+    /// a string `starts_with`, `srcfoo/x` would falsely read as inside
+    /// `src` — a scope-escape. Pin the rejection.
+    #[test]
+    fn test_is_sub_path_rejects_byte_prefix_sibling_and_unrelated_paths() {
+        let _guard = test::ChangeDirGuard::new(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        // Positive control: a genuine child IS inside, so a regression
+        // that returned `false` for everything can't make the negative
+        // assertions below pass vacuously.
+        assert!(is_sub_path("src/main.rs", "src"), "genuine child is inside");
+
+        assert!(
+            !is_sub_path("srcfoo/x.rs", "src"),
+            "a byte-prefix sibling must not be inside the parent",
+        );
+        assert!(
+            !is_sub_path("srcfoo", "src"),
+            "the byte-prefix sibling dir itself must not be inside the parent",
+        );
+        assert!(
+            !is_sub_path("lib/x.rs", "src"),
+            "an unrelated sibling must not be inside the parent",
+        );
+    }
+
+    /// Interior `..` is resolved before the containment check: a
+    /// `..` that stays within the parent keeps the path in scope, while
+    /// a `..` that climbs out to a sibling escapes it. Pins that the
+    /// normalization happens before `starts_with`, not after.
+    ///
+    /// Covers both input branches: relative inputs (resolved by
+    /// `.absolutize()`) and absolute inputs (resolved by the internal
+    /// `normalize_abs_path`), so the absolute branch — exercised
+    /// otherwise only by the root-escape test — is pinned for the
+    /// in-scope / sibling-escape cases too.
+    #[test]
+    fn test_is_sub_path_resolves_interior_parent_dir() {
+        let _guard = test::ChangeDirGuard::new(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        // Relative inputs (the `.absolutize()` branch):
+        // src/sub/../main.rs -> src/main.rs, still under src.
+        assert!(is_sub_path("src/sub/../main.rs", "src"));
+        // src/../lib/x.rs -> lib/x.rs, NOT under src.
+        assert!(!is_sub_path("src/../lib/x.rs", "src"));
+
+        // Absolute inputs (the `normalize_abs_path` branch): same
+        // interior-`..` semantics, independent of the current dir.
+        assert!(is_sub_path("/repo/src/sub/../main.rs", "/repo/src"));
+        assert!(!is_sub_path("/repo/src/../lib/x.rs", "/repo/src"));
+    }
+
     #[test]
     fn test_is_sub_path_parent_dir_cannot_escape_root() {
         assert!(!is_sub_path("/../../etc/passwd", "/tmp"));
