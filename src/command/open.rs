@@ -23,11 +23,10 @@ use crate::{
 
 const OPEN_EXAMPLES: &str = "\
 EXAMPLES:
-  libra open
-  libra open origin
-  libra open https://github.com/web3infra-foundation/libra
-  libra open --json
-";
+    libra open                                            Open the auto-detected upstream in the browser
+    libra open origin                                     Open a specific remote
+    libra open https://github.com/web3infra-foundation/libra    Open a direct URL
+    libra open --json                                     Structured JSON output for agents (no browser)";
 
 #[derive(Parser, Debug)]
 #[command(after_help = OPEN_EXAMPLES)]

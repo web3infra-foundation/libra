@@ -70,11 +70,11 @@ use crate::{
 
 const SHORTLOG_EXAMPLES: &str = "\
 EXAMPLES:
-  libra shortlog
-  libra shortlog HEAD~5
-  libra shortlog -n -s
-  libra shortlog --json
-";
+    libra shortlog                  Summarize commits reachable from HEAD by author
+    libra shortlog HEAD~5           Summarize a subset of history starting from a revision
+    libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
+    libra shortlog --since 24h      Restrict to commits in the last 24 hours
+    libra shortlog --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = SHORTLOG_EXAMPLES)]

@@ -18,14 +18,13 @@ use crate::utils::{
 
 const CLEAN_EXAMPLES: &str = "\
 EXAMPLES:
-  libra clean -n
-  libra clean -f
-  libra clean -fd
-  libra clean -fx
-  libra clean -fX
-  libra clean -f --exclude '*.log'
-  libra clean -n --json
-";
+    libra clean -n                      Preview what would be removed (dry-run)
+    libra clean -f                      Remove untracked files (files only)
+    libra clean -fd                     Also remove untracked directories
+    libra clean -fx                     Remove untracked files including ignored ones
+    libra clean -fX                     Remove only ignored files
+    libra clean -f --exclude '*.log'    Layer an additional exclusion on top of .libraignore
+    libra clean -n --json               Structured JSON output for agents";
 
 #[derive(Parser, Debug, Clone)]
 #[command(after_help = CLEAN_EXAMPLES)]
