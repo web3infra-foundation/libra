@@ -44,8 +44,9 @@ const LOG_EXAMPLES: &str = "\
 EXAMPLES:
     libra log -n 5                         Show the latest 5 commits
     libra log --oneline --graph            Show a compact commit graph
-    libra log --author alice --since 2026-01-01
-                                          Filter commits by author and date
+    libra log --author alice                Filter commits by author (case-insensitive substring)
+    libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
+    libra log --grep 'fix(' -n 20          Filter commits by message substring
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
