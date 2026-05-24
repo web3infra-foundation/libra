@@ -1458,10 +1458,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
 
     #[cfg(target_os = "linux")]
     {
-        if candidate
-            .as_ref()
-            .is_some_and(|path| is_executable_file(Path::new(path)))
-        {
+        if candidate.as_ref().is_some_and(|path| is_executable_file(path)) {
             return candidate;
         }
         return None;
