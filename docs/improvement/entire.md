@@ -625,10 +625,10 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:440](../../src/internal/ai/session/store.rs) |
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
-| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/353](../../src/command/checkout.rs)（多个 INTENT_BRANCH match arm 散落在 219/222/226/229/353/355 等）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
+| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/224/351](../../src/command/checkout.rs)（三处 INTENT_BRANCH/AGENT_TRACES match arm，分别在 :219 / :224 / :351）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
 | 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:351/500](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
-| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
+| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 872)](../../src/command/cloud.rs) |
 | 现 Claude/Gemini provider | 保留 `HookProvider`，新加 `ObservedAgent` wrapper 组合复用 | [hooks/providers/](../../src/internal/ai/hooks/providers/) |
 | Projection 层 | **不直接复用** —— 独立 storage.rs，弱关联 | [projection/](../../src/internal/ai/projection/) |
 
