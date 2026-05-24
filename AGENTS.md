@@ -126,6 +126,11 @@ Do not dismiss an issue only because:
 - PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all`, plus any relevant `--features test-*` runs); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
 
+## Workspace Notes
+- This repository is managed as a `libra` workspace and is intentionally used through `libra` commands rather than raw `git`.
+- Prefer this command flow for changes: `libra status` -> inspect diff -> `libra add` -> `libra commit -a -s -m "<scope>: ..."` -> `libra push origin <branch>`.
+- When a user requests version operations or release copy steps, follow the `libra` command workflow instead of `git` commands.
+
 ## Aggressive review bias
 
 Prefer false-positive-tolerant review over false-negative-tolerant review for:

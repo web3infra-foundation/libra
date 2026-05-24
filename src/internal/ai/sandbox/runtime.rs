@@ -166,7 +166,8 @@ impl ExecEnv {
 
         let mut command = Command::new(program);
         command.args(args);
-        command.current_dir(self.cwd);
+        let canonical_cwd = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        command.current_dir(canonical_cwd);
         command.envs(self.env);
         if self.new_session {
             configure_new_session(&mut command);

@@ -2121,15 +2121,27 @@ mod tests {
         std::fs::write(&policy_path, b"placeholder bpf bytes").expect("write placeholder bpf");
 
         let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
-        let _policy = match prior {
-            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
-            None => {
-                // SAFETY: test-only env cleanup before running the assertion.
+        unsafe {
+            std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+        }
+        struct EnvRestore {
+            key: &'static str,
+            value: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
                 unsafe {
-                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                    if let Some(val) = &self.value {
+                        std::env::set_var(self.key, val);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
                 }
-                None
             }
+        }
+        let _restore = EnvRestore {
+            key: SANDBOX_SECCOMP_POLICY_ENV,
+            value: prior,
         };
         assert_eq!(
             resolve_seccomp_policy_path().as_deref(),

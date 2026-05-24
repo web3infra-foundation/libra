@@ -141,12 +141,15 @@ use crate::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle,
-                    CodeUiRuntimeOptions, CodeUiSession, CodeUiSessionStatus,
-                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiInteractionStatus, CodeUiProviderAdapter, CodeUiProviderInfo,
+                    CodeUiRuntimeHandle, CodeUiRuntimeOptions, CodeUiSession,
+                    CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTranscriptEntry,
+                    CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter, initial_snapshot,
+                    snapshot_from_thread_bundle,
                 },
-                headless::{HeadlessCodeRuntime, headless_capabilities},
+                headless::{
+                    HeadlessCodeRuntime, HeadlessSessionPersistence, headless_capabilities,
+                },
                 start as start_web_server,
             },
         },
@@ -784,12 +787,18 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
         )
         .await?
     } else {
+        let storage_root = resolve_storage_root(&working_dir);
+        let session_store = Arc::new(SessionStore::from_storage_path(&storage_root));
+        let session_state =
+            load_or_create_headless_web_session_state(args, &working_dir, &session_store)?;
         // Phase 3 v0 routes the supported providers through the new
         // headless runtime. Anything not yet hooked up keeps the read-only
         // placeholder so we fail closed rather than panicking on attach.
         match build_non_codex_headless_runtime(
             args,
             &working_dir,
+            session_store,
+            session_state,
             browser_control == BrowserControlMode::Loopback,
         )
         .await?
@@ -1844,6 +1853,106 @@ fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>>
         .map_err(CliError::command_usage)
 }
 
+const HEADLESS_CODE_UI_SNAPSHOT_METADATA_KEY: &str = "code_ui_snapshot";
+
+struct HeadlessWebSessionBootstrap {
+    store: Arc<SessionStore>,
+    state: SessionState,
+}
+
+struct HeadlessApprovalChannels {
+    exec_approval_tx: mpsc::UnboundedSender<ExecApprovalRequest>,
+    exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
+}
+
+fn load_or_create_headless_web_session_state(
+    args: &CodeArgs,
+    working_dir: &Path,
+    session_store: &Arc<SessionStore>,
+) -> CliResult<SessionState> {
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+    let mut session = if let Some(thread_id) = args.resume.as_deref() {
+        if thread_id.trim().is_empty() {
+            return Err(CliError::command_usage(
+                "--resume requires a non-empty thread_id",
+            ));
+        }
+        match session_store.load_for_thread_id(thread_id, &working_dir_str) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Err(CliError::fatal(format!(
+                    "no Libra Code session found for thread_id '{thread_id}' in working directory '{working_dir_str}'"
+                )));
+            }
+            Err(error) => {
+                return Err(CliError::io(format!(
+                    "failed to load Libra Code session for thread_id '{thread_id}': {error}"
+                )));
+            }
+        }
+    } else {
+        SessionState::new(&working_dir_str)
+    };
+
+    let thread_id = session_canonical_thread_id(&session).unwrap_or_else(|| session.id.clone());
+    session
+        .metadata
+        .entry("thread_id".to_string())
+        .or_insert_with(|| serde_json::json!(thread_id));
+    Ok(session)
+}
+
+fn build_headless_web_code_ui_snapshot(
+    working_dir: &Path,
+    provider: CodeUiProviderInfo,
+    capabilities: CodeUiCapabilities,
+    session: &SessionState,
+) -> CodeUiSessionSnapshot {
+    let working_dir = working_dir.to_string_lossy().to_string();
+    let mut snapshot = session
+        .metadata
+        .get(HEADLESS_CODE_UI_SNAPSHOT_METADATA_KEY)
+        .and_then(|value| serde_json::from_value::<CodeUiSessionSnapshot>(value.clone()).ok())
+        .unwrap_or_else(|| {
+            initial_snapshot(working_dir.clone(), provider.clone(), capabilities.clone())
+        });
+
+    snapshot.session_id = session.id.clone();
+    snapshot.thread_id =
+        Some(session_canonical_thread_id(session).unwrap_or_else(|| session.id.clone()));
+    snapshot.working_dir = working_dir;
+    snapshot.provider = provider;
+    snapshot.capabilities = capabilities;
+    if snapshot.transcript.is_empty() {
+        snapshot.transcript = build_tui_code_ui_transcript(session);
+    }
+
+    let now = Utc::now();
+    for entry in &mut snapshot.transcript {
+        if entry.streaming {
+            entry.streaming = false;
+            if !matches!(
+                entry.status.as_deref(),
+                Some("completed" | "error" | "cancelled")
+            ) {
+                entry.status = Some("cancelled".to_string());
+            }
+            entry.updated_at = now;
+        }
+    }
+    let has_pending_interaction = snapshot
+        .interactions
+        .iter()
+        .any(|interaction| interaction.status == CodeUiInteractionStatus::Pending);
+    snapshot.status = if has_pending_interaction {
+        CodeUiSessionStatus::AwaitingInteraction
+    } else {
+        CodeUiSessionStatus::Idle
+    };
+    snapshot.updated_at = now;
+    snapshot
+}
+
 /// Build a headless Code UI runtime for `--web-only` non-Codex providers.
 ///
 /// Constructs a minimal local-read-only [`ToolRegistry`]
@@ -1856,13 +1965,13 @@ fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>>
 /// [`BrowserControlMode::Loopback`] so the runtime advertises browser writes
 /// in the snapshot capabilities. The initial controller is `Unclaimed` —
 /// the browser is the only writer in headless mode, no TUI to hand off from.
-pub async fn build_headless_web_code_ui_runtime<M>(
+async fn build_headless_web_code_ui_runtime<M>(
     args: &CodeArgs,
     working_dir: &Path,
+    session_bootstrap: HeadlessWebSessionBootstrap,
     model: M,
     model_name: String,
-    exec_approval_tx: mpsc::UnboundedSender<ExecApprovalRequest>,
-    exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
+    approval_channels: HeadlessApprovalChannels,
     browser_write_enabled: bool,
 ) -> CliResult<Arc<CodeUiRuntimeHandle>>
 where
@@ -1871,6 +1980,14 @@ where
 {
     use crate::internal::ai::agent::runtime::tool_loop::ToolLoopConfig;
 
+    let HeadlessWebSessionBootstrap {
+        store: session_store,
+        state: session_state,
+    } = session_bootstrap;
+    let HeadlessApprovalChannels {
+        exec_approval_tx,
+        exec_approval_rx,
+    } = approval_channels;
     let provider_name = format!("{:?}", args.provider).to_lowercase();
     let provider = CodeUiProviderInfo {
         provider: provider_name.clone(),
@@ -1879,14 +1996,15 @@ where
         managed: false,
     };
     let capabilities = headless_capabilities();
-
-    let mut snapshot = initial_snapshot(
-        working_dir.to_string_lossy().to_string(),
+    let initial_history = session_state.to_history();
+    let snapshot = build_headless_web_code_ui_snapshot(
+        working_dir,
         provider,
         capabilities.clone(),
+        &session_state,
     );
-    snapshot.status = CodeUiSessionStatus::Idle;
     let session = CodeUiSession::new(snapshot);
+    let persistence = HeadlessSessionPersistence::new(session_store, session_state);
 
     let approval_config = approval_config_from_project_config(working_dir);
     let approval_ttl = args
@@ -1928,7 +2046,7 @@ where
             ..Default::default()
         });
 
-    let adapter = HeadlessCodeRuntime::new(
+    let adapter = HeadlessCodeRuntime::new_with_persistence(
         session,
         capabilities,
         model,
@@ -1936,6 +2054,8 @@ where
         user_input_rx,
         exec_approval_rx,
         config_factory,
+        initial_history,
+        Some(persistence),
     );
 
     let mut runtime_options = CodeUiRuntimeOptions::new(
@@ -2000,6 +2120,8 @@ fn build_headless_tool_registry(
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
+    session_store: Arc<SessionStore>,
+    session_state: SessionState,
     browser_write_enabled: bool,
 ) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
     let (exec_approval_tx, exec_approval_rx) =
@@ -2019,10 +2141,16 @@ async fn build_non_codex_headless_runtime(
                 build_headless_web_code_ui_runtime(
                     args,
                     working_dir,
+                    HeadlessWebSessionBootstrap {
+                        store: session_store,
+                        state: session_state,
+                    },
                     model,
                     model_name,
-                    exec_approval_tx,
-                    exec_approval_rx,
+                    HeadlessApprovalChannels {
+                        exec_approval_tx,
+                        exec_approval_rx,
+                    },
                     browser_write_enabled,
                 )
                 .await?,
@@ -2039,10 +2167,16 @@ async fn build_non_codex_headless_runtime(
                 build_headless_web_code_ui_runtime(
                     args,
                     working_dir,
+                    HeadlessWebSessionBootstrap {
+                        store: session_store,
+                        state: session_state,
+                    },
                     model,
                     model_name,
-                    exec_approval_tx,
-                    exec_approval_rx,
+                    HeadlessApprovalChannels {
+                        exec_approval_tx,
+                        exec_approval_rx,
+                    },
                     browser_write_enabled,
                 )
                 .await?,
@@ -5143,11 +5277,19 @@ no_cache_unknown_network = true
         let mut args = base_args();
         args.provider = CodeProvider::Ollama;
         args.model = Some("llama3.2".to_string());
+        let session_store = Arc::new(SessionStore::from_storage_path(&tmp.path().join(".libra")));
+        let session_state = SessionState::new(&tmp.path().to_string_lossy());
 
-        let runtime = build_non_codex_headless_runtime(&args, tmp.path(), false)
-            .await
-            .expect("headless Ollama should build through ProviderFactory")
-            .expect("Ollama is the supported non-Codex headless provider");
+        let runtime = build_non_codex_headless_runtime(
+            &args,
+            tmp.path(),
+            session_store,
+            session_state,
+            false,
+        )
+        .await
+        .expect("headless Ollama should build through ProviderFactory")
+        .expect("Ollama is the supported non-Codex headless provider");
         let snapshot = runtime.snapshot().await;
 
         assert_eq!(snapshot.provider.provider, "ollama");
@@ -5167,14 +5309,22 @@ no_cache_unknown_network = true
                 &fixture_path,
                 r#"{"responses":[],"fallback":{"type":"text","text":"ok"}}"#,
             )
-                .expect("fixture payload should be written");
+            .expect("fixture payload should be written");
             fixture_path
         });
+        let session_store = Arc::new(SessionStore::from_storage_path(&tmp.path().join(".libra")));
+        let session_state = SessionState::new(&tmp.path().to_string_lossy());
 
-        let runtime = build_non_codex_headless_runtime(&args, tmp.path(), false)
-            .await
-            .expect("headless Fake should build through ProviderFactory")
-            .expect("Fake provider is now supported in headless provider factory path");
+        let runtime = build_non_codex_headless_runtime(
+            &args,
+            tmp.path(),
+            session_store,
+            session_state,
+            false,
+        )
+        .await
+        .expect("headless Fake should build through ProviderFactory")
+        .expect("Fake provider is now supported in headless provider factory path");
         let snapshot = runtime.snapshot().await;
 
         assert_eq!(snapshot.provider.provider, "fake");

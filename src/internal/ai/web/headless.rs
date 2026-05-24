@@ -30,22 +30,28 @@
 //! These follow-ups are explicitly called out in
 //! `docs/improvement/web.md` and will land in subsequent phases.
 
-use std::{collections::HashMap, sync::Arc, sync::atomic::AtomicU64, sync::atomic::Ordering};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::{
-    sync::{mpsc, oneshot, Mutex},
+    sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
 };
 
 use super::code_ui::{
-    CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind, CodeUiInteractionOption,
-    CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
-    CodeUiReadModel, CodeUiSession, CodeUiSessionStatus, CodeUiTranscriptEntry,
-    CodeUiTranscriptEntryKind,
-    CodeUiApplyToFuture,
+    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind,
+    CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
+    CodeUiInteractionStatus, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot,
+    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -54,8 +60,11 @@ use crate::internal::ai::{
         CompletionUsageSummary, Message,
     },
     sandbox::{ExecApprovalRequest, ReviewDecision},
-    tools::ToolRegistry,
-    tools::context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
+    session::{SessionState, SessionStore},
+    tools::{
+        ToolRegistry,
+        context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
+    },
 };
 
 /// Capabilities advertised by the headless runtime.
@@ -72,7 +81,50 @@ pub fn headless_capabilities() -> CodeUiCapabilities {
         patchsets: false,
         interactive_approvals: true,
         structured_questions: true,
-        provider_session_resume: false,
+        provider_session_resume: true,
+    }
+}
+
+#[derive(Clone)]
+pub struct HeadlessSessionPersistence {
+    store: Arc<SessionStore>,
+    state: Arc<Mutex<SessionState>>,
+}
+
+impl HeadlessSessionPersistence {
+    pub fn new(store: Arc<SessionStore>, state: SessionState) -> Self {
+        Self {
+            store,
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    async fn record_user_message(
+        &self,
+        snapshot: CodeUiSessionSnapshot,
+        content: &str,
+    ) -> io::Result<()> {
+        let mut state = self.state.lock().await;
+        state.add_user_message(content);
+        sync_session_metadata_from_snapshot(&mut state, snapshot);
+        self.store.save(&state)
+    }
+
+    async fn record_assistant_message(
+        &self,
+        snapshot: CodeUiSessionSnapshot,
+        content: &str,
+    ) -> io::Result<()> {
+        let mut state = self.state.lock().await;
+        state.add_assistant_message(content);
+        sync_session_metadata_from_snapshot(&mut state, snapshot);
+        self.store.save(&state)
+    }
+
+    async fn persist_snapshot(&self, snapshot: CodeUiSessionSnapshot) -> io::Result<()> {
+        let mut state = self.state.lock().await;
+        sync_session_metadata_from_snapshot(&mut state, snapshot);
+        self.store.save(&state)
     }
 }
 
@@ -125,6 +177,9 @@ pub struct HeadlessCodeRuntime<M: CompletionModel + 'static> {
     pending_user_inputs: Arc<Mutex<HashMap<String, PendingHeadlessUserInput>>>,
     /// Pending exec approval flows keyed by tool call id.
     pending_exec_approvals: Arc<Mutex<HashMap<String, PendingHeadlessExecApproval>>>,
+    /// Optional on-disk session persistence used by `libra code --web-only
+    /// --resume <thread_id>` for non-Codex providers.
+    persistence: Option<HeadlessSessionPersistence>,
 }
 
 impl<M> HeadlessCodeRuntime<M>
@@ -142,16 +197,45 @@ where
         capabilities: CodeUiCapabilities,
         model: M,
         registry: Arc<ToolRegistry>,
-        mut user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
-        mut exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
+        user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
+        exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
         config_factory: Arc<
             dyn Fn() -> super::super::agent::runtime::tool_loop::ToolLoopConfig + Send + Sync,
         >,
     ) -> Arc<Self> {
+        Self::new_with_persistence(
+            session,
+            capabilities,
+            model,
+            registry,
+            user_input_rx,
+            exec_approval_rx,
+            config_factory,
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Build a headless runtime with restored model history and optional
+    /// SessionStore persistence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_persistence(
+        session: Arc<CodeUiSession>,
+        capabilities: CodeUiCapabilities,
+        model: M,
+        registry: Arc<ToolRegistry>,
+        user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
+        exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
+        config_factory: Arc<
+            dyn Fn() -> super::super::agent::runtime::tool_loop::ToolLoopConfig + Send + Sync,
+        >,
+        initial_history: Vec<Message>,
+        persistence: Option<HeadlessSessionPersistence>,
+    ) -> Arc<Self> {
         let runtime = Arc::new(Self {
             session,
             capabilities,
-            history: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(initial_history)),
             model: Arc::new(model),
             registry,
             config_factory,
@@ -159,16 +243,19 @@ where
             next_turn_id: Arc::new(AtomicU64::new(1)),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_exec_approvals: Arc::new(Mutex::new(HashMap::new())),
+            persistence,
         });
 
-        let listener = runtime.clone();
+        let weak_listener = Arc::downgrade(&runtime);
+        let user_input_rx = user_input_rx;
+        let exec_approval_rx = exec_approval_rx;
         tokio::spawn(async move {
-            listener
-                .run_user_and_exec_approval_request_listener(
-                    &mut user_input_rx,
-                    &mut exec_approval_rx,
-                )
-                .await;
+            Self::run_user_and_exec_approval_request_listener(
+                weak_listener,
+                user_input_rx,
+                exec_approval_rx,
+            )
+            .await;
         });
 
         runtime
@@ -240,18 +327,25 @@ where
         self.session.upsert_transcript_entry(user_entry).await;
         self.session.upsert_transcript_entry(assistant_entry).await;
         self.session.set_status(CodeUiSessionStatus::Thinking).await;
+        if let Some(persistence) = self.persistence.as_ref() {
+            persist_or_warn(
+                persistence
+                    .record_user_message(self.session.snapshot().await, &text)
+                    .await,
+                "failed to persist headless web user message",
+            );
+        }
 
         let session = self.session.clone();
         let history = self.history.clone();
         let model = self.model.clone();
         let registry = self.registry.clone();
         let config = (self.config_factory)();
+        let persistence = self.persistence.clone();
         let in_flight_for_task = self.in_flight.clone();
         let user_text = text;
         let task_assistant_entry_id = assistant_entry_id.clone();
-        let turn_id = self
-            .next_turn_id
-            .fetch_add(1, Ordering::Relaxed);
+        let turn_id = self.next_turn_id.fetch_add(1, Ordering::Relaxed);
 
         let task = tokio::spawn(async move {
             let mut observer = HeadlessTurnObserver {
@@ -288,12 +382,29 @@ where
                     )
                     .await;
                     session.set_status(CodeUiSessionStatus::Idle).await;
+                    if let Some(persistence) = persistence.as_ref() {
+                        persist_or_warn(
+                            persistence
+                                .record_assistant_message(
+                                    session.snapshot().await,
+                                    turn.final_text.as_str(),
+                                )
+                                .await,
+                            "failed to persist headless web assistant message",
+                        );
+                    }
                 }
                 Err(error) => {
                     let message = format_completion_error(&error);
                     finalize_assistant_entry(&session, &task_assistant_entry_id, &message, "error")
                         .await;
                     session.set_status(CodeUiSessionStatus::Error).await;
+                    if let Some(persistence) = persistence.as_ref() {
+                        persist_or_warn(
+                            persistence.persist_snapshot(session.snapshot().await).await,
+                            "failed to persist headless web failed turn snapshot",
+                        );
+                    }
                 }
             }
 
@@ -328,11 +439,11 @@ where
                 anyhow!("The pending execution approval request is no longer awaiting a response")
             })?;
 
-            self.session
-                .resolve_interaction(interaction_id)
-                .await;
+            self.session.resolve_interaction(interaction_id).await;
             self.session
                 .set_status(CodeUiSessionStatus::ExecutingTool)
+                .await;
+            self.persist_current_snapshot("failed to persist resolved exec approval interaction")
                 .await;
             return Ok(());
         }
@@ -346,16 +457,15 @@ where
 
         let user_input_response =
             user_input_response_from_code_ui_request(&pending.questions, response)?;
-        pending
-            .response_tx
-            .send(user_input_response)
-            .map_err(|_| anyhow!("The pending user input request is no longer awaiting a response"))?;
+        pending.response_tx.send(user_input_response).map_err(|_| {
+            anyhow!("The pending user input request is no longer awaiting a response")
+        })?;
 
-        self.session
-            .resolve_interaction(interaction_id)
-            .await;
+        self.session.resolve_interaction(interaction_id).await;
         self.session
             .set_status(CodeUiSessionStatus::ExecutingTool)
+            .await;
+        self.persist_current_snapshot("failed to persist resolved user input interaction")
             .await;
         Ok(())
     }
@@ -381,6 +491,8 @@ where
         }
         self.session.set_status(CodeUiSessionStatus::Idle).await;
         self.clear_pending_user_inputs().await;
+        self.persist_current_snapshot("failed to persist cancelled headless web turn")
+            .await;
         Ok(())
     }
 
@@ -400,6 +512,8 @@ where
             .await;
         }
         self.clear_pending_user_inputs().await;
+        self.persist_current_snapshot("failed to persist headless web shutdown snapshot")
+            .await;
         Ok(())
     }
 }
@@ -410,9 +524,9 @@ where
     M::Response: CompletionUsage,
 {
     async fn run_user_and_exec_approval_request_listener(
-        &self,
-        user_input_rx: &mut mpsc::UnboundedReceiver<UserInputRequest>,
-        exec_approval_rx: &mut mpsc::UnboundedReceiver<ExecApprovalRequest>,
+        weak_listener: std::sync::Weak<Self>,
+        mut user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
+        mut exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
     ) {
         let mut user_input_open = true;
         let mut exec_approval_open = true;
@@ -421,14 +535,22 @@ where
             tokio::select! {
                 request = user_input_rx.recv(), if user_input_open => {
                     if let Some(request) = request {
-                        self.handle_user_input_request(request).await;
+                        if let Some(listener) = weak_listener.upgrade() {
+                            listener.handle_user_input_request(request).await;
+                        } else {
+                            break;
+                        }
                     } else {
                         user_input_open = false;
                     }
                 }
                 request = exec_approval_rx.recv(), if exec_approval_open => {
                     if let Some(request) = request {
-                        self.handle_exec_approval_request(request).await;
+                        if let Some(listener) = weak_listener.upgrade() {
+                            listener.handle_exec_approval_request(request).await;
+                        } else {
+                            break;
+                        }
                     } else {
                         exec_approval_open = false;
                     }
@@ -473,6 +595,8 @@ where
         self.session
             .set_status(CodeUiSessionStatus::AwaitingInteraction)
             .await;
+        self.persist_current_snapshot("failed to persist pending user input interaction")
+            .await;
     }
 
     async fn handle_exec_approval_request(&self, request: ExecApprovalRequest) {
@@ -501,6 +625,8 @@ where
         self.session
             .set_status(CodeUiSessionStatus::AwaitingInteraction)
             .await;
+        self.persist_current_snapshot("failed to persist pending exec approval interaction")
+            .await;
     }
 
     async fn clear_pending_user_inputs(&self) {
@@ -524,6 +650,17 @@ where
 
         for interaction_id in pending_ids {
             self.session.clear_interaction(&interaction_id).await;
+        }
+    }
+
+    async fn persist_current_snapshot(&self, warning: &'static str) {
+        if let Some(persistence) = self.persistence.as_ref() {
+            persist_or_warn(
+                persistence
+                    .persist_snapshot(self.session.snapshot().await)
+                    .await,
+                warning,
+            );
         }
     }
 }
@@ -559,6 +696,31 @@ async fn finalize_assistant_entry(
 
 fn format_completion_error(error: &CompletionError) -> String {
     format!("Agent turn failed: {error}")
+}
+
+fn persist_or_warn(result: io::Result<()>, message: &'static str) {
+    if let Err(error) = result {
+        tracing::warn!(error = %error, "{message}");
+    }
+}
+
+fn sync_session_metadata_from_snapshot(
+    state: &mut SessionState,
+    mut snapshot: CodeUiSessionSnapshot,
+) {
+    let thread_id = snapshot
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| state.id.clone());
+    snapshot.thread_id = Some(thread_id.clone());
+    state
+        .metadata
+        .insert("thread_id".to_string(), serde_json::json!(thread_id));
+    state.metadata.insert(
+        "code_ui_snapshot".to_string(),
+        serde_json::to_value(snapshot).unwrap_or_else(|_| serde_json::json!({})),
+    );
+    state.updated_at = Utc::now();
 }
 
 fn request_user_input_question_to_metadata(question: &UserInputQuestion) -> serde_json::Value {
@@ -608,13 +770,12 @@ fn interaction_request_for_exec_approval(
         _ => "Approval request",
     };
 
-    let prompt = format!("{command}");
     CodeUiInteractionRequest {
         id: interaction_id,
         kind,
         title: Some(title.to_string()),
         description: Some(reason),
-        prompt: Some(prompt),
+        prompt: Some(command),
         options: vec![
             CodeUiInteractionOption {
                 id: "approve".to_string(),
@@ -670,7 +831,7 @@ fn review_decision_from_interaction_response(
             Some(option) if option.eq_ignore_ascii_case("decline") => Some(false),
             Some(option) if option.eq_ignore_ascii_case("no") => Some(false),
             Some(option) if option.eq_ignore_ascii_case("abort") => {
-                return Ok(ReviewDecision::Abort)
+                return Ok(ReviewDecision::Abort);
             }
             _ => None,
         })
@@ -708,10 +869,10 @@ fn user_input_response_from_code_ui_request(
         .ok_or_else(|| anyhow!("User input request contains no questions"))?;
 
     let mut values = Vec::new();
-    if let Some(selected) = response.selected_option {
-        if !selected.is_empty() {
-            values.push(selected);
-        }
+    if let Some(selected) = response.selected_option
+        && !selected.is_empty()
+    {
+        values.push(selected);
     }
     if let Some(note) = response.note.as_deref() {
         let note = note.trim();
@@ -720,10 +881,14 @@ fn user_input_response_from_code_ui_request(
         }
     }
 
-    if values.is_empty() {
-        if let Some(approved) = response.approved {
-            values.push(if approved { "yes".to_string() } else { "no".to_string() });
-        }
+    if values.is_empty()
+        && let Some(approved) = response.approved
+    {
+        values.push(if approved {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        });
     }
 
     if values.is_empty() {

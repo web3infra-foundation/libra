@@ -13,19 +13,23 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use libra::internal::ai::{
     agent::runtime::tool_loop::ToolLoopConfig,
+    completion::Message,
     providers::fake,
     runtime::{ToolBoundaryRuntime, TracingAuditSink},
     sandbox::ExecApprovalRequest,
-    tools::context::{UserInputQuestion, UserInputRequest, UserInputResponse},
-    tools::{ToolRegistryBuilder, handlers::ReadFileHandler},
+    session::{SessionState, SessionStore},
+    tools::{
+        ToolRegistryBuilder,
+        context::{UserInputQuestion, UserInputRequest, UserInputResponse},
+        handlers::ReadFileHandler,
+    },
     web::{
         code_ui::{
             CodeUiApplyToFuture, CodeUiCommandAdapter, CodeUiInteractionResponse,
-            CodeUiInteractionStatus,
-            CodeUiProviderInfo, CodeUiReadModel, CodeUiSession, CodeUiSessionStatus,
-            initial_snapshot,
+            CodeUiInteractionStatus, CodeUiProviderInfo, CodeUiReadModel, CodeUiSession,
+            CodeUiSessionStatus, initial_snapshot,
         },
-        headless::{HeadlessCodeRuntime, headless_capabilities},
+        headless::{HeadlessCodeRuntime, HeadlessSessionPersistence, headless_capabilities},
     },
 };
 use tokio::sync::mpsc;
@@ -41,6 +45,19 @@ fn fixture_path(name: &str) -> PathBuf {
 fn build_runtime(
     fixture: &str,
     working_dir: PathBuf,
+) -> (
+    Arc<HeadlessCodeRuntime<fake::CompletionModel>>,
+    mpsc::UnboundedSender<UserInputRequest>,
+    mpsc::UnboundedSender<ExecApprovalRequest>,
+) {
+    build_runtime_with_persistence(fixture, working_dir, Vec::new(), None)
+}
+
+fn build_runtime_with_persistence(
+    fixture: &str,
+    working_dir: PathBuf,
+    initial_history: Vec<Message>,
+    persistence: Option<HeadlessSessionPersistence>,
 ) -> (
     Arc<HeadlessCodeRuntime<fake::CompletionModel>>,
     mpsc::UnboundedSender<UserInputRequest>,
@@ -62,8 +79,7 @@ fn build_runtime(
         capabilities.clone(),
     ));
     let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
-    let (exec_approval_tx, exec_approval_rx) =
-        mpsc::unbounded_channel::<ExecApprovalRequest>();
+    let (exec_approval_tx, exec_approval_rx) = mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)
@@ -79,7 +95,7 @@ fn build_runtime(
         Arc::new(ToolLoopConfig::default);
 
     (
-        HeadlessCodeRuntime::new(
+        HeadlessCodeRuntime::new_with_persistence(
             session,
             capabilities,
             model,
@@ -87,6 +103,8 @@ fn build_runtime(
             user_input_rx,
             exec_approval_rx,
             config_factory,
+            initial_history,
+            persistence,
         ),
         user_input_tx,
         exec_approval_tx,
@@ -173,6 +191,61 @@ async fn empty_message_is_rejected_before_any_transcript_mutation() {
     assert_eq!(snapshot.status, CodeUiSessionStatus::Idle);
 }
 
+/// Headless web-only sessions must write enough state for `--resume` to
+/// restore both model history and the browser transcript on the next process.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_message_persists_resumable_session_snapshot() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let storage = tempfile::tempdir().expect("tempdir for session storage");
+    let store = Arc::new(SessionStore::from_storage_path(storage.path()));
+    let mut state = SessionState::new(&workdir.path().to_string_lossy());
+    let thread_id = state.id.clone();
+    state.metadata.insert(
+        "thread_id".to_string(),
+        serde_json::json!(thread_id.clone()),
+    );
+    let persistence = HeadlessSessionPersistence::new(store.clone(), state);
+    let (runtime, _, _) = build_runtime_with_persistence(
+        "basic_chat",
+        workdir.path().to_path_buf(),
+        Vec::new(),
+        Some(persistence),
+    );
+
+    runtime
+        .submit_message("persist this turn".to_string())
+        .await
+        .expect("headless submit should accept non-empty text");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let saved = store.load(&thread_id).expect("session should load");
+        if saved.messages.len() == 2 {
+            let snapshot = saved
+                .metadata
+                .get("code_ui_snapshot")
+                .expect("persisted session should include Code UI snapshot");
+            assert_eq!(
+                snapshot.get("threadId").and_then(|value| value.as_str()),
+                Some(thread_id.as_str()),
+                "persisted Code UI snapshot should carry the resumable thread id",
+            );
+            assert!(
+                snapshot
+                    .get("transcript")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|entries| entries.len() >= 2),
+                "persisted Code UI snapshot should retain browser transcript entries",
+            );
+            assert_eq!(saved.to_history().len(), 2);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    panic!("session store did not receive the completed headless turn before deadline");
+}
+
 /// The headless runtime advertises only the surfaces it can actually deliver
 /// in v0; locking these down catches accidental capability drift (e.g.
 /// turning on `interactiveApprovals` before the InteractionPanel routing is
@@ -187,7 +260,7 @@ fn headless_capabilities_match_phase3_v0_contract() {
     assert!(!caps.patchsets);
     assert!(caps.interactive_approvals);
     assert!(caps.structured_questions);
-    assert!(!caps.provider_session_resume);
+    assert!(caps.provider_session_resume);
 }
 
 /// `cancel_turn` must finalize the streaming assistant entry — leaving it
@@ -370,9 +443,7 @@ async fn respond_interaction_unknown_id() {
         .await;
     let error = result.expect_err("interactions must surface a concrete error for unknown id");
     assert!(
-        error
-            .to_string()
-            .contains("Unknown pending interaction"),
+        error.to_string().contains("Unknown pending interaction"),
         "error message must call out unknown interaction ids, got {error}",
     );
 }
@@ -404,14 +475,10 @@ async fn request_user_input_request_is_reflected_in_snapshot_and_responded_to() 
     let mut saw_pending = false;
     while std::time::Instant::now() < deadline {
         let snapshot = runtime.snapshot().await;
-        if snapshot
-            .interactions
-            .iter()
-            .any(|interaction| {
-                interaction.id == interaction_id
-                    && interaction.status == CodeUiInteractionStatus::Pending
-            })
-        {
+        if snapshot.interactions.iter().any(|interaction| {
+            interaction.id == interaction_id
+                && interaction.status == CodeUiInteractionStatus::Pending
+        }) {
             saw_pending = true;
             break;
         }
@@ -463,8 +530,7 @@ async fn request_user_input_request_is_reflected_in_snapshot_and_responded_to() 
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_approval_request_is_reflected_in_snapshot_and_responded_to() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let (runtime, _, exec_approval_tx) =
-        build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _, exec_approval_tx) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let interaction_id = "exec-approval-1".to_string();
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -489,12 +555,10 @@ async fn exec_approval_request_is_reflected_in_snapshot_and_responded_to() {
     let mut saw_pending = false;
     while std::time::Instant::now() < deadline {
         let snapshot = runtime.snapshot().await;
-        if snapshot
-            .interactions
-            .iter()
-            .any(|interaction| interaction.id == interaction_id
-                && interaction.status == CodeUiInteractionStatus::Pending)
-        {
+        if snapshot.interactions.iter().any(|interaction| {
+            interaction.id == interaction_id
+                && interaction.status == CodeUiInteractionStatus::Pending
+        }) {
             saw_pending = true;
             break;
         }

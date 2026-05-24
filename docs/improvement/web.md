@@ -10,7 +10,7 @@
 - Wire contract 已固定在 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 与 [web/src/lib/code-ui/types.ts](../../web/src/lib/code-ui/types.ts)。Rust 结构字段使用 `camelCase`，枚举使用 `snake_case`；[tests/ai_code_ui_wire_test.rs](../../tests/ai_code_ui_wire_test.rs) 覆盖 snapshot、controller、capabilities、transcript kinds、interaction kinds、thread list 等 JSON 形态。
 - 前端生产路径已改走 [web/src/lib/code-ui/client.ts](../../web/src/lib/code-ui/client.ts)、[store.tsx](../../web/src/lib/code-ui/store.tsx)、[controller.tsx](../../web/src/lib/code-ui/controller.tsx) 和 [view-model.ts](../../web/src/lib/code-ui/view-model.ts)。`web/src/lib/mock/` 已不存在；`rg 'from "@/lib/mock' web/src` 应无结果。
 - 浏览器写控制已通过 `--browser-control <off|loopback>` 落地。TUI 默认 `off`；`--web-only --provider codex` 默认 `loopback`；非 Codex web-only 默认 `off`。浏览器只持有 `X-Code-Controller-Token` lease；automation 额外需要 `X-Libra-Control-Token`。
-- `--web-only --provider ollama` 已有 Phase 3 v0 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具；暂不支持 approvals、mutating tools、plan/patchset workflow、session persistence/resume。其它非 Codex provider 仍会回退 placeholder。
+- `--web-only --provider <non-codex>` 已有 Phase 3 v0 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、request-user-input / approval interaction surface、session persistence/resume；暂不支持 mutating tools、plan/patchset workflow。
 
 ## 目标与非目标
 
@@ -37,7 +37,7 @@
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
-| Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
+| Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺 mutating tools sandbox/approval、plan/patchset |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
 ## API 边界
@@ -121,8 +121,8 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 - 已完成：`build_non_codex_headless_runtime()` 的 Ollama 路径收敛到 `ProviderFactory`，避免 Ollama 与 TUI provider bootstrap 分叉。
 - 为 headless runtime 接入 `ToolRuntimeContext`、sandbox、approval store、network policy、usage recorder；mutating tools 必须通过 `CodeUiInteractionRequest` 显示 approval，不允许静默执行。
-- 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
-- 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
+- [x] 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
+- [x] 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
 - 支持 plan/patchset 最小投影，打开 `planUpdates` / `patchsets` capability 前必须有测试证明 UI 可重建。
 
 **验收：**

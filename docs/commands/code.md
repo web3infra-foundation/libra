@@ -110,7 +110,7 @@ When the server is bound to a non-loopback host, non-loopback browsers receive a
 
 When `--browser-control loopback` is requested and the browser holds the active lease, the TUI initial controller is `LocalTui` (visible owner, can be reclaimed) instead of `Fixed { Tui }` (permanently blocking). If the TUI also wants to drive writes, `--control write` must be supplied alongside `--browser-control loopback`; the two writers serialize through the same `TuiControlCommand` channel.
 
-For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session — no terminal required. Headless mode currently advertises `messageInput`, `streamingText`, and `toolCalls` capabilities; `interactiveApprovals`, `planUpdates`, and `patchsets` light up once the corresponding workflow integrations land.
+For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session -- no terminal required. Headless mode advertises `messageInput`, `streamingText`, `toolCalls`, `interactiveApprovals`, `structuredQuestions`, and `providerSessionResume`; `--resume <thread_id>` restores persisted transcript/history for the same working directory. `planUpdates` and `patchsets` remain disabled until the shared workflow projection is wired into headless mode.
 
 ### Code UI Wire Contract
 
@@ -227,6 +227,9 @@ libra code --repo=/Volumes/Data/linked --provider ollama --model gemma4:31b
 
 # Resume a canonical Libra thread
 libra code --resume 11111111-1111-4111-8111-111111111111
+
+# Resume a browser-driven non-Codex headless session
+libra code --web-only --provider ollama --resume 11111111-1111-4111-8111-111111111111 --browser-control loopback
 
 # Inspect the same thread's version graph
 libra graph 11111111-1111-4111-8111-111111111111
