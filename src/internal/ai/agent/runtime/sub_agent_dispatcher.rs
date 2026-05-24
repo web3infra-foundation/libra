@@ -11,11 +11,8 @@
 //! 4. resolve `subagent_type` via the spec registry; reject `Primary`
 //!    profiles — P3.3 implemented
 //! 5. `SafetyDecision::evaluate(SubAgentSpawn { name, prompt_digest })`
-//!    — still a TODO no-op. The `ToolOperation::sub_agent_spawn`
-//!    constructor exists (v0.17.712), so wiring `ToolBoundaryPolicy::decide`
-//!    against it is a small follow-up; today the dispatcher accepts
-//!    every sub-spec that survived the prior gates; no semantic gap
-//!    exists because Libra has no `SubAgentSpawn` policy configured.
+//!    via `ToolBoundaryRuntime::decide` and `ToolOperation::sub_agent_spawn`.
+//!    Registry-level hardening can reject a spawn before it reaches step 8.
 //! 6. compute `effective_ruleset` via `child_ruleset(parent, sub_spec)`
 //!    — P3.3 implemented
 //! 7. assert no permission escalation (Permission Escalation Gate)
@@ -69,7 +66,8 @@ use futures::future::BoxFuture;
 
 use super::sub_agent::{
     CancellationSource, DispatchContext, PermissionAskRequest, PermissionAskSource,
-    PermissionReply, SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+    PermissionReply, SafetyDecisionDenial, SubAgentDispatcher, TaskEntryKind, TaskFailure,
+    TaskInvocation, TaskResult,
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
@@ -79,6 +77,7 @@ use crate::internal::ai::{
         EDIT_TOOLS, PermissionRuleset, agent_permission_spec_to_ruleset, assert_no_escalation,
         child_ruleset,
     },
+    runtime::ToolOperation,
     session::jsonl::SessionEvent,
 };
 
@@ -245,21 +244,21 @@ impl DefaultSubAgentDispatcher {
 
         // Step 5: SafetyDecision evaluate.
         //
-        // TODO(OC-Phase 3 P3.4): wire `ToolBoundaryPolicy::decide`
-        // against the `ToolOperation::sub_agent_spawn(name,
-        // prompt_digest)` operation that v0.17.712 already exposes.
-        // The remaining blocker is that `DispatchContext` does not
-        // carry a `ToolBoundaryPolicy` reference; wiring requires
-        // adding `tool_boundary_policy: Option<&ToolBoundaryPolicy>`
-        // to `DispatchContext` and threading the system principal
-        // from the parent runtime. Today this is a documented no-op
-        // — P3.3 ships the gate ordering and the P3.4 PR will swap
-        // this stub for the real call without touching the
-        // surrounding capability gates. The dispatcher accepts any
-        // sub-spec that survived the prior gates; no semantic gap
-        // exists today because Libra has no `SubAgentSpawn` policy
-        // configured.
-        let _safety_decision_stub_marker = ();
+        // Tool-boundary policy is attached to the parent tool registry.
+        // If absent, this layer currently falls back to pass-through,
+        // preserving historical behavior for tests and other callers that
+        // do not yet inject a runtime policy.
+        if let Some(hardening) = ctx.tool_registry.hardening() {
+            let decision = hardening.decide(&ToolOperation::sub_agent_spawn(
+                invocation.subagent_type.as_str(),
+                digest_for_prompt(&invocation.prompt),
+            ));
+            if !decision.allowed {
+                return Err(TaskFailure::SafetyDenied(SafetyDecisionDenial {
+                    reason: decision.reason,
+                }));
+            }
+        }
 
         // Step 6: compute effective ruleset for the child.
         let effective = child_ruleset(ctx.parent_ruleset, &sub_spec.permission);
@@ -784,6 +783,10 @@ mod tests {
         },
         permission::{PermissionAction, PermissionRule, PermissionRuleset},
         providers::{ProviderBuildOptions, ProviderFactory},
+        runtime::{
+            InMemoryAuditSink, PrincipalContext, PrincipalRole, SecretRedactor, ToolBoundaryPolicy,
+            ToolBoundaryRuntime,
+        },
         session::SessionId,
         tools::ToolRegistry,
         usage::UsageRecorder,
@@ -807,6 +810,20 @@ mod tests {
     fn default_tool_registry() -> &'static ToolRegistry {
         static REG: OnceLock<ToolRegistry> = OnceLock::new();
         REG.get_or_init(|| ToolRegistry::with_working_dir(std::path::PathBuf::from(".")))
+    }
+
+    fn observer_tool_registry() -> ToolRegistry {
+        let hardening = ToolBoundaryRuntime::new(
+            uuid::Uuid::new_v4(),
+            PrincipalContext {
+                principal_id: "observer".to_string(),
+                role: PrincipalRole::Observer,
+            },
+            ToolBoundaryPolicy::default_runtime(),
+            SecretRedactor::default_runtime(),
+            std::sync::Arc::new(InMemoryAuditSink::default()),
+        );
+        ToolRegistry::with_working_dir(std::path::PathBuf::from(".")).with_hardening(hardening)
     }
 
     /// Test asker that replies with a pre-canned [`PermissionReply`]
@@ -1266,6 +1283,73 @@ mod tests {
             }
             other => panic!("expected PermissionEscalationDenied, got {other:?}"),
         }
+    }
+
+    /// Scenario (Step 5): Tool-boundary hardening can reject
+    /// `SubAgentSpawn` before permission ask. An observer principal
+    /// does not allow mutating operations, and spawning a sub-agent is
+    /// modeled as a mutating spawn operation, so this dispatch must
+    /// fail fast with `SafetyDenied`.
+    #[tokio::test]
+    async fn dispatch_rejects_when_safety_decision_denies_spawn() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let asker = Arc::new(TestAsker::always(PermissionReply::Once));
+        let permission_service = PermissionService::new(asker.clone());
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-safety-denied".to_string();
+        let parent_session: SessionId = "session-safety-denied".to_string();
+        let tool_registry = observer_tool_registry();
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-safety-denied"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let result = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await;
+        match result {
+            Err(TaskFailure::SafetyDenied(SafetyDecisionDenial { reason })) => {
+                assert!(
+                    reason.contains("observer principals cannot run mutating tools"),
+                    "unexpected safety reason: {reason}",
+                );
+            }
+            other => panic!("expected SafetyDenied, got {other:?}"),
+        }
+        assert_eq!(
+            asker.ask_call_count(),
+            0,
+            "safety deny must happen before permission ask"
+        );
     }
 
     /// Scenario (TOCTOU regression guard): with the only slot already
