@@ -5,7 +5,7 @@ List local refs and their object IDs, with optional filtering by type and patter
 ## Synopsis
 
 ```
-libra show-ref [OPTIONS] [<PATTERN>...]
+libra show-ref [OPTIONS] [PATTERN]...
 ```
 
 ## Description
