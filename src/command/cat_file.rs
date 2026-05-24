@@ -54,13 +54,13 @@ Notes:
   - --ai on ai_session objects prints a unified session summary before full JSON.
   - --ai-list accepts built-in AI types as well as any type already present in the history branch.";
 
-const CAT_FILE_AFTER_HELP: &str = "Examples:
-  libra cat-file -p HEAD
-  libra cat-file -t 40d352ee7190f92dcf7883b8a81f2c730fd8a860
-  libra cat-file --ai-list intent
-  libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7zXjsskQ
-  libra cat-file --ai 5b878637-f852-4bff-adee-3354c42ae69f
-  libra cat-file --ai-type debug-local-1772707227";
+const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
+    libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
+    libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    libra cat-file --ai-list intent                         List all AI objects of a built-in type
+    libra cat-file --ai-list-types                          List every AI object type in the history branch
+    libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
+    libra cat-file --ai 5b878637-f852-4bff-adee-3354c42a…   Look up an AI object across all types by id";
 
 /// Provide content, type, or size information for repository objects (Git and AI).
 #[derive(Parser, Debug)]
