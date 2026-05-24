@@ -235,6 +235,29 @@ pub struct AgentPermissionSpec {
     pub may_spawn_sub_agents: bool,
 }
 
+impl AgentPermissionSpec {
+    /// Whether `tool` may be invoked under this permission spec.
+    ///
+    /// Encodes the same S2-INV-05 contract as the feature-gated
+    /// [`AgentPermissionProfile::permits_tool`] so the default-build
+    /// config / parsing layer evaluates tool gating identically to the
+    /// runtime profile it converts into:
+    ///
+    /// - **default deny** — an empty spec permits nothing; a tool must
+    ///   be explicitly present in `allowed_tools`;
+    /// - **deny wins** — a tool in `denied_tools` is rejected even if it
+    ///   also appears in `allowed_tools`.
+    ///
+    /// Tool names are matched **exactly** against the `BTreeSet`s (no
+    /// `*` wildcard / glob / prefix matching). A tool is permitted iff
+    /// it is in `allowed_tools` AND not in `denied_tools`.
+    ///
+    /// [`AgentPermissionProfile::permits_tool`]: crate::internal::ai::agent_run::permission::AgentPermissionProfile::permits_tool
+    pub fn permits_tool(&self, tool: &str) -> bool {
+        !self.denied_tools.contains(tool) && self.allowed_tools.contains(tool)
+    }
+}
+
 /// The executable form of an agent profile.
 ///
 /// Compared with [`super::parser::AgentProfile`] this struct adds:
@@ -285,6 +308,48 @@ pub struct AgentExecutionSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn permission_spec(allowed: &[&str], denied: &[&str]) -> AgentPermissionSpec {
+        AgentPermissionSpec {
+            allowed_tools: allowed.iter().map(|t| t.to_string()).collect(),
+            denied_tools: denied.iter().map(|t| t.to_string()).collect(),
+            ..AgentPermissionSpec::default()
+        }
+    }
+
+    /// S2-INV-05 default deny: the `Default` (empty) spec permits no
+    /// tool. Mirrors the feature-gated `AgentPermissionProfile`
+    /// behavior so the default-build config layer gates identically.
+    #[test]
+    fn permission_spec_default_permits_nothing() {
+        let spec = AgentPermissionSpec::default();
+        for tool in ["read_file", "shell", "apply_patch", "spawn_subagent"] {
+            assert!(
+                !spec.permits_tool(tool),
+                "default spec must reject `{tool}`"
+            );
+        }
+    }
+
+    /// Only explicitly-allowed (and not denied) tools are permitted; an
+    /// unlisted tool is denied by default.
+    #[test]
+    fn permission_spec_permits_only_allowed_tools() {
+        let spec = permission_spec(&["read_file", "grep"], &[]);
+        assert!(spec.permits_tool("read_file"));
+        assert!(spec.permits_tool("grep"));
+        assert!(!spec.permits_tool("shell"));
+    }
+
+    /// Deny wins: a tool in both `allowed_tools` and `denied_tools` is
+    /// rejected — the unbypassable hard-deny property, evaluated
+    /// identically to `AgentPermissionProfile`.
+    #[test]
+    fn permission_spec_denied_overrides_allowed() {
+        let spec = permission_spec(&["read_file", "shell"], &["shell"]);
+        assert!(spec.permits_tool("read_file"));
+        assert!(!spec.permits_tool("shell"), "deny must win over allow");
+    }
 
     /// Scenario: bare `provider/model` lifts cleanly; legacy `default` / `fast`
     /// strings stay un-lifted so the caller can keep them as `model_preference`.
