@@ -549,6 +549,65 @@ mod tests {
         assert!(proposal.summary.requires_human_review);
     }
 
+    /// Pin the **exact** inclusive auto-accept boundary
+    /// (`risk.score <= policy.auto_accept_max_score`). The route-table
+    /// test only exercises 20≤30 and 20>10; neither hits the precise
+    /// edge. An off-by-one here (`<` instead of `<=`, or vice-versa) is
+    /// a security-relevant defect: it would either auto-merge a
+    /// sub-agent patch one risk point too risky, or force review on a
+    /// patch that policy says is acceptable. This constructs a
+    /// `Passed` report with a hand-built `RiskScoreBreakdown` at the
+    /// threshold and one point above it.
+    #[test]
+    fn build_decision_proposal_auto_accept_boundary_is_inclusive() {
+        let policy = DecisionPolicy {
+            policy_version: "test:phase4".to_string(),
+            auto_accept_max_score: 30,
+        };
+        let report = sample_report(ValidationStatus::Passed);
+
+        let risk_at = |score: u8| RiskScoreBreakdown {
+            breakdown_id: Uuid::new_v4(),
+            thread_id: report.thread_id,
+            validation_report_id: Some(report.report_id),
+            policy_version: "test:phase4".to_string(),
+            stale: false,
+            is_latest: true,
+            summary: RiskScoreSummary {
+                score,
+                reasons: vec![],
+                validation_status: ValidationStatus::Passed,
+            },
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // score == threshold → AutoAccept (the boundary is inclusive).
+        let at_threshold = build_decision_proposal(&report, &risk_at(30), &policy);
+        assert_eq!(
+            at_threshold.summary.route,
+            DecisionProposalRoute::AutoAccept,
+            "score exactly at auto_accept_max_score must auto-accept (`<=`)",
+        );
+        assert!(at_threshold.is_auto_accept());
+        assert!(!at_threshold.summary.requires_human_review);
+
+        // score == threshold + 1 → HumanReview (just over the edge).
+        let over_threshold = build_decision_proposal(&report, &risk_at(31), &policy);
+        assert_eq!(
+            over_threshold.summary.route,
+            DecisionProposalRoute::HumanReview,
+            "score one point over the threshold must escalate to review",
+        );
+        assert!(!over_threshold.is_auto_accept());
+        assert!(over_threshold.summary.requires_human_review);
+        // A Passed-but-too-risky patch still proposes Accepted, just gated.
+        assert_eq!(
+            over_threshold.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+    }
+
     /// `DecisionProposalRoute::variant_name` must match the
     /// `#[serde(rename_all = "snake_case")]` tag values for all four
     /// variants. Failure means audit logs (which use variant_name) and
