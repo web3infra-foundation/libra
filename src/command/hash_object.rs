@@ -19,12 +19,11 @@ use crate::{
 };
 
 const HASH_OBJECT_EXAMPLES: &str = "\
-Examples:
-  libra hash-object README.md
-  libra hash-object -w src/main.rs
-  printf 'hello' | libra hash-object --stdin
-  printf 'hello' | libra hash-object --stdin --json
-";
+EXAMPLES:
+    libra hash-object README.md                         Compute the blob id (no write)
+    libra hash-object -w src/main.rs                    Compute and write the object to .libra/objects/
+    printf 'hello' | libra hash-object --stdin          Hash stdin instead of a file
+    printf 'hello' | libra hash-object --stdin --json   Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = HASH_OBJECT_EXAMPLES)]

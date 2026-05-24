@@ -189,16 +189,16 @@ Dangling objects are those that exist but are not referenced by any ref, index, 
 By default, only dangling commits are reported (matching git fsck behavior).
 Unreachable objects include all dangling objects plus those only reachable from other unreachable objects.";
 
-const FSCK_AFTER_HELP: &str = "Examples:
-  libra fsck
-  libra fsck --no-reflogs
-  libra fsck --unreachable
-  libra fsck --no-dangling
-  libra fsck --lost-found
-  libra fsck --root
-  libra fsck --tags
-  libra fsck --connectivity-only
-  libra fsck <object-id>";
+const FSCK_AFTER_HELP: &str = "EXAMPLES:
+    libra fsck                          Verify every object, ref, and reflog entry
+    libra fsck --no-reflogs             Skip reflog validation (faster on large repos)
+    libra fsck --unreachable            Report unreachable objects (not just dangling commits)
+    libra fsck --no-dangling            Suppress the default dangling-commit report
+    libra fsck --lost-found             Stage dangling objects under .libra/lost-found/
+    libra fsck --root                   Print root commit ids in the report
+    libra fsck --tags                   Print tag ids in the report
+    libra fsck --connectivity-only      Skip blob content checks; verify graph only
+    libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
 #[derive(Parser, Debug)]
