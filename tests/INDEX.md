@@ -35,6 +35,8 @@
 | `compat_help_examples_banner` | 1 | Every visible command in `src/cli.rs::Commands` renders an `EXAMPLES:` / `Examples:` section in `<cmd> --help` (cross-cutting item B) | `src/cli.rs`, `src/command/**` |
 | `compat_error_codes_doc_sync` | 1 | Every `LBR-*-NNN` literal in `src/utils/error.rs` is documented in `docs/error-codes.md` | `src/utils/error.rs`, `docs/error-codes.md` |
 | `compat_command_docs_examples_section` | 1 | Every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading | `docs/commands/**` |
+| `compat_help_flag_descriptions` | 1 | Every visible flag and positional under `Options:` / `Arguments:` carries a non-empty description; covers 42 root commands + 53 sub/sub-sub-commands (110 surfaces) | `src/cli.rs`, `src/command/**` |
+| `compat_help_no_impl_meta_leak` | 1 | No `libra <cmd> --help` body leaks contributor-facing rustdoc into clap's long_about; forbids 6 phrase classes (e.g. `Codex pass-`, raw markdown headings, code fences) | `src/cli.rs`, `src/command/**` |
 | `db_migration_test` | 1 | SQLite schema bootstrap + migration round-trip | `src/internal/db.rs`, `sql/` |
 
 ## Wave 2 — Code UI & local automation
