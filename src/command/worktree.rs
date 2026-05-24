@@ -71,8 +71,8 @@ pub enum WorktreeSubcommand {
     Lock {
         /// Filesystem path of the worktree to lock.
         path: String,
-        /// Optional explanation for why this worktree is locked.
-        #[clap(long)]
+        /// Optional free-form explanation for why this worktree is locked (shown in `worktree list`)
+        #[clap(long, value_name = "TEXT")]
         reason: Option<String>,
     },
     /// Remove the lock from a previously locked worktree.
