@@ -58,13 +58,12 @@ Compatibility Notes:
   This differs from `git branch --quiet`, which still prints the primary list.
 
 EXAMPLES:
-  libra branch feature-x                  Create a branch from HEAD
-  libra branch feature-x main             Create a branch from another branch
-  libra branch -d topic                   Delete a fully merged branch
-  libra branch -D topic                   Force-delete a branch
-  libra branch --set-upstream-to origin/main
-                                          Set upstream for the current branch
-  libra branch --json --show-current      Structured JSON output for agents";
+    libra branch feature-x                Create a branch from HEAD
+    libra branch feature-x main           Create a branch from another branch
+    libra branch -d topic                 Delete a fully merged branch
+    libra branch -D topic                 Force-delete a branch
+    libra branch -u origin/main           Set upstream for the current branch
+    libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
 ///
