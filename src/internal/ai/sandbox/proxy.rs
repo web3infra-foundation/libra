@@ -1,24 +1,16 @@
-//! Stub network-allowlist proxy interface for sandbox Phase 7
+//! Network allowlist decision layer for sandbox Phase 7
 //! (`docs/improvement/sandbox.md` §7.4).
 //!
-//! When the sandbox network three-state migration lands a complete
-//! `Allowlist { services }` mode, AI shell tools that need outbound
-//! network access will route through a local-only HTTP CONNECT proxy
-//! that filters connections by SNI / Host header against the
-//! allowlist. The full proxy (built on `hyper` + `hickory-resolver`)
-//! is a follow-up batch; this module ships the **trait surface plus
-//! three reference implementations** so:
+//! AI shell tools that need allowlisted outbound network access route through
+//! a short-lived local HTTP/CONNECT proxy in [`super::proxy_runtime`]. This
+//! module keeps the policy decision surface pure and testable:
 //!
-//! 1. The sandbox runtime can route through a `&'a dyn
-//!    NetworkProxy` without knowing whether the active proxy is the
-//!    real one or a stub.
-//! 2. Tests and the `Denied`-mode fallback can use [`NoopProxy`]
-//!    (deny everything) without depending on the network crate
-//!    stack.
-//! 3. The `BestEffort` enforcement path can default to
-//!    [`LoopbackOnlyProxy`] — allow 127.0.0.1 / `::1` only, deny
-//!    everything else — which approximates the v1 "loopback-only"
-//!    contract while the real proxy is being built.
+//! 1. The sandbox runtime can route through a `&dyn NetworkProxy` without
+//!    depending on the transport implementation.
+//! 2. Tests and the `Denied`-mode fallback can use [`NoopProxy`] (deny
+//!    everything) without opening sockets.
+//! 3. [`AllowlistProxy`] evaluates host / port / protocol rules used by the
+//!    runtime proxy before any TCP forwarding happens.
 //!
 //! All implementations are `dyn`-safe and implement `Debug` so the
 //! sandbox runtime can reuse one diagnostic envelope type for all
@@ -82,11 +74,9 @@ impl NetworkDecision {
 /// Pluggable network filter that sits between the sandbox runtime
 /// and the outbound transport.
 ///
-/// Phase 7.4's real implementation will combine SNI / Host-header
-/// matching with the per-`NetworkService` rules from the policy
-/// layer; the stubs in this module short-circuit to a fixed answer
-/// so the rest of the system can be wired without depending on the
-/// network crate stack.
+/// The runtime proxy feeds CONNECT targets and HTTP Host headers into this
+/// trait before forwarding. Keeping the decision pure lets tests cover
+/// matching and denial without needing a network listener.
 ///
 /// Implementors must be `Send + Sync + Debug` so the sandbox
 /// runtime can share a single instance across worker threads via
@@ -135,10 +125,9 @@ impl NetworkProxy for NoopProxy {
 /// Proxy implementation that allows only loopback destinations
 /// (127.0.0.1 / ::1 / `localhost`).
 ///
-/// Used as the v1 fallback for `Allowlist` mode when the full proxy
-/// hasn't started, and as the `BestEffort` enforcement default. Any
-/// non-loopback destination is denied with a reason naming the
-/// observed host so audit consumers can see exactly which target was
+/// Used by the `Full` compatibility arm until a dedicated pass-through proxy
+/// type exists. Any non-loopback destination is denied with a reason naming
+/// the observed host so audit consumers can see exactly which target was
 /// rejected.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LoopbackOnlyProxy;
@@ -163,11 +152,8 @@ impl NetworkProxy for LoopbackOnlyProxy {
 /// Proxy implementation that enforces configured host / port / protocol
 /// allowlist entries.
 ///
-/// This is the v1 stub for `Allowlist` mode: it performs static
-/// policy matching and explicit denial when a request does not match
-/// any allowlist entry. The stub does not perform DNS or full socket
-/// forwarding, but it does make the allowlist semantics visible at
-/// decision time.
+/// The transport runtime calls this before DNS / socket forwarding. A request
+/// that does not match any allowlist entry is explicitly denied.
 #[derive(Debug, Clone)]
 pub struct AllowlistProxy {
     services: Vec<NetworkService>,
@@ -324,9 +310,8 @@ pub enum NetworkAccessMode {
     /// degrades per `SandboxEnforcement`.
     Allowlist,
     /// Allow unrestricted outbound. Routes through `LoopbackOnlyProxy`
-    /// in the v1 stub — the full proxy will be a transparent
-    /// pass-through. `Full` requires `DangerFullAccess` or explicit
-    /// approval.
+    /// as a diagnostic placeholder. `Full` requires `DangerFullAccess`
+    /// or explicit approval.
     Full,
 }
 
@@ -369,9 +354,8 @@ pub enum ProxyEnforcement {
 /// | Allowlist | None            | BestEffort      | DegradeToDenied (silent)        |
 /// | Full      | n/a             | n/a             | Proxy(LoopbackOnlyProxy)        |
 ///
-/// `Full` returns `LoopbackOnlyProxy` in this v1 stub because the
-/// full transparent-pass-through proxy is deferred. Once it ships
-/// the arm becomes `Proxy(FullProxy)`.
+/// `Full` returns `LoopbackOnlyProxy` as a diagnostic placeholder because no
+/// proxy is needed for full network access.
 pub fn select_network_proxy<'a>(
     mode: NetworkAccessMode,
     allowlist_proxy: Option<&'a dyn NetworkProxy>,
@@ -726,13 +710,13 @@ mod tests {
         }
     }
 
-    /// `Full` mode currently routes to `LoopbackOnlyProxy` (v1 stub).
+    /// `Full` mode currently routes to `LoopbackOnlyProxy`.
     /// Pin the assertion so when the full pass-through proxy lands,
     /// this test fails and forces the implementer to update the
     /// expected backend name — that's exactly the kind of arm change
     /// audit consumers need to be aware of.
     #[test]
-    fn select_network_proxy_full_mode_routes_to_loopback_only_in_v1_stub() {
+    fn select_network_proxy_full_mode_routes_to_loopback_only_placeholder() {
         let selection =
             select_network_proxy(NetworkAccessMode::Full, None, ProxyEnforcement::BestEffort);
         let NetworkProxySelection::Proxy(p) = selection else {
@@ -742,7 +726,7 @@ mod tests {
     }
 
     /// End-to-end integration test that exercises the full
-    /// Phase 7 stub chain:
+    /// Phase 7 allowlist decision chain:
     ///
     ///   `policy::NetworkService` allowlist entries →
     ///   `NetworkRequest` (built from those entries) →
@@ -751,13 +735,10 @@ mod tests {
     /// Validates that the validated allowlist entry shape (with
     /// explicit ports and protocol) can be threaded through the
     /// proxy dispatch surface without translation, and that the
-    /// `LoopbackOnlyProxy` stub correctly accepts a loopback target
-    /// drawn from a real-world allowlist line and rejects a remote
-    /// target with the same port. Pre-positions the chain so the
-    /// Phase 7.4 full proxy's allowlist-matching logic can replace
-    /// `LoopbackOnlyProxy` without touching this test.
+    /// `AllowlistProxy` accepts a configured target and rejects a remote target
+    /// with the same port.
     #[test]
-    fn phase7_stub_proxy_chains_validated_allowlist_entry_to_proxy_decision() {
+    fn phase7_allowlist_proxy_chains_validated_allowlist_entry_to_proxy_decision() {
         use crate::internal::ai::sandbox::policy::{NetworkProtocol, NetworkService};
 
         // Build a well-formed allowlist entry — mimics a row from
@@ -793,7 +774,7 @@ mod tests {
             };
             assert!(
                 proxy.evaluate(&req).is_allow(),
-                "v1 stub must allow loopback target on declared port {port}",
+                "allowlist proxy must allow target on declared port {port}",
             );
         }
 

@@ -15,9 +15,9 @@ use tokio::process::Command;
 #[cfg(target_os = "macos")]
 use super::sensitive_read_paths;
 use super::{
-    NetworkAccessMode, NetworkProxy, NetworkProxySelection, ProxyEnforcement, SandboxEnforcement,
-    SandboxPermissions, SandboxPolicy, SandboxPolicyError, allowlist_proxy_from_policy,
-    select_network_proxy,
+    NetworkAccessMode, NetworkProxy, NetworkProxySelection, NetworkService, ProxyEnforcement,
+    SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
+    allowlist_proxy_from_policy, select_network_proxy,
 };
 #[cfg(unix)]
 use crate::utils::fuse;
@@ -140,6 +140,7 @@ pub struct ExecEnv {
     pub justification: Option<String>,
     pub arg0: Option<String>,
     pub new_session: bool,
+    pub allowlist_proxy_services: Option<Vec<NetworkService>>,
     /// Optional seccomp BPF policy file. When `Some`, the
     /// command's `pre_exec` hook opens this file inside the child
     /// (just before exec) and dups it to [`SECCOMP_POLICY_FD`].
@@ -451,6 +452,17 @@ impl SandboxManager {
             ),
         };
 
+        let enable_allowlist_proxy =
+            matches!(network_proxy_selection, NetworkProxySelection::Proxy(_))
+                && network_access_mode == NetworkAccessMode::Allowlist;
+        let allowlist_proxy_services = if enable_allowlist_proxy {
+            allowlist_proxy
+                .as_ref()
+                .map(|proxy| proxy.services().to_vec())
+        } else {
+            None
+        };
+
         let disable_network = match network_proxy_selection {
             NetworkProxySelection::Reject { reason } => {
                 return Err(SandboxTransformError::NetworkEnforcementFailed { reason });
@@ -609,6 +621,7 @@ impl SandboxManager {
                 effective_sandbox,
                 SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
             ),
+            allowlist_proxy_services,
             seccomp_policy_path: seccomp_policy_path_for_transform,
         })
     }
@@ -722,7 +735,10 @@ pub fn create_bwrap_command_args_with_seccomp(
         args.push("--seccomp".to_string());
         args.push(fd.to_string());
     }
-    if network_access_mode == NetworkAccessMode::Full {
+    if matches!(
+        network_access_mode,
+        NetworkAccessMode::Full | NetworkAccessMode::Allowlist
+    ) {
         args.push("--share-net".to_string());
     } else {
         args.push("--unshare-net".to_string());
@@ -870,10 +886,16 @@ fn create_seatbelt_command_args(
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (sensitive_read_policy, sensitive_read_params) =
         build_macos_sensitive_read_policy(home.as_deref(), deny_read_paths);
-    let network_policy = if network_access_mode == NetworkAccessMode::Full {
-        SEATBELT_NETWORK_POLICY
-    } else {
-        ""
+    let network_policy = match network_access_mode {
+        NetworkAccessMode::Full => SEATBELT_NETWORK_POLICY,
+        NetworkAccessMode::Allowlist => {
+            r#"
+; allow sandboxed tools to reach Libra's loopback allowlist proxy only.
+(allow network-outbound (remote ip "127.0.0.1:*"))
+(allow network-outbound (remote ip "::1:*"))
+"#
+        }
+        NetworkAccessMode::Denied => "",
     };
     let full_policy = format!(
         "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{sensitive_read_policy}{file_write_policy}\n{network_policy}"
@@ -1259,6 +1281,11 @@ mod tests {
             transformed.env.get(LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR),
             None,
         );
+        let services = transformed
+            .allowlist_proxy_services
+            .expect("allowlist transform should carry proxy services");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].host, "registry.npmjs.org");
     }
 
     #[test]
@@ -1291,6 +1318,34 @@ mod tests {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
             network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
+
+        assert!(args.contains(&"--share-net".to_string()));
+        assert!(!args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn create_bwrap_command_args_allowlist_uses_shared_network_for_local_proxy() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Allowlist {
+                services: vec![crate::internal::ai::sandbox::NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            },
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -1788,6 +1843,7 @@ mod tests {
             justification: None,
             arg0: None,
             new_session: true,
+            allowlist_proxy_services: None,
             seccomp_policy_path: None,
         };
         let (mut command, _) = env.into_command().expect("exec env should build");

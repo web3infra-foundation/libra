@@ -33,6 +33,7 @@ mod command_safety;
 pub mod evidence;
 pub mod policy;
 pub mod proxy;
+mod proxy_runtime;
 pub mod runtime;
 #[cfg(target_os = "linux")]
 pub mod seccomp_compile;
@@ -1128,12 +1129,21 @@ async fn run_command_spec_inner(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<SandboxExecOutput, String> {
-    let (mut cmd, timeout_override) =
-        build_command_from_spec(spec, sandbox.as_ref(), sandbox_runtime)?;
+    let mut built = build_command_from_spec(spec, sandbox.as_ref(), sandbox_runtime)?;
+    let allowlist_proxy =
+        start_allowlist_proxy_if_needed(&mut built.command, built.allowlist_proxy_services).await?;
+    let timeout_override = built.timeout_ms;
+    let mut cmd = built.command;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn shell: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(proxy) = allowlist_proxy {
+                proxy.shutdown().await;
+            }
+            return Err(format!("failed to spawn shell: {error}"));
+        }
+    };
 
     let stdout_pipe = child
         .stdout
@@ -1189,6 +1199,10 @@ async fn run_command_spec_inner(
     }
     if stderr_incomplete {
         stderr.push_str("\n[stderr stream incomplete]");
+    }
+
+    if let Some(proxy) = allowlist_proxy {
+        proxy.shutdown().await;
     }
 
     Ok(SandboxExecOutput {
@@ -1274,7 +1288,7 @@ fn build_command_from_spec(
     spec: CommandSpec,
     sandbox: Option<&ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
-) -> Result<(tokio::process::Command, Option<u64>), String> {
+) -> Result<BuiltCommand, String> {
     let sandbox_policy_cwd = spec.cwd.clone();
     let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
     let use_linux_sandbox_bwrap = sandbox_runtime
@@ -1334,7 +1348,53 @@ fn build_command_from_spec(
             }
             err.to_string()
         })?;
-    exec_env.into_command()
+    let allowlist_proxy_services = exec_env.allowlist_proxy_services.clone();
+    let (command, timeout_ms) = exec_env.into_command()?;
+    Ok(BuiltCommand {
+        command,
+        timeout_ms,
+        allowlist_proxy_services,
+    })
+}
+
+struct BuiltCommand {
+    command: tokio::process::Command,
+    timeout_ms: Option<u64>,
+    allowlist_proxy_services: Option<Vec<NetworkService>>,
+}
+
+async fn start_allowlist_proxy_if_needed(
+    command: &mut tokio::process::Command,
+    services: Option<Vec<NetworkService>>,
+) -> Result<Option<proxy_runtime::RunningAllowlistProxy>, String> {
+    let Some(services) = services else {
+        return Ok(None);
+    };
+    let proxy = proxy_runtime::spawn_allowlist_http_proxy(services).await?;
+    inject_allowlist_proxy_env(command, &proxy);
+    Ok(Some(proxy))
+}
+
+fn inject_allowlist_proxy_env(
+    command: &mut tokio::process::Command,
+    proxy: &proxy_runtime::RunningAllowlistProxy,
+) {
+    let proxy_url = proxy.local_http_proxy_url();
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, &proxy_url);
+    }
+    // Force proxy-aware tools through Libra's allowlist proxy even when the
+    // parent shell has broad NO_PROXY defaults for loopback or local domains.
+    command.env("NO_PROXY", "");
+    command.env("no_proxy", "");
+    command.env("LIBRA_SANDBOX_ALLOWLIST_PROXY", proxy_url);
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2625,6 +2685,50 @@ mod tests {
                 .is_some_and(|name| name.starts_with(COMMAND_TMPDIR_PREFIX))
         );
         assert!(!command_tmpdir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_spec_injects_allowlist_proxy_env_for_allowlist_policy() {
+        let spec = CommandSpec {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\"".to_string(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: Some(5_000),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            justification: None,
+        };
+        let sandbox = ToolSandboxContext {
+            policy: SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![NetworkService {
+                        host: "registry.npmjs.org".to_string(),
+                        ports: vec![443],
+                        protocol: Some(NetworkProtocol::Tcp),
+                    }],
+                },
+            },
+            permissions: SandboxPermissions::UseDefault,
+        };
+        let sandbox_runtime = SandboxRuntimeConfig {
+            enforcement: SandboxEnforcement::Required,
+            ..SandboxRuntimeConfig::default()
+        };
+
+        let output = run_command_spec(spec, 16 * 1024, Some(sandbox), Some(&sandbox_runtime))
+            .await
+            .expect("allowlist command should receive proxy env");
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "stdout: {:?}", output.stdout);
+        assert!(lines[0].starts_with("http://127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], lines[0]);
     }
 
     #[test]

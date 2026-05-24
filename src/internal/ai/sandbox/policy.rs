@@ -91,10 +91,9 @@ pub struct SandboxEnforcementParseError {
 /// Pre-positioned for Phase 7 (`docs/improvement/sandbox.md` §7.1) of the
 /// sandbox network-three-state work. Until the full
 /// `NetworkAccess::Allowlist { services }` migration lands this type is
-/// only used by the new [`NetworkService`] schema and its validators
-/// — it doesn't yet appear on the sandbox-policy wire envelope, but
-/// shipping the schema early lets the `.libra/sandbox.toml` parser and
-/// the future proxy stub be implemented against a stable contract.
+/// used by the [`NetworkService`] schema, validators, and allowlist
+/// proxy runtime. Keeping it explicit lets `.libra/sandbox.toml`
+/// service entries map directly into proxy decisions.
 ///
 /// `Tcp` is the default to match the sandbox.md spec
 /// ("默认 tcp"); callers that need UDP-only allowlists (e.g. DNS, QUIC)
