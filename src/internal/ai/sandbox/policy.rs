@@ -284,18 +284,22 @@ pub enum NetworkAccess {
 /// against the previous 2-state [`NetworkAccess`] readable after the
 /// upgrade; new writers always emit the tagged form via the derived
 /// `Serialize`.
+///
+/// Uses a custom [`serde::de::Visitor`] (rather than the simpler
+/// `#[serde(untagged)]` enum trick) so that off-contract inputs
+/// (`null`, numbers, bare strings like `"full"`, arrays, ...) surface
+/// an actionable error message — "expected either a legacy boolean
+/// (true → Full, false → Denied) or a tagged object {mode: ...}" —
+/// instead of the generic "data did not match any variant of untagged
+/// enum" that the derived `Deserialize` produces. The map arm still
+/// delegates to a derived `Deserialize` for the tagged shape so the
+/// `kebab-case` `mode` discriminator and `services` payload remain
+/// in lockstep with [`Serialize`].
 impl<'de> Deserialize<'de> for NetworkAccess {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Wire {
-            Legacy(bool),
-            Tagged(Tagged),
-        }
-
         #[derive(Deserialize)]
         #[serde(tag = "mode", rename_all = "kebab-case")]
         enum Tagged {
@@ -307,12 +311,40 @@ impl<'de> Deserialize<'de> for NetworkAccess {
             Full,
         }
 
-        Ok(match Wire::deserialize(deserializer)? {
-            Wire::Legacy(allowed) => NetworkAccess::from_legacy_bool(allowed),
-            Wire::Tagged(Tagged::Denied) => NetworkAccess::Denied,
-            Wire::Tagged(Tagged::Allowlist { services }) => NetworkAccess::Allowlist { services },
-            Wire::Tagged(Tagged::Full) => NetworkAccess::Full,
-        })
+        struct NetworkAccessVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for NetworkAccessVisitor {
+            type Value = NetworkAccess;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "either a legacy boolean (true → Full, false → Denied) or a tagged object \
+                     {\"mode\": \"denied\" | \"allowlist\" | \"full\", ...}",
+                )
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(NetworkAccess::from_legacy_bool(value))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let tagged =
+                    Tagged::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(match tagged {
+                    Tagged::Denied => NetworkAccess::Denied,
+                    Tagged::Allowlist { services } => NetworkAccess::Allowlist { services },
+                    Tagged::Full => NetworkAccess::Full,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(NetworkAccessVisitor)
     }
 }
 
@@ -1181,9 +1213,7 @@ mod tests {
     /// fail to deserialize — otherwise an accidentally-accepted shape
     /// (e.g., a bare string like `"full"`, which was never part of
     /// either the legacy or current wire contract) would silently land
-    /// the wrong variant. The exact error text comes from serde's
-    /// untagged-enum machinery and is intentionally not asserted; only
-    /// the rejection is part of the contract.
+    /// the wrong variant.
     #[test]
     fn network_access_deserialize_rejects_non_contract_shapes() {
         for bad_input in [
@@ -1199,6 +1229,26 @@ mod tests {
             assert!(
                 serde_json::from_str::<NetworkAccess>(bad_input).is_err(),
                 "expected NetworkAccess to reject malformed input `{bad_input}`",
+            );
+        }
+    }
+
+    /// Off-contract type errors must surface the visitor's `expecting`
+    /// text so users see actionable guidance ("either a legacy boolean
+    /// ... or a tagged object {mode: ...}") rather than the generic
+    /// `untagged enum did not match any variant` message that the
+    /// previous derived form produced. Pin against the three most
+    /// likely user-facing shapes: `null`, a bare string, and a number.
+    #[test]
+    fn network_access_deserialize_error_messages_include_visitor_expecting_hint() {
+        for bad_input in ["null", "\"full\"", "42", "[]"] {
+            let error = serde_json::from_str::<NetworkAccess>(bad_input)
+                .expect_err("malformed input should not deserialize");
+            let message = error.to_string();
+            assert!(
+                message.contains("legacy boolean") && message.contains("tagged object"),
+                "error message for `{bad_input}` should include the visitor's \
+                 `expecting` hint about legacy boolean / tagged object, got: {message}",
             );
         }
     }
