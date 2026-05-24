@@ -652,6 +652,168 @@ mod tests {
         }
     }
 
+    /// `describe_network_access` in `Denied` mode must report
+    /// `("denied", [], "noop", None)` for every enforcement tier.
+    /// Pin the default-deny network shape so a future refactor of
+    /// the `(mode, proxy, enforcement)` decision tree that
+    /// accidentally lets `BestEffort` degrade `Denied` into a more
+    /// permissive proxy (e.g. `loopback-only`) trips this test.
+    #[test]
+    fn describe_network_access_denied_mode_routes_through_noop_proxy() {
+        use crate::internal::ai::sandbox::{NetworkAccess, SandboxEnforcement, SandboxPolicy};
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        for enforcement in SandboxEnforcement::all() {
+            let (mode, allowlist, proxy_backend, warning) =
+                super::describe_network_access(&policy, enforcement);
+            assert_eq!(mode, "denied", "enforcement={enforcement:?}");
+            assert!(allowlist.is_empty(), "enforcement={enforcement:?}");
+            assert_eq!(proxy_backend, "noop", "enforcement={enforcement:?}");
+            assert!(
+                warning.is_none(),
+                "Denied mode must not produce a warning, got {warning:?} for {enforcement:?}",
+            );
+        }
+    }
+
+    /// `describe_network_access` in `Full` mode must report
+    /// `("full", [], "loopback-only", None)` for every enforcement
+    /// tier. `Full` routes through the loopback-only placeholder
+    /// (sandbox.md §7.4 lines 357-358); pin the placeholder name so
+    /// when the future pass-through proxy lands and the backend name
+    /// changes, this test fails loudly.
+    #[test]
+    fn describe_network_access_full_mode_routes_through_loopback_only_placeholder() {
+        use crate::internal::ai::sandbox::{NetworkAccess, SandboxEnforcement, SandboxPolicy};
+
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Full,
+        };
+        for enforcement in SandboxEnforcement::all() {
+            let (mode, allowlist, proxy_backend, warning) =
+                super::describe_network_access(&policy, enforcement);
+            assert_eq!(mode, "full", "enforcement={enforcement:?}");
+            assert!(allowlist.is_empty(), "enforcement={enforcement:?}");
+            assert_eq!(
+                proxy_backend, "loopback-only",
+                "enforcement={enforcement:?}"
+            );
+            assert!(
+                warning.is_none(),
+                "Full mode must not produce a warning, got {warning:?} for {enforcement:?}",
+            );
+        }
+    }
+
+    /// `describe_network_access` in `Allowlist` mode with valid
+    /// services must report `("allowlist", [services], "allowlist",
+    /// None)`. The allowlist proxy is constructed when the policy's
+    /// services pass [`NetworkService::validate`]; this test pins
+    /// that flow end-to-end through the helper.
+    #[test]
+    fn describe_network_access_allowlist_mode_with_valid_services_routes_through_allowlist_proxy() {
+        use crate::internal::ai::sandbox::{
+            NetworkAccess, NetworkProtocol, NetworkService, SandboxEnforcement, SandboxPolicy,
+        };
+
+        let services = vec![
+            NetworkService {
+                host: "registry.npmjs.org".to_string(),
+                ports: vec![443],
+                protocol: Some(NetworkProtocol::Tcp),
+            },
+            NetworkService {
+                host: "*.pypi.org".to_string(),
+                ports: vec![443],
+                protocol: None,
+            },
+        ];
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Allowlist {
+                services: services.clone(),
+            },
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+
+        for enforcement in SandboxEnforcement::all() {
+            let (mode, allowlist, proxy_backend, warning) =
+                super::describe_network_access(&policy, enforcement);
+            assert_eq!(mode, "allowlist", "enforcement={enforcement:?}");
+            assert_eq!(
+                allowlist.len(),
+                services.len(),
+                "allowlist length must match the configured services for enforcement={enforcement:?}",
+            );
+            assert!(
+                allowlist
+                    .iter()
+                    .any(|entry| entry.contains("registry.npmjs.org")),
+                "allowlist must surface the npm registry entry, got {allowlist:?}",
+            );
+            assert_eq!(proxy_backend, "allowlist", "enforcement={enforcement:?}");
+            assert!(
+                warning.is_none(),
+                "Allowlist with valid services must not warn, got {warning:?} for {enforcement:?}",
+            );
+        }
+    }
+
+    /// `describe_network_access` in `Allowlist` mode with an empty
+    /// services list (proxy unavailable) must degrade according to
+    /// the enforcement tier:
+    ///
+    /// - `Required` → `proxy_backend = "none"` + warning citing
+    ///   `Required` forbids degradation.
+    /// - `PreferStrict` → `proxy_backend = "none"` + warning citing
+    ///   `PreferStrict`.
+    /// - `BestEffort` → `proxy_backend = "none"` + warning citing
+    ///   `BestEffort`.
+    ///
+    /// Pin the three-tier degradation contract from sandbox.md §7.4
+    /// lines 340-343 ("代理不可用则按 `SandboxEnforcement` 决策"),
+    /// so a refactor that swaps tiers (e.g. silently allowing
+    /// `Required` to fall back to deny-all) trips this test.
+    #[test]
+    fn describe_network_access_allowlist_without_services_degrades_per_enforcement_tier() {
+        use crate::internal::ai::sandbox::{NetworkAccess, SandboxEnforcement, SandboxPolicy};
+
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Allowlist {
+                services: Vec::new(),
+            },
+        };
+
+        for (enforcement, expected_text) in [
+            (SandboxEnforcement::Required, "Required"),
+            (SandboxEnforcement::PreferStrict, "PreferStrict"),
+            (SandboxEnforcement::BestEffort, "BestEffort"),
+        ] {
+            let (mode, allowlist, proxy_backend, warning) =
+                super::describe_network_access(&policy, enforcement);
+            assert_eq!(mode, "allowlist", "enforcement={enforcement:?}");
+            assert!(
+                allowlist.is_empty(),
+                "empty services list must produce empty allowlist for {enforcement:?}, got {allowlist:?}",
+            );
+            assert_eq!(
+                proxy_backend, "none",
+                "unavailable allowlist proxy must map to `none` backend for {enforcement:?}",
+            );
+            let warning = warning.expect("unavailable allowlist must surface a warning");
+            assert!(
+                warning.contains(expected_text),
+                "warning must cite the `{expected_text}` enforcement tier, got: {warning}",
+            );
+        }
+    }
+
     #[test]
     fn sandbox_host_environment_warnings_detect_wsl_signals() {
         let warnings = sandbox_host_environment_warnings(&HostEnvironmentSignals {
