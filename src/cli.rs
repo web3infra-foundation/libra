@@ -42,8 +42,13 @@ Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
 Output Examples:
-  libra --json status
-  libra --json branch
+  libra --json status                  Pretty JSON envelope on stdout
+  libra --json=ndjson log              One-line-per-event newline-delimited JSON
+  libra --machine status               Compact JSON; suppresses progress/decoration
+  libra --quiet --exit-code-on-warning Silent run; non-zero exit (9) if warnings occurred
+  libra --color=never log              Force-disable colors (also via NO_COLOR=1)
+
+For per-command flags, see `libra <cmd> --help`.
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -314,7 +319,7 @@ enum Commands {
 
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
-    #[command(about = "Summarize 'git log' output", alias = "slog")]
+    #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
