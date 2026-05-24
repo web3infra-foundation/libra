@@ -455,6 +455,45 @@ mod tests {
         assert_eq!(report.bytes_scanned, clean.len());
     }
 
+    /// False-positive guard: realistic non-secret developer content
+    /// must pass through untouched. The positive tests confirm secrets
+    /// ARE redacted; this confirms an over-broad rule doesn't corrupt a
+    /// captured transcript by redacting legitimate tokens (a 40-hex git
+    /// SHA, a UUID, a `path:line` ref, a semver, and prose that merely
+    /// contains the words "sk"/"key"). Each string below is a plausible
+    /// false-positive candidate — if a rule regex is ever loosened to
+    /// match one, this test flips red.
+    #[test]
+    fn clean_developer_content_is_not_over_redacted() {
+        let r = Redactor::new_default();
+        for clean in [
+            // 40-char lowercase hex git SHA — must NOT trip a rule.
+            // No rule matches a bare hex run: the entropy-bearing rules
+            // (aws-secret, etc.) require a `key=`/`secret=` context, and
+            // the structural rules (telegram `\d{8,11}:…`, discord, jwt
+            // `eyJ…`) require their own distinct shapes that 40 hex
+            // chars don't satisfy.
+            "commit 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+            // A UUID (e.g. a thread id) — hyphen-separated hex groups.
+            "thread 550e8400-e29b-41d4-a716-446655440000 resumed",
+            // A repo-relative path with a line number.
+            "see src/internal/ai/observed_agents/redaction.rs:163",
+            // A semver / version banner.
+            "libra 0.17.1004 release build",
+            // Prose containing the substrings "sk" and "key" without a
+            // key SHAPE (no `sk-`+20chars, no `AIza`, no `xox…`).
+            "the sk module exports a key helper for the task",
+        ] {
+            let (out, report) = redact_str(&r, clean);
+            assert_eq!(out, clean, "clean content must pass through unchanged");
+            assert!(
+                report.matches.is_empty(),
+                "clean content `{clean}` must not match any redaction rule, got {:?}",
+                report.matches,
+            );
+        }
+    }
+
     #[test]
     fn preserves_byte_count_metadata() {
         let r = Redactor::new_default();
