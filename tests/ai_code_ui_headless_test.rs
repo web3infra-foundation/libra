@@ -15,15 +15,18 @@ use libra::internal::ai::{
     agent::runtime::tool_loop::ToolLoopConfig,
     providers::fake,
     runtime::{ToolBoundaryRuntime, TracingAuditSink},
+    tools::context::{UserInputQuestion, UserInputRequest, UserInputResponse},
     tools::{ToolRegistryBuilder, handlers::ReadFileHandler},
     web::{
         code_ui::{
-            CodeUiCommandAdapter, CodeUiInteractionResponse, CodeUiProviderInfo, CodeUiReadModel,
-            CodeUiSession, CodeUiSessionStatus, initial_snapshot,
+            CodeUiCommandAdapter, CodeUiInteractionResponse, CodeUiInteractionStatus,
+            CodeUiProviderInfo, CodeUiReadModel, CodeUiSession, CodeUiSessionStatus,
+            initial_snapshot,
         },
         headless::{HeadlessCodeRuntime, headless_capabilities},
     },
 };
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -36,7 +39,10 @@ fn fixture_path(name: &str) -> PathBuf {
 fn build_runtime(
     fixture: &str,
     working_dir: PathBuf,
-) -> Arc<HeadlessCodeRuntime<fake::CompletionModel>> {
+) -> (
+    Arc<HeadlessCodeRuntime<fake::CompletionModel>>,
+    mpsc::UnboundedSender<UserInputRequest>,
+) {
     let fake_client = fake::Client::from_fixture_path(&fixture_path(fixture))
         .expect("fake provider fixture must load");
     let model = fake_client.completion_model("fake");
@@ -52,6 +58,7 @@ fn build_runtime(
         provider,
         capabilities.clone(),
     ));
+    let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
 
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)
@@ -66,7 +73,17 @@ fn build_runtime(
     let config_factory: Arc<dyn Fn() -> ToolLoopConfig + Send + Sync> =
         Arc::new(ToolLoopConfig::default);
 
-    HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory)
+    (
+        HeadlessCodeRuntime::new(
+            session,
+            capabilities,
+            model,
+            registry,
+            user_input_rx,
+            config_factory,
+        ),
+        user_input_tx,
+    )
 }
 
 /// Submitting a plain message must produce an assistant transcript entry that
@@ -77,7 +94,7 @@ fn build_runtime(
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_message_streams_assistant_reply_into_snapshot() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let runtime = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     runtime
         .submit_message("hello headless".to_string())
@@ -136,7 +153,7 @@ async fn submit_message_streams_assistant_reply_into_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_message_is_rejected_before_any_transcript_mutation() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let runtime = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let result = runtime.submit_message("   ".to_string()).await;
     assert!(result.is_err(), "whitespace-only messages must be rejected");
@@ -161,8 +178,8 @@ fn headless_capabilities_match_phase3_v0_contract() {
     assert!(caps.tool_calls);
     assert!(!caps.plan_updates);
     assert!(!caps.patchsets);
-    assert!(!caps.interactive_approvals);
-    assert!(!caps.structured_questions);
+    assert!(caps.interactive_approvals);
+    assert!(caps.structured_questions);
     assert!(!caps.provider_session_resume);
 }
 
@@ -173,7 +190,7 @@ fn headless_capabilities_match_phase3_v0_contract() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_turn_finalizes_streaming_assistant_entry() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let runtime = build_runtime("delayed_chat", workdir.path().to_path_buf());
+    let (runtime, _) = build_runtime("delayed_chat", workdir.path().to_path_buf());
 
     runtime
         .submit_message("slow".to_string())
@@ -334,20 +351,104 @@ async fn append_assistant_delta_still_accepts_thinking_status() {
     assert_eq!(entry.content.as_deref(), Some("hello world"));
 }
 
-/// Interaction routing through the InteractionPanel is explicitly out of
-/// scope for Phase 3 v0. Pin the error message so the surface change is
-/// loud once this gets wired up.
+/// `respond_interaction` should reject unknown interactions and only
+/// accept requests that are currently pending.
 #[tokio::test(flavor = "multi_thread")]
-async fn respond_interaction_returns_unsupported_until_phase3_followup() {
+async fn respond_interaction_unknown_id() {
     let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
-    let runtime = build_runtime("basic_chat", workdir.path().to_path_buf());
+    let (runtime, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
 
     let result = runtime
         .respond_interaction("ignored", CodeUiInteractionResponse::default())
         .await;
-    let error = result.expect_err("interactions must surface an error in v0");
+    let error = result.expect_err("interactions must surface a concrete error for unknown id");
     assert!(
-        error.to_string().contains("not yet supported"),
-        "error message must call out the unsupported state, got {error}",
+        error
+            .to_string()
+            .contains("Unknown pending interaction"),
+        "error message must call out unknown interaction ids, got {error}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_user_input_request_is_reflected_in_snapshot_and_responded_to() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, user_input_tx) = build_runtime("basic_chat", workdir.path().to_path_buf());
+
+    let interaction_id = "request-user-input-1".to_string();
+    let question_id = "q1".to_string();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel::<UserInputResponse>();
+    user_input_tx
+        .send(UserInputRequest {
+            call_id: interaction_id.clone(),
+            questions: vec![UserInputQuestion {
+                id: question_id.clone(),
+                header: "Approve".to_string(),
+                question: "Choose approach".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: None,
+            }],
+            response_tx,
+        })
+        .expect("request_user_input request should enqueue in runtime");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_pending = false;
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if snapshot
+            .interactions
+            .iter()
+            .any(|interaction| {
+                interaction.id == interaction_id
+                    && interaction.status == CodeUiInteractionStatus::Pending
+            })
+        {
+            saw_pending = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        saw_pending,
+        "request_user_input request should appear as pending interaction",
+    );
+
+    runtime
+        .respond_interaction(
+            &interaction_id,
+            CodeUiInteractionResponse {
+                selected_option: Some("selected option".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("respond_interaction should forward to pending request sender");
+
+    let response = response_rx
+        .await
+        .expect("request_user_input request should deliver response");
+    assert_eq!(
+        response
+            .answers
+            .get(&question_id)
+            .expect("response should include requested question")
+            .answers,
+        vec!["selected option".to_string()]
+    );
+
+    let final_snapshot = runtime.snapshot().await;
+    assert_eq!(
+        final_snapshot.status,
+        CodeUiSessionStatus::ExecutingTool,
+        "respond_interaction should set runtime status to executing tool",
+    );
+    assert!(
+        final_snapshot
+            .interactions
+            .iter()
+            .all(|interaction| interaction.status != CodeUiInteractionStatus::Pending),
+        "all pending interactions should be resolved",
     );
 }

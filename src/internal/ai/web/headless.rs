@@ -18,29 +18,32 @@
 //!   [`ToolLoopConfig`], so the same allow-list / hooks / sandbox boundaries
 //!   that protect the TUI agent also apply here.
 //!
-//! # Out of scope for v0 (tracked as future work)
+//! # Phase 3 follow-up target
 //!
 //! - IntentSpec / Plan workflow integration. The TUI's Phase 0/1 review loop
 //!   is deeply coupled to the ratatui [`crate::internal::tui::app::App`]; this
 //!   runtime treats every browser submit as a single direct turn instead.
-//! - `request_user_input` / `approval` interactions surfaced as
-//!   [`crate::internal::ai::web::code_ui::CodeUiInteractionRequest`]s. The
-//!   current observer ignores those tools.
+//! - `approval` / `sandbox_approval` interactions are intentionally not yet
+//!   surfaced.
 //! - Multi-turn conversation history persistence via `SessionStore`.
 //!
 //! These follow-ups are explicitly called out in
 //! `docs/improvement/web.md` and will land in subsequent phases.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, sync::atomic::AtomicU64, sync::atomic::Ordering};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot, Mutex},
+    task::JoinHandle,
+};
 
 use super::code_ui::{
-    CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionResponse, CodeUiReadModel,
-    CodeUiSession, CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+    CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionRequest, CodeUiInteractionResponse,
+    CodeUiReadModel, CodeUiSession, CodeUiSessionStatus, CodeUiTranscriptEntry,
+    CodeUiTranscriptEntryKind,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -49,6 +52,7 @@ use crate::internal::ai::{
         CompletionUsageSummary, Message,
     },
     tools::ToolRegistry,
+    tools::context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
 };
 
 /// Capabilities advertised by the headless runtime.
@@ -63,10 +67,15 @@ pub fn headless_capabilities() -> CodeUiCapabilities {
         plan_updates: false,
         tool_calls: true,
         patchsets: false,
-        interactive_approvals: false,
-        structured_questions: false,
+        interactive_approvals: true,
+        structured_questions: true,
         provider_session_resume: false,
     }
+}
+
+struct PendingHeadlessUserInput {
+    questions: Vec<UserInputQuestion>,
+    response_tx: oneshot::Sender<UserInputResponse>,
 }
 
 /// Adapter that runs an agent tool loop in response to browser-driven messages.
@@ -104,7 +113,9 @@ pub struct HeadlessCodeRuntime<M: CompletionModel + 'static> {
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
     /// Monotonic turn id; used by spawned tasks to detect that a successor
     /// turn has claimed the slot before they cleared their own entry.
-    next_turn_id: Arc<std::sync::atomic::AtomicU64>,
+    next_turn_id: Arc<AtomicU64>,
+    /// Pending `request_user_input` flows keyed by tool call id.
+    pending_user_inputs: Arc<Mutex<HashMap<String, PendingHeadlessUserInput>>>,
 }
 
 impl<M> HeadlessCodeRuntime<M>
@@ -122,11 +133,12 @@ where
         capabilities: CodeUiCapabilities,
         model: M,
         registry: Arc<ToolRegistry>,
+        mut user_input_rx: mpsc::UnboundedReceiver<UserInputRequest>,
         config_factory: Arc<
             dyn Fn() -> super::super::agent::runtime::tool_loop::ToolLoopConfig + Send + Sync,
         >,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let runtime = Arc::new(Self {
             session,
             capabilities,
             history: Arc::new(Mutex::new(Vec::new())),
@@ -134,8 +146,18 @@ where
             registry,
             config_factory,
             in_flight: Arc::new(Mutex::new(None)),
-            next_turn_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        })
+            next_turn_id: Arc::new(AtomicU64::new(1)),
+            pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let listener = runtime.clone();
+        tokio::spawn(async move {
+            listener
+                .run_user_input_request_listener(&mut user_input_rx)
+                .await;
+        });
+
+        runtime
     }
 }
 
@@ -215,7 +237,7 @@ where
         let task_assistant_entry_id = assistant_entry_id.clone();
         let turn_id = self
             .next_turn_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, Ordering::Relaxed);
 
         let task = tokio::spawn(async move {
             let mut observer = HeadlessTurnObserver {
@@ -280,14 +302,30 @@ where
 
     async fn respond_interaction(
         &self,
-        _interaction_id: &str,
-        _response: CodeUiInteractionResponse,
+        interaction_id: &str,
+        response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
-        // Phase 3 v0 surface — interactions are not yet routed to the headless
-        // runtime; the browser only sees plain text turns.
-        Err(anyhow!(
-            "Interactive approvals are not yet supported by the headless web runtime; configure --provider codex or --browser-control loopback in TUI mode"
-        ))
+        let pending = {
+            let mut pending = self.pending_user_inputs.lock().await;
+            pending
+                .remove(interaction_id)
+                .ok_or_else(|| anyhow!("Unknown pending interaction: {interaction_id}"))?
+        };
+
+        let user_input_response =
+            user_input_response_from_code_ui_request(&pending.questions, response)?;
+        pending
+            .response_tx
+            .send(user_input_response)
+            .map_err(|_| anyhow!("The pending user input request is no longer awaiting a response"))?;
+
+        self.session
+            .resolve_interaction(interaction_id)
+            .await;
+        self.session
+            .set_status(CodeUiSessionStatus::ExecutingTool)
+            .await;
+        Ok(())
     }
 
     async fn cancel_turn(&self) -> anyhow::Result<()> {
@@ -310,6 +348,7 @@ where
             .await;
         }
         self.session.set_status(CodeUiSessionStatus::Idle).await;
+        self.clear_pending_user_inputs().await;
         Ok(())
     }
 
@@ -328,7 +367,70 @@ where
             )
             .await;
         }
+        self.clear_pending_user_inputs().await;
         Ok(())
+    }
+}
+
+impl<M> HeadlessCodeRuntime<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+    M::Response: CompletionUsage,
+{
+    async fn run_user_input_request_listener(
+        &self,
+        user_input_rx: &mut mpsc::UnboundedReceiver<UserInputRequest>,
+    ) {
+        while let Some(request) = user_input_rx.recv().await {
+            let interaction_id = request.call_id.clone();
+            let questions_for_ui = request
+                .questions
+                .iter()
+                .map(request_user_input_question_to_metadata)
+                .collect::<Vec<_>>();
+
+            {
+                let mut pending = self.pending_user_inputs.lock().await;
+                pending.insert(
+                    interaction_id.clone(),
+                    PendingHeadlessUserInput {
+                        questions: request.questions,
+                        response_tx: request.response_tx,
+                    },
+                );
+            }
+
+            let interaction = CodeUiInteractionRequest {
+                id: interaction_id,
+                kind: crate::internal::ai::web::code_ui::CodeUiInteractionKind::RequestUserInput,
+                title: Some("User input required".to_string()),
+                description: None,
+                prompt: None,
+                options: Vec::new(),
+                status: crate::internal::ai::web::code_ui::CodeUiInteractionStatus::Pending,
+                metadata: serde_json::json!({ "questions": questions_for_ui }),
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+
+            self.session.upsert_interaction(interaction).await;
+            self.session
+                .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                .await;
+        }
+    }
+
+    async fn clear_pending_user_inputs(&self) {
+        let pending_ids = {
+            let mut pending = self.pending_user_inputs.lock().await;
+            let ids = pending.keys().cloned().collect::<Vec<_>>();
+            pending.clear();
+            ids
+        };
+
+        for interaction_id in pending_ids {
+            self.session.clear_interaction(&interaction_id).await;
+        }
     }
 }
 
@@ -363,6 +465,84 @@ async fn finalize_assistant_entry(
 
 fn format_completion_error(error: &CompletionError) -> String {
     format!("Agent turn failed: {error}")
+}
+
+fn request_user_input_question_to_metadata(question: &UserInputQuestion) -> serde_json::Value {
+    let has_options = question
+        .options
+        .as_ref()
+        .is_some_and(|options| !options.is_empty());
+
+    let options = question
+        .options
+        .as_ref()
+        .map(|options| {
+            options
+                .iter()
+                .map(|option| serde_json::json!({ "id": option.label, "label": option.label }))
+                .collect::<Vec<_>>()
+        })
+        .filter(|options| !options.is_empty())
+        .unwrap_or_default();
+
+    let metadata = serde_json::json!({
+        "id": question.id,
+        "prompt": question.question,
+        "kind": if has_options { "single" } else { "text" },
+        "options": options,
+    });
+
+    metadata
+}
+
+fn user_input_response_from_code_ui_request(
+    questions: &[UserInputQuestion],
+    response: CodeUiInteractionResponse,
+) -> anyhow::Result<UserInputResponse> {
+    if let Some((question_id, answers)) = response
+        .answers
+        .into_iter()
+        .find(|(_, answers)| !answers.is_empty())
+    {
+        return Ok(UserInputResponse {
+            answers: [(question_id, UserInputAnswer { answers })]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        });
+    }
+
+    let question = questions
+        .first()
+        .ok_or_else(|| anyhow!("User input request contains no questions"))?;
+
+    let mut values = Vec::new();
+    if let Some(selected) = response.selected_option {
+        if !selected.is_empty() {
+            values.push(selected);
+        }
+    }
+    if let Some(note) = response.note.as_deref() {
+        let note = note.trim();
+        if !note.is_empty() {
+            values.push(format!("user_note: {note}"));
+        }
+    }
+
+    if values.is_empty() {
+        if let Some(approved) = response.approved {
+            values.push(if approved { "yes".to_string() } else { "no".to_string() });
+        }
+    }
+
+    if values.is_empty() {
+        return Err(anyhow!("User input response must include answers"));
+    }
+
+    Ok(UserInputResponse {
+        answers: [(question.id.clone(), UserInputAnswer { answers: values })]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+    })
 }
 
 /// Observer that streams text deltas into the live snapshot transcript so the

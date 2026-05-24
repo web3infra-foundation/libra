@@ -79,7 +79,7 @@ use rmcp::transport::streamable_http_server::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::connect_async;
@@ -1886,7 +1886,9 @@ where
     snapshot.status = CodeUiSessionStatus::Idle;
     let session = CodeUiSession::new(snapshot);
 
-    let registry = build_headless_tool_registry(working_dir);
+    let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
+
+    let registry = build_headless_tool_registry(working_dir, user_input_tx);
     let preamble = system_preamble(working_dir, args.context, args.provider, Some(&model_name));
     let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
     let temperature = args.temperature;
@@ -1905,7 +1907,14 @@ where
             ..Default::default()
         });
 
-    let adapter = HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory);
+    let adapter = HeadlessCodeRuntime::new(
+        session,
+        capabilities,
+        model,
+        registry,
+        user_input_rx,
+        config_factory,
+    );
 
     let mut runtime_options = CodeUiRuntimeOptions::new(
         browser_write_enabled,
@@ -1916,7 +1925,10 @@ where
     Ok(CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await)
 }
 
-fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
+fn build_headless_tool_registry(
+    working_dir: &Path,
+    user_input_tx: mpsc::UnboundedSender<UserInputRequest>,
+) -> Arc<ToolRegistry> {
     // Headless v0 ships **local-read-only** tools.
     //
     // The TUI flow attaches a `ToolRuntimeContext` (sandbox policy, approval
@@ -1944,7 +1956,11 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
-        .register("search_files", Arc::new(SearchFilesHandler));
+        .register("search_files", Arc::new(SearchFilesHandler))
+        .register(
+            "request_user_input",
+            Arc::new(RequestUserInputHandler::new(user_input_tx)),
+        );
     Arc::new(register_semantic_handlers(builder).build())
 }
 
@@ -4948,7 +4964,8 @@ no_cache_unknown_network = true
     #[test]
     fn build_headless_tool_registry_omits_task_tool_in_flag_off_default() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let registry = build_headless_tool_registry(tmp.path());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let registry = build_headless_tool_registry(tmp.path(), tx);
         let names = registry.tool_names();
         assert!(
             !names.contains(&"task".to_string()),
