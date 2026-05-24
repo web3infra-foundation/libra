@@ -10,7 +10,6 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::{
-    info_println,
     internal::ai::sandbox::{
         NetworkAccess, NetworkAccessMode, NetworkProtocol, NetworkProxy, NetworkProxySelection,
         NetworkService, ProxyEnforcement, SandboxEnforcement, SandboxPolicy,
@@ -219,21 +218,60 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
 }
 
 fn render_status_human(report: &SandboxStatusOutput, output: &OutputConfig) -> CliResult<()> {
-    info_println!(output, "Sandbox status");
-    info_println!(output, "  platform: {}", report.platform);
-    info_println!(output, "  sandbox_type: {}", report.sandbox_type);
-    info_println!(output, "  enforcement: {}", report.enforcement);
-    info_println!(
-        output,
+    if !output.quiet {
+        // Build the rendered block as a string up front so we have a
+        // single source-of-truth shape that both production (`stdout`)
+        // and the unit tests can consume. The pure-function form is
+        // covered by `format_status_human` tests in this module.
+        print!("{}", format_status_human(report));
+    }
+    std::io::stdout()
+        .flush()
+        .map_err(|error| CliError::io(format!("failed to write sandbox status: {error}")))?;
+    Ok(())
+}
+
+/// Render the human form of [`SandboxStatusOutput`] as a single string
+/// (each line terminated by `\n`).
+///
+/// Extracted from [`render_status_human`] so the rendering shape can
+/// be unit-tested without redirecting the process stdout — which is
+/// fragile under `cargo test`'s default libtest output capture
+/// (`BufferRedirect` taps the raw FD but libtest wraps stdout in its
+/// own capture buffer, so the two layers don't compose reliably).
+fn format_status_human(report: &SandboxStatusOutput) -> String {
+    use std::fmt::Write;
+
+    let mut buffer = String::new();
+    let _ = writeln!(buffer, "Sandbox status");
+    let _ = writeln!(buffer, "  platform: {}", report.platform);
+    let _ = writeln!(buffer, "  sandbox_type: {}", report.sandbox_type);
+    let _ = writeln!(buffer, "  enforcement: {}", report.enforcement);
+    let _ = writeln!(
+        buffer,
         "  effective_enforcement: {}",
         report.effective_enforcement
     );
-    info_println!(output, "  network: {}", report.network.mode);
-    info_println!(output, "  proxy_backend: {}", report.proxy_backend);
-    info_println!(output, "  bwrap_available: {}", report.bwrap_available);
-    info_println!(output, "  bwrap_requested: {}", report.bwrap_requested);
-    info_println!(
-        output,
+    let _ = writeln!(buffer, "  network: {}", report.network.mode);
+    if !report.network.allowlist.is_empty() {
+        // Allowlist entries are only populated when `network.mode ==
+        // "allowlist"` (see `describe_network_access`). Mirror the
+        // JSON `data.network.allowlist` field so human readers see
+        // which services the proxy will actually route — otherwise
+        // they have to switch to `--json` to learn what `allowlist`
+        // means for this invocation, which contradicts
+        // `docs/improvement/sandbox.md` §7.4 line 350 (`libra sandbox
+        // status` must output `network.allowlist`).
+        let _ = writeln!(buffer, "  network_allowlist:");
+        for entry in &report.network.allowlist {
+            let _ = writeln!(buffer, "    - {entry}");
+        }
+    }
+    let _ = writeln!(buffer, "  proxy_backend: {}", report.proxy_backend);
+    let _ = writeln!(buffer, "  bwrap_available: {}", report.bwrap_available);
+    let _ = writeln!(buffer, "  bwrap_requested: {}", report.bwrap_requested);
+    let _ = writeln!(
+        buffer,
         "  seatbelt_available: {}",
         report.seatbelt_available
     );
@@ -242,26 +280,23 @@ fn render_status_human(report: &SandboxStatusOutput, output: &OutputConfig) -> C
         .path
         .as_deref()
         .unwrap_or("(not configured)");
-    info_println!(output, "  helper_path: {helper_path}");
-    info_println!(
-        output,
+    let _ = writeln!(buffer, "  helper_path: {helper_path}");
+    let _ = writeln!(
+        buffer,
         "  helper_path_exists: {}",
         report.helper_path.exists
     );
-    info_println!(output, "  writable_roots:");
+    let _ = writeln!(buffer, "  writable_roots:");
     for root in &report.writable_roots {
-        info_println!(output, "    - {root}");
+        let _ = writeln!(buffer, "    - {root}");
     }
     if !report.warnings.is_empty() {
-        info_println!(output, "  warnings:");
+        let _ = writeln!(buffer, "  warnings:");
         for warning in &report.warnings {
-            info_println!(output, "    - {warning}");
+            let _ = writeln!(buffer, "    - {warning}");
         }
     }
-    std::io::stdout()
-        .flush()
-        .map_err(|error| CliError::io(format!("failed to write sandbox status: {error}")))?;
-    Ok(())
+    buffer
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -505,7 +540,117 @@ impl From<SandboxEnforcement> for ProxyEnforcement {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostEnvironmentSignals, sandbox_host_environment_warnings};
+    use super::{
+        HostEnvironmentSignals, SandboxHelperPathStatus, SandboxNetworkStatus, SandboxStatusOutput,
+        format_status_human, sandbox_host_environment_warnings,
+    };
+
+    /// Build a `SandboxStatusOutput` fixture for the human-render
+    /// assertions. Defaults mirror the macOS Seatbelt sandbox with
+    /// the `Denied` network mode — individual tests override the
+    /// fields they exercise.
+    fn fixture(allowlist: Vec<String>) -> SandboxStatusOutput {
+        SandboxStatusOutput {
+            platform: "macos",
+            sandbox_type: "macos-seatbelt",
+            enforcement: "best_effort",
+            effective_enforcement: "best_effort",
+            writable_roots: vec!["/repo".to_string()],
+            network: SandboxNetworkStatus {
+                mode: if allowlist.is_empty() {
+                    "denied"
+                } else {
+                    "allowlist"
+                },
+                allowlist,
+            },
+            proxy_backend: "noop",
+            bwrap_available: false,
+            bwrap_requested: false,
+            seatbelt_available: true,
+            helper_path: SandboxHelperPathStatus {
+                path: None,
+                exists: false,
+            },
+            warnings: Vec::new(),
+        }
+    }
+
+    /// `format_status_human` must emit a `network_allowlist:` block
+    /// listing every entry in `network.allowlist` when the list is
+    /// non-empty. Pin against `docs/improvement/sandbox.md` §7.4
+    /// line 350 ("`libra sandbox status` 输出 ... `network.allowlist`")
+    /// and `docs/commands/sandbox.md`'s field table — without this,
+    /// the JSON form exposes the allowlist but the human form
+    /// silently hides it, forcing users to switch to `--json` to see
+    /// which services the proxy actually allows.
+    #[test]
+    fn format_status_human_emits_network_allowlist_when_present() {
+        let rendered = format_status_human(&fixture(vec![
+            "registry.npmjs.org:443".to_string(),
+            "*.pypi.org:443".to_string(),
+        ]));
+
+        assert!(
+            rendered.contains("network: allowlist"),
+            "human render must include `network: allowlist` line, got:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("network_allowlist:"),
+            "human render must include the `network_allowlist:` block when entries exist, got:\n{rendered}",
+        );
+        for entry in ["registry.npmjs.org:443", "*.pypi.org:443"] {
+            assert!(
+                rendered.contains(&format!("    - {entry}")),
+                "human render must list allowlist entry `{entry}` with the 4-space indent, got:\n{rendered}",
+            );
+        }
+    }
+
+    /// When `network.allowlist` is empty the `network_allowlist:`
+    /// block must NOT appear — otherwise denied-mode operators see a
+    /// dangling header with no entries. Pin the absence so a future
+    /// refactor that always renders the section trips this test.
+    #[test]
+    fn format_status_human_omits_network_allowlist_when_empty() {
+        let rendered = format_status_human(&fixture(Vec::new()));
+
+        assert!(
+            rendered.contains("network: denied"),
+            "human render must include `network: denied`, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("network_allowlist:"),
+            "human render must NOT include `network_allowlist:` when the list is empty, got:\n{rendered}",
+        );
+    }
+
+    /// The non-allowlist baseline fields must appear in every render
+    /// regardless of allowlist content. Pin the bedrock shape so a
+    /// future refactor of `format_status_human` that drops a baseline
+    /// line trips this test.
+    #[test]
+    fn format_status_human_renders_baseline_fields() {
+        let rendered = format_status_human(&fixture(Vec::new()));
+        for marker in [
+            "Sandbox status",
+            "  platform: macos",
+            "  sandbox_type: macos-seatbelt",
+            "  enforcement: best_effort",
+            "  effective_enforcement: best_effort",
+            "  proxy_backend: noop",
+            "  bwrap_available: false",
+            "  seatbelt_available: true",
+            "  helper_path: (not configured)",
+            "  writable_roots:",
+            "    - /repo",
+        ] {
+            assert!(
+                rendered.contains(marker),
+                "human render must include `{marker}`, got:\n{rendered}",
+            );
+        }
+    }
 
     #[test]
     fn sandbox_host_environment_warnings_detect_wsl_signals() {
