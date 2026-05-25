@@ -29,7 +29,7 @@ use crate::{
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-            snapshot_workspace,
+            is_cargo_cache_path, snapshot_workspace,
         },
     },
     utils::util::is_sub_path,
@@ -519,7 +519,7 @@ fn read_capped_utf8_file(path: &Path) -> ToolResult<Option<String>> {
 }
 
 fn is_cargo_manifest_path(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "Cargo.toml")
+    path.file_name().is_some_and(|name| name == "Cargo.toml") && !is_cargo_cache_path(path)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1015,6 +1015,32 @@ mod tests {
                 .is_some_and(|diff| diff.contains("+serde = \"1\"")),
             "{diffs:?}"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_ignores_cargo_home_registry_manifest_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("cargo-home/registry/src/index/dep-1.0.0"))
+            .unwrap();
+        let manifest = temp
+            .path()
+            .join("cargo-home/registry/src/index/dep-1.0.0/Cargo.toml");
+        std::fs::write(&manifest, "[dependencies]\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "printf 'clap = \"4\"\\n' >> cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"
+            }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["diffs"], serde_json::json!([]));
     }
 
     #[tokio::test]
