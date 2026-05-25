@@ -47,8 +47,8 @@ use crate::{
             event::{AgentRunEvent, WorkspaceStrategy},
             event_store::AgentRunEventStore,
             workspace_strategy::{
-                MaterializationUnavailable, WorkspaceSizing, record_materialization,
-                resolve_after_preferred_attempt, select_preferred_strategy,
+                MaterializationUnavailable, WorkspaceSizing, full_copy_fallback_warning,
+                record_materialization, resolve_after_preferred_attempt, select_preferred_strategy,
             },
         },
         workspace_snapshot::{
@@ -816,6 +816,21 @@ pub(crate) fn materialize_sub_agent_workspace(
     // without eagerly copying every file).
     let materialized_file_count = worktree.baseline.entries.len() as u64;
 
+    // CEX-S2-11 (2): a full-copy fallback is opt-in-gated and expensive
+    // (it duplicates the whole worktree), so flag it in the audit log
+    // alongside the structured `WorkspaceMaterialized` event that carries
+    // the same `fallback_reason`. Non-fallback strategies stay silent.
+    if let Some(warning) = full_copy_fallback_warning(final_strategy, fallback_reason.as_deref()) {
+        tracing::warn!(
+            run_id = %run_id.0,
+            thread_id = %thread_id,
+            elapsed_ms,
+            materialized_file_count,
+            source_repo_size = sizing.repo_size_bytes,
+            "{warning}",
+        );
+    }
+
     let materialization = record_materialization(
         final_strategy,
         sizing,
@@ -1489,6 +1504,52 @@ mod tests {
         },
         utils::{test, util},
     };
+
+    /// A `tracing` writer that captures every emitted line into a shared
+    /// buffer so a test can assert what was (or was not) logged. Used to
+    /// pin the CEX-S2-11 (2) audit-log warning at its real emission site
+    /// in `materialize_sub_agent_workspace`, not just the pure helper.
+    #[derive(Clone, Default)]
+    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured-log buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `body` with a thread-local `tracing` subscriber that captures
+    /// WARN-and-above events, and return everything it logged. The
+    /// subscriber is scoped to this thread (via `with_default`), so it
+    /// only sees events the synchronous `body` emits here — parallel
+    /// tests on other threads cannot pollute the buffer.
+    fn capture_warnings(body: impl FnOnce()) -> String {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapturedWriter(buffer.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().expect("captured-log buffer poisoned").clone();
+        String::from_utf8(bytes).expect("captured logs must be valid UTF-8")
+    }
 
     #[cfg(unix)]
     fn symlink_path(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
@@ -2378,6 +2439,104 @@ mod tests {
         }
 
         workspace.cleanup().expect("cleanup must not leak");
+    }
+
+    /// CEX-S2-11 (2): the full-copy fallback MUST write a warning to the
+    /// audit log at its real emission site. Captures `tracing` output
+    /// around the opted-in fallback and asserts exactly one WARN names
+    /// the full copy and the `agent.allow_full_copy` opt-in — a guard the
+    /// pure `full_copy_fallback_warning` unit tests cannot give, since
+    /// they don't exercise the `tracing::warn!` wiring in
+    /// `materialize_sub_agent_workspace`.
+    #[test]
+    fn full_copy_fallback_emits_audit_log_warning() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("a.txt"), "hello").unwrap();
+
+        let store = event_store(temp.path());
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 2 * SPARSE_REPO_SIZE_THRESHOLD_BYTES,
+            worktree_file_count: 1,
+        };
+
+        let logs = capture_warnings(|| {
+            let workspace = materialize_sub_agent_workspace(
+                &main,
+                sizing,
+                thread_id,
+                run_id,
+                true,
+                &FuseProvisionState::default(),
+                &store,
+            )
+            .expect("full-copy fallback should succeed when opted in");
+            assert_eq!(workspace.strategy(), WorkspaceStrategy::FullCopy);
+            workspace.cleanup().expect("cleanup must not leak");
+        });
+
+        let warn_lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("full repository copy"))
+            .collect();
+        assert_eq!(
+            warn_lines.len(),
+            1,
+            "exactly one full-copy fallback warning must be logged, got: {logs}",
+        );
+        assert!(
+            warn_lines[0].contains("WARN"),
+            "the fallback notice must be emitted at WARN level: {}",
+            warn_lines[0],
+        );
+        assert!(
+            warn_lines[0].contains("agent.allow_full_copy = true"),
+            "the warning must name the opt-in flag: {}",
+            warn_lines[0],
+        );
+    }
+
+    /// The normal `Worktree` path (no fallback) must stay silent — no
+    /// full-copy warning is logged for a small repo. Pins the
+    /// `full_copy_fallback_warning` `None` branch at the emission site so
+    /// a refactor that always-warns trips here.
+    #[test]
+    fn worktree_materialization_emits_no_full_copy_warning() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("a.txt"), "hello").unwrap();
+
+        let store = event_store(temp.path());
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 4 * 1024,
+            worktree_file_count: 1,
+        };
+
+        let logs = capture_warnings(|| {
+            let workspace = materialize_sub_agent_workspace(
+                &main,
+                sizing,
+                thread_id,
+                run_id,
+                true,
+                &FuseProvisionState::default(),
+                &store,
+            )
+            .expect("small repo must materialize as a worktree");
+            assert_eq!(workspace.strategy(), WorkspaceStrategy::Worktree);
+            workspace.cleanup().expect("cleanup must not leak");
+        });
+
+        assert!(
+            !logs.contains("full repository copy"),
+            "the worktree path must not log a full-copy fallback warning: {logs}",
+        );
     }
 
     /// CEX-S2-11 (5) leak-free: if the workspace materializes but the

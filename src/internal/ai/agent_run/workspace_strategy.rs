@@ -177,6 +177,41 @@ pub fn record_materialization(
     }
 }
 
+/// Build the audit-log warning a caller MUST emit when a sub-agent
+/// workspace had to fall back to a full repository copy (CEX-S2-11 (2)).
+///
+/// Full copy is the opt-in-gated, last-resort strategy: it duplicates the
+/// entire worktree rather than reusing the object store, so each fallback
+/// is worth flagging in the audit log even though it was explicitly
+/// permitted via `agent.allow_full_copy = true`. The structured
+/// [`WorkspaceMaterialized`] event already records the same
+/// `fallback_reason`; this message is the human-facing warning that sits
+/// alongside it.
+///
+/// Returns `None` for every non-`FullCopy` strategy so callers warn only
+/// on the expensive fallback and stay silent on the normal
+/// [`WorkspaceStrategy::Worktree`] path. `fallback_reason` is the reason
+/// the preferred strategy could not be materialized (the same value
+/// threaded into [`record_materialization`]); when absent a generic
+/// explanation is substituted so the warning is never empty.
+pub fn full_copy_fallback_warning(
+    strategy: WorkspaceStrategy,
+    fallback_reason: Option<&str>,
+) -> Option<String> {
+    if strategy != WorkspaceStrategy::FullCopy {
+        return None;
+    }
+    let reason = fallback_reason
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("preferred workspace strategy unavailable");
+    Some(format!(
+        "sub-agent workspace fell back to a full repository copy \
+         (agent.allow_full_copy = true): {reason}; a full copy duplicates the \
+         entire worktree and is intended for debug / small fixtures / emergency \
+         compatibility only"
+    ))
+}
+
 /// A sub-agent attempted a write outside the filesystem scope it was
 /// granted in [`AgentContextPack::write_scope`]. Per CEX-S2-11 (4) the
 /// surfaced error must be user-friendly and tell the operator exactly
@@ -514,6 +549,63 @@ mod tests {
             event.fallback_reason,
             "sparse checkout unavailable: object store offline",
         );
+    }
+
+    /// The full-copy fallback warning fires only for `FullCopy` and is
+    /// silent for every other strategy — a caller wired to this helper
+    /// never warns on the normal `Worktree` / `Sparse` paths (CEX-S2-11
+    /// (2): warn only on the expensive opt-in fallback).
+    #[test]
+    fn full_copy_warning_only_fires_for_full_copy() {
+        for quiet in [
+            WorkspaceStrategy::Worktree,
+            WorkspaceStrategy::Sparse,
+            WorkspaceStrategy::Blocked,
+        ] {
+            assert_eq!(
+                full_copy_fallback_warning(quiet, Some("anything")),
+                None,
+                "{quiet:?} must not emit a full-copy fallback warning",
+            );
+        }
+    }
+
+    /// A `FullCopy` warning carries the supplied reason and names the
+    /// opt-in flag so the audit log says why a full copy happened and how
+    /// it was permitted.
+    #[test]
+    fn full_copy_warning_carries_reason_and_names_opt_in() {
+        let warning = full_copy_fallback_warning(
+            WorkspaceStrategy::FullCopy,
+            Some("sparse checkout unavailable: object store offline"),
+        )
+        .expect("FullCopy must produce a warning");
+        assert!(
+            warning.contains("sparse checkout unavailable: object store offline"),
+            "warning must carry the fallback reason: {warning}",
+        );
+        assert!(
+            warning.contains("agent.allow_full_copy = true"),
+            "warning must name the opt-in flag: {warning}",
+        );
+    }
+
+    /// An absent or empty reason still yields a non-empty warning — the
+    /// audit log never gets a blank line that hides why a full copy ran.
+    #[test]
+    fn full_copy_warning_substitutes_generic_reason_when_missing() {
+        for missing in [None, Some("")] {
+            let warning = full_copy_fallback_warning(WorkspaceStrategy::FullCopy, missing)
+                .expect("FullCopy must produce a warning");
+            assert!(
+                warning.contains("preferred workspace strategy unavailable"),
+                "missing reason must fall back to a generic explanation: {warning}",
+            );
+            assert!(
+                warning.contains("agent.allow_full_copy = true"),
+                "warning must still name the opt-in flag: {warning}",
+            );
+        }
     }
 
     /// `record_materialization` payloads round-trip through serde so
