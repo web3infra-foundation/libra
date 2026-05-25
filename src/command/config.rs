@@ -45,6 +45,8 @@ const EXAMPLES: &str = r#"EXAMPLES:
     echo "$SECRET" | libra config set --stdin vault.env.KEY  Set from stdin (CI/CD)
     libra config set --encrypt custom.key "value"      Force-encrypt a value
     libra config list --vault                          List vault env entries
+    libra config generate-ssh-key --remote origin      Generate SSH key for remote
+    libra config generate-gpg-key                      Generate GPG signing key
     libra config list --name-only                      List all key names
     libra config path                                  Show config DB path"#;
 
