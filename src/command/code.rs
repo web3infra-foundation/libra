@@ -3149,7 +3149,12 @@ where
                 tracing::info!(
                     enabled = true,
                     max_depth = agents_config.multi_agent.max_subagent_depth,
-                    max_concurrent = agents_config.multi_agent.max_concurrent_subagents,
+                    // Log the EFFECTIVE concurrency (CEX-S2-12 caps it to
+                    // 1), not the configured value, so the diagnostic
+                    // matches what the dispatcher actually enforces.
+                    max_concurrent = cex_s2_12_subagent_concurrency_cap(
+                        agents_config.multi_agent.max_concurrent_subagents,
+                    ),
                     "sub-agent dispatcher attached to tool_loop config",
                 );
                 config.subagent_runtime = Some(runtime);
@@ -3604,6 +3609,24 @@ pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
+/// CEX-S2-12 "single sub-agent behind flag" concurrency cap.
+///
+/// While the `code.sub_agents.enabled` gate is the only path that
+/// builds a [`SubAgentToolLoopRuntime`], CEX-S2-12 must run at most one
+/// concurrent sub-agent regardless of the operator-configured
+/// `code.multi_agent.max_concurrent_subagents` (and the
+/// `code.sub_agents.max_parallel` schema default of `2`). Real
+/// parallelism stays locked until CEX-S2-14 wires the scheduler-side
+/// observer budget — at which point this returns `configured` instead
+/// of the forced `1`.
+///
+/// Kept as a named pure function (rather than a literal `1` at the call
+/// site) so the cap is documented, greppable, and pinned by a unit test
+/// against a silent regression to passing the operator value through.
+const fn cex_s2_12_subagent_concurrency_cap(_configured: u32) -> u32 {
+    1
+}
+
 /// Construct a [`SubAgentToolLoopRuntime`] from the libra-code
 /// session's resolved state. Called from the session bootstrap
 /// when `agents_config.sub_agents.enabled = true`; failures
@@ -3659,7 +3682,12 @@ async fn build_subagent_runtime_for_session(
                 .multi_agent
                 .max_subagent_depth
                 .min(u8::MAX as u32) as u8,
-            max_concurrent_subagents: agents_config.multi_agent.max_concurrent_subagents,
+            // CEX-S2-12 "single sub-agent behind flag": force the
+            // dispatcher concurrency to 1 regardless of the configured
+            // value; CEX-S2-14 unlocks the operator's real budget.
+            max_concurrent_subagents: cex_s2_12_subagent_concurrency_cap(
+                agents_config.multi_agent.max_concurrent_subagents,
+            ),
         },
     )
     .with_default_child_runner();
@@ -4124,6 +4152,23 @@ mod tests {
     };
 
     use super::*;
+
+    /// CEX-S2-12 "single sub-agent behind flag": the dispatcher
+    /// concurrency cap is forced to 1 for every configured value —
+    /// including the `sub_agents.max_parallel` schema default of 2 and
+    /// larger operator settings — until CEX-S2-14 unlocks real
+    /// parallelism. Pins the cap against a silent regression to passing
+    /// the operator value through.
+    #[test]
+    fn s2_12_concurrency_cap_forces_single_sub_agent() {
+        for configured in [0_u32, 1, 2, 4, 16, u32::MAX] {
+            assert_eq!(
+                cex_s2_12_subagent_concurrency_cap(configured),
+                1,
+                "CEX-S2-12 must cap concurrency to 1, not {configured}",
+            );
+        }
+    }
 
     fn base_args() -> CodeArgs {
         CodeArgs {

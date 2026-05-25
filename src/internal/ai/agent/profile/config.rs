@@ -144,13 +144,16 @@ fn default_subagent_timeout_ms() -> u64 {
 /// rollback): a fresh install must observe byte-equivalent behaviour
 /// to Step 1, and any sub-agent attempt with `enabled = false` is a
 /// programmer error that fails closed at the dispatcher layer (the
-/// CEX-S2-12 dispatcher itself doesn't exist yet — this card only
-/// lands the schema).
+/// dispatcher landed in v0.17.737+ and is only built behind the
+/// `enabled` gate).
 ///
 /// `max_parallel = 2` matches the CEX-S2-14 scheduler-side observer
-/// budget; CEX-S2-12 enforces `max_parallel = 1` regardless (single
-/// sub-agent behind flag). The field is parsed here so a later
-/// CEX-S2-14 patch doesn't need to touch the config schema.
+/// budget; CEX-S2-12 enforces a single concurrent sub-agent regardless
+/// (single sub-agent behind flag) — the runtime build path applies
+/// `cex_s2_12_subagent_concurrency_cap` (see `src/command/code.rs`) so
+/// the effective dispatcher concurrency is `1` until CEX-S2-14 unlocks
+/// the configured value. The field is parsed here so a later CEX-S2-14
+/// patch doesn't need to touch the config schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubAgentsConfig {
