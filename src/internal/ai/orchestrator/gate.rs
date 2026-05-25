@@ -478,7 +478,7 @@ mod tests {
 
         assert!(result.passed, "stderr: {}", result.stderr);
         let lines = result.stdout.lines().collect::<Vec<_>>();
-        let expected = vec![
+        let expected = [
             worktree_root.join("home").to_string_lossy().into_owned(),
             worktree_root
                 .join("cargo-home")
