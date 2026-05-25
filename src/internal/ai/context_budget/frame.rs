@@ -551,6 +551,100 @@ mod handoff_message_tests {
         }
     }
 
+    /// CEX-13c / Step 1.9 freeze the `ContextFrameEvent` wire contract
+    /// (`#[serde(deny_unknown_fields)]`) — append-only prompt context
+    /// frames persisted to session JSONL, replayed, and fed into the
+    /// sub-agent handoff. Pin the EXACT required key set, the `prompt_id`
+    /// skip-when-None, that `segments` / `omissions` always serialize
+    /// (Vec, no skip) and `budget_exceeded_by` is always present
+    /// (`#[serde(default)]`, no skip), the `deny_unknown_fields`
+    /// rejection, and a full round-trip — so a rename / added field /
+    /// dropped-skip silently breaking replay trips here.
+    #[test]
+    fn context_frame_event_wire_contract_is_frozen() {
+        let base = frame_with_segments(Vec::new());
+        let base_json = serde_json::to_value(&base).expect("serialize ContextFrameEvent");
+        let base_keys: std::collections::BTreeSet<&str> = base_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "event_id",
+            "recorded_at",
+            "frame_id",
+            "kind",
+            "segments",
+            "omissions",
+            "total_candidate_tokens",
+            "total_selected_tokens",
+            "budget_exceeded_by",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            base_keys, required,
+            "ContextFrameEvent (None prompt_id) must serialize EXACTLY the required key set, \
+             got: {base_json}",
+        );
+        assert_eq!(
+            base_json["segments"],
+            serde_json::json!([]),
+            "empty segments must serialize as [], not be omitted",
+        );
+        assert_eq!(base_json["omissions"], serde_json::json!([]));
+
+        let full = ContextFrameEvent {
+            prompt_id: Some("prompt-7".to_string()),
+            ..base.clone()
+        };
+        let full_json = serde_json::to_value(&full).expect("serialize ContextFrameEvent");
+        let full_keys: std::collections::BTreeSet<&str> = full_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut full_expected = required.clone();
+        full_expected.insert("prompt_id");
+        assert_eq!(
+            full_keys, full_expected,
+            "a ContextFrameEvent with prompt_id must add EXACTLY prompt_id, got: {full_json}",
+        );
+
+        // `#[serde(default)]` on budget_exceeded_by: an omitted value
+        // reads back 0 (read-side compatibility for older records that
+        // predate the field).
+        let mut without_budget = full_json.as_object().expect("object").clone();
+        without_budget.remove("budget_exceeded_by");
+        let defaulted: ContextFrameEvent =
+            serde_json::from_value(serde_json::Value::Object(without_budget))
+                .expect("deserialize without budget_exceeded_by");
+        assert_eq!(
+            defaulted.budget_exceeded_by, 0,
+            "an omitted #[serde(default)] budget_exceeded_by must default to 0",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = full_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ContextFrameEvent>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: ContextFrameEvent =
+            serde_json::from_value(full_json.clone()).expect("deserialize ContextFrameEvent");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            full_json,
+            "ContextFrameEvent must round-trip its wire shape",
+        );
+    }
+
     /// Each segment with non-empty content becomes one User message
     /// whose body starts with a `[kind:source:label]` header line.
     /// The header lets the model attribute the content while
