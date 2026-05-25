@@ -484,8 +484,8 @@ fn sum_segment_tokens(segments: &[ContextSegmentBudget]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextBudgetError, ContextPriority, ContextSegmentKind, ProviderContextCapability,
-        TruncationPolicy,
+        ContextBudget, ContextBudgetError, ContextPriority, ContextSegmentKind,
+        ProviderContextCapability, TruncationPolicy,
     };
 
     #[test]
@@ -628,6 +628,62 @@ mod tests {
             serde_json::to_value(&back).expect("re-serialize"),
             json,
             "ProviderContextCapability must round-trip its wire shape",
+        );
+    }
+
+    /// `ContextBudget` is the complete opencode-mirrored budget profile
+    /// (`#[serde(deny_unknown_fields)]`). Pin its top-level wire contract
+    /// — the three required fields, the `deny_unknown_fields` rejection,
+    /// every field required on read, and a full round-trip (which
+    /// transitively exercises the nested `ProviderContextCapability` +
+    /// `ContextSegmentBudget` serde, completing the budget-profile
+    /// cross-system contract coverage).
+    #[test]
+    fn context_budget_wire_contract_is_frozen() {
+        let budget = ContextBudget::for_provider_model("anthropic", "claude-opus-4-7");
+        let json = serde_json::to_value(&budget).expect("serialize ContextBudget");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> =
+            ["max_prompt_tokens", "provider", "segments"]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            keys, required,
+            "ContextBudget must serialize EXACTLY its three required fields, got: {json}",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ContextBudget>(serde_json::Value::Object(with_extra)).is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Every field is required on read: removing any one must fail.
+        for key in &required {
+            let mut missing = json.as_object().expect("object").clone();
+            missing.remove(*key);
+            assert!(
+                serde_json::from_value::<ContextBudget>(serde_json::Value::Object(missing))
+                    .is_err(),
+                "removing required field `{key}` must fail deserialization",
+            );
+        }
+
+        // Round-trip: exercises the nested ProviderContextCapability +
+        // ContextSegmentBudget serde transitively.
+        let back: ContextBudget =
+            serde_json::from_value(json.clone()).expect("deserialize ContextBudget");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            json,
+            "ContextBudget must round-trip its wire shape",
         );
     }
 }
