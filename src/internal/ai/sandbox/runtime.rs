@@ -24,6 +24,11 @@ use crate::utils::fuse;
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
+const CARGO_HOME_ENV_VAR: &str = "CARGO_HOME";
+const HOME_ENV_VAR: &str = "HOME";
+const LIBRA_LOG_FILE_ENV_VAR: &str = "LIBRA_LOG_FILE";
+const XDG_CACHE_HOME_ENV_VAR: &str = "XDG_CACHE_HOME";
+const XDG_CONFIG_HOME_ENV_VAR: &str = "XDG_CONFIG_HOME";
 #[cfg(target_os = "macos")]
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
@@ -79,6 +84,7 @@ impl CommandSpec {
     ) -> Self {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let mut env = HashMap::new();
+        apply_task_worktree_env_overrides(&cwd, &mut env);
         apply_fuse_workspace_env_overrides(&cwd, &mut env, ambient_cargo_target_dir_is_set);
         Self {
             program: shell,
@@ -89,6 +95,78 @@ impl CommandSpec {
             sandbox_permissions,
             justification,
         }
+    }
+}
+
+fn apply_task_worktree_env_overrides(cwd: &Path, env: &mut HashMap<String, String>) {
+    let Some(worktree_root) = enclosing_task_worktree_root(cwd) else {
+        return;
+    };
+
+    insert_path_env(env, HOME_ENV_VAR, worktree_root.join("home"));
+    insert_path_env(
+        env,
+        XDG_CONFIG_HOME_ENV_VAR,
+        worktree_root.join("xdg-config"),
+    );
+    insert_path_env(env, XDG_CACHE_HOME_ENV_VAR, worktree_root.join("xdg-cache"));
+    insert_path_env(env, CARGO_HOME_ENV_VAR, worktree_root.join("cargo-home"));
+    insert_path_env(
+        env,
+        LIBRA_LOG_FILE_ENV_VAR,
+        worktree_root.join("logs").join("libra.log"),
+    );
+}
+
+fn insert_path_env(env: &mut HashMap<String, String>, key: &str, path: PathBuf) {
+    env.insert(key.to_string(), path.to_string_lossy().into_owned());
+}
+
+fn enclosing_task_worktree_root(path: &Path) -> Option<PathBuf> {
+    let normalized = path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_abs_path(path));
+    for ancestor in normalized.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) != Some("workspace") {
+            continue;
+        }
+        let parent = ancestor.parent()?;
+        if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("libra-task-worktree-"))
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
+fn normalize_abs_path(path: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        fuse::normalize_abs_path(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::path::Component;
+
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+                Component::RootDir => out.push(Path::new(comp.as_os_str())),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
+                }
+                Component::Normal(part) => out.push(part),
+            }
+        }
+        out
     }
 }
 
@@ -1923,6 +2001,61 @@ mod tests {
         let mut env = HashMap::new();
         apply_fuse_workspace_env_overrides(Path::new("/repo/src"), &mut env, false);
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn shell_command_spec_uses_task_local_home_cargo_and_log_paths() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e/workspace/src");
+        let spec = CommandSpec::shell_inner(
+            "libra status && cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        let root = "/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e";
+        let home = format!("{root}/home");
+        let cargo_home = format!("{root}/cargo-home");
+        let log_file = format!("{root}/logs/libra.log");
+        let xdg_config_home = format!("{root}/xdg-config");
+        let xdg_cache_home = format!("{root}/xdg-cache");
+        assert_eq!(
+            spec.env.get(HOME_ENV_VAR).map(String::as_str),
+            Some(home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(CARGO_HOME_ENV_VAR).map(String::as_str),
+            Some(cargo_home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(LIBRA_LOG_FILE_ENV_VAR).map(String::as_str),
+            Some(log_file.as_str())
+        );
+        assert_eq!(
+            spec.env.get(XDG_CONFIG_HOME_ENV_VAR).map(String::as_str),
+            Some(xdg_config_home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(XDG_CACHE_HOME_ENV_VAR).map(String::as_str),
+            Some(xdg_cache_home.as_str())
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_does_not_inject_task_local_env_outside_task_worktree() {
+        let spec = CommandSpec::shell_inner(
+            "echo ok",
+            PathBuf::from("/repo/src"),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        assert!(!spec.env.contains_key(HOME_ENV_VAR));
+        assert!(!spec.env.contains_key(CARGO_HOME_ENV_VAR));
+        assert!(!spec.env.contains_key(LIBRA_LOG_FILE_ENV_VAR));
     }
 
     #[test]
