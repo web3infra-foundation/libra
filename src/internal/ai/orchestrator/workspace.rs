@@ -514,20 +514,66 @@ fn verify_fuse_task_worktree_mount_once(
     })?;
 
     if expect_repo_storage_link {
-        let storage_link = workspace_root.join(util::ROOT_DIR);
-        fs::symlink_metadata(&storage_link).map_err(|err| {
+        verify_fuse_repo_storage_link(workspace_root)?;
+    }
+
+    verify_fuse_task_worktree_write_probe(workspace_root)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_fuse_repo_storage_link(workspace_root: &Path) -> io::Result<()> {
+    let storage_link = workspace_root.join(util::ROOT_DIR);
+    let metadata = fs::symlink_metadata(&storage_link).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "expected .libra repository storage link is not visible at '{}': {}",
+                storage_link.display(),
+                err
+            ),
+        )
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(&storage_link).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!(
-                    "expected .libra repository storage link is not visible at '{}': {}",
+                    "expected .libra repository storage link is not readable at '{}': {}",
                     storage_link.display(),
                     err
                 ),
             )
         })?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            storage_link.parent().unwrap_or(workspace_root).join(target)
+        };
+        if !resolved.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "expected .libra repository storage link at '{}' points to missing target '{}'",
+                    storage_link.display(),
+                    resolved.display()
+                ),
+            ));
+        }
     }
 
-    verify_fuse_task_worktree_write_probe(workspace_root)?;
+    util::try_get_storage_path(Some(workspace_root.to_path_buf())).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "expected .libra repository storage link at '{}' is not usable by Libra VCS: {}",
+                storage_link.display(),
+                err
+            ),
+        )
+    })?;
 
     Ok(())
 }
@@ -2233,6 +2279,36 @@ mod tests {
         assert!(message.contains("FUSE mount health check failed after"));
         assert!(message.contains("expected .libra repository storage link is not visible"));
         assert!(message.contains(workspace.to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_health_check_accepts_usable_repo_storage_link() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let storage = temp.path().join("storage");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(storage.join("objects")).unwrap();
+        std::fs::create_dir_all(storage.join("hooks")).unwrap();
+        std::os::unix::fs::symlink(&storage, workspace.join(util::ROOT_DIR)).unwrap();
+
+        super::verify_fuse_task_worktree_mount_once(&workspace, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_health_check_rejects_dangling_repo_storage_link() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let missing = temp.path().join("missing-storage");
+        std::os::unix::fs::symlink(&missing, workspace.join(util::ROOT_DIR)).unwrap();
+
+        let err = super::verify_fuse_task_worktree_mount_once(&workspace, true).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("points to missing target"));
+        assert!(message.contains(missing.to_string_lossy().as_ref()));
     }
 
     #[test]
