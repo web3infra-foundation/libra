@@ -59,6 +59,7 @@ pub mod budget;
 pub mod context_pack;
 pub mod decision;
 pub mod event;
+pub mod event_store;
 pub mod evidence;
 pub mod patchset;
 pub mod permission;
