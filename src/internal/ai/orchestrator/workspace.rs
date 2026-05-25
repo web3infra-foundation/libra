@@ -41,9 +41,20 @@ use super::{
 #[cfg(unix)]
 use crate::utils::fuse as fuse_utils;
 use crate::{
-    internal::ai::workspace_snapshot::{
-        WorkspaceEntry, WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
-        workspace_entry_if_exists,
+    internal::ai::{
+        agent_run::{
+            AgentRunId,
+            event::{AgentRunEvent, WorkspaceStrategy},
+            event_store::AgentRunEventStore,
+            workspace_strategy::{
+                MaterializationUnavailable, WorkspaceSizing, record_materialization,
+                resolve_after_preferred_attempt, select_preferred_strategy,
+            },
+        },
+        workspace_snapshot::{
+            WorkspaceEntry, WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
+            workspace_entry_if_exists,
+        },
     },
     utils::util,
 };
@@ -678,6 +689,167 @@ pub(crate) fn cleanup_task_worktree(worktree: TaskWorktree) -> io::Result<()> {
     }
 }
 
+/// A materialized isolated workspace for a sub-agent run (CEX-S2-11),
+/// plus the [`WorkspaceStrategy`] that produced it. Wraps the underlying
+/// [`TaskWorktree`] so callers get the run-scoped lifecycle
+/// ([`SubAgentWorkspace::cleanup`]) without touching the worktree
+/// internals.
+///
+// `allow(dead_code)`: the materialization abstraction lands ahead of the
+// flag-gated sub-agent dispatcher wiring that calls it (a later CEX-S2-11
+// slice), matching the doc's "abstraction before runtime" sequencing.
+#[allow(dead_code)]
+pub(crate) struct SubAgentWorkspace {
+    worktree: TaskWorktree,
+    strategy: WorkspaceStrategy,
+}
+
+#[allow(dead_code)]
+impl SubAgentWorkspace {
+    /// Filesystem root the sub-agent should run in.
+    pub(crate) fn root(&self) -> &Path {
+        &self.worktree.root
+    }
+
+    /// The strategy recorded in the `workspace_materialized` event.
+    pub(crate) fn strategy(&self) -> WorkspaceStrategy {
+        self.strategy
+    }
+
+    /// The physical materialization backend (FUSE overlay vs full copy).
+    /// Orthogonal to [`strategy`](Self::strategy): until native
+    /// object-store-sharing worktrees and sparse checkout land, every
+    /// strategy is physically materialized through
+    /// [`prepare_task_worktree`].
+    pub(crate) fn backend(&self) -> TaskWorkspaceBackend {
+        self.worktree.backend()
+    }
+
+    /// Tear down the workspace (unmount FUSE / remove the copy). Per
+    /// CEX-S2-11 (5) this must run on run completion so workspaces do not
+    /// leak.
+    pub(crate) fn cleanup(self) -> io::Result<()> {
+        cleanup_task_worktree(self.worktree)
+    }
+}
+
+/// Error materializing a sub-agent's isolated workspace.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SubAgentWorkspaceError {
+    /// The preferred strategy could not be materialized and full-copy
+    /// fallback was not permitted (`agent.allow_full_copy = false`).
+    /// Surfaced WITHOUT touching the filesystem.
+    #[error(transparent)]
+    Unavailable(#[from] MaterializationUnavailable),
+    /// A filesystem error occurred while materializing the workspace or
+    /// appending the `workspace_materialized` event.
+    #[error("failed to materialize sub-agent workspace: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// Materialize an isolated workspace for a sub-agent run and append the
+/// `workspace_materialized` event to the run's transcript (CEX-S2-11).
+///
+/// `sizing` (from [`workspace_sizing::measure_workspace_sizing`]) drives
+/// [`select_preferred_strategy`]. The preferred strategy is materialized
+/// through [`prepare_task_worktree`] — a FUSE overlay when available,
+/// else a full copy:
+///
+/// - `Worktree` (small repo) → materialized directly; strategy
+///   `Worktree`.
+/// - `Sparse` (large repo) → **no native sparse-checkout API exists
+///   yet**, so it is treated as a failed preferred attempt and resolved
+///   via [`resolve_after_preferred_attempt`]: with `allow_full_copy` it
+///   materializes a full copy (strategy `FullCopy`, carrying the reason
+///   as the audit `fallback_reason`); otherwise it returns
+///   [`SubAgentWorkspaceError::Unavailable`] **without** materializing.
+///
+/// On success the `workspace_materialized` event records the resolved
+/// strategy, the source/materialized file count, elapsed time, and any
+/// fallback reason, and is appended to
+/// `.libra/sessions/{thread_id}/agents/{run_id}.jsonl` via `store`.
+///
+/// The physical backend (FUSE overlay vs full copy) is orthogonal to the
+/// recorded strategy and is available via
+/// [`SubAgentWorkspace::backend`]; the strategy field records the
+/// size-based selection, which is the doc's taxonomy. Native
+/// object-store-sharing `Worktree` and `Sparse` materialization remain
+/// pending CEX-S2-11 slices.
+///
+/// [`workspace_sizing::measure_workspace_sizing`]: crate::internal::ai::agent_run::workspace_sizing::measure_workspace_sizing
+#[allow(dead_code)]
+pub(crate) fn materialize_sub_agent_workspace(
+    main_working_dir: &Path,
+    sizing: WorkspaceSizing,
+    thread_id: Uuid,
+    run_id: AgentRunId,
+    allow_full_copy: bool,
+    fuse_state: &FuseProvisionState,
+    store: &AgentRunEventStore,
+) -> Result<SubAgentWorkspace, SubAgentWorkspaceError> {
+    let preferred = select_preferred_strategy(sizing);
+
+    // Resolve the final strategy BEFORE any filesystem work so a
+    // disallowed full-copy fallback fails fast without materializing.
+    let (final_strategy, fallback_reason) = if preferred == WorkspaceStrategy::Worktree {
+        (WorkspaceStrategy::Worktree, None)
+    } else {
+        // Sparse (the only other size-selected strategy) has no native
+        // materializer yet — treat it as a failed preferred attempt.
+        resolve_after_preferred_attempt(
+            preferred,
+            Err("native sparse checkout is not yet implemented; \
+                 falling back to a full workspace copy"
+                .to_string()),
+            allow_full_copy,
+        )?
+    };
+
+    let start = std::time::Instant::now();
+    let (worktree, _outcome) = prepare_task_worktree(main_working_dir, run_id.0, fuse_state)?;
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // The baseline is the source snapshot the workspace mirrors, so its
+    // entry count is the count of files the workspace exposes. For the
+    // copy backend this equals files physically written; for a lazy FUSE
+    // overlay it is the logical count (the overlay exposes the same tree
+    // without eagerly copying every file).
+    let materialized_file_count = worktree.baseline.entries.len() as u64;
+
+    let materialization = record_materialization(
+        final_strategy,
+        sizing,
+        materialized_file_count,
+        elapsed_ms,
+        fallback_reason,
+    );
+
+    // The workspace is already on disk. `TaskWorktree` has no `Drop`, so a
+    // failed transcript append would otherwise leak it — clean up before
+    // surfacing the error (CEX-S2-11 (5): no leaked workspaces).
+    if let Err(append_error) = store.append(
+        thread_id,
+        run_id,
+        &AgentRunEvent::WorkspaceMaterialized {
+            agent_run_id: run_id,
+            materialization,
+        },
+    ) {
+        if let Err(cleanup_error) = cleanup_task_worktree(worktree) {
+            tracing::warn!(
+                run_id = %run_id.0,
+                "failed to clean up sub-agent workspace after transcript append error: {cleanup_error}",
+            );
+        }
+        return Err(SubAgentWorkspaceError::Io(append_error));
+    }
+
+    Ok(SubAgentWorkspace {
+        worktree,
+        strategy: final_strategy,
+    })
+}
+
 #[cfg(unix)]
 fn cleanup_fuse_task_worktree(worktree: FuseTaskWorktreeBackend) -> io::Result<()> {
     let workspace_root = worktree.cleanup_root.join("workspace");
@@ -1298,14 +1470,22 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        FuseProvisionState, WorkspaceSyncError, cleanup_task_worktree, clone_or_copy_file,
-        detect_contract_violations, materialize_workspace, prepare_copy_task_worktree,
-        prepare_task_worktree, prepare_task_worktree_root, sync_task_worktree_back,
-        task_worktree_paths,
+        FuseProvisionState, SubAgentWorkspaceError, WorkspaceSyncError, cleanup_task_worktree,
+        clone_or_copy_file, detect_contract_violations, materialize_sub_agent_workspace,
+        materialize_workspace, prepare_copy_task_worktree, prepare_task_worktree,
+        prepare_task_worktree_root, sync_task_worktree_back, task_worktree_paths,
     };
     use crate::{
-        internal::ai::workspace_snapshot::{
-            WorkspaceEntry, snapshot_workspace, snapshot_workspace_with_contents,
+        internal::ai::{
+            agent_run::{
+                AgentRunId,
+                event::{AgentRunEvent, WorkspaceStrategy},
+                event_store::AgentRunEventStore,
+                workspace_strategy::{SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing},
+            },
+            workspace_snapshot::{
+                WorkspaceEntry, snapshot_workspace, snapshot_workspace_with_contents,
+            },
         },
         utils::{test, util},
     };
@@ -2044,5 +2224,213 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    fn event_store(temp_root: &std::path::Path) -> AgentRunEventStore {
+        AgentRunEventStore::new(temp_root.join(".libra").join("sessions"))
+    }
+
+    /// A small repo (under both thresholds) selects `Worktree` and
+    /// materializes via `prepare_task_worktree`: the source files appear
+    /// in the workspace, the strategy is `Worktree`, and exactly one
+    /// `workspace_materialized` event is appended to the run transcript.
+    #[test]
+    fn materialize_sub_agent_worktree_for_small_repo_emits_event() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+        let store = event_store(temp.path());
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 4 * 1024,
+            worktree_file_count: 1,
+        };
+
+        let workspace = materialize_sub_agent_workspace(
+            &main,
+            sizing,
+            thread_id,
+            run_id,
+            false, // allow_full_copy irrelevant for the Worktree path
+            &FuseProvisionState::default(),
+            &store,
+        )
+        .expect("worktree materialization should succeed");
+
+        assert_eq!(workspace.strategy(), WorkspaceStrategy::Worktree);
+        assert_eq!(
+            std::fs::read_to_string(workspace.root().join("src/lib.rs")).unwrap(),
+            "fn main() {}\n",
+        );
+
+        let events = store.read(thread_id, run_id).expect("read transcript");
+        assert_eq!(events.len(), 1, "exactly one workspace_materialized event");
+        match events[0].known() {
+            Some(AgentRunEvent::WorkspaceMaterialized {
+                materialization, ..
+            }) => {
+                assert_eq!(materialization.strategy, WorkspaceStrategy::Worktree);
+                assert!(materialization.fallback_reason.is_empty());
+                assert!(materialization.materialized_file_count >= 1);
+            }
+            other => panic!("expected WorkspaceMaterialized, got {other:?}"),
+        }
+
+        workspace.cleanup().expect("cleanup must not leak");
+    }
+
+    /// A large repo selects `Sparse`; with no native sparse API and
+    /// `allow_full_copy = false`, materialization fails fast with
+    /// `Unavailable` and — critically — touches neither the filesystem
+    /// (no workspace) nor the transcript (no event).
+    #[test]
+    fn materialize_sub_agent_sparse_without_opt_in_is_unavailable_and_inert() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("a.txt"), "x").unwrap();
+
+        let store = event_store(temp.path());
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 2 * SPARSE_REPO_SIZE_THRESHOLD_BYTES, // forces Sparse
+            worktree_file_count: 1,
+        };
+
+        // `SubAgentWorkspace` is intentionally not `Debug` (it wraps FUSE
+        // handles), so match instead of `expect_err`.
+        let err = match materialize_sub_agent_workspace(
+            &main,
+            sizing,
+            thread_id,
+            run_id,
+            false,
+            &FuseProvisionState::default(),
+            &store,
+        ) {
+            Ok(workspace) => {
+                let _ = workspace.cleanup();
+                panic!("sparse without opt-in must be unavailable");
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(err, SubAgentWorkspaceError::Unavailable(_)));
+
+        // No event was appended — the failure happened before any I/O.
+        assert!(
+            store.read(thread_id, run_id).unwrap().is_empty(),
+            "a rejected materialization must not append a transcript event",
+        );
+    }
+
+    /// A large repo with `allow_full_copy = true` falls back to a full
+    /// copy: strategy `FullCopy`, a non-empty `fallback_reason`, and the
+    /// event recorded.
+    #[test]
+    fn materialize_sub_agent_sparse_with_opt_in_falls_back_to_full_copy() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("a.txt"), "hello").unwrap();
+
+        let store = event_store(temp.path());
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let sizing = WorkspaceSizing {
+            repo_size_bytes: 2 * SPARSE_REPO_SIZE_THRESHOLD_BYTES,
+            worktree_file_count: 1,
+        };
+
+        let workspace = materialize_sub_agent_workspace(
+            &main,
+            sizing,
+            thread_id,
+            run_id,
+            true,
+            &FuseProvisionState::default(),
+            &store,
+        )
+        .expect("full-copy fallback should succeed when opted in");
+
+        assert_eq!(workspace.strategy(), WorkspaceStrategy::FullCopy);
+        assert_eq!(
+            std::fs::read_to_string(workspace.root().join("a.txt")).unwrap(),
+            "hello",
+        );
+
+        let events = store.read(thread_id, run_id).expect("read transcript");
+        assert_eq!(events.len(), 1);
+        match events[0].known() {
+            Some(AgentRunEvent::WorkspaceMaterialized {
+                materialization, ..
+            }) => {
+                assert_eq!(materialization.strategy, WorkspaceStrategy::FullCopy);
+                assert!(
+                    !materialization.fallback_reason.is_empty(),
+                    "a fallback must record a reason",
+                );
+            }
+            other => panic!("expected WorkspaceMaterialized, got {other:?}"),
+        }
+
+        workspace.cleanup().expect("cleanup must not leak");
+    }
+
+    /// CEX-S2-11 (5) leak-free: if the workspace materializes but the
+    /// transcript append fails, the just-created worktree must be cleaned
+    /// up before the error propagates. Forces the append to fail (a file
+    /// where the sessions root should be) and asserts the repo's
+    /// `worktrees/tasks` dir is left empty — no leaked workspace.
+    #[tokio::test]
+    async fn materialize_cleans_up_workspace_when_event_append_fails() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test::setup_with_new_libra_in(&repo).await;
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+
+        let storage = util::try_get_storage_path(Some(repo.clone())).unwrap();
+        let worktrees_tasks = storage.join("worktrees").join("tasks");
+
+        // A FILE where the sessions root should be makes `create_dir_all`
+        // inside `store.append` fail, exercising the cleanup-on-error path.
+        let bad_root = temp.path().join("sessions-as-file");
+        std::fs::write(&bad_root, "not a dir").unwrap();
+        let store = AgentRunEventStore::new(&bad_root);
+
+        let result = materialize_sub_agent_workspace(
+            &repo,
+            WorkspaceSizing {
+                repo_size_bytes: 4 * 1024,
+                worktree_file_count: 1,
+            },
+            Uuid::new_v4(),
+            AgentRunId::new(),
+            false,
+            &FuseProvisionState::default(),
+            &store,
+        );
+
+        match result {
+            Ok(workspace) => {
+                let _ = workspace.cleanup();
+                panic!("a transcript append failure must surface an error");
+            }
+            Err(err) => assert!(matches!(err, SubAgentWorkspaceError::Io(_))),
+        }
+
+        // The materialized worktree must have been cleaned up: no leftover
+        // `libra-task-worktree-*` entry under the repo's tasks dir.
+        let leaked: Vec<PathBuf> = std::fs::read_dir(&worktrees_tasks)
+            .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            leaked.is_empty(),
+            "workspace leaked after transcript append failure: {leaked:?}",
+        );
     }
 }
