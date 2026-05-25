@@ -18,7 +18,10 @@
 //! - **`reasoning_effort`**: a four-valued discrete control (`low`/`medium`/`high`/`max`)
 //!   that tunes the depth of the chain-of-thought.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -41,6 +44,10 @@ use crate::internal::ai::{
         },
     },
 };
+
+const DEEPSEEK_REQUEST_MAX_ATTEMPTS: u32 = 3;
+const DEEPSEEK_RETRY_BASE_DELAY_MS: u64 = 250;
+const DEEPSEEK_RETRY_MAX_DELAY_MS: u64 = 2_000;
 
 /// DeepSeek completion model bound to a specific model identifier and HTTP [`Client`].
 ///
@@ -85,6 +92,38 @@ impl Model {
     /// - Tracing emits `provider = "deepseek"` for every code path so production logs
     ///   can be filtered by provider.
     async fn send_chat_completion_request(
+        &self,
+        request: &DeepSeekRequest,
+    ) -> Result<reqwest::Response, CompletionError> {
+        for attempt in 1..=DEEPSEEK_REQUEST_MAX_ATTEMPTS {
+            match self.send_chat_completion_request_once(request).await {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if attempt < DEEPSEEK_REQUEST_MAX_ATTEMPTS
+                        && should_retry_deepseek_request_error(&error) =>
+                {
+                    let delay = deepseek_retry_delay(attempt);
+                    tracing::warn!(
+                        provider = "deepseek",
+                        attempt,
+                        next_attempt = attempt + 1,
+                        max_attempts = DEEPSEEK_REQUEST_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %error,
+                        "DeepSeek request failed with retryable error; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(CompletionError::ResponseError(
+            "DeepSeek retry loop exited without returning a response".to_string(),
+        ))
+    }
+
+    async fn send_chat_completion_request_once(
         &self,
         request: &DeepSeekRequest,
     ) -> Result<reqwest::Response, CompletionError> {
@@ -883,6 +922,53 @@ fn should_retry_deepseek_stream_without_stream(error: &CompletionError) -> bool 
     }
 }
 
+fn should_retry_deepseek_request_error(error: &CompletionError) -> bool {
+    match error {
+        CompletionError::HttpError(error) => {
+            error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+        }
+        CompletionError::ProviderError(message) | CompletionError::ResponseError(message) => {
+            is_retryable_deepseek_provider_message(message)
+        }
+        CompletionError::JsonError(_)
+        | CompletionError::RequestError(_)
+        | CompletionError::NotImplemented(_) => false,
+    }
+}
+
+fn is_retryable_deepseek_provider_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "status 429",
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+        "rate limit",
+        "temporarily unavailable",
+        "temporarily overloaded",
+        "overloaded",
+        "try again",
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection closed",
+        "error sending request",
+        "error decoding response body",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn deepseek_retry_delay(attempt: u32) -> Duration {
+    let exp = 2_u64.saturating_pow(attempt.saturating_sub(1));
+    Duration::from_millis(
+        DEEPSEEK_RETRY_BASE_DELAY_MS
+            .saturating_mul(exp)
+            .min(DEEPSEEK_RETRY_MAX_DELAY_MS),
+    )
+}
+
 // ================================================================
 // CompletionModel Implementation
 // ================================================================
@@ -1445,6 +1531,38 @@ mod tests {
         );
 
         assert!(should_retry_deepseek_stream_without_stream(&error));
+    }
+
+    #[test]
+    fn test_deepseek_request_retry_predicate_accepts_transport_text() {
+        let provider_error = CompletionError::ProviderError(
+            "error sending request for url (https://api.deepseek.com/chat/completions)".into(),
+        );
+        let status_error = CompletionError::ProviderError("status 503: overloaded".into());
+        let response_error = CompletionError::ResponseError("connection reset by peer".into());
+
+        assert!(should_retry_deepseek_request_error(&provider_error));
+        assert!(should_retry_deepseek_request_error(&status_error));
+        assert!(should_retry_deepseek_request_error(&response_error));
+    }
+
+    #[test]
+    fn test_deepseek_request_retry_predicate_rejects_non_transients() {
+        let provider_error = CompletionError::ProviderError("status 400: bad request".into());
+        let json_error = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("invalid json should produce an error");
+
+        assert!(!should_retry_deepseek_request_error(&provider_error));
+        assert!(!should_retry_deepseek_request_error(
+            &CompletionError::JsonError(json_error)
+        ));
+    }
+
+    #[test]
+    fn test_deepseek_retry_delay_is_bounded_exponential_backoff() {
+        assert_eq!(deepseek_retry_delay(1), Duration::from_millis(250));
+        assert_eq!(deepseek_retry_delay(2), Duration::from_millis(500));
+        assert_eq!(deepseek_retry_delay(10), Duration::from_millis(2_000));
     }
 
     /// Scenario: `Max` must serialise as the lowercase string `"max"` per
