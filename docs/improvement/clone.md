@@ -152,6 +152,11 @@ struct CloneOutput {
     ssh_key_detected: Option<String>, // 从 InitOutput.ssh_key_detected 透传
     shallow: bool,                    // --depth 是否生效
     warnings: Vec<String>,            // 非致命警告（如 empty remote / init warning）
+    gitignore_converted: Vec<String>, // 由 .gitignore 转换写入的 .libraignore worktree 相对路径；始终序列化，bare 恒为空
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_kind: Option<String>,      // 附加 clone 源类型；普通 Git 源时省略
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_site: Option<CloudCloneSiteOutput>, // libra+cloud:// 源的 Cloudflare publish 元数据；其余源省略
 }
 ```
 
@@ -321,10 +326,13 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "vault_signing": true,
     "ssh_key_detected": "/Users/eli/.ssh/id_ed25519",
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": [".libraignore", "src/.libraignore"]
   }
 }
 ```
+
+> **`gitignore_converted`**：克隆时把源仓库的 `.gitignore` 转换为 `.libraignore` 所写入的 worktree 相对路径列表。始终存在（无 `skip_serializing_if`）：无转换时为空数组 `[]`，bare 克隆恒为 `[]`。
 
 **`--bare` 场景：**
 
@@ -342,7 +350,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "vault_signing": true,
     "ssh_key_detected": null,
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": []
   }
 }
 ```
@@ -366,7 +375,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
 >     "shallow": false,
 >     "warnings": [
 >       "You appear to have cloned an empty repository."
->     ]
+>     ],
+>     "gitignore_converted": []
 >   }
 > }
 > ```
@@ -393,7 +403,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "shallow": false,
     "warnings": [
       "You appear to have cloned an empty repository."
-    ]
+    ],
+    "gitignore_converted": []
   }
 }
 ```

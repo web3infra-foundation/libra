@@ -4245,4 +4245,102 @@ mod tests {
             "invalid libra+cloud clone source 'libra+cloud://bad': missing site",
         );
     }
+
+    /// Pins the `--json` `CloneOutput` wire contract (documented in
+    /// docs/improvement/clone.md). The ordinary-Git case must carry every
+    /// always-present field — including `gitignore_converted` (the
+    /// `.gitignore` → `.libraignore` conversion report) — and must OMIT
+    /// the optional `source_kind` / `cloud_site` (their
+    /// `skip_serializing_if = Option::is_none`). A rename/drop/retype that
+    /// silently breaks JSON consumers trips here.
+    #[test]
+    fn clone_output_json_pins_ordinary_git_contract() {
+        let output = CloneOutput {
+            path: "/tmp/repo".to_string(),
+            bare: false,
+            remote_url: "git@github.com:user/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            object_format: "sha1".to_string(),
+            repo_id: "a1b2c3d4".to_string(),
+            vault_signing: true,
+            ssh_key_detected: Some("/home/u/.ssh/id_ed25519".to_string()),
+            shallow: false,
+            warnings: Vec::new(),
+            gitignore_converted: vec![".libraignore".to_string(), "sub/.libraignore".to_string()],
+            source_kind: None,
+            cloud_site: None,
+        };
+
+        let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
+        let map = value
+            .as_object()
+            .expect("CloneOutput serializes to an object");
+
+        // gitignore_converted is always present (no skip) and carries the
+        // converted-file list verbatim.
+        assert_eq!(
+            map.get("gitignore_converted"),
+            Some(&serde_json::json!([".libraignore", "sub/.libraignore"])),
+            "gitignore_converted must serialize the converted .libraignore paths",
+        );
+
+        // The always-present field set, pinned by name.
+        for key in [
+            "path",
+            "bare",
+            "remote_url",
+            "branch",
+            "object_format",
+            "repo_id",
+            "vault_signing",
+            "ssh_key_detected",
+            "shallow",
+            "warnings",
+            "gitignore_converted",
+        ] {
+            assert!(
+                map.contains_key(key),
+                "CloneOutput JSON must contain `{key}`"
+            );
+        }
+
+        // Optional source fields are omitted for ordinary Git sources.
+        assert!(
+            !map.contains_key("source_kind"),
+            "source_kind must be omitted when None (skip_serializing_if)",
+        );
+        assert!(
+            !map.contains_key("cloud_site"),
+            "cloud_site must be omitted when None (skip_serializing_if)",
+        );
+    }
+
+    /// A bare clone reports no `.gitignore` conversions (clone.md: "Empty
+    /// for bare clones"), but the key is still present as an empty array
+    /// rather than dropped — JSON consumers can rely on it always existing.
+    #[test]
+    fn clone_output_json_gitignore_converted_empty_is_present() {
+        let output = CloneOutput {
+            path: "/tmp/repo.git".to_string(),
+            bare: true,
+            remote_url: "git@github.com:user/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            object_format: "sha1".to_string(),
+            repo_id: "a1b2c3d4".to_string(),
+            vault_signing: true,
+            ssh_key_detected: None,
+            shallow: false,
+            warnings: Vec::new(),
+            gitignore_converted: Vec::new(),
+            source_kind: None,
+            cloud_site: None,
+        };
+
+        let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
+        assert_eq!(
+            value.get("gitignore_converted"),
+            Some(&serde_json::json!([])),
+            "gitignore_converted must be an empty array, not absent, for bare clones",
+        );
+    }
 }
