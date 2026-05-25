@@ -232,7 +232,10 @@ mod tests {
 
     /// `RiskLevel` wire tags are likewise stable snake_case. Pin them
     /// so the CEX-S2-15 risk-score payload (which CEX-S2-13 only shapes)
-    /// keeps a consistent serialized vocabulary.
+    /// keeps a consistent serialized vocabulary. Asserts the round-trip
+    /// (deserialize too) so a rename that desyncs the reader side is
+    /// caught here, not just the serialize side (matches the
+    /// `ReviewState` pin).
     #[test]
     fn risk_level_serializes_to_stable_snake_case_tags() {
         for (level, tag) in [
@@ -243,6 +246,41 @@ mod tests {
         ] {
             let wire = serde_json::to_string(&level).expect("serialize RiskLevel");
             assert_eq!(wire, tag, "unexpected wire tag for {level:?}");
+            let back: RiskLevel = serde_json::from_str(&wire).expect("deserialize RiskLevel");
+            assert_eq!(back, level, "RiskLevel wire tag must round-trip");
         }
+    }
+
+    /// A populated `RiskScore` (non-empty `factors`) pins to an exact
+    /// JSON wire shape. CEX-S2-15 fills the factors — so freeze the
+    /// serialized vocabulary now against the literal payload, not just a
+    /// serialize→deserialize echo (which a synchronized rename would
+    /// slip through). `factors` is a `Vec<(String, String)>`, so each
+    /// entry serializes as a two-element JSON array; `deny_unknown_fields`
+    /// on the struct means a future field addition that desyncs readers
+    /// of persisted decision records trips the deserialize from-literal.
+    #[test]
+    fn risk_score_round_trips_with_factors() {
+        let score = RiskScore {
+            level: RiskLevel::High,
+            factors: vec![
+                ("budget_token_exceeded".to_string(), "3".to_string()),
+                ("conflict_count".to_string(), "2".to_string()),
+            ],
+        };
+        // The frozen wire shape: snake_case level tag + factors as an
+        // array of [key, value] pairs.
+        const WIRE: &str =
+            r#"{"level":"high","factors":[["budget_token_exceeded","3"],["conflict_count","2"]]}"#;
+
+        let serialized = serde_json::to_string(&score).expect("serialize RiskScore");
+        assert_eq!(serialized, WIRE, "RiskScore wire shape drifted");
+
+        let back: RiskScore =
+            serde_json::from_str(WIRE).expect("deserialize RiskScore from literal");
+        assert_eq!(
+            back, score,
+            "RiskScore must round-trip from the frozen wire shape"
+        );
     }
 }
