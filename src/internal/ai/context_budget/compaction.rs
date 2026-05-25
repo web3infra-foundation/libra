@@ -425,4 +425,98 @@ mod tests {
             "summary must show the token-count delta: {summary}"
         );
     }
+
+    /// CEX-13c freezes the `CompactionEvent` wire contract
+    /// (`#[serde(deny_unknown_fields)]`) — an append-only compaction
+    /// record persisted in JSONL and replayed to explain why context
+    /// changed. Pin the EXACT required key set, the `tail_start_id`
+    /// skip-when-None, that the three id/attachment Vecs always serialize
+    /// (no skip), the `deny_unknown_fields` rejection, and a full
+    /// round-trip — so a rename / added field / dropped-skip silently
+    /// breaking replay trips here.
+    #[test]
+    fn compaction_event_wire_contract_is_frozen() {
+        let base = CompactionEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            reason: CompactionReason::ResumeReplay,
+            summary: "compacted older turns".to_string(),
+            tokens_before: 1000,
+            tokens_after: 400,
+            omitted_segment_ids: Vec::new(),
+            protected_segment_ids: Vec::new(),
+            attachment_refs: Vec::new(),
+            tail_start_id: None,
+        };
+        let base_json = serde_json::to_value(&base).expect("serialize CompactionEvent");
+        let base_keys: std::collections::BTreeSet<&str> = base_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "event_id",
+            "recorded_at",
+            "frame_id",
+            "reason",
+            "summary",
+            "tokens_before",
+            "tokens_after",
+            "omitted_segment_ids",
+            "protected_segment_ids",
+            "attachment_refs",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            base_keys, required,
+            "CompactionEvent (None tail_start_id) must serialize EXACTLY the required key set, \
+             got: {base_json}",
+        );
+        assert_eq!(
+            base_json["omitted_segment_ids"],
+            serde_json::json!([]),
+            "empty Vec fields must serialize as [], not be omitted",
+        );
+        assert_eq!(base_json["protected_segment_ids"], serde_json::json!([]));
+        assert_eq!(base_json["attachment_refs"], serde_json::json!([]));
+
+        let full = CompactionEvent {
+            tail_start_id: Some("seg-42".to_string()),
+            ..base.clone()
+        };
+        let full_json = serde_json::to_value(&full).expect("serialize CompactionEvent");
+        let full_keys: std::collections::BTreeSet<&str> = full_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut full_expected = required.clone();
+        full_expected.insert("tail_start_id");
+        assert_eq!(
+            full_keys, full_expected,
+            "a CompactionEvent with tail_start_id must add EXACTLY tail_start_id, got: {full_json}",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = full_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<CompactionEvent>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: CompactionEvent =
+            serde_json::from_value(full_json.clone()).expect("deserialize CompactionEvent");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            full_json,
+            "CompactionEvent must round-trip its wire shape",
+        );
+    }
 }
