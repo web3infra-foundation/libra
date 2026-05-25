@@ -1178,12 +1178,16 @@ fn workspace_sync_io_error(stage: &'static str, path: &Path, err: io::Error) -> 
 }
 
 fn is_fuse_infrastructure_io_error(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(6) || is_fuse_infrastructure_error_message(&err.to_string())
+    matches!(err.raw_os_error(), Some(5) | Some(6))
+        || is_fuse_infrastructure_error_message(&err.to_string())
 }
 
 pub(crate) fn is_fuse_infrastructure_error_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("device not configured") || lower.contains("os error 6")
+    lower.contains("device not configured")
+        || lower.contains("input/output error")
+        || lower.contains("os error 5")
+        || lower.contains("os error 6")
 }
 
 /// Snapshot the worktree at `task_worktree_dir` and report every changed path
@@ -2147,6 +2151,16 @@ mod tests {
         ));
         assert!(super::is_fuse_infrastructure_error_message(
             "failed to snapshot worktree: os error 6"
+        ));
+    }
+
+    #[test]
+    fn input_output_error_is_classified_as_fuse_infrastructure_error() {
+        assert!(super::is_fuse_infrastructure_error_message(
+            "failed to snapshot workspace: Input/output error (os error 5)"
+        ));
+        assert!(super::is_fuse_infrastructure_io_error(
+            &io::Error::from_raw_os_error(5)
         ));
     }
 
