@@ -65,6 +65,7 @@ pub mod patchset;
 pub mod permission;
 pub mod run;
 pub mod task;
+pub mod workspace_sizing;
 pub mod workspace_strategy;
 
 // ----------------------------------------------------------------------------
