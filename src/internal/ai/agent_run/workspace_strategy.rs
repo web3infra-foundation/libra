@@ -89,6 +89,65 @@ pub fn resolve_full_copy_fallback(allow_full_copy: bool) -> Option<WorkspaceStra
     allow_full_copy.then_some(WorkspaceStrategy::FullCopy)
 }
 
+/// The preferred workspace strategy could not be materialized and
+/// full-copy fallback is disabled (`agent.allow_full_copy = false`).
+/// Per CEX-S2-11 (2) the caller must surface this — telling the operator
+/// how to unblock — rather than silently copying the whole repository.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "could not materialize the preferred sub-agent workspace ({reason}); \
+     full-copy fallback is disabled — set `agent.allow_full_copy = true` to permit \
+     copying the whole repository, or resolve the underlying materialization failure"
+)]
+pub struct MaterializationUnavailable {
+    /// Human-readable reason the preferred strategy failed to materialize.
+    pub reason: String,
+}
+
+/// Resolve the final workspace strategy after attempting to materialize
+/// the preferred one (CEX-S2-11 (2) fallback flow).
+///
+/// `attempt` is the preferred-strategy materialization result: `Ok(())`
+/// when it materialized, `Err(reason)` when it failed.
+///
+/// - `Ok(())` → `(preferred, None)`: no fallback; the size-selected
+///   strategy was used.
+/// - `Err(reason)` + `allow_full_copy` → `(FullCopy, Some(reason))`: the
+///   caller must now materialize via full copy and SHOULD log a warning
+///   (full copy is for debug / small fixtures / emergency compatibility
+///   only). The `reason` becomes the audit event's `fallback_reason`.
+/// - `Err(reason)` + `!allow_full_copy` → [`MaterializationUnavailable`].
+///
+/// Never returns [`WorkspaceStrategy::Blocked`] (a runtime
+/// scope-violation outcome, not a materialization choice).
+pub fn resolve_after_preferred_attempt(
+    preferred: WorkspaceStrategy,
+    attempt: Result<(), String>,
+    allow_full_copy: bool,
+) -> Result<(WorkspaceStrategy, Option<String>), MaterializationUnavailable> {
+    // INVARIANT: `preferred` is a size-selected strategy. `select_preferred_strategy`
+    // only ever yields Worktree or Sparse; FullCopy is a fallback this function
+    // PRODUCES (never accepts as input), and Blocked is a runtime scope-violation
+    // outcome — neither is a valid `preferred`. Guard in debug builds so misuse is
+    // caught in tests rather than silently returning an `Ok((FullCopy, None))` /
+    // `Ok((Blocked, None))` pair that contradicts the contract.
+    debug_assert!(
+        matches!(
+            preferred,
+            WorkspaceStrategy::Worktree | WorkspaceStrategy::Sparse
+        ),
+        "resolve_after_preferred_attempt requires a size-selected preferred strategy \
+         (Worktree | Sparse), got {preferred:?}",
+    );
+    match attempt {
+        Ok(()) => Ok((preferred, None)),
+        Err(reason) => match resolve_full_copy_fallback(allow_full_copy) {
+            Some(fallback) => Ok((fallback, Some(reason))),
+            None => Err(MaterializationUnavailable { reason }),
+        },
+    }
+}
+
 /// Build the [`WorkspaceMaterialized`] event payload (CEX-S2-11 (3))
 /// emitted once per sub-agent workspace creation.
 ///
@@ -319,6 +378,95 @@ mod tests {
             Some(WorkspaceStrategy::FullCopy)
         );
         assert_eq!(resolve_full_copy_fallback(false), None);
+    }
+
+    /// A successful preferred-strategy attempt keeps that strategy with
+    /// no fallback reason — for both size-selected strategies.
+    #[test]
+    fn resolve_after_attempt_keeps_preferred_on_success() {
+        for preferred in [WorkspaceStrategy::Worktree, WorkspaceStrategy::Sparse] {
+            assert_eq!(
+                resolve_after_preferred_attempt(preferred, Ok(()), false),
+                Ok((preferred, None)),
+                "a successful {preferred:?} attempt must not fall back",
+            );
+            // allow_full_copy is irrelevant when the attempt succeeds.
+            assert_eq!(
+                resolve_after_preferred_attempt(preferred, Ok(()), true),
+                Ok((preferred, None)),
+            );
+        }
+    }
+
+    /// A failed preferred attempt falls back to `FullCopy` — carrying the
+    /// failure reason as the audit `fallback_reason` — only when the user
+    /// opted in via `allow_full_copy = true`.
+    #[test]
+    fn resolve_after_attempt_falls_back_to_full_copy_when_opted_in() {
+        let outcome = resolve_after_preferred_attempt(
+            WorkspaceStrategy::Sparse,
+            Err("sparse checkout unavailable: object store offline".to_string()),
+            true,
+        );
+        assert_eq!(
+            outcome,
+            Ok((
+                WorkspaceStrategy::FullCopy,
+                Some("sparse checkout unavailable: object store offline".to_string()),
+            )),
+        );
+    }
+
+    /// A failed preferred attempt WITHOUT the opt-in surfaces
+    /// `MaterializationUnavailable` (never silently full-copies), and the
+    /// error is actionable — it names the reason and points at
+    /// `agent.allow_full_copy`.
+    #[test]
+    fn resolve_after_attempt_errors_without_opt_in() {
+        let err = resolve_after_preferred_attempt(
+            WorkspaceStrategy::Worktree,
+            Err("worktree reservation failed: lock held".to_string()),
+            false,
+        )
+        .expect_err("must not silently full-copy when opt-in is off");
+        assert_eq!(err.reason, "worktree reservation failed: lock held");
+        let message = err.to_string();
+        assert!(
+            message.contains("worktree reservation failed: lock held")
+                && message.contains("agent.allow_full_copy"),
+            "error must name the reason and the opt-in flag: {message}",
+        );
+    }
+
+    /// The `preferred` precondition is guarded in debug builds: passing
+    /// a non-size-selected strategy (`FullCopy` / `Blocked`) panics the
+    /// `debug_assert` rather than returning a nonsensical `Ok` pair.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "size-selected preferred strategy")]
+    fn resolve_after_attempt_rejects_non_size_selected_preferred() {
+        let _ = resolve_after_preferred_attempt(WorkspaceStrategy::FullCopy, Ok(()), false);
+    }
+
+    /// The fallback resolver never produces `Blocked` (a runtime
+    /// scope-violation outcome) — sweep success/failure × opt-in.
+    #[test]
+    fn resolve_after_attempt_never_returns_blocked() {
+        for preferred in [WorkspaceStrategy::Worktree, WorkspaceStrategy::Sparse] {
+            for allow in [false, true] {
+                for attempt in [Ok(()), Err("boom".to_string())] {
+                    if let Ok((strategy, _)) =
+                        resolve_after_preferred_attempt(preferred, attempt, allow)
+                    {
+                        assert_ne!(
+                            strategy,
+                            WorkspaceStrategy::Blocked,
+                            "resolver must never select Blocked",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// `record_materialization` locks `source_repo_size` to the
