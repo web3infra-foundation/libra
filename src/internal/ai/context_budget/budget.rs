@@ -483,7 +483,10 @@ fn sum_segment_tokens(segments: &[ContextSegmentBudget]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextBudgetError, ContextPriority, ContextSegmentKind, TruncationPolicy};
+    use super::{
+        ContextBudgetError, ContextPriority, ContextSegmentKind, ProviderContextCapability,
+        TruncationPolicy,
+    };
 
     #[test]
     fn context_budget_error_display_pins_each_variant() {
@@ -558,6 +561,73 @@ mod tests {
         assert_eq!(
             TruncationPolicy::PreserveSourceLabels.to_string(),
             "preserve_source_labels",
+        );
+    }
+
+    /// `ProviderContextCapability` mirrors opencode's `session/overflow.ts`
+    /// provider-capability shape verbatim (a cross-system config contract,
+    /// frozen with `#[serde(deny_unknown_fields)]`), so a future joint
+    /// Libra ⇄ opencode config is a list concatenation, not a translation.
+    /// The existing tests cover the budget COMPUTATION; this pins the wire
+    /// contract: the EXACT key set (all four fields required), that every
+    /// field is required on read, the `deny_unknown_fields` rejection, and
+    /// a full round-trip — so a rename / added field / dropped requirement
+    /// breaking cross-system config compatibility trips here.
+    #[test]
+    fn provider_context_capability_wire_contract_is_frozen() {
+        let cap = ProviderContextCapability::new("anthropic", "claude-opus-4-7", 128_000, 16_000);
+        let json = serde_json::to_value(&cap).expect("serialize ProviderContextCapability");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "provider",
+            "model",
+            "max_context_tokens",
+            "reserved_output_tokens",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, required,
+            "ProviderContextCapability must serialize EXACTLY its four required fields, got: {json}",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ProviderContextCapability>(serde_json::Value::Object(
+                with_extra
+            ))
+            .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Every field is required on read: removing any one must fail
+        // deserialization (guards against a future #[serde(default)]).
+        for key in &required {
+            let mut missing = json.as_object().expect("object").clone();
+            missing.remove(*key);
+            assert!(
+                serde_json::from_value::<ProviderContextCapability>(serde_json::Value::Object(
+                    missing
+                ))
+                .is_err(),
+                "removing required field `{key}` must fail deserialization",
+            );
+        }
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: ProviderContextCapability =
+            serde_json::from_value(json.clone()).expect("deserialize ProviderContextCapability");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            json,
+            "ProviderContextCapability must round-trip its wire shape",
         );
     }
 }
