@@ -253,6 +253,27 @@ mod tests {
         }
     }
 
+    /// `SkillFrontmatter` is `#[serde(deny_unknown_fields)]`, so a
+    /// typo'd / unknown frontmatter key must surface as a parse error
+    /// (`InvalidToml`) rather than being silently dropped — a skill
+    /// author who writes `allowed-tool` (missing `s`) or `descriptn`
+    /// should be told, not have the key ignored. Pins the deny-unknown
+    /// contract so a future removal of the attribute regresses here. The
+    /// error message carries the offending key for an actionable hint.
+    #[test]
+    fn parse_skill_definition_rejects_unknown_frontmatter_key() {
+        let raw = "---\nname = \"x\"\nallowed-tool = [\"read_file\"]\n---\nbody";
+        match parse_skill_definition(raw) {
+            Err(SkillParseError::InvalidToml(msg)) => {
+                assert!(
+                    msg.contains("allowed-tool"),
+                    "InvalidToml must name the unknown key, got: {msg}",
+                );
+            }
+            other => panic!("expected an unknown frontmatter key to be rejected, got {other:?}"),
+        }
+    }
+
     /// The body section is everything after the closing `---` fence,
     /// trimmed. Pins the trim direction.
     #[test]
