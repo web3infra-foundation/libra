@@ -402,6 +402,79 @@ impl NetworkAccess {
     pub fn from_legacy_bool(allowed: bool) -> Self {
         if allowed { Self::Full } else { Self::Denied }
     }
+
+    /// Restrictiveness rank: `Denied` (0) < `Allowlist` (1) < `Full`
+    /// (2). Lower = more locked-down. Used by [`Self::restrict_with`]
+    /// to pick the more-restrictive of two access settings.
+    fn restrictiveness_rank(&self) -> u8 {
+        match self {
+            Self::Denied => 0,
+            Self::Allowlist { .. } => 1,
+            Self::Full => 2,
+        }
+    }
+
+    /// Combine this policy-derived access with an operator-supplied
+    /// `.libra/sandbox.toml [sandbox.network]` setting, returning the
+    /// **more restrictive** of the two. This is a tightening-only
+    /// operation: the result can never grant more network reach than
+    /// either input, so a config file can lock a workspace down but
+    /// never silently widen a policy.
+    ///
+    /// Per `docs/improvement/sandbox.md` §7.5, *upgrading* network
+    /// access (e.g. opening an allowlist from a `Denied` baseline)
+    /// requires the `ExecApprovalRequest` channel; this combiner
+    /// deliberately does not perform that upgrade. A config `Full`
+    /// applied to a `Denied` policy therefore collapses back to
+    /// `Denied` rather than loosening it.
+    ///
+    /// Semantics by rank:
+    /// - Different ranks → the lower-ranked (more restrictive) value
+    ///   wins, carrying its own services when it is the `Allowlist`.
+    /// - Both `Allowlist` → the **intersection** of the two service
+    ///   lists (by full [`NetworkService`] equality), which is a
+    ///   subset of each input and therefore still strictly tightening.
+    /// - Both `Denied` or both `Full` → that shared value.
+    ///
+    /// An `Allowlist` result that ends up with **no services** (an
+    /// empty config allowlist, or an empty intersection) is collapsed
+    /// to [`NetworkAccess::Denied`]. An allowlist that permits zero
+    /// hosts is semantically deny-all, and collapsing it is also a
+    /// safety requirement: the OS-layer transform builds bwrap /
+    /// seatbelt args from the `Allowlist` *mode* (which shares the
+    /// network namespace) and relies on the proxy to filter. With no
+    /// services the proxy is never started, so an empty `Allowlist`
+    /// reaching the transform under the `PreferStrict` / `BestEffort`
+    /// tiers would leave the namespace shared with only a soft env-var
+    /// signal. Returning `Denied` forces `--unshare-net` instead.
+    pub fn restrict_with(&self, config: &NetworkAccess) -> NetworkAccess {
+        let combined = match self
+            .restrictiveness_rank()
+            .cmp(&config.restrictiveness_rank())
+        {
+            std::cmp::Ordering::Less => self.clone(),
+            std::cmp::Ordering::Greater => config.clone(),
+            std::cmp::Ordering::Equal => match (self, config) {
+                (Self::Allowlist { services: lhs }, Self::Allowlist { services: rhs }) => {
+                    let intersection = lhs
+                        .iter()
+                        .filter(|service| rhs.contains(service))
+                        .cloned()
+                        .collect();
+                    Self::Allowlist {
+                        services: intersection,
+                    }
+                }
+                // Both `Denied` or both `Full` — identical, return either.
+                _ => self.clone(),
+            },
+        };
+
+        match combined {
+            Self::Allowlist { services } if services.is_empty() => Self::Denied,
+            other => other,
+        }
+    }
 }
 
 pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
@@ -533,6 +606,39 @@ impl SandboxPolicy {
             Self::ReadOnly => false,
             Self::ExternalSandbox { network_access } => network_access.is_enabled(),
             Self::WorkspaceWrite { network_access, .. } => network_access.is_enabled(),
+        }
+    }
+
+    /// Return a copy of this policy with its network access tightened
+    /// by an operator-supplied `.libra/sandbox.toml [sandbox.network]`
+    /// setting (see [`NetworkAccess::restrict_with`]). The restriction
+    /// is tightening-only: it can lock the workspace down but never
+    /// widen the policy's reach.
+    ///
+    /// Only the network-bearing variants ([`Self::WorkspaceWrite`] and
+    /// [`Self::ExternalSandbox`]) are affected. [`Self::ReadOnly`] is
+    /// already `Denied`, and [`Self::DangerFullAccess`] is an explicit
+    /// host-level escalation with no `network_access` field — the
+    /// config file does not silently downgrade it (an operator who set
+    /// `DangerFullAccess` opted out of the sandbox entirely), so it is
+    /// returned unchanged.
+    pub fn with_network_restriction(&self, config: &NetworkAccess) -> SandboxPolicy {
+        match self {
+            Self::ExternalSandbox { network_access } => Self::ExternalSandbox {
+                network_access: network_access.restrict_with(config),
+            },
+            Self::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                exclude_tmpdir_env_var,
+                exclude_slash_tmp,
+            } => Self::WorkspaceWrite {
+                writable_roots: writable_roots.clone(),
+                network_access: network_access.restrict_with(config),
+                exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
+                exclude_slash_tmp: *exclude_slash_tmp,
+            },
+            Self::DangerFullAccess | Self::ReadOnly => self.clone(),
         }
     }
 
@@ -1251,5 +1357,167 @@ mod tests {
                  `expecting` hint about legacy boolean / tagged object, got: {message}",
             );
         }
+    }
+
+    fn svc(host: &str, ports: Vec<u16>) -> NetworkService {
+        NetworkService {
+            host: host.to_string(),
+            ports,
+            protocol: None,
+        }
+    }
+
+    /// `restrict_with` is tightening-only: when the two inputs have
+    /// different restrictiveness ranks (`Denied < Allowlist < Full`),
+    /// the lower-ranked (more locked-down) value always wins, carrying
+    /// its own services when it is the `Allowlist`. Critically, a
+    /// config `Full` applied to a `Denied` policy must NOT loosen it —
+    /// that upgrade requires the approval channel (sandbox.md §7.5).
+    #[test]
+    fn restrict_with_returns_more_restrictive_across_ranks() {
+        let allowlist = NetworkAccess::Allowlist {
+            services: vec![svc("registry.npmjs.org", vec![443])],
+        };
+
+        // Config tightens Full → Allowlist (config's services define the set).
+        assert_eq!(NetworkAccess::Full.restrict_with(&allowlist), allowlist);
+        // Symmetric: a policy allowlist narrowed by a config Full stays the allowlist.
+        assert_eq!(allowlist.restrict_with(&NetworkAccess::Full), allowlist);
+
+        // Denied always wins regardless of the other side.
+        assert_eq!(
+            NetworkAccess::Full.restrict_with(&NetworkAccess::Denied),
+            NetworkAccess::Denied
+        );
+        assert_eq!(
+            allowlist.restrict_with(&NetworkAccess::Denied),
+            NetworkAccess::Denied
+        );
+
+        // A config `Full` can NEVER widen a more-restrictive policy.
+        assert_eq!(
+            NetworkAccess::Denied.restrict_with(&NetworkAccess::Full),
+            NetworkAccess::Denied
+        );
+        assert_eq!(
+            allowlist.restrict_with(&NetworkAccess::Full),
+            allowlist,
+            "config Full must not loosen a policy allowlist to Full",
+        );
+
+        // A config allowlist with NO services narrowing a Full policy
+        // is deny-all, not "allow everything" — must collapse to Denied.
+        let empty_allowlist = NetworkAccess::Allowlist { services: vec![] };
+        assert_eq!(
+            NetworkAccess::Full.restrict_with(&empty_allowlist),
+            NetworkAccess::Denied,
+            "an empty config allowlist must lock a Full policy down to Denied",
+        );
+    }
+
+    /// Two `Allowlist`s combine to the **intersection** of their
+    /// service lists, which is a subset of each input — so the result
+    /// can never grant a host that only one side allowed. An empty
+    /// intersection collapses to `Denied` (deny-all), never an empty
+    /// `Allowlist`.
+    #[test]
+    fn restrict_with_intersects_two_allowlists() {
+        let policy = NetworkAccess::Allowlist {
+            services: vec![
+                svc("a.example.com", vec![443]),
+                svc("b.example.com", vec![443]),
+            ],
+        };
+        let config = NetworkAccess::Allowlist {
+            services: vec![
+                svc("b.example.com", vec![443]),
+                svc("c.example.com", vec![443]),
+            ],
+        };
+        // Only `b` (identical host+ports) is in both lists.
+        assert_eq!(
+            policy.restrict_with(&config),
+            NetworkAccess::Allowlist {
+                services: vec![svc("b.example.com", vec![443])],
+            }
+        );
+
+        // Differing ports = different service = excluded from the
+        // intersection. The resulting empty allowlist collapses to
+        // Denied (deny-all) rather than an empty `Allowlist`.
+        let port_mismatch = NetworkAccess::Allowlist {
+            services: vec![svc("b.example.com", vec![8443])],
+        };
+        assert_eq!(
+            policy.restrict_with(&port_mismatch),
+            NetworkAccess::Denied,
+            "an empty intersection must collapse to Denied, never an empty allowlist",
+        );
+
+        // A disjoint config allowlist (no shared host) also collapses to Denied.
+        let disjoint = NetworkAccess::Allowlist {
+            services: vec![svc("z.example.com", vec![443])],
+        };
+        assert_eq!(policy.restrict_with(&disjoint), NetworkAccess::Denied);
+
+        // Both Denied / both Full collapse to that shared value.
+        assert_eq!(
+            NetworkAccess::Denied.restrict_with(&NetworkAccess::Denied),
+            NetworkAccess::Denied
+        );
+        assert_eq!(
+            NetworkAccess::Full.restrict_with(&NetworkAccess::Full),
+            NetworkAccess::Full
+        );
+    }
+
+    /// `with_network_restriction` tightens only the network-bearing
+    /// variants. `ReadOnly` (already `Denied`) and `DangerFullAccess`
+    /// (explicit host-level escalation with no `network_access` field)
+    /// are returned unchanged so a config file cannot silently mutate
+    /// an opt-out-of-sandbox decision.
+    #[test]
+    fn with_network_restriction_only_touches_network_bearing_variants() {
+        let workspace = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/tmp/ws")],
+            network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: false,
+        };
+        match workspace.with_network_restriction(&NetworkAccess::Denied) {
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                exclude_tmpdir_env_var,
+                exclude_slash_tmp,
+            } => {
+                assert_eq!(network_access, NetworkAccess::Denied);
+                // Non-network fields must be preserved verbatim.
+                assert_eq!(writable_roots, vec![PathBuf::from("/tmp/ws")]);
+                assert!(exclude_tmpdir_env_var);
+                assert!(!exclude_slash_tmp);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+
+        let external = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Full,
+        };
+        assert_eq!(
+            external.with_network_restriction(&NetworkAccess::Denied),
+            SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Denied
+            },
+        );
+
+        // ReadOnly and DangerFullAccess pass through untouched.
+        assert_eq!(
+            SandboxPolicy::ReadOnly.with_network_restriction(&NetworkAccess::Full),
+            SandboxPolicy::ReadOnly,
+        );
+        assert_eq!(
+            SandboxPolicy::DangerFullAccess.with_network_restriction(&NetworkAccess::Denied),
+            SandboxPolicy::DangerFullAccess,
+        );
     }
 }

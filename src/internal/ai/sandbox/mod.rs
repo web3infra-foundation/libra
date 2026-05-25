@@ -1295,16 +1295,36 @@ fn build_command_from_spec(
         .map(|config| config.use_linux_sandbox_bwrap)
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
-    let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
+    // Read `.libra/sandbox.toml` once and derive both deny-read paths
+    // and the network restriction from the same parsed struct, so the
+    // two never observe different file versions under a concurrent edit.
+    let sandbox_config = load_sandbox_config_file(&sandbox_policy_cwd)?;
+    let deny_read_paths =
+        resolve_deny_read_paths_from(&sandbox_config, &sandbox_policy_cwd, sandbox_runtime);
     let fallback_seccomp_policy_path = resolve_seccomp_policy_path();
     let seccomp_policy_path = sandbox_runtime
         .and_then(|cfg| cfg.seccomp_policy_path.as_deref())
         .or(fallback_seccomp_policy_path.as_deref());
+    // Apply any `.libra/sandbox.toml [sandbox.network]` restriction to
+    // the policy BEFORE the transform reads it. This is tightening-only
+    // (see `SandboxPolicy::with_network_restriction`): the config can
+    // lock the workspace down but never widen the policy's reach, so the
+    // security-critical transform derivation is left untouched.
+    let config_network_access = sandbox_config.network_access()?;
+    let restricted_policy = match (sandbox, &config_network_access) {
+        (Some(context), Some(config_access)) => {
+            Some(context.policy.with_network_restriction(config_access))
+        }
+        _ => None,
+    };
+    let effective_policy = restricted_policy
+        .as_ref()
+        .or_else(|| sandbox.map(|context| &context.policy));
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
             spec,
-            policy: sandbox.map(|context| &context.policy),
+            policy: effective_policy,
             sandbox_policy_cwd: &sandbox_policy_cwd,
             linux_sandbox_exe: linux_sandbox_exe.as_ref(),
             use_linux_sandbox_bwrap,
@@ -1401,22 +1421,126 @@ fn inject_allowlist_proxy_env(
 struct SandboxConfigFile {
     #[serde(default)]
     deny_read: Vec<PathBuf>,
+    /// Optional `[sandbox]` table. Network access lives under
+    /// `[sandbox.network]` per `docs/improvement/sandbox.md` §7.3,
+    /// while `deny_read` stays at the file root for backward
+    /// compatibility with existing configs.
+    #[serde(default)]
+    sandbox: Option<SandboxConfigSection>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxConfigSection {
+    #[serde(default)]
+    network: Option<SandboxNetworkConfig>,
+}
+
+/// The `[sandbox.network]` section of `.libra/sandbox.toml`.
+///
+/// ```toml
+/// [sandbox.network]
+/// mode = "allowlist"  # denied | allowlist | full; default denied
+///
+/// [[sandbox.network.services]]
+/// host = "registry.npmjs.org"
+/// ports = [443]
+/// ```
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxNetworkConfig {
+    #[serde(default)]
+    mode: SandboxNetworkMode,
+    /// Allowlist entries; only consulted when `mode = "allowlist"`.
+    #[serde(default)]
+    services: Vec<NetworkService>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SandboxNetworkMode {
+    #[default]
+    Denied,
+    Allowlist,
+    Full,
+}
+
+impl SandboxConfigFile {
+    /// Translate the `[sandbox.network]` section into a
+    /// [`NetworkAccess`], validating allowlist services per
+    /// `docs/improvement/sandbox.md` §7.3 (no bare `*` / empty host,
+    /// no implicit high-sensitivity-port grants). Returns `Ok(None)`
+    /// when no `[sandbox.network]` section is present so callers leave
+    /// the policy-derived access untouched.
+    ///
+    /// The returned access is only ever applied as a *tightening*
+    /// constraint via [`SandboxPolicy::with_network_restriction`], so a
+    /// `mode = "full"` here can never loosen a more-restrictive policy.
+    fn network_access(&self) -> Result<Option<NetworkAccess>, String> {
+        let Some(network) = self
+            .sandbox
+            .as_ref()
+            .and_then(|section| section.network.as_ref())
+        else {
+            return Ok(None);
+        };
+
+        let access = match network.mode {
+            SandboxNetworkMode::Denied => NetworkAccess::Denied,
+            SandboxNetworkMode::Full => NetworkAccess::Full,
+            SandboxNetworkMode::Allowlist => {
+                for service in &network.services {
+                    service.validate().map_err(|error| {
+                        format!(
+                            "invalid `[sandbox.network]` service '{}' in .libra/sandbox.toml: {error}",
+                            service.host
+                        )
+                    })?;
+                }
+                NetworkAccess::Allowlist {
+                    services: network.services.clone(),
+                }
+            }
+        };
+        Ok(Some(access))
+    }
+}
+
+/// Load `.libra/sandbox.toml` and resolve its deny-read paths in one
+/// call. Production code (`build_command_from_spec`) loads the file
+/// once and calls [`resolve_deny_read_paths_from`] directly so the
+/// network section is derived from the same parsed struct; this
+/// convenience wrapper is retained for the focused deny-read tests,
+/// which also exercise the load/parse-error path.
+#[cfg(test)]
 fn resolve_deny_read_paths(
     cwd: &Path,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<Vec<PathBuf>, String> {
-    let mut paths = load_sandbox_config_file(cwd)?.deny_read;
-    if let Some(config) = sandbox_runtime {
-        paths.extend(config.deny_read_paths.iter().cloned());
+    let config = load_sandbox_config_file(cwd)?;
+    Ok(resolve_deny_read_paths_from(&config, cwd, sandbox_runtime))
+}
+
+/// Resolve deny-read paths from an already-loaded config so the
+/// `.libra/sandbox.toml` file is read once per command setup (the
+/// network access is derived from the same parsed struct). Reading it
+/// twice could otherwise observe two different file versions if the
+/// file is edited concurrently.
+fn resolve_deny_read_paths_from(
+    config: &SandboxConfigFile,
+    cwd: &Path,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Vec<PathBuf> {
+    let mut paths = config.deny_read.clone();
+    if let Some(runtime) = sandbox_runtime {
+        paths.extend(runtime.deny_read_paths.iter().cloned());
     }
 
     let mut resolved = Vec::with_capacity(paths.len());
     for path in paths {
         push_unique_path(&mut resolved, resolve_deny_read_path(cwd, path));
     }
-    Ok(resolved)
+    resolved
 }
 
 fn load_sandbox_config_file(cwd: &Path) -> Result<SandboxConfigFile, String> {
@@ -2300,6 +2424,167 @@ mod tests {
             error.contains("failed to parse sandbox config"),
             "unexpected error: {error}"
         );
+    }
+
+    fn parse_network_access(toml: &str) -> Result<Option<NetworkAccess>, String> {
+        toml::from_str::<SandboxConfigFile>(toml)
+            .map_err(|error| error.to_string())?
+            .network_access()
+    }
+
+    /// `[sandbox.network]` is optional. A config with only the legacy
+    /// top-level `deny_read` (or an empty file) yields `None`, leaving
+    /// the policy-derived network access untouched.
+    #[test]
+    fn config_network_access_absent_yields_none() {
+        assert_eq!(parse_network_access("").expect("empty parses"), None);
+        assert_eq!(
+            parse_network_access(r#"deny_read = ["/secret"]"#).expect("deny_read-only parses"),
+            None,
+            "deny_read at root must not be confused for a network section",
+        );
+    }
+
+    /// A misspelled table or field name under `[sandbox]` must fail
+    /// loudly rather than be silently ignored (which would leave the
+    /// intended restriction unapplied). `deny_unknown_fields` on the
+    /// new config structs guarantees this; an unknown `mode` value is
+    /// already rejected by the enum.
+    #[test]
+    fn config_network_access_rejects_unknown_keys_and_modes() {
+        // Typo'd subtable name: `networks` instead of `network`.
+        assert!(
+            parse_network_access("[sandbox.networks]\nmode = \"denied\"").is_err(),
+            "a typo'd [sandbox.networks] table must not be silently ignored",
+        );
+        // Typo'd field inside the network table.
+        assert!(
+            parse_network_access("[sandbox.network]\nmodee = \"denied\"").is_err(),
+            "a typo'd field under [sandbox.network] must be rejected",
+        );
+        // Unknown mode value.
+        assert!(
+            parse_network_access("[sandbox.network]\nmode = \"denyed\"").is_err(),
+            "an unknown mode value must be rejected",
+        );
+    }
+
+    /// The three documented `mode` values map onto the three-state
+    /// `NetworkAccess` (sandbox.md §7.3). `deny_read` at the root and
+    /// `[sandbox.network]` coexist in one file without collision.
+    #[test]
+    fn config_network_access_parses_each_mode() {
+        assert_eq!(
+            parse_network_access("[sandbox.network]\nmode = \"denied\"").expect("denied parses"),
+            Some(NetworkAccess::Denied),
+        );
+        assert_eq!(
+            parse_network_access("[sandbox.network]\nmode = \"full\"").expect("full parses"),
+            Some(NetworkAccess::Full),
+        );
+
+        let allowlist = parse_network_access(
+            "deny_read = [\"/secret\"]\n\
+             [sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("allowlist parses");
+        assert_eq!(
+            allowlist,
+            Some(NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }),
+        );
+    }
+
+    /// Allowlist services are validated per sandbox.md §7.3: a bare
+    /// `host = "*"` and an entry that omits `ports` for a
+    /// high-sensitivity service are rejected with an actionable,
+    /// file-attributed error.
+    #[test]
+    fn config_network_access_rejects_invalid_allowlist_services() {
+        let wildcard = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"*\"\n\
+             ports = [443]\n",
+        )
+        .expect_err("bare wildcard host must be rejected");
+        assert!(
+            wildcard.contains(".libra/sandbox.toml") && wildcard.contains("bare wildcard"),
+            "expected file-attributed wildcard error, got: {wildcard}",
+        );
+
+        let empty_ports = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"bastion.example.com\"\n",
+        )
+        .expect_err("empty ports on a high-sensitivity entry must be rejected");
+        assert!(
+            empty_ports.contains("high-sensitivity"),
+            "expected high-sensitivity-port error, got: {empty_ports}",
+        );
+    }
+
+    /// End-to-end of the tightening wire: a `mode = "denied"` config
+    /// locks down a `WorkspaceWrite { Full }` policy, while a config
+    /// allowlist narrows a `Full` policy to exactly the listed
+    /// services. The config can never widen the policy.
+    #[test]
+    fn config_network_access_tightens_policy_via_with_network_restriction() {
+        let full_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+
+        let denied = parse_network_access("[sandbox.network]\nmode = \"denied\"")
+            .expect("denied parses")
+            .expect("present");
+        match full_policy.with_network_restriction(&denied) {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(network_access, NetworkAccess::Denied);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+
+        // A config that opens an allowlist cannot loosen a Denied policy.
+        let denied_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let allowlist = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("allowlist parses")
+        .expect("present");
+        match denied_policy.with_network_restriction(&allowlist) {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(
+                    network_access,
+                    NetworkAccess::Denied,
+                    "config allowlist must not open a Denied policy without approval",
+                );
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
     }
 
     #[test]
