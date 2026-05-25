@@ -80,3 +80,75 @@ pub fn get_tree_files_recursive(
     }
     Ok(files)
 }
+
+#[cfg(test)]
+mod tests {
+    use git_internal::{hash::ObjectHash, internal::index::IndexEntry};
+
+    use super::*;
+
+    fn entry(name: &str, mode: u32) -> IndexEntry {
+        let mut e = IndexEntry::new_from_blob(name.to_string(), ObjectHash::new(&[1; 20]), 0);
+        e.mode = mode;
+        e
+    }
+
+    fn item_mode(tree: &Tree, name: &str) -> TreeItemMode {
+        tree.tree_items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("tree must contain `{name}`"))
+            .mode
+    }
+
+    /// `create_tree_from_index` maps each index file-type/permission bit
+    /// to the correct `TreeItemMode`. A wrong mapping corrupts the
+    /// committed tree — e.g. losing the executable bit, or storing a
+    /// symlink as a regular blob. Pin every supported mode.
+    #[test]
+    fn create_tree_maps_each_file_mode() {
+        let mut index = Index::new();
+        index.add(entry("regular.txt", 0o100644));
+        index.add(entry("script.sh", 0o100755)); // exec bit set
+        index.add(entry("link", 0o120000)); // symlink
+        index.add(entry("submodule", 0o160000)); // gitlink
+
+        let tree = create_tree_from_index(&index).expect("supported modes must build a tree");
+
+        assert_eq!(item_mode(&tree, "regular.txt"), TreeItemMode::Blob);
+        assert_eq!(item_mode(&tree, "script.sh"), TreeItemMode::BlobExecutable);
+        assert_eq!(item_mode(&tree, "link"), TreeItemMode::Link);
+        assert_eq!(item_mode(&tree, "submodule"), TreeItemMode::Commit);
+    }
+
+    /// The executable bit is detected via `mode & 0o111`: any of the
+    /// user/group/other execute bits flips a regular file to
+    /// `BlobExecutable`, and a regular file with none stays `Blob`.
+    #[test]
+    fn create_tree_detects_executable_bit_via_mask() {
+        let mut index = Index::new();
+        index.add(entry("group_exec", 0o100750)); // only group +x
+        index.add(entry("other_exec", 0o100701)); // only other +x
+        index.add(entry("plain", 0o100644));
+
+        let tree = create_tree_from_index(&index).expect("build tree");
+        assert_eq!(item_mode(&tree, "group_exec"), TreeItemMode::BlobExecutable);
+        assert_eq!(item_mode(&tree, "other_exec"), TreeItemMode::BlobExecutable);
+        assert_eq!(item_mode(&tree, "plain"), TreeItemMode::Blob);
+    }
+
+    /// An unsupported file-type mode (e.g. a FIFO, `0o010000`) is a
+    /// hard error rather than a silently-mismapped tree entry —
+    /// corrupted index data must not produce a malformed tree.
+    #[test]
+    fn create_tree_rejects_unsupported_file_mode() {
+        let mut index = Index::new();
+        index.add(entry("fifo", 0o010000));
+        let err =
+            create_tree_from_index(&index).expect_err("unsupported file mode must be rejected");
+        assert!(
+            matches!(err, GitError::InvalidTreeItem(_)),
+            "expected InvalidTreeItem, got {err:?}",
+        );
+    }
+}
