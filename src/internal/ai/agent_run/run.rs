@@ -149,4 +149,87 @@ mod tests {
             assert_eq!(back, status, "AgentRunStatus wire tag must round-trip");
         }
     }
+
+    /// CEX-S2-10 freezes the `AgentRun` wire contract
+    /// (`#[serde(deny_unknown_fields)]`) — the central run record
+    /// persisted to `agents/{run_id}.jsonl` and replayed by projection.
+    /// The tests above pin only the `AgentRunStatus` field; pin the
+    /// struct's required field set, the `workspace_path` skip-when-None,
+    /// the `deny_unknown_fields` rejection, and the round-trip too, so a
+    /// rename / added field / dropped-skip silently breaking persisted
+    /// runs trips here.
+    #[test]
+    fn agent_run_wire_contract_is_frozen() {
+        // Pre-materialization run: `workspace_path` None is omitted.
+        let unmaterialized = AgentRun {
+            id: AgentRunId::new(),
+            task_id: AgentTaskId::new(),
+            thread_id: Uuid::new_v4(),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            transcript_path: ".libra/sessions/t/agents/r.jsonl".to_string(),
+            workspace_path: None,
+            status: AgentRunStatus::Queued,
+        };
+        let json = serde_json::to_value(&unmaterialized).expect("serialize AgentRun");
+        let obj = json.as_object().expect("AgentRun serializes to an object");
+        // Assert the EXACT frozen key set, not just presence — so a
+        // future added field (which old deny_unknown_fields readers would
+        // reject) trips here rather than slipping through.
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        let base_keys: std::collections::BTreeSet<&str> = [
+            "id",
+            "task_id",
+            "thread_id",
+            "provider",
+            "model",
+            "transcript_path",
+            "status",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, base_keys,
+            "AgentRun (None workspace_path) must serialize EXACTLY the frozen key set \
+             (workspace_path omitted by skip_serializing_if), got: {json}",
+        );
+
+        // Materialized run: `workspace_path` present when `Some` — and
+        // exactly one extra key beyond the base set.
+        let materialized = AgentRun {
+            workspace_path: Some(".libra/sessions/t/worktrees/tasks/r/workspace".to_string()),
+            ..unmaterialized
+        };
+        let materialized_json = serde_json::to_value(&materialized).expect("serialize AgentRun");
+        let materialized_keys: std::collections::BTreeSet<&str> = materialized_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut materialized_expected = base_keys.clone();
+        materialized_expected.insert("workspace_path");
+        assert_eq!(
+            materialized_keys, materialized_expected,
+            "materialized AgentRun must serialize EXACTLY the base set plus workspace_path, \
+             got: {materialized_json}",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = materialized_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<AgentRun>(serde_json::Value::Object(with_extra)).is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: AgentRun =
+            serde_json::from_value(materialized_json.clone()).expect("deserialize AgentRun");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            materialized_json,
+            "AgentRun must round-trip its wire shape",
+        );
+    }
 }
