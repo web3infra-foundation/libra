@@ -48,7 +48,10 @@ use sea_orm::{
 use tokio::time::sleep;
 
 use crate::{
-    internal::model::reference::{self, ConfigKind},
+    internal::{
+        ai::observed_agents::RedactedBytes,
+        model::reference::{self, ConfigKind},
+    },
     utils::{
         object::{read_git_object, write_git_object},
         storage::Storage,
@@ -882,7 +885,7 @@ impl HistoryManager {
         let metadata_blob_oid = write_git_object(&self.repo_path, "blob", params.metadata_json)
             .context("failed to write checkpoint metadata.json blob")?;
         let transcript_blob_oid =
-            write_git_object(&self.repo_path, "blob", params.transcript_redacted)
+            write_git_object(&self.repo_path, "blob", params.transcript_redacted.bytes())
                 .context("failed to write checkpoint transcript blob")?;
         let events_blob_oid = match params.events_jsonl {
             Some(bytes) => Some(
@@ -1150,8 +1153,12 @@ pub struct CheckpointCommitParams<'a> {
     pub tool_use_id: Option<&'a str>,
     /// Pre-serialised metadata JSON to land at `metadata.json`.
     pub metadata_json: &'a [u8],
-    /// Already-redacted transcript bytes.
-    pub transcript_redacted: &'a [u8],
+    /// Already-redacted transcript bytes. Typed as [`RedactedBytes`]
+    /// (not `&[u8]`) so the agent-traces write path can only ever receive
+    /// bytes that passed through the redaction type — entire.md §8.1 /
+    /// §13 P0: every transcript blob written to `agent-traces` must go
+    /// through `RedactedBytes`.
+    pub transcript_redacted: &'a RedactedBytes,
     /// File-name component used inside `transcript/<name>` and
     /// `events/<name>.jsonl`. Conventionally the agent's slug
     /// (`claude_code`, `gemini`, …).
