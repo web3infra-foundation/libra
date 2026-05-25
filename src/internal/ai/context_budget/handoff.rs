@@ -1340,4 +1340,84 @@ This is prose, not a bullet.
             texts[2],
         );
     }
+
+    /// CEX-13c / OC-Phase 4 P4.4 freeze the `ContextHandoff` wire
+    /// contract (`#[serde(deny_unknown_fields)]`) — the compacted
+    /// parent→child handoff envelope whose `source_frame_id` lets replay
+    /// match the transcript. All six fields are required (no optionals,
+    /// no skip, no `#[serde(default)]`). Pin the EXACT key set, that both
+    /// Vec fields serialize as `[]`, the `deny_unknown_fields` rejection,
+    /// and a full round-trip — so a rename / added field silently
+    /// breaking replay trips here.
+    #[test]
+    fn context_handoff_wire_contract_is_frozen() {
+        let handoff = ContextHandoff {
+            summary: "compacted parent summary".to_string(),
+            recent_tail: Vec::new(),
+            attachment_refs: Vec::new(),
+            source_frame_id: Uuid::new_v4(),
+            remaining_budget_tokens: 4096,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&handoff).expect("serialize ContextHandoff");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "summary",
+            "recent_tail",
+            "attachment_refs",
+            "source_frame_id",
+            "remaining_budget_tokens",
+            "created_at",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, required,
+            "ContextHandoff must serialize EXACTLY its six required fields (no optionals), \
+             got: {json}",
+        );
+        assert_eq!(
+            json["recent_tail"],
+            serde_json::json!([]),
+            "empty recent_tail must serialize as [], not be omitted",
+        );
+        assert_eq!(json["attachment_refs"], serde_json::json!([]));
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ContextHandoff>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Every field is required on read: removing any one must fail
+        // deserialization. Guards against a future #[serde(default)] (or
+        // skip) silently weakening the contract to admit an incomplete
+        // handoff envelope.
+        for key in &required {
+            let mut missing = json.as_object().expect("object").clone();
+            missing.remove(*key);
+            assert!(
+                serde_json::from_value::<ContextHandoff>(serde_json::Value::Object(missing))
+                    .is_err(),
+                "removing required field `{key}` must fail deserialization",
+            );
+        }
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: ContextHandoff =
+            serde_json::from_value(json.clone()).expect("deserialize ContextHandoff");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            json,
+            "ContextHandoff must round-trip its wire shape",
+        );
+    }
 }
