@@ -82,6 +82,91 @@ mod tests {
         }
     }
 
+    /// CEX-S2-10 freezes the `AgentContextPack` wire contract
+    /// (`#[serde(deny_unknown_fields)]`). The tests below cover scope
+    /// LOGIC; this one pins the SERDE contract: the EXACT key set
+    /// (`read_scope` / `write_scope` carry `#[serde(default)]` but NO
+    /// skip, so they always serialize — even empty as `[]`), the
+    /// `source_intent_id` skip-when-None / present-when-Some, the
+    /// `serde(default)` scope behaviour on read, the `deny_unknown_fields`
+    /// rejection, and the round-trip.
+    #[test]
+    fn agent_context_pack_wire_contract_is_frozen() {
+        // Minimal pack: empty scopes still serialize as `[]`; intent omitted.
+        let minimal = pack(&[], &[]);
+        let json = serde_json::to_value(&minimal).expect("serialize AgentContextPack");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let base: std::collections::BTreeSet<&str> =
+            ["task_id", "goal", "read_scope", "write_scope"]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            keys, base,
+            "AgentContextPack (None intent) must serialize EXACTLY the frozen key set \
+             (scopes have no skip_serializing_if), got: {json}",
+        );
+        assert_eq!(
+            json["read_scope"],
+            serde_json::json!([]),
+            "empty read_scope must serialize as [], not be omitted",
+        );
+        assert_eq!(json["write_scope"], serde_json::json!([]));
+
+        // Populated scopes + intent present.
+        let full = AgentContextPack {
+            source_intent_id: Some(Uuid::new_v4()),
+            ..pack(&["src"], &["src/foo.rs"])
+        };
+        let full_json = serde_json::to_value(&full).expect("serialize AgentContextPack");
+        let full_keys: std::collections::BTreeSet<&str> = full_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut full_expected = base.clone();
+        full_expected.insert("source_intent_id");
+        assert_eq!(
+            full_keys, full_expected,
+            "populated AgentContextPack must add EXACTLY source_intent_id, got: {full_json}",
+        );
+
+        // `#[serde(default)]` scopes: omitted on read default to empty.
+        let mut without_scopes = json.as_object().expect("object").clone();
+        without_scopes.remove("read_scope");
+        without_scopes.remove("write_scope");
+        let parsed: AgentContextPack =
+            serde_json::from_value(serde_json::Value::Object(without_scopes))
+                .expect("deserialize without scopes");
+        assert!(
+            parsed.read_scope.is_empty() && parsed.write_scope.is_empty(),
+            "omitted #[serde(default)] scopes must default to empty",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = full_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<AgentContextPack>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: AgentContextPack =
+            serde_json::from_value(full_json.clone()).expect("deserialize AgentContextPack");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            full_json,
+            "AgentContextPack must round-trip its wire shape",
+        );
+    }
+
     /// Write entries equal to or nested under a read entry satisfy the
     /// subset invariant.
     #[test]
