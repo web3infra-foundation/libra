@@ -60,7 +60,7 @@ use crate::internal::ai::{
         CompletionError, CompletionModel, CompletionStreamEvent, CompletionUsage,
         CompletionUsageSummary, Message,
     },
-    sandbox::{ExecApprovalRequest, ReviewDecision},
+    sandbox::{ExecApprovalRequest, NetworkAccess, ReviewDecision},
     session::{SessionState, SessionStore},
     tools::{
         ToolOutput, ToolRegistry,
@@ -812,7 +812,7 @@ fn exec_approval_request_to_metadata(request: &ExecApprovalRequest) -> serde_jso
         "reason": request.reason,
         "is_retry": request.is_retry,
         "sandbox_label": request.sandbox_label,
-        "network_access": request.network_access,
+        "network_access": network_access_label(&request.network_access),
         "writable_roots": request
             .writable_roots
             .iter()
@@ -820,6 +820,14 @@ fn exec_approval_request_to_metadata(request: &ExecApprovalRequest) -> serde_jso
             .collect::<Vec<_>>(),
         "cache_disabled_reason": request.cache_disabled_reason,
     })
+}
+
+fn network_access_label(network_access: &NetworkAccess) -> &'static str {
+    match network_access {
+        NetworkAccess::Denied => "denied",
+        NetworkAccess::Allowlist { .. } => "allowlist",
+        NetworkAccess::Full => "full",
+    }
 }
 
 fn review_decision_from_interaction_response(

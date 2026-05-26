@@ -16,7 +16,7 @@ use libra::internal::ai::{
     completion::Message,
     providers::fake,
     runtime::{ToolBoundaryRuntime, TracingAuditSink},
-    sandbox::ExecApprovalRequest,
+    sandbox::{ExecApprovalRequest, NetworkAccess},
     session::{SessionState, SessionStore},
     tools::{
         ToolRegistryBuilder,
@@ -544,7 +544,7 @@ async fn exec_approval_request_is_reflected_in_snapshot_and_responded_to() {
             reason: Some("Run cargo check for repository validation".to_string()),
             is_retry: false,
             sandbox_label: "workspace-write".to_string(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             writable_roots: Vec::new(),
             cache_disabled_reason: None,
             response_tx,

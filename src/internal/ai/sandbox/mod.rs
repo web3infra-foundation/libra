@@ -805,7 +805,7 @@ pub struct ExecApprovalRequest {
     pub reason: Option<String>,
     pub is_retry: bool,
     pub sandbox_label: String,
-    pub network_access: bool,
+    pub network_access: NetworkAccess,
     pub writable_roots: Vec<PathBuf>,
     pub cache_disabled_reason: Option<String>,
     pub response_tx: oneshot::Sender<ReviewDecision>,
@@ -902,7 +902,7 @@ pub async fn run_shell_command(
             .unwrap_or(SandboxPermissions::UseDefault),
         None,
     );
-    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime).await
+    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime, None).await
 }
 
 pub async fn run_shell_command_with_approval(
@@ -970,42 +970,121 @@ pub async fn run_shell_command_with_approval(
     };
 
     let mut already_approved = allow_all_bypasses_prompt;
-    if let Some(approval_ctx) = approval.as_ref() {
-        match requirement {
-            ExecApprovalRequirement::Skip { .. } => {}
-            ExecApprovalRequirement::NeedsApproval { ref reason } => {
-                let decision = request_exec_approval(
-                    approval_ctx,
-                    ExecApprovalPrompt {
-                        call_id: &call_id,
-                        command: &command,
-                        cwd: &cwd,
-                        reason: reason.clone().or_else(|| {
-                            justification
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|text| !text.is_empty())
-                                .map(ToString::to_string)
-                        }),
-                        sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
-                        sandbox_permissions: spec.sandbox_permissions,
-                        is_retry: false,
-                    },
-                )
-                .await;
 
-                if decision.is_approved() {
+    if let ExecApprovalRequirement::Forbidden { ref reason } = requirement {
+        return Err(reason.clone());
+    }
+
+    let network_access_upgrade = if approval.is_some() {
+        requested_network_access_upgrade(
+            sandbox.as_ref().map(|context| &context.policy),
+            spec.sandbox_permissions,
+            &cwd,
+            false,
+        )?
+    } else {
+        None
+    };
+
+    let mut approved_network_access_upgrade = None;
+
+    if let Some(approval_ctx) = approval.as_ref() {
+        if let Some(upgrade_access) = network_access_upgrade.as_ref() {
+            if matches!(approval_ctx.policy, AskForApproval::Never) {
+                return Err(
+                    "network access escalation requires approval, but approval policy is never"
+                        .to_string(),
+                );
+            }
+            let network_reason = format!(
+                "requested network access escalation from {current:?} to {requested:?}",
+                current = shell_policy_network_access(
+                    sandbox.as_ref().map(|context| &context.policy),
+                    spec.sandbox_permissions,
+                    false,
+                ),
+                requested = upgrade_access,
+            );
+            let reason = match &requirement {
+                ExecApprovalRequirement::NeedsApproval { reason } => reason
+                    .clone()
+                    .or_else(|| {
+                        justification
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(ToString::to_string)
+                    })
+                    .map(|reason| format!("{reason}; {network_reason}"))
+                    .or(Some(network_reason)),
+                _ => Some(network_reason),
+            };
+            let decision = request_uncached_exec_approval(
+                approval_ctx,
+                ExecApprovalPrompt {
+                    call_id: &call_id,
+                    command: &command,
+                    cwd: &cwd,
+                    reason,
+                    sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                    sandbox_permissions: spec.sandbox_permissions,
+                    is_retry: false,
+                    requested_network_access: Some(upgrade_access.clone()),
+                },
+                Some("network access escalation approvals are not cached".to_string()),
+            )
+            .await;
+
+            if decision.is_approved() {
+                if matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. }) {
                     already_approved = true;
-                } else {
-                    match decision {
-                        ReviewDecision::Denied => return Err("rejected by user".to_string()),
-                        ReviewDecision::Abort => return Err("aborted by user".to_string()),
-                        _ => {}
-                    }
+                }
+                approved_network_access_upgrade = Some(upgrade_access.clone());
+            } else {
+                match decision {
+                    ReviewDecision::Denied => return Err("rejected by user".to_string()),
+                    ReviewDecision::Abort => return Err("aborted by user".to_string()),
+                    _ => {}
                 }
             }
-            ExecApprovalRequirement::Forbidden { ref reason } => {
-                return Err(reason.clone());
+        } else {
+            match requirement {
+                ExecApprovalRequirement::Skip { .. } => {}
+                ExecApprovalRequirement::NeedsApproval { ref reason } => {
+                    let decision = request_exec_approval(
+                        approval_ctx,
+                        ExecApprovalPrompt {
+                            call_id: &call_id,
+                            command: &command,
+                            cwd: &cwd,
+                            reason: reason.clone().or_else(|| {
+                                justification
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|text| !text.is_empty())
+                                    .map(ToString::to_string)
+                            }),
+                            sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                            sandbox_permissions: spec.sandbox_permissions,
+                            is_retry: false,
+                            requested_network_access: None,
+                        },
+                    )
+                    .await;
+
+                    if decision.is_approved() {
+                        already_approved = true;
+                    } else {
+                        match decision {
+                            ReviewDecision::Denied => return Err("rejected by user".to_string()),
+                            ReviewDecision::Abort => return Err("aborted by user".to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+                ExecApprovalRequirement::Forbidden { ref reason } => {
+                    return Err(reason.clone());
+                }
             }
         }
     }
@@ -1042,6 +1121,7 @@ pub async fn run_shell_command_with_approval(
                 sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
                 sandbox_permissions: SandboxPermissions::RequireEscalated,
                 is_retry: true,
+                requested_network_access: None,
             },
             Some("sandbox fallback approvals are not cached".to_string()),
         )
@@ -1067,6 +1147,7 @@ pub async fn run_shell_command_with_approval(
         max_output_bytes,
         first_attempt_sandbox,
         sandbox_runtime.as_ref(),
+        approved_network_access_upgrade,
     )
     .await?;
 
@@ -1092,6 +1173,7 @@ pub async fn run_shell_command_with_approval(
                 sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
                 sandbox_permissions: spec.sandbox_permissions,
                 is_retry: true,
+                requested_network_access: None,
             },
         )
         .await;
@@ -1105,7 +1187,7 @@ pub async fn run_shell_command_with_approval(
         }
     }
 
-    run_command_spec(spec, max_output_bytes, None, sandbox_runtime.as_ref()).await
+    run_command_spec(spec, max_output_bytes, None, sandbox_runtime.as_ref(), None).await
 }
 
 pub async fn run_command_spec(
@@ -1113,11 +1195,19 @@ pub async fn run_command_spec(
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
+    network_access_override: Option<NetworkAccess>,
 ) -> Result<SandboxExecOutput, String> {
     let command_tmpdir = create_command_tmpdir()?;
     inject_command_tmp_env(&mut spec, &command_tmpdir);
 
-    let output = run_command_spec_inner(spec, max_output_bytes, sandbox, sandbox_runtime).await;
+    let output = run_command_spec_inner(
+        spec,
+        max_output_bytes,
+        sandbox,
+        sandbox_runtime,
+        network_access_override,
+    )
+    .await;
     let evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
     cleanup_command_tmpdir(&command_tmpdir, evidence_sink.as_deref()).await;
     output
@@ -1128,8 +1218,14 @@ async fn run_command_spec_inner(
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
+    network_access_override: Option<NetworkAccess>,
 ) -> Result<SandboxExecOutput, String> {
-    let mut built = build_command_from_spec(spec, sandbox.as_ref(), sandbox_runtime)?;
+    let mut built = build_command_from_spec(
+        spec,
+        sandbox.as_ref(),
+        sandbox_runtime,
+        network_access_override,
+    )?;
     let allowlist_proxy =
         start_allowlist_proxy_if_needed(&mut built.command, built.allowlist_proxy_services).await?;
     let timeout_override = built.timeout_ms;
@@ -1288,6 +1384,7 @@ fn build_command_from_spec(
     spec: CommandSpec,
     sandbox: Option<&ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
+    network_access_override: Option<NetworkAccess>,
 ) -> Result<BuiltCommand, String> {
     let sandbox_policy_cwd = spec.cwd.clone();
     let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
@@ -1311,15 +1408,20 @@ fn build_command_from_spec(
     // lock the workspace down but never widen the policy's reach, so the
     // security-critical transform derivation is left untouched.
     let config_network_access = sandbox_config.network_access()?;
-    let restricted_policy = match (sandbox, &config_network_access) {
+    let policy = sandbox.map(|context| {
+        network_access_override
+            .as_ref()
+            .map_or(context.policy.clone(), |access| {
+                context.policy.with_network_access(access)
+            })
+    });
+    let restricted_policy = match (&policy, &config_network_access) {
         (Some(context), Some(config_access)) => {
-            Some(context.policy.with_network_restriction(config_access))
+            Some(context.with_network_restriction(config_access))
         }
         _ => None,
     };
-    let effective_policy = restricted_policy
-        .as_ref()
-        .or_else(|| sandbox.map(|context| &context.policy));
+    let effective_policy = restricted_policy.as_ref().or(policy.as_ref());
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1796,9 +1898,15 @@ async fn request_exec_approval(
         sandbox_policy,
         sandbox_permissions,
         is_retry,
+        requested_network_access,
     } = request;
-    let (sandbox_label, network_access, writable_roots) =
-        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
+    let (sandbox_label, network_access, writable_roots) = approval_request_context(
+        sandbox_policy,
+        cwd,
+        sandbox_permissions,
+        is_retry,
+        requested_network_access.as_ref(),
+    );
     let keys = ApprovalCacheKeys::shell(command, cwd, sandbox_permissions);
     let cache_disabled_reason = ctx.cache_policy.disabled_reason_for_command(command);
     request_cached_approval_with_cache_keys(
@@ -1834,9 +1942,15 @@ async fn request_uncached_exec_approval(
         sandbox_policy,
         sandbox_permissions,
         is_retry,
+        requested_network_access,
     } = request;
-    let (sandbox_label, network_access, writable_roots) =
-        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
+    let (sandbox_label, network_access, writable_roots) = approval_request_context(
+        sandbox_policy,
+        cwd,
+        sandbox_permissions,
+        is_retry,
+        requested_network_access.as_ref(),
+    );
     let (response_tx, response_rx) = oneshot::channel();
     if ctx
         .request_tx
@@ -1868,6 +1982,7 @@ struct ExecApprovalPrompt<'a> {
     sandbox_policy: Option<&'a SandboxPolicy>,
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
+    requested_network_access: Option<NetworkAccess>,
 }
 
 fn approval_request_context(
@@ -1875,32 +1990,96 @@ fn approval_request_context(
     cwd: &Path,
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
-) -> (String, bool, Vec<PathBuf>) {
+    requested_network_access: Option<&NetworkAccess>,
+) -> (String, NetworkAccess, Vec<PathBuf>) {
+    let resolved_network_access = requested_network_access.cloned().unwrap_or_else(|| {
+        shell_policy_network_access(sandbox_policy, sandbox_permissions, is_retry)
+    });
+
     if sandbox_permissions.requires_escalated_permissions() || is_retry {
-        return ("outside sandbox".to_string(), true, Vec::new());
+        return (
+            "outside sandbox".to_string(),
+            NetworkAccess::Full,
+            Vec::new(),
+        );
     }
 
     match sandbox_policy {
-        Some(SandboxPolicy::DangerFullAccess) => {
-            ("danger-full-access".to_string(), true, Vec::new())
-        }
-        Some(SandboxPolicy::ExternalSandbox { network_access }) => (
-            "external-sandbox".to_string(),
-            network_access.is_enabled(),
+        Some(SandboxPolicy::DangerFullAccess) => (
+            "danger-full-access".to_string(),
+            resolved_network_access,
             Vec::new(),
         ),
-        Some(SandboxPolicy::ReadOnly) => ("read-only".to_string(), false, Vec::new()),
-        Some(policy @ SandboxPolicy::WorkspaceWrite { network_access, .. }) => (
+        Some(SandboxPolicy::ExternalSandbox { .. }) => (
+            "external-sandbox".to_string(),
+            resolved_network_access,
+            Vec::new(),
+        ),
+        Some(SandboxPolicy::ReadOnly) => {
+            ("read-only".to_string(), resolved_network_access, Vec::new())
+        }
+        Some(policy @ SandboxPolicy::WorkspaceWrite { .. }) => (
             "workspace-write".to_string(),
-            network_access.is_enabled(),
+            resolved_network_access,
             policy
                 .get_writable_roots_with_cwd(cwd)
                 .into_iter()
                 .map(|root| root.root)
                 .collect(),
         ),
-        None => ("no sandbox".to_string(), true, Vec::new()),
+        None => (
+            "no sandbox".to_string(),
+            resolved_network_access,
+            Vec::new(),
+        ),
     }
+}
+
+fn shell_policy_network_access(
+    sandbox_policy: Option<&SandboxPolicy>,
+    sandbox_permissions: SandboxPermissions,
+    is_retry: bool,
+) -> NetworkAccess {
+    if sandbox_permissions.requires_escalated_permissions() || is_retry {
+        return NetworkAccess::Full;
+    }
+
+    match sandbox_policy {
+        Some(SandboxPolicy::DangerFullAccess) => NetworkAccess::Full,
+        Some(SandboxPolicy::ExternalSandbox { network_access }) => network_access.clone(),
+        Some(SandboxPolicy::ReadOnly) => NetworkAccess::Denied,
+        Some(SandboxPolicy::WorkspaceWrite { network_access, .. }) => network_access.clone(),
+        None => NetworkAccess::Full,
+    }
+}
+
+fn requested_network_access_upgrade(
+    sandbox_policy: Option<&SandboxPolicy>,
+    sandbox_permissions: SandboxPermissions,
+    cwd: &Path,
+    is_retry: bool,
+) -> Result<Option<NetworkAccess>, String> {
+    if !matches!(
+        sandbox_policy,
+        Some(SandboxPolicy::ExternalSandbox { .. } | SandboxPolicy::WorkspaceWrite { .. })
+    ) {
+        return Ok(None);
+    }
+
+    let current_network_access =
+        shell_policy_network_access(sandbox_policy, sandbox_permissions, is_retry);
+    let config_network_access = load_sandbox_config_file(cwd)?.network_access()?;
+
+    let Some(config_network_access) = config_network_access else {
+        return Ok(None);
+    };
+
+    if config_network_access.restrictiveness_rank() > current_network_access.restrictiveness_rank()
+    {
+        return Ok(Some(config_network_access));
+    }
+
+    Ok(None)
 }
 
 pub fn shell_approval_key(
@@ -2838,7 +3017,8 @@ mod tests {
             justification: None,
         };
 
-        let result = build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime));
+        let result =
+            build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime), None);
 
         // SAFETY: restore the ambient env var.
         unsafe {
@@ -2908,7 +3088,8 @@ mod tests {
             justification: None,
         };
 
-        let result = build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime));
+        let result =
+            build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime), None);
 
         // The dangerous writable root must reject the spec.
         assert!(result.is_err(), "dangerous writable root must abort build");
@@ -2956,7 +3137,7 @@ mod tests {
         spec.env
             .insert("TMP".to_string(), caller_tmp.to_string_lossy().into_owned());
 
-        let output = run_command_spec(spec, 16 * 1024, None, None)
+        let output = run_command_spec(spec, 16 * 1024, None, None, None)
             .await
             .expect("command should run with private tmp env");
 
@@ -3004,7 +3185,7 @@ mod tests {
             ..SandboxRuntimeConfig::default()
         };
 
-        let output = run_command_spec(spec, 16 * 1024, Some(sandbox), Some(&sandbox_runtime))
+        let output = run_command_spec(spec, 16 * 1024, Some(sandbox), Some(&sandbox_runtime), None)
             .await
             .expect("allowlist command should receive proxy env");
 
@@ -3030,10 +3211,11 @@ mod tests {
             Path::new("/tmp/workspace"),
             SandboxPermissions::UseDefault,
             false,
+            None,
         );
 
         assert_eq!(sandbox_label, "workspace-write");
-        assert!(!network_access);
+        assert_eq!(network_access, NetworkAccess::Denied);
         assert_eq!(writable_roots, vec![PathBuf::from("/tmp/workspace/src")]);
     }
 
@@ -3044,11 +3226,219 @@ mod tests {
             Path::new("/tmp/workspace"),
             SandboxPermissions::UseDefault,
             true,
+            None,
         );
 
         assert_eq!(sandbox_label, "outside sandbox");
-        assert!(network_access);
+        assert_eq!(network_access, NetworkAccess::Full);
         assert!(writable_roots.is_empty());
+    }
+
+    #[test]
+    fn requested_network_access_upgrade_detects_config_widening() {
+        let temp = tempfile::tempdir().expect("tempdir for network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![temp.path().to_path_buf()],
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&policy),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            upgrade,
+            Some(NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn requested_network_access_upgrade_skips_non_network_bearing_policy() {
+        let temp = tempfile::tempdir().expect("tempdir for read-only network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&SandboxPolicy::ReadOnly),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(upgrade, None);
+    }
+
+    #[tokio::test]
+    async fn network_access_upgrade_uses_uncached_approval_request() {
+        let temp = tempfile::tempdir().expect("tempdir for network approval test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn({
+            let cwd = cwd.clone();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-network-upgrade".to_string(),
+                    command: "true".to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::WorkspaceWrite {
+                            writable_roots: vec![cwd],
+                            network_access: NetworkAccess::Denied,
+                            exclude_tmpdir_env_var: false,
+                            exclude_slash_tmp: false,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: None,
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("network upgrade approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(request.command, "true");
+        assert_eq!(request.sandbox_label, "workspace-write");
+        assert_eq!(
+            request.cache_disabled_reason.as_deref(),
+            Some("network access escalation approvals are not cached")
+        );
+        assert_eq!(
+            request.network_access,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }
+        );
+        assert!(
+            request
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("requested network access escalation")
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Denied)
+            .expect("approval receiver should be active");
+
+        let error = run
+            .await
+            .expect("network upgrade run task should not panic")
+            .expect_err("denying network upgrade should stop execution");
+        assert_eq!(error, "rejected by user");
+    }
+
+    #[tokio::test]
+    async fn safety_deny_does_not_request_network_upgrade_approval() {
+        let temp = tempfile::tempdir().expect("tempdir for denied network approval test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+
+        let error = run_shell_command_with_approval(ShellCommandRequest {
+            call_id: "call-network-upgrade-denied".to_string(),
+            command: "echo should-not-run".to_string(),
+            cwd: temp.path().to_path_buf(),
+            timeout_ms: Some(5_000),
+            max_output_bytes: 16 * 1024,
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![temp.path().to_path_buf()],
+                    network_access: NetworkAccess::Denied,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            sandbox_runtime: None,
+            approval: Some(ctx),
+            justification: None,
+            safety_decision: Some(SafetyDecision::deny(
+                "test.deny",
+                "policy denial remains authoritative",
+                super::super::runtime::hardening::BlastRadius::Workspace,
+            )),
+        })
+        .await
+        .expect_err("safety deny should stop before network upgrade approval");
+
+        assert!(error.contains("policy denial remains authoritative"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
@@ -3078,7 +3468,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -3119,7 +3509,7 @@ mod tests {
                 reason: Some("test".to_string()),
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -3164,7 +3554,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -3186,7 +3576,7 @@ mod tests {
                     reason: None,
                     is_retry: false,
                     sandbox_label: "workspace-write".to_string(),
-                    network_access: false,
+                    network_access: NetworkAccess::Denied,
                     writable_roots: vec![PathBuf::from("/tmp/other")],
                     cache_disabled_reason: None,
                     response_tx,
@@ -3234,6 +3624,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::RequireEscalated,
                 is_retry: true,
+                requested_network_access: None,
             },
             Some("sandbox fallback approvals are not cached".to_string()),
         )
@@ -3511,6 +3902,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 is_retry: false,
+                requested_network_access: None,
             },
         )
         .await;
@@ -3526,6 +3918,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 is_retry: false,
+                requested_network_access: None,
             },
         )
         .await;
@@ -3594,7 +3987,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp/workspace")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -3626,7 +4019,7 @@ mod tests {
             reason: None,
             is_retry: false,
             sandbox_label: "workspace-write".to_string(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             writable_roots: vec![cwd.to_path_buf()],
             cache_disabled_reason,
             response_tx,

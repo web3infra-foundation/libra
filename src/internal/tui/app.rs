@@ -101,7 +101,10 @@ use crate::{
         },
         projection::ProjectionRebuilder,
         prompt::SystemPromptBuilder,
-        sandbox::{ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, ReviewDecision},
+        sandbox::{
+            ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, NetworkAccess,
+            ReviewDecision,
+        },
         session::{
             SessionState, SessionStore,
             file_history::FileHistoryError,
@@ -2291,7 +2294,7 @@ where
             command = %log_preview_text(&request.command),
             cwd = %request.cwd.display(),
             sandbox = %request.sandbox_label,
-            network_access = request.network_access,
+            network_access = ?request.network_access,
             writable_roots = request.writable_roots.len(),
             is_retry = request.is_retry,
             has_reason = request.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()),
@@ -2309,7 +2312,7 @@ where
             metadata: serde_json::json!({
                 "cwd": request.cwd,
                 "sandboxLabel": request.sandbox_label,
-                "networkAccess": request.network_access,
+                "networkAccess": network_access_label(&request.network_access),
                 "writableRoots": request.writable_roots,
                 "isRetry": request.is_retry,
                 "cacheDisabledReason": request.cache_disabled_reason,
@@ -2360,7 +2363,7 @@ where
             details.clone(),
             false,
             "orchestrator phase gate".to_string(),
-            false,
+            None,
             Vec::new(),
             vec![
                 (
@@ -2570,7 +2573,7 @@ where
         let command = pending.request.command.clone();
         let cwd = pending.request.cwd.clone();
         let sandbox_label = pending.request.sandbox_label.clone();
-        let network_access = pending.request.network_access;
+        let network_access = pending.request.network_access.clone();
         let writable_roots = pending.request.writable_roots.clone();
         let is_retry = pending.request.is_retry;
 
@@ -2584,7 +2587,7 @@ where
             ),
             is_retry,
             sandbox_label.clone(),
-            network_access,
+            Some(network_access.clone()),
             writable_roots.clone(),
             vec![
                 (
@@ -2618,7 +2621,7 @@ where
                 metadata: serde_json::json!({
                     "cwd": cwd,
                     "sandboxLabel": sandbox_label,
-                    "networkAccess": network_access,
+                    "networkAccess": network_access_label(&network_access),
                     "writableRoots": writable_roots,
                     "isRetry": is_retry,
                     "confirmation": "allow_all_commands",
@@ -4763,7 +4766,7 @@ where
             interaction.description.clone(),
             false,
             "codex managed runtime".to_string(),
-            true,
+            None,
             vec![self.registry.working_dir().to_path_buf()],
             options,
         );
@@ -11375,6 +11378,14 @@ fn provider_plan_draft_from_args(args: SubmitPlanDraftArgs) -> Result<ProviderPl
         }),
         steps,
     })
+}
+
+fn network_access_label(network_access: &NetworkAccess) -> &'static str {
+    match network_access {
+        NetworkAccess::Denied => "denied",
+        NetworkAccess::Allowlist { .. } => "allowlist",
+        NetworkAccess::Full => "full",
+    }
 }
 
 fn apply_developer_network_access(spec: &mut IntentSpec, network_access: bool) {

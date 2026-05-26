@@ -406,7 +406,7 @@ impl NetworkAccess {
     /// Restrictiveness rank: `Denied` (0) < `Allowlist` (1) < `Full`
     /// (2). Lower = more locked-down. Used by [`Self::restrict_with`]
     /// to pick the more-restrictive of two access settings.
-    fn restrictiveness_rank(&self) -> u8 {
+    pub(crate) fn restrictiveness_rank(&self) -> u8 {
         match self {
             Self::Denied => 0,
             Self::Allowlist { .. } => 1,
@@ -635,6 +635,33 @@ impl SandboxPolicy {
             } => Self::WorkspaceWrite {
                 writable_roots: writable_roots.clone(),
                 network_access: network_access.restrict_with(config),
+                exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
+                exclude_slash_tmp: *exclude_slash_tmp,
+            },
+            Self::DangerFullAccess | Self::ReadOnly => self.clone(),
+        }
+    }
+
+    /// Return a copy of this policy with `network_access` explicitly
+    /// replaced for network-bearing variants.
+    ///
+    /// This helper is used when runtime callers intentionally want to
+    /// apply a specific network mode (for example, after explicit
+    /// user approval) before applying any `.libra/sandbox.toml`
+    /// tightening rules.
+    pub fn with_network_access(&self, network_access: &NetworkAccess) -> Self {
+        match self {
+            Self::ExternalSandbox { .. } => Self::ExternalSandbox {
+                network_access: network_access.clone(),
+            },
+            Self::WorkspaceWrite {
+                writable_roots,
+                exclude_tmpdir_env_var,
+                exclude_slash_tmp,
+                network_access: _,
+            } => Self::WorkspaceWrite {
+                writable_roots: writable_roots.clone(),
+                network_access: network_access.clone(),
                 exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                 exclude_slash_tmp: *exclude_slash_tmp,
             },

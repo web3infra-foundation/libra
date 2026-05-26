@@ -18,7 +18,10 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app_event::AgentStatus, theme};
-use crate::internal::ai::{sandbox::ExecApprovalRequest, tools::context::UserInputQuestion};
+use crate::internal::ai::{
+    sandbox::{ExecApprovalRequest, NetworkAccess},
+    tools::context::UserInputQuestion,
+};
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone, Debug)]
@@ -42,7 +45,7 @@ struct ExecApprovalSnapshot {
     reason: Option<String>,
     is_retry: bool,
     sandbox_label: String,
-    network_access: bool,
+    network_access: Option<NetworkAccess>,
     writable_roots: Vec<String>,
     options: Vec<(String, String)>,
 }
@@ -233,7 +236,7 @@ impl BottomPane {
                 reason,
                 request.is_retry,
                 request.sandbox_label.clone(),
-                request.network_access,
+                Some(request.network_access.clone()),
                 request.writable_roots.clone(),
                 options,
             );
@@ -252,7 +255,7 @@ impl BottomPane {
         reason: Option<String>,
         is_retry: bool,
         sandbox_label: String,
-        network_access: bool,
+        network_access: Option<NetworkAccess>,
         writable_roots: Vec<PathBuf>,
         options: Vec<(String, String)>,
     ) {
@@ -964,22 +967,22 @@ impl BottomPane {
                 format!("  sandbox: {}", approval.sandbox_label),
                 theme::text::muted(),
             ),
-            Line::styled(
-                format!(
-                    "  network: {}",
-                    if approval.network_access {
-                        "enabled"
-                    } else {
-                        "restricted"
-                    }
-                ),
-                theme::text::muted(),
-            ),
-            Line::styled(
-                format!("  cwd: {}", approval.cwd),
-                theme::text::muted().add_modifier(Modifier::DIM),
-            ),
         ];
+        if let Some(network_access) = &approval.network_access {
+            let network_label = match network_access {
+                NetworkAccess::Denied => "denied",
+                NetworkAccess::Allowlist { .. } => "allowlist",
+                NetworkAccess::Full => "full",
+            };
+            summary_lines.push(Line::styled(
+                format!("  network: {network_label}"),
+                theme::text::muted(),
+            ));
+        }
+        summary_lines.push(Line::styled(
+            format!("  cwd: {}", approval.cwd),
+            theme::text::muted().add_modifier(Modifier::DIM),
+        ));
         if let Some(label) = self.input_context_label.as_deref() {
             summary_lines.push(Line::styled(
                 format!("  context: {label}"),
@@ -1572,7 +1575,10 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::BottomPane;
-    use crate::internal::tui::{app_event::AgentStatus, theme};
+    use crate::internal::{
+        ai::sandbox::NetworkAccess,
+        tui::{app_event::AgentStatus, theme},
+    };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
         let mut out = String::new();
@@ -1698,7 +1704,7 @@ mod tests {
             None,
             false,
             "workspace-write".to_string(),
-            false,
+            Some(NetworkAccess::Denied),
             Vec::new(),
             vec![
                 ("Approve".to_string(), "Run once".to_string()),
@@ -1728,7 +1734,9 @@ mod tests {
             Some("Writes outside the workspace need explicit approval".to_string()),
             true,
             "workspace-write".to_string(),
-            true,
+            Some(NetworkAccess::Allowlist {
+                services: Vec::new(),
+            }),
             vec![PathBuf::from("/tmp/libra"), PathBuf::from("/tmp/shared")],
             vec![
                 ("Approve".to_string(), "Run once".to_string()),
@@ -1758,7 +1766,7 @@ mod tests {
         assert!(rendered.contains("Sandbox approval required"));
         assert!(rendered.contains("Retry: cargo test --all"));
         assert!(rendered.contains("sandbox: workspace-write"));
-        assert!(rendered.contains("network: enabled"));
+        assert!(rendered.contains("network: allowlist"));
         assert!(rendered.contains("cwd: /tmp/libra"));
         assert!(rendered.contains("write roots: /tmp/libra, /tmp/shared"));
         assert!(rendered.contains("Writes outside the workspace need explicit approval"));
