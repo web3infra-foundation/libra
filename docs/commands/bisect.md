@@ -123,6 +123,8 @@ libra bisect log
 
 Run a command at each bisect step and dispatch `good` / `bad` / `skip` automatically based on its exit code. The command is invoked at each candidate commit and bisect advances until convergence (or until candidates are exhausted).
 
+`bisect run` requires an active session that already has both a bad bound and at least one good bound, so start it with `libra bisect start <bad> --good <good>` or mark both bounds manually before invoking automation.
+
 | Argument | Description |
 |----------|-------------|
 | `<cmd> [<args>...]` | The command to execute. The first token is the executable; everything after is forwarded verbatim. `--` is allowed and pass-through (e.g. `libra bisect run cargo test -- --ignored`). |
@@ -158,6 +160,40 @@ libra bisect view
 ```
 
 If no bisect is in progress, returns a fatal error (`NOT_IN_BISECT`).
+
+## JSON / Machine Output
+
+`libra bisect` supports global `--json` and `--machine` for all subcommands.
+Both modes emit a single `bisect` command envelope on success; `--machine`
+uses the same envelope as one compact line and suppresses human progress.
+
+Common fields:
+
+| Field | Description |
+|-------|-------------|
+| `action` | One of `start`, `mark`, `skip`, `reset`, `log`, `view`, `run`. |
+| `status` | Present for state transitions: `started`, `waiting_for_good`, `waiting_for_bad`, `testing`, `converged`, or `all_skipped`. |
+| `bad` / `good` / `current` | Full commit IDs for the current bisect bounds and candidate. |
+| `remaining` / `steps` | Candidate count and estimated remaining search steps when known. |
+| `first_bad` | Full commit ID when the session converged. |
+
+Example:
+
+```json
+{
+  "ok": true,
+  "command": "bisect",
+  "data": {
+    "action": "view",
+    "head": "901abcd...",
+    "good": ["abc1234..."],
+    "bad": "def5678...",
+    "current": "901abcd...",
+    "remaining": 1,
+    "completed": false
+  }
+}
+```
 
 ## Common Commands
 
@@ -324,6 +360,7 @@ Note: jj does not have a bisect command. Users who need binary search debugging 
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
 | `LBR-REPO-003` | No commits in repository |
+| `LBR-REPO-003` | `bisect run` invoked before both good/bad bounds select a candidate |
 | `LBR-CLI-002` | Bisect session already in progress (for `start`) |
 | `LBR-CLI-002` | No bisect session in progress (for `bad`, `good`, `skip`, `log`) |
 | `LBR-CLI-003` | Commit not found (invalid rev argument) |

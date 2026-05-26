@@ -11,7 +11,7 @@
 //! the bottom run the binary outside or inside an empty repo to confirm
 //! the user-visible failure behaviour.
 
-use std::process::Command;
+use std::{fs, process::Command};
 
 use libra::{
     cli::Bisect,
@@ -604,6 +604,50 @@ async fn test_bisect_view_inside_active_session() {
         .unwrap();
 }
 
+/// `--json bisect view` must emit a single clean command envelope without
+/// human progress lines on stdout.
+#[tokio::test]
+#[serial]
+async fn test_bisect_json_view_outputs_clean_envelope() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: Some(hashes[0].clone()),
+            good: Some(hashes[4].clone()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["--json", "bisect", "view"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "json view failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Bisecting between"),
+        "json stdout must not contain human text: {stdout}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bisect json view should parse");
+    assert_eq!(json["command"], "bisect");
+    assert_eq!(json["data"]["action"], "view");
+    assert_eq!(json["data"]["remaining"].as_u64(), Some(4));
+
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+}
+
 /// `bisect run` without an active session must reject with `BisectNotActive`.
 /// The user must `bisect start` (with bounds) before automation kicks in.
 #[tokio::test]
@@ -626,6 +670,50 @@ async fn test_bisect_run_without_session_errors() {
     let err = result.unwrap_err();
     let stable = err.stable_code().as_str();
     assert_eq!(stable, "LBR-BISECT-001");
+}
+
+/// `bisect run` must fail before spawning the command when the session exists
+/// but good/bad bounds have not selected a candidate yet.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_bisect_run_without_bounds_does_not_spawn_command() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let _hashes = create_linear_commits(3).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: None,
+            good: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let marker = temp_path.path().join("spawned-marker");
+    let result = execute_safe(
+        Bisect::Run {
+            cmd: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("touch {}", marker.display()),
+            ],
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+
+    assert!(result.is_err(), "run without bounds must error");
+    let err = result.unwrap_err();
+    assert_eq!(err.stable_code().as_str(), "LBR-REPO-003");
+    assert!(
+        fs::metadata(&marker).is_err(),
+        "bisect run spawned the command before validating bounds"
+    );
 }
 
 /// `bisect run` with a script that always returns 128 must surface the
@@ -664,4 +752,54 @@ async fn test_bisect_run_propagates_fatal_exit_code() {
 
     // Clean up so the next test in the suite starts fresh.
     let _ = execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default()).await;
+}
+
+/// `--machine bisect run` must emit exactly one JSON line for automation even
+/// though the run internally marks multiple commits.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_bisect_machine_run_outputs_single_json_line() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+
+    execute_safe(
+        Bisect::Start {
+            bad: Some(hashes[0].clone()),
+            good: Some(hashes[4].clone()),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(
+        &["--machine", "bisect", "run", "sh", "-c", "exit 1"],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "machine run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "machine output should be exactly one JSON line: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Marked ") && !stdout.contains("HEAD is now"),
+        "machine stdout must not contain human progress: {stdout}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bisect machine run should parse");
+    assert_eq!(json["command"], "bisect");
+    assert_eq!(json["data"]["action"], "run");
+    assert_eq!(json["data"]["steps"].as_u64(), Some(2));
+    assert!(json["data"]["first_bad"].as_str().is_some());
 }
