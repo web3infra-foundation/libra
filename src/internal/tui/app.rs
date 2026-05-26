@@ -5236,7 +5236,24 @@ where
         };
 
         let subagent_name = invocation.subagent_type.clone();
-        let ctx = runtime.dispatch_context(format!("user-task:{}", uuid::Uuid::new_v4()));
+        // The `/task` slash command runs outside a turn loop, so there
+        // is no per-turn `ToolLoopConfig` carrying a file-history batch.
+        // Derive a per-invocation context from the session's base
+        // runtime context (sandbox / approval authority) and attach a
+        // fresh file-history batch so a child `apply_patch` records undo
+        // preimages — matching the per-turn LLM-initiated path
+        // (S2-INV-06). Falls back to the runtime's stored snapshot when
+        // the session has no base runtime context.
+        let user_task_id = uuid::Uuid::new_v4();
+        let live_runtime_context = self.config.runtime_context.clone().map(|mut ctx| {
+            ctx.file_history = Some(FileHistoryRuntimeContext {
+                session_root: self.session_store.session_root(&self.session.id),
+                batch_id: format!("user-task-{user_task_id}"),
+            });
+            ctx
+        });
+        let ctx =
+            runtime.dispatch_context(format!("user-task:{user_task_id}"), live_runtime_context);
         match runtime
             .dispatcher
             .dispatch(

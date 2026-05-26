@@ -1009,6 +1009,21 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 // hooks fire on the child's tool calls — sub-agents
                 // are not allowed to bypass project-level hooks.
                 hook_runner: request.ctx.hook_runner.cloned(),
+                // S2-INV-06 approval-authority inheritance: forward the
+                // parent's runtime sandbox / approval / file-history
+                // context so the child's tool invocations run under the
+                // same authority the parent does. `DispatchContext::
+                // runtime_context` documents this as "inherited by child
+                // tool invocations ... they must not get a fresh approval
+                // authority"; before this line the child silently dropped
+                // it, leaving every child tool call with `None`
+                // (no sandbox, approval defaulting to `Skip`) — strictly
+                // more permissive than the parent. Forwarding it is a
+                // tightening, not isolation: rebasing the sandbox
+                // `writable_roots` onto a materialized per-run workspace
+                // (S2-INV-03) is a separate follow-on; here the child
+                // simply inherits whatever the parent already enforces.
+                runtime_context: request.ctx.runtime_context.clone(),
                 ..ToolLoopConfig::default()
             };
 
@@ -1155,7 +1170,24 @@ impl std::fmt::Debug for SubAgentToolLoopRuntime {
 }
 
 impl SubAgentToolLoopRuntime {
-    pub fn dispatch_context(&self, parent_message_id: MessageId) -> DispatchContext<'_> {
+    /// Build a [`DispatchContext`] for one `task` dispatch.
+    ///
+    /// `live_runtime_context` lets the caller hand the child the
+    /// parent tool loop's *current* per-turn runtime context (sandbox /
+    /// approval / file-history authority). This matters because the TUI
+    /// attaches per-turn state — most importantly the file-history
+    /// batch that drives `apply_patch` undo preimage recording — to the
+    /// turn's `ToolLoopConfig.runtime_context`, NOT to the
+    /// session-start snapshot stored in [`Self::runtime_context`]. The
+    /// tool-loop `task` interception passes that live context here so a
+    /// dispatched child inherits the live authority (S2-INV-06);
+    /// callers without a per-turn context (e.g. the `/task` slash
+    /// command) pass `None` and fall back to the stored snapshot.
+    pub fn dispatch_context(
+        &self,
+        parent_message_id: MessageId,
+        live_runtime_context: Option<ToolRuntimeContext>,
+    ) -> DispatchContext<'_> {
         DispatchContext {
             parent_thread_id: &self.parent_thread_id,
             parent_session_id: &self.parent_session_id,
@@ -1172,7 +1204,7 @@ impl SubAgentToolLoopRuntime {
                 .as_ref()
                 .map(|resolver| resolver.as_ref()),
             tool_registry: &self.tool_registry,
-            runtime_context: self.runtime_context.clone(),
+            runtime_context: live_runtime_context.or_else(|| self.runtime_context.clone()),
             usage_recorder: self.usage_recorder.as_ref(),
             context_frame_loader: self.context_frame_loader.as_ref(),
             abort_token: self.abort_token.child(),

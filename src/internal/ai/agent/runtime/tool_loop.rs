@@ -612,6 +612,14 @@ where
                 let mut tool_result: Result<ToolOutput, String> = if tool_name == "task" {
                     dispatch_task_tool_call(
                         config.subagent_runtime.as_ref(),
+                        // Hand the dispatched child the parent loop's
+                        // *live* per-turn runtime context (sandbox /
+                        // approval / file-history authority) rather than
+                        // the session-start snapshot, so child tool
+                        // calls inherit the current file-history batch
+                        // (undo preimage recording) and approval scope
+                        // (S2-INV-06).
+                        config.runtime_context.clone(),
                         &call.id,
                         &call.function.arguments,
                         observer,
@@ -897,6 +905,7 @@ fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, St
 
 async fn dispatch_task_tool_call<O: ToolLoopObserver>(
     runtime: Option<&SubAgentToolLoopRuntime>,
+    live_runtime_context: Option<ToolRuntimeContext>,
     call_id: &str,
     arguments: &Value,
     observer: &mut O,
@@ -904,7 +913,7 @@ async fn dispatch_task_tool_call<O: ToolLoopObserver>(
     let runtime =
         runtime.ok_or_else(|| "Tool 'task' is not available in this session".to_string())?;
     let invocation = parse_task_invocation(arguments)?;
-    let ctx = runtime.dispatch_context(format!("tool-call:{call_id}"));
+    let ctx = runtime.dispatch_context(format!("tool-call:{call_id}"), live_runtime_context);
     match runtime
         .dispatcher
         .dispatch(ctx, invocation, TaskEntryKind::LlmInitiated)
@@ -1902,10 +1911,13 @@ mod tests {
         use futures::future::BoxFuture;
         use sea_orm::Database;
 
-        use crate::internal::ai::agent::runtime::{
-            AbortToken, ContextFrameLoader, DispatchContext, PermissionAskRequest, PermissionAsker,
-            PermissionReply, PermissionService, SubAgentDispatcher, SubAgentToolLoopRuntime,
-            TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+        use crate::internal::ai::{
+            agent::runtime::{
+                AbortToken, ContextFrameLoader, DispatchContext, PermissionAskRequest,
+                PermissionAsker, PermissionReply, PermissionService, SubAgentDispatcher,
+                SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+            },
+            sandbox::FileHistoryRuntimeContext,
         };
 
         #[derive(Clone)]
@@ -1967,6 +1979,11 @@ mod tests {
         #[derive(Default)]
         struct RecordingDispatcher {
             calls: Mutex<Vec<TaskInvocation>>,
+            // Capture the `runtime_context` each dispatch received so
+            // the test can prove the parent loop's *live* per-turn
+            // context (not the runtime's session-start snapshot) is
+            // threaded into the child `DispatchContext` (S2-INV-06).
+            captured_runtime_context: Mutex<Option<Option<ToolRuntimeContext>>>,
         }
 
         impl SubAgentDispatcher for RecordingDispatcher {
@@ -1980,6 +1997,8 @@ mod tests {
                     assert_eq!(entry_kind, TaskEntryKind::LlmInitiated);
                     assert_eq!(ctx.parent_thread_id, "thread-task");
                     assert_eq!(ctx.depth, 0);
+                    *self.captured_runtime_context.lock().unwrap() =
+                        Some(ctx.runtime_context.clone());
                     self.calls.lock().unwrap().push(invocation.clone());
                     Ok(TaskResult {
                         task_id: "task-123".to_string(),
@@ -2056,6 +2075,22 @@ mod tests {
             hook_runner: None,
         };
 
+        // The parent loop's LIVE per-turn context: the runtime above
+        // stored `runtime_context: None` (the session-start snapshot),
+        // so anything observed on the dispatched child can only have
+        // come from this `config.runtime_context`, proving the live
+        // context is threaded through (S2-INV-06). `file_history`
+        // mirrors what the TUI attaches per turn (the batch that drives
+        // child `apply_patch` undo preimage recording).
+        let live_runtime_context = ToolRuntimeContext {
+            file_history: Some(FileHistoryRuntimeContext {
+                session_root: temp_dir.path().join("session-root"),
+                batch_id: "turn-7".to_string(),
+            }),
+            max_output_bytes: Some(0x00C0_FFEE),
+            ..ToolRuntimeContext::default()
+        };
+
         let mut observer = RecordingObserver::default();
         let turn = run_tool_loop_with_history_and_observer(
             &model,
@@ -2065,6 +2100,7 @@ mod tests {
             ToolLoopConfig {
                 allowed_tools: Some(vec!["read_file".to_string()]),
                 subagent_runtime: Some(runtime),
+                runtime_context: Some(live_runtime_context),
                 ..Default::default()
             },
             &mut observer,
@@ -2081,6 +2117,36 @@ mod tests {
                 subagent_type: "explore".to_string(),
                 task_id: None,
             }]
+        );
+
+        // S2-INV-06: the dispatched child's `DispatchContext` must carry
+        // the parent loop's LIVE `config.runtime_context`, not the
+        // runtime's `None` session-start snapshot. A regression that
+        // drops the threading (reverting `dispatch_context`'s
+        // `live_runtime_context` arg or the tool-loop call site) makes
+        // this observe `None` / a defaulted context.
+        let captured = dispatcher
+            .captured_runtime_context
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the dispatcher must have been invoked for the task call");
+        let captured = captured.expect(
+            "the child DispatchContext must inherit the parent's live runtime_context, \
+             not the runtime's None snapshot",
+        );
+        assert_eq!(
+            captured.max_output_bytes,
+            Some(0x00C0_FFEE),
+            "child must inherit the live per-turn output-budget cap",
+        );
+        let file_history = captured.file_history.as_ref().expect(
+            "child must inherit the live per-turn file-history batch so its \
+             apply_patch calls record undo preimages",
+        );
+        assert_eq!(
+            file_history.batch_id, "turn-7",
+            "child must inherit the live per-turn file-history batch verbatim",
         );
         let seen = seen_task_results.lock().unwrap();
         assert_eq!(seen.len(), 1);

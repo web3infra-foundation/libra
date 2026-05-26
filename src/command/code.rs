@@ -3142,6 +3142,11 @@ where
             &provider_name,
             &agent_router,
             config.hook_runner.clone(),
+            // Hand the dispatcher the parent tool loop's resolved
+            // runtime context (sandbox / approval / file-history)
+            // so dispatched sub-agents inherit the parent's authority
+            // rather than running unsandboxed (S2-INV-06).
+            config.runtime_context.clone(),
         )
         .await
         {
@@ -3650,6 +3655,7 @@ async fn build_subagent_runtime_for_session(
     provider_name: &str,
     agent_router: &AgentProfileRouter,
     hook_runner: Option<std::sync::Arc<crate::internal::ai::hooks::HookRunner>>,
+    runtime_context: Option<ToolRuntimeContext>,
 ) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
     use crate::internal::ai::{
         agent::{
@@ -3820,7 +3826,18 @@ async fn build_subagent_runtime_for_session(
         provider_build_options: ProviderBuildOptions::default(),
         provider_build_options_resolver: None,
         tool_registry: (*registry).clone(),
-        runtime_context: None,
+        // S2-INV-06: hand the child the parent session's resolved
+        // runtime sandbox / approval / file-history authority so its
+        // tool invocations run under the same gates the parent does.
+        // `DefaultSubAgentChildRunner::run` forwards this into the
+        // child's `ToolLoopConfig.runtime_context`; before it was
+        // populated here the child ran every tool call with `None`
+        // (no sandbox, approval defaulting to `Skip`) — strictly more
+        // permissive than the parent. This is authority *inheritance*,
+        // not workspace *isolation* (S2-INV-03): the child still shares
+        // the parent's `writable_roots`; rebasing those onto a
+        // materialized per-run workspace is a separate follow-on.
+        runtime_context,
         compaction_model,
         usage_recorder,
         context_frame_loader,
