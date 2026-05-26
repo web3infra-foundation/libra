@@ -845,6 +845,7 @@ pub struct ShellCommandRequest {
     pub max_output_bytes: usize,
     pub sandbox: Option<ToolSandboxContext>,
     pub sandbox_runtime: Option<SandboxRuntimeConfig>,
+    pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
     pub approval: Option<ToolApprovalContext>,
     pub justification: Option<String>,
     pub safety_decision: Option<SafetyDecision>,
@@ -902,7 +903,7 @@ pub async fn run_shell_command(
             .unwrap_or(SandboxPermissions::UseDefault),
         None,
     );
-    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime, None).await
+    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime, None, None).await
 }
 
 pub async fn run_shell_command_with_approval(
@@ -916,6 +917,7 @@ pub async fn run_shell_command_with_approval(
         max_output_bytes,
         sandbox,
         sandbox_runtime,
+        evidence_sink,
         approval,
         justification,
         safety_decision,
@@ -1148,6 +1150,7 @@ pub async fn run_shell_command_with_approval(
         first_attempt_sandbox,
         sandbox_runtime.as_ref(),
         approved_network_access_upgrade,
+        evidence_sink.as_deref(),
     )
     .await?;
 
@@ -1187,7 +1190,15 @@ pub async fn run_shell_command_with_approval(
         }
     }
 
-    run_command_spec(spec, max_output_bytes, None, sandbox_runtime.as_ref(), None).await
+    run_command_spec(
+        spec,
+        max_output_bytes,
+        None,
+        sandbox_runtime.as_ref(),
+        None,
+        evidence_sink.as_deref(),
+    )
+    .await
 }
 
 pub async fn run_command_spec(
@@ -1196,6 +1207,7 @@ pub async fn run_command_spec(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
 ) -> Result<SandboxExecOutput, String> {
     let command_tmpdir = create_command_tmpdir()?;
     inject_command_tmp_env(&mut spec, &command_tmpdir);
@@ -1206,10 +1218,11 @@ pub async fn run_command_spec(
         sandbox,
         sandbox_runtime,
         network_access_override,
+        evidence_sink,
     )
     .await;
-    let evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
-    cleanup_command_tmpdir(&command_tmpdir, evidence_sink.as_deref()).await;
+    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.as_deref());
+    cleanup_command_tmpdir(&command_tmpdir, evidence_sink.or(runtime_evidence_sink)).await;
     output
 }
 
@@ -1219,12 +1232,14 @@ async fn run_command_spec_inner(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
 ) -> Result<SandboxExecOutput, String> {
     let mut built = build_command_from_spec(
         spec,
         sandbox.as_ref(),
         sandbox_runtime,
         network_access_override,
+        evidence_sink,
     )?;
     let allowlist_proxy =
         start_allowlist_proxy_if_needed(&mut built.command, built.allowlist_proxy_services).await?;
@@ -1385,6 +1400,7 @@ fn build_command_from_spec(
     sandbox: Option<&ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
 ) -> Result<BuiltCommand, String> {
     let sandbox_policy_cwd = spec.cwd.clone();
     let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
@@ -1462,7 +1478,9 @@ fn build_command_from_spec(
                 _ => None,
             };
             if let Some(event) = event {
-                if let Some(sink) = sandbox_runtime.and_then(|c| c.evidence_sink.as_deref()) {
+                if let Some(sink) = evidence_sink
+                    .or_else(|| sandbox_runtime.and_then(|c| c.evidence_sink.as_deref()))
+                {
                     sink.record(event);
                 } else {
                     evidence::TracingSandboxEvidenceSink.record(event);
@@ -3017,8 +3035,13 @@ mod tests {
             justification: None,
         };
 
-        let result =
-            build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime), None);
+        let result = build_command_from_spec(
+            spec,
+            Some(&sandbox_context),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        );
 
         // SAFETY: restore the ambient env var.
         unsafe {
@@ -3088,8 +3111,13 @@ mod tests {
             justification: None,
         };
 
-        let result =
-            build_command_from_spec(spec, Some(&sandbox_context), Some(&sandbox_runtime), None);
+        let result = build_command_from_spec(
+            spec,
+            Some(&sandbox_context),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        );
 
         // The dangerous writable root must reject the spec.
         assert!(result.is_err(), "dangerous writable root must abort build");
@@ -3137,7 +3165,7 @@ mod tests {
         spec.env
             .insert("TMP".to_string(), caller_tmp.to_string_lossy().into_owned());
 
-        let output = run_command_spec(spec, 16 * 1024, None, None, None)
+        let output = run_command_spec(spec, 16 * 1024, None, None, None, None)
             .await
             .expect("command should run with private tmp env");
 
@@ -3185,9 +3213,16 @@ mod tests {
             ..SandboxRuntimeConfig::default()
         };
 
-        let output = run_command_spec(spec, 16 * 1024, Some(sandbox), Some(&sandbox_runtime), None)
-            .await
-            .expect("allowlist command should receive proxy env");
+        let output = run_command_spec(
+            spec,
+            16 * 1024,
+            Some(sandbox),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        )
+        .await
+        .expect("allowlist command should receive proxy env");
 
         assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
         let lines = output.stdout.lines().collect::<Vec<_>>();
@@ -3340,6 +3375,7 @@ mod tests {
                         permissions: SandboxPermissions::UseDefault,
                     }),
                     sandbox_runtime: None,
+                    evidence_sink: None,
                     approval: Some(ctx),
                     justification: None,
                     safety_decision: None,
@@ -3423,6 +3459,7 @@ mod tests {
                 permissions: SandboxPermissions::UseDefault,
             }),
             sandbox_runtime: None,
+            evidence_sink: None,
             approval: Some(ctx),
             justification: None,
             safety_decision: Some(SafetyDecision::deny(
@@ -3657,6 +3694,7 @@ mod tests {
             max_output_bytes: 16 * 1024,
             sandbox: None,
             sandbox_runtime: None,
+            evidence_sink: None,
             approval: Some(ctx),
             justification: None,
             safety_decision: None,
@@ -3694,6 +3732,7 @@ mod tests {
             max_output_bytes: 16 * 1024,
             sandbox: None,
             sandbox_runtime: None,
+            evidence_sink: None,
             approval: Some(ctx),
             justification: None,
             safety_decision: Some(SafetyDecision::deny(
@@ -3752,6 +3791,7 @@ mod tests {
                         enforcement: SandboxEnforcement::PreferStrict,
                         ..SandboxRuntimeConfig::default()
                     }),
+                    evidence_sink: None,
                     approval: Some(ctx),
                     justification: None,
                     safety_decision: None,

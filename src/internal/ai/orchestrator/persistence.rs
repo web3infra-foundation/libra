@@ -47,7 +47,7 @@ use crate::{
     internal::ai::{
         codex::{
             model::{
-                IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepSnapshot,
+                EvidenceEvent, IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepSnapshot,
                 ProvenanceSnapshot, RunSnapshot, TaskSnapshot, ToolInvocationEvent,
             },
             types::{FileChange, PatchStatus},
@@ -1732,11 +1732,11 @@ async fn persist_runtime_event(
             tool_name,
             result,
         } => {
-            let payload = match result {
+            let payload = match &result {
                 Ok(output) => json!({
                     "invocation_id": build_runtime_invocation_key(task, &call_id),
                     "call_id": call_id,
-                    "result": tool_output_to_json(&output),
+                    "result": tool_output_to_json(output),
                     "error": serde_json::Value::Null,
                 }),
                 Err(error) => json!({
@@ -1746,20 +1746,20 @@ async fn persist_runtime_event(
                     "error": error,
                 }),
             };
+            let status = match &result {
+                Ok(output) if output.is_success() => "completed",
+                Ok(_) | Err(_) => "failed",
+            };
             persist_tool_invocation_event(
-                mcp_server,
-                &context,
-                task,
-                &call_id,
-                &tool_name,
-                if payload.get("error").is_some_and(|value| !value.is_null()) {
-                    "failed"
-                } else {
-                    "completed"
-                },
-                payload,
+                mcp_server, &context, task, &call_id, &tool_name, status, payload,
             )
             .await?;
+            if let Ok(output) = &result {
+                persist_sandbox_evidence_events(
+                    mcp_server, &context, task, &call_id, &tool_name, output,
+                )
+                .await?;
+            }
         }
         super::types::TaskRuntimeEvent::UsageUpdated { .. } => {}
     }
@@ -1850,6 +1850,49 @@ async fn persist_tool_invocation_event(
         payload,
     };
     put_history_json(mcp_server, "tool_invocation_event", &object_id, &event).await
+}
+
+async fn persist_sandbox_evidence_events(
+    mcp_server: &Arc<LibraMcpServer>,
+    context: &RuntimeEventContext,
+    task: &super::types::TaskSpec,
+    call_id: &str,
+    tool_name: &str,
+    output: &ToolOutput,
+) -> Result<(), OrchestratorError> {
+    let Some(events) = sandbox_evidence_events_from_output(output) else {
+        return Ok(());
+    };
+
+    for (index, event_data) in events.iter().enumerate() {
+        let data = json!({
+            "task_id": task.id().to_string(),
+            "tool": tool_name,
+            "call_id": call_id,
+            "event": event_data,
+        });
+        let object_id = stable_history_object_id(
+            "orchestrator_sandbox_evidence_event",
+            &json!({
+                "run_id": context.run_id,
+                "task_id": task.id().to_string(),
+                "call_id": call_id,
+                "index": index,
+                "event": event_data,
+            }),
+        )?;
+        let evidence = EvidenceEvent {
+            id: object_id.clone(),
+            run_id: context.run_id.clone(),
+            patchset_id: None,
+            at: Utc::now(),
+            kind: "sandbox".to_string(),
+            data,
+        };
+        put_history_json(mcp_server, "evidence", &object_id, &evidence).await?;
+    }
+
+    Ok(())
 }
 
 async fn append_task_event(
@@ -2073,6 +2116,14 @@ fn tool_output_to_json(output: &ToolOutput) -> serde_json::Value {
             "result": result,
         }),
     }
+}
+
+fn sandbox_evidence_events_from_output(output: &ToolOutput) -> Option<&Vec<serde_json::Value>> {
+    output
+        .metadata()
+        .and_then(|metadata| metadata.get("sandbox_evidence"))
+        .and_then(|value| value.as_array())
+        .filter(|events| !events.is_empty())
 }
 
 fn build_runtime_invocation_key(task: &super::types::TaskSpec, call_id: &str) -> String {
@@ -4871,6 +4922,31 @@ mod tests {
                 result: Ok(crate::internal::ai::tools::ToolOutput::success("patched")),
             },
         );
+        observer.on_task_runtime_event(
+            &plan_spec.tasks[0],
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id: "call-2".to_string(),
+                tool_name: "shell".to_string(),
+                arguments: json!({"command":"true"}),
+            },
+        );
+        observer.on_task_runtime_event(
+            &plan_spec.tasks[0],
+            TaskRuntimeEvent::ToolCallEnd {
+                call_id: "call-2".to_string(),
+                tool_name: "shell".to_string(),
+                result: Ok(crate::internal::ai::tools::ToolOutput::failure(
+                    "sandbox rejected command",
+                )
+                .with_metadata(json!({
+                    "sandbox_evidence": [{
+                        "kind": "writable_root_rejected",
+                        "root": "/",
+                        "reason": "dangerous writable root",
+                    }]
+                }))),
+            },
+        );
         let results = vec![TaskResult {
             task_id: impl_task_id,
             status: TaskNodeStatus::Completed,
@@ -5067,14 +5143,28 @@ mod tests {
         assert!(assistant_context_frame.contains("\"fullTextStored\":false"));
         assert!(assistant_context_frame.contains("\"contentChars\""));
         assert!(!assistant_context_frame.contains(raw_tail));
-        assert!(
-            history
-                .list_objects("tool_invocation_event")
-                .await
-                .unwrap()
-                .len()
-                >= 2
-        );
+        let tool_invocation_events = history.list_objects("tool_invocation_event").await.unwrap();
+        assert!(tool_invocation_events.len() >= 2);
+        let mut saw_failed_shell_invocation = false;
+        for (_, hash) in &tool_invocation_events {
+            let value = storage.get_json::<serde_json::Value>(hash).await.unwrap();
+            if value["payload"]["call_id"] == "call-2" && value["status"] == "failed" {
+                assert_eq!(value["tool"], "shell");
+                saw_failed_shell_invocation = true;
+            }
+        }
+        assert!(saw_failed_shell_invocation);
+        let mut saw_sandbox_evidence = false;
+        for (_, hash) in history.list_objects("evidence").await.unwrap() {
+            let value = storage.get_json::<serde_json::Value>(&hash).await.unwrap();
+            if value.get("kind").and_then(|kind| kind.as_str()) == Some("sandbox") {
+                assert_eq!(value["data"]["tool"], "shell");
+                assert_eq!(value["data"]["call_id"], "call-2");
+                assert_eq!(value["data"]["event"]["kind"], "writable_root_rejected");
+                saw_sandbox_evidence = true;
+            }
+        }
+        assert!(saw_sandbox_evidence);
         assert!(history.list_objects("run_event").await.unwrap().len() >= 2);
         assert!(history.list_objects("task_event").await.unwrap().len() >= 4);
     }

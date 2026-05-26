@@ -139,8 +139,8 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，`PreferStrict` 在 approval shell 路径会要求用户确认降级，不再无感知降级。
 - Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `.azure` / `.docker` / `.npmrc` / `.pypirc` / Cargo/Gem credentials / `~/.config/gcloud` / `~/.config/gh` / `~/.config/hub` / `~/.kube` / `.config/libra/vault` / Firefox、Chrome、Chromium、Brave profile / macOS `Library/Cookies` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径。
 - `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数已通过 `runtime.rs::create_bwrap_command_args` 落地（v0.17.724），并通过 `exec_env_new_session_runs_child_as_session_leader` 等回归在 Unix 上验证。
-- `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
-- `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单，并通过 `SandboxEvidenceSink::WritableRootRejected { root, reason }` 把拒绝事件作为结构化 Evidence 写入 sink（`evidence.rs:58`）；剩余风险是 agent Runtime 的 `ToolInvocation[E]` projection 尚未把 sink 里的 `WritableRootRejected` 转换成 `Evidence[E]` payload — sink-to-runtime 投影是下一阶段的事。
+- `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；清理失败会进入 `SandboxEvidenceSink::TmpdirCleanupFailed`，shell handler 会通过 request-level fanout sink 捕获事件并在 `ToolOutput.metadata.sandbox_evidence` 暴露，orchestrator `ToolCallEnd` projection 会写入 `EvidenceEvent(kind="sandbox")`。
+- `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单，并通过 `SandboxEvidenceSink::WritableRootRejected { root, reason }` 把拒绝事件作为结构化 Evidence 写入 sink（`evidence.rs:58`）；agent Runtime 的 `ToolInvocation[E]` projection 已把 shell metadata 中的 sandbox 事件转换成 `Evidence[E]` payload。
 - `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，尚未切换为默认强制或默认询问。
 
 ## 目标与非目标
@@ -375,7 +375,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ## 与 agent.md Part B 的交接契约
 
-- **Runtime 正式写入**：沙箱拒绝事件、enforcement 失败、危险挂载拒绝必须落到 [agent.md](agent.md) Part B Runtime 的 `ToolInvocation[E]` + `Evidence[E]`，不能藏在 tracing 日志里
+- **Runtime 正式写入 ✅**：shell request-level fanout sink 会保留 tracing / 既有 runtime sink，同时捕获沙箱拒绝事件、enforcement 失败、危险挂载拒绝；orchestrator `ToolCallEnd` 会将 `ToolOutput.metadata.sandbox_evidence` 投影为 [agent.md](agent.md) Part B Runtime 的 `Evidence[E]`。
 - **Phase 边界**：沙箱策略的选择与降级发生在 Phase 2 `CodexTaskExecutor` / `CompletionTaskExecutor` 进入 Runtime 写入之前；Phase 0 / 1 的 readonly tools 默认走 `SandboxPolicy::ReadOnly` + `SandboxEnforcement::Required`
 - **Projection**：`libra sandbox status` 输出可作为 Projection 读取消费者（UI / MCP / diagnostics），但不成为真相源
 

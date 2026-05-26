@@ -25,7 +25,11 @@
 //! the agent-runtime layer and must be assembled by the sink
 //! implementation, not by the sandbox.
 
-use std::{fmt::Debug, path::PathBuf, sync::Mutex};
+use std::{
+    fmt::Debug,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 /// Structured sandbox events that callers can observe via
 /// [`SandboxEvidenceSink::record`].
@@ -101,6 +105,38 @@ pub enum SandboxEvidenceEvent {
     },
 }
 
+impl SandboxEvidenceEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::TmpdirCleanupFailed { .. } => "tmpdir_cleanup_failed",
+            Self::WritableRootRejected { .. } => "writable_root_rejected",
+            Self::EnforcementFailed { .. } => "enforcement_failed",
+            Self::NetworkEnforcementFailed { .. } => "network_enforcement_failed",
+        }
+    }
+
+    pub fn to_metadata_value(&self) -> serde_json::Value {
+        match self {
+            Self::TmpdirCleanupFailed { path, error } => serde_json::json!({
+                "kind": self.kind(),
+                "path": path.display().to_string(),
+                "error": error,
+            }),
+            Self::WritableRootRejected { root, reason } => serde_json::json!({
+                "kind": self.kind(),
+                "root": root.display().to_string(),
+                "reason": reason,
+            }),
+            Self::EnforcementFailed { reason } | Self::NetworkEnforcementFailed { reason } => {
+                serde_json::json!({
+                    "kind": self.kind(),
+                    "reason": reason,
+                })
+            }
+        }
+    }
+}
+
 /// Object-safe sink the sandbox calls at each structured event
 /// surface. Implementations MUST be cheap to call — they sit on
 /// the hot path of every sandboxed command — and MUST NOT panic.
@@ -112,6 +148,29 @@ pub enum SandboxEvidenceEvent {
 /// can keep its derived `#[derive(Debug)]`.
 pub trait SandboxEvidenceSink: Debug + Send + Sync {
     fn record(&self, event: SandboxEvidenceEvent);
+}
+
+/// Sink that forwards every event to multiple child sinks.
+///
+/// Used by the shell runtime to capture structured metadata while preserving
+/// an already-configured runtime sink or the default tracing fallback.
+#[derive(Debug)]
+pub struct FanoutSandboxEvidenceSink {
+    sinks: Vec<Arc<dyn SandboxEvidenceSink>>,
+}
+
+impl FanoutSandboxEvidenceSink {
+    pub fn new(sinks: Vec<Arc<dyn SandboxEvidenceSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl SandboxEvidenceSink for FanoutSandboxEvidenceSink {
+    fn record(&self, event: SandboxEvidenceEvent) {
+        for sink in &self.sinks {
+            sink.record(event.clone());
+        }
+    }
 }
 
 /// Default sink that mirrors the pre-Phase-7 behaviour:
@@ -262,6 +321,38 @@ mod tests {
             SandboxEvidenceEvent::NetworkEnforcementFailed { reason }
                 if reason == "proxy unavailable"
         ));
+    }
+
+    #[test]
+    fn fanout_sink_forwards_to_all_children() {
+        let first = Arc::new(InMemorySandboxEvidenceSink::new());
+        let second = Arc::new(InMemorySandboxEvidenceSink::new());
+        let fanout = FanoutSandboxEvidenceSink::new(vec![first.clone(), second.clone()]);
+
+        fanout.record(SandboxEvidenceEvent::EnforcementFailed {
+            reason: "missing helper".to_string(),
+        });
+
+        assert_eq!(first.events().len(), 1);
+        assert_eq!(second.events().len(), 1);
+    }
+
+    #[test]
+    fn event_metadata_uses_stable_kind_and_fields() {
+        let event = SandboxEvidenceEvent::WritableRootRejected {
+            root: PathBuf::from("/"),
+            reason: "dangerous root".to_string(),
+        };
+
+        assert_eq!(event.kind(), "writable_root_rejected");
+        assert_eq!(
+            event.to_metadata_value(),
+            serde_json::json!({
+                "kind": "writable_root_rejected",
+                "root": "/",
+                "reason": "dangerous root",
+            })
+        );
     }
 
     /// The sink trait is object-safe — the sandbox stores it as
