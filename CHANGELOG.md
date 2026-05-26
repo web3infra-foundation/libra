@@ -56,6 +56,14 @@
 
 ### Documentation
 
+- **AI provider env constructor policy (v0.17.1048)**: provider
+  Rustdocs now define `Client::from_env()` as a source-compatible
+  legacy helper for the 0.17 line and `Client::from_resolved_env(...)`
+  as the preferred runtime bootstrap for repository/global
+  vault-aware config. The v0.18 migration note is explicit:
+  `from_env()` will be deprecated but retained for compatibility,
+  while new runtime call sites should use `from_resolved_env` with a
+  `LocalIdentityTarget`.
 - **Root help command groups (v0.17.840)**: `fsck` and `hash-object`
   added to the `Maintenance And Plumbing` row of `libra --help`'s
   Command Groups section. Both commands were callable and documented
