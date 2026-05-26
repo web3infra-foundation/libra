@@ -2919,4 +2919,173 @@ mod tests {
             "fail-closed must not create the main worktree"
         );
     }
+
+    /// CEX-S2-12 criterion (3): every post-Spawned `TaskFailure` must
+    /// map to the structurally-correct terminal `AgentRunEvent` so
+    /// replay tooling can branch on the variant tag without
+    /// string-matching the reason. Pins `map_failure_to_terminal_event`
+    /// across all distinct mappings (the full-dispatch tests cover only
+    /// Failed/TimedOut/Cancelled-ParentAbort; this pins the
+    /// Cancelled-source matrix and every BudgetExceeded dimension).
+    #[test]
+    fn map_failure_to_terminal_event_pins_every_lifecycle_mapping() {
+        use crate::internal::ai::{
+            agent::runtime::{
+                BudgetExceededReason, CancellationSource, ContextHandoffError, ToolLoopError,
+            },
+            agent_run::{BudgetDimension, CancellationReason},
+            completion::CompletionError,
+        };
+
+        let id = AgentRunId::new();
+
+        // `map_failure_to_terminal_event` only ever emits these four
+        // variants; pull the id back out so every case confirms the
+        // `agent_run_id` is threaded into the terminal event unchanged.
+        fn run_id_of(event: &AgentRunEvent) -> AgentRunId {
+            match event {
+                AgentRunEvent::Cancelled { agent_run_id, .. }
+                | AgentRunEvent::TimedOut { agent_run_id, .. }
+                | AgentRunEvent::BudgetExceeded { agent_run_id, .. }
+                | AgentRunEvent::Failed { agent_run_id, .. } => *agent_run_id,
+                other => panic!(
+                    "map_failure_to_terminal_event produced an unexpected variant: {other:?}"
+                ),
+            }
+        }
+
+        // Map a failure AND assert the agent_run_id round-trips, then
+        // return the event for the caller's variant assertion.
+        let ev = |failure: &TaskFailure| {
+            let event = map_failure_to_terminal_event(id, failure);
+            assert_eq!(
+                run_id_of(&event),
+                id,
+                "agent_run_id must be threaded into the terminal event for {failure:?}",
+            );
+            event
+        };
+
+        // Cancellation source → mapped CancellationReason.
+        assert!(matches!(
+            ev(&TaskFailure::Cancelled {
+                source: CancellationSource::ParentAbort,
+            }),
+            AgentRunEvent::Cancelled {
+                reason: CancellationReason::UserRequested,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ev(&TaskFailure::Cancelled {
+                source: CancellationSource::Timeout,
+            }),
+            AgentRunEvent::Cancelled {
+                reason: CancellationReason::LayerOneTimeout,
+                ..
+            }
+        ));
+        match ev(&TaskFailure::Cancelled {
+            source: CancellationSource::BudgetHardCap,
+        }) {
+            AgentRunEvent::Cancelled {
+                reason: CancellationReason::Other(reason),
+                ..
+            } => assert_eq!(reason, "budget_hard_cap"),
+            other => {
+                panic!("BudgetHardCap cancel must map to Other(\"budget_hard_cap\"), got {other:?}")
+            }
+        }
+
+        // Timeout → TimedOut.
+        assert!(matches!(
+            ev(&TaskFailure::Timeout {
+                wall_clock_ms: 1_000
+            }),
+            AgentRunEvent::TimedOut { .. }
+        ));
+
+        // BudgetExceeded(reason) → BudgetExceeded{dimension}.
+        assert!(matches!(
+            ev(&TaskFailure::BudgetExceeded(
+                BudgetExceededReason::CostHardCap
+            )),
+            AgentRunEvent::BudgetExceeded {
+                dimension: BudgetDimension::Cost,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ev(&TaskFailure::BudgetExceeded(
+                BudgetExceededReason::TokenHardCap
+            )),
+            AgentRunEvent::BudgetExceeded {
+                dimension: BudgetDimension::Token,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ev(&TaskFailure::BudgetExceeded(
+                BudgetExceededReason::WallClock
+            )),
+            AgentRunEvent::BudgetExceeded {
+                dimension: BudgetDimension::WallClock,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ev(&TaskFailure::BudgetExceeded(BudgetExceededReason::Steps)),
+            AgentRunEvent::BudgetExceeded {
+                dimension: BudgetDimension::ToolCall,
+                ..
+            }
+        ));
+
+        // Catch-all: every remaining variant that can reach this helper
+        // → Failed carrying the failure's Display text verbatim. Covers
+        // a representative spread of the wildcard arm, including
+        // `BudgetExceeded::Internal` (the budget reason that is NOT a
+        // dimension), a structured-field variant, a tuple variant, and a
+        // unit variant.
+        for failure in [
+            TaskFailure::BudgetExceeded(BudgetExceededReason::Internal {
+                reason: "enforcement unavailable".to_string(),
+            }),
+            TaskFailure::FeatureDisabled,
+            TaskFailure::UnknownSubagent {
+                name: "ghost".to_string(),
+                suggestions: vec!["explore".to_string()],
+            },
+            TaskFailure::DepthExceeded {
+                current: 2,
+                limit: 1,
+            },
+            TaskFailure::ConcurrencyExceeded {
+                current: 4,
+                limit: 1,
+            },
+            TaskFailure::PermissionEscalationDenied {
+                permission: "edit".to_string(),
+                pattern: "*".to_string(),
+            },
+            TaskFailure::SafetyDenied(SafetyDecisionDenial {
+                reason: "denied for test".to_string(),
+            }),
+            TaskFailure::ApprovalRejected {
+                feedback: Some("rejected for test".to_string()),
+            },
+            TaskFailure::ContextHandoffFailed(ContextHandoffError::NoFrameAvailable),
+            TaskFailure::ProviderError(CompletionError::ProviderError("boom".to_string())),
+            TaskFailure::ChildToolLoopFailed(ToolLoopError::StepBudgetExhausted { steps: 48 }),
+        ] {
+            match ev(&failure) {
+                AgentRunEvent::Failed { reason, .. } => assert_eq!(
+                    reason,
+                    failure.to_string(),
+                    "catch-all must surface the failure's Display text verbatim",
+                ),
+                other => panic!("{failure:?} must map to Failed, got {other:?}"),
+            }
+        }
+    }
 }
