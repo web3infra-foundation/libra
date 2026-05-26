@@ -47,7 +47,7 @@ pub use sub_agent::{
     PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
     ProviderBuildOptionsResolver, SafetyDecisionDenial, SubAgentChildRunRequest,
     SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure,
-    TaskInvocation, TaskResult, ToolLoopError,
+    TaskInvocation, TaskResult, ToolLoopError, WorkspaceIsolationConfig,
 };
 
 // OC-Phase 3 P3.3 + P3.4 + P3.6 + P3.7:

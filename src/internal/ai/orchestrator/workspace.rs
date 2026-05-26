@@ -257,7 +257,15 @@ fn prepare_task_worktree_copy_fallback(
 ) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
     let copy_paths = task_worktree_paths(main_working_dir, task_id, "copy");
     prepare_task_worktree_root(&copy_paths.cleanup_root)?;
-    let backend = prepare_copy_task_worktree(main_working_dir, &copy_paths, &baseline)?;
+    // The cleanup root now exists on disk. If the copy materialization
+    // fails partway through, remove it before surfacing the error so a
+    // mid-copy failure does not leak a partial `libra-task-worktree-*`
+    // directory (CEX-S2-11 (5): no leaked workspaces). The caller
+    // receives only the error and has no handle to clean up itself.
+    let backend = remove_partial_workspace_on_error(
+        &copy_paths.cleanup_root,
+        prepare_copy_task_worktree(main_working_dir, &copy_paths, &baseline),
+    )?;
 
     Ok((
         TaskWorktree {
@@ -354,8 +362,16 @@ fn prepare_fuse_task_worktree(
     };
 
     prepare_task_worktree_root(&paths.cleanup_root)?;
-    let expect_repo_storage_link =
-        prepare_fuse_task_worktree_layers(main_working_dir, paths, baseline)?;
+    // The cleanup root now exists; if FUSE layer setup fails, remove it
+    // before surfacing the error so a partial workspace is not leaked
+    // (CEX-S2-11 (5)). The mount-failure arms below already clean up via
+    // `warn_cleanup_root_failure` + `Fallback`; this covers the `?`
+    // io-error path that would otherwise leak the directory. Shares the
+    // same `remove_partial_workspace_on_error` helper as the copy path.
+    let expect_repo_storage_link = remove_partial_workspace_on_error(
+        &paths.cleanup_root,
+        prepare_fuse_task_worktree_layers(main_working_dir, paths, baseline),
+    )?;
 
     let mount_result = mount_fuse_task_worktree_on_runtime(
         &runtime,
@@ -980,6 +996,28 @@ fn remove_cleanup_root(cleanup_root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Pass through `result`, but if it is `Err`, remove the
+/// already-created `cleanup_root` first so a materialization that fails
+/// *after* the workspace root exists does not leak a partial
+/// `libra-task-worktree-*` directory (CEX-S2-11 (5): no leaked
+/// workspaces). Shared by the copy and FUSE materialization paths,
+/// which both create the root and then run a fallible materializer the
+/// caller has no handle to clean up.
+fn remove_partial_workspace_on_error<T>(
+    cleanup_root: &Path,
+    result: io::Result<T>,
+) -> io::Result<T> {
+    if result.is_err()
+        && let Err(cleanup_err) = remove_cleanup_root(cleanup_root)
+    {
+        warn!(
+            path = %cleanup_root.display(),
+            "failed to remove partial task worktree after materialization error: {cleanup_err}",
+        );
+    }
+    result
+}
+
 #[cfg(unix)]
 fn warn_cleanup_root_failure(cleanup_root: &Path) {
     if let Err(err) = remove_cleanup_root(cleanup_root) {
@@ -1535,10 +1573,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        FuseProvisionState, SubAgentWorkspaceError, WorkspaceSyncError, cleanup_task_worktree,
-        clone_or_copy_file, detect_contract_violations, materialize_sub_agent_workspace,
-        materialize_workspace, prepare_copy_task_worktree, prepare_task_worktree,
-        prepare_task_worktree_root, sync_task_worktree_back, task_worktree_paths,
+        FuseAttemptOutcome, FuseProvisionState, SubAgentWorkspaceError, WorkspaceSyncError,
+        cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
+        materialize_sub_agent_workspace, materialize_workspace, prepare_copy_task_worktree,
+        prepare_task_worktree, prepare_task_worktree_copy_fallback, prepare_task_worktree_root,
+        remove_partial_workspace_on_error, sync_task_worktree_back, task_worktree_paths,
     };
     use crate::{
         internal::ai::{
@@ -2431,6 +2470,74 @@ mod tests {
         }
 
         workspace.cleanup().expect("cleanup must not leak");
+    }
+
+    /// CEX-S2-11 (5): if the copy materialization fails AFTER the
+    /// cleanup root has been created, the partial workspace must be
+    /// removed before the error is surfaced — the caller receives only
+    /// the error and has no handle to clean up. Inject a failure by
+    /// snapshotting a file and then deleting it, so `copy_workspace_entry`
+    /// hits `NotFound` on the source mid-copy.
+    #[test]
+    fn copy_fallback_removes_partial_workspace_on_materialization_error() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("real.txt"), "content\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).expect("snapshot");
+        // Delete the snapshotted source so the copy step fails partway.
+        std::fs::remove_file(main.join("real.txt")).unwrap();
+
+        let task_id = Uuid::new_v4();
+        let cleanup_root = task_worktree_paths(&main, task_id, "copy").cleanup_root;
+
+        let result = prepare_task_worktree_copy_fallback(
+            &main,
+            task_id,
+            baseline,
+            FuseAttemptOutcome::AlreadyDisabled,
+        );
+        assert!(
+            result.is_err(),
+            "copying a deleted source file must surface an error",
+        );
+        assert!(
+            !cleanup_root.exists(),
+            "the partial workspace must be removed on a copy materialization error \
+             (no leak), but {} still exists",
+            cleanup_root.display(),
+        );
+    }
+
+    /// Backend-agnostic coverage of the shared cleanup-on-error helper
+    /// used by BOTH the copy and FUSE materialization paths
+    /// (CEX-S2-11 (5)): an `Err` removes the already-created cleanup
+    /// root; an `Ok` leaves it intact and passes the value through. This
+    /// exercises the FUSE path's leak-prevention logic (the FUSE backend
+    /// itself needs a real mount and is not reachable under `#[cfg(test)]`).
+    #[test]
+    fn remove_partial_workspace_on_error_cleans_up_only_on_err() {
+        let temp = tempdir().unwrap();
+
+        let err_root = temp.path().join("err-root");
+        std::fs::create_dir_all(err_root.join("workspace")).unwrap();
+        let result: io::Result<()> =
+            remove_partial_workspace_on_error(&err_root, Err(io::Error::other("boom")));
+        assert!(result.is_err(), "the original error must be propagated");
+        assert!(
+            !err_root.exists(),
+            "an Err must remove the already-created cleanup root (no leak)",
+        );
+
+        let ok_root = temp.path().join("ok-root");
+        std::fs::create_dir_all(&ok_root).unwrap();
+        let result = remove_partial_workspace_on_error(&ok_root, io::Result::Ok(7u8));
+        assert_eq!(result.expect("Ok passes through"), 7);
+        assert!(
+            ok_root.exists(),
+            "an Ok must leave the workspace root intact",
+        );
     }
 
     /// A large repo selects `Sparse`; with no native sparse API and

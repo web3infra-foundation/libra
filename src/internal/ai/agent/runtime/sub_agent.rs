@@ -56,6 +56,42 @@ use crate::internal::ai::{
 /// stricter parsing.
 pub type MessageId = String;
 
+/// Inputs the dispatcher needs to materialize an isolated per-run
+/// workspace for a sub-agent (CEX-S2-12 / S2-INV-03).
+///
+/// Attached to [`DefaultSubAgentDispatcher`] via
+/// `with_workspace_isolation` (set by `libra code`'s
+/// `build_subagent_runtime_for_session`). When present, the dispatcher
+/// materializes a workspace through
+/// [`crate::internal::ai::orchestrator::workspace::materialize_sub_agent_workspace`],
+/// re-roots the child tool registry onto it, and rebases the inherited
+/// sandbox `writable_roots` to it before running the child — so a
+/// sub-agent's writes land in the workspace, not the main worktree.
+/// `None` (every existing test and any flag-off path) means no
+/// isolation: behaviour is byte-for-byte identical to before this slice.
+#[derive(Clone)]
+pub struct WorkspaceIsolationConfig {
+    /// Per-session FUSE-provisioning state (degrades to copy backend
+    /// when FUSE is unavailable). `Arc`-backed, cheap to clone.
+    pub fuse_state: crate::internal::ai::orchestrator::workspace::FuseProvisionState,
+    /// `.libra/sessions` root the per-run `AgentRunEventStore` writes the
+    /// `WorkspaceMaterialized` event under.
+    pub sessions_root: std::path::PathBuf,
+    /// Whether an expensive full-copy fallback is permitted when the
+    /// preferred (size-selected) strategy cannot be materialized
+    /// (`code.multi_agent.allow_full_copy`).
+    pub allow_full_copy: bool,
+}
+
+impl std::fmt::Debug for WorkspaceIsolationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceIsolationConfig")
+            .field("sessions_root", &self.sessions_root)
+            .field("allow_full_copy", &self.allow_full_copy)
+            .finish_non_exhaustive()
+    }
+}
+
 // ─── Cancellation primitive ─────────────────────────────────────────────
 
 /// Cooperative cancellation token threaded through a sub-agent dispatch.
@@ -867,6 +903,19 @@ pub struct SubAgentChildRunRequest<'a> {
     /// hand them in without changing the runner trait's surface.
     /// Empty is the "no handoff yet" baseline.
     pub history: Vec<crate::internal::ai::completion::Message>,
+    /// CEX-S2-12 / S2-INV-03 workspace isolation: when the dispatcher
+    /// materialized an isolated workspace for this run, the child tool
+    /// registry re-rooted onto that workspace (working_dir =
+    /// workspace_root, plus an alias mapping the user-facing repo path
+    /// into it). `None` means no isolation — the runner falls back to
+    /// `ctx.tool_registry` (the parent's, rooted at the main worktree).
+    pub workspace_registry: Option<ToolRegistry>,
+    /// The inherited [`ToolRuntimeContext`] with its sandbox
+    /// `writable_roots` rebased onto the isolated workspace root, so an
+    /// absolute-path `shell` write to the main worktree is OS-denied.
+    /// `None` means no isolation — the runner falls back to
+    /// `ctx.runtime_context` (carrying the main worktree's roots).
+    pub workspace_runtime_context: Option<ToolRuntimeContext>,
 }
 
 /// Executes the tail of a dispatch after gates and approvals pass.
@@ -994,9 +1043,23 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             // execution-time gate (`available_for` filters the
             // request's tool list, `allowed_tools` blocks any
             // hallucinated call to a tool outside that list).
-            let allowed_tools: Vec<String> = request
-                .ctx
-                .tool_registry
+            // CEX-S2-12 / S2-INV-03 workspace isolation: when the
+            // dispatcher materialized an isolated workspace it hands the
+            // child a registry re-rooted onto it and a runtime context
+            // whose sandbox `writable_roots` are rebased to it. Fall
+            // back to the parent's registry / inherited context when no
+            // workspace was materialized (every flag-off path), keeping
+            // behaviour identical to before this slice.
+            let child_registry = request
+                .workspace_registry
+                .as_ref()
+                .unwrap_or(request.ctx.tool_registry);
+            let child_runtime_context = request
+                .workspace_runtime_context
+                .clone()
+                .or_else(|| request.ctx.runtime_context.clone());
+
+            let allowed_tools: Vec<String> = child_registry
                 .available_for(request.sub_spec, request.effective_ruleset)
                 .into_iter()
                 .map(|spec| spec.function.name)
@@ -1009,21 +1072,20 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 // hooks fire on the child's tool calls — sub-agents
                 // are not allowed to bypass project-level hooks.
                 hook_runner: request.ctx.hook_runner.cloned(),
-                // S2-INV-06 approval-authority inheritance: forward the
-                // parent's runtime sandbox / approval / file-history
-                // context so the child's tool invocations run under the
-                // same authority the parent does. `DispatchContext::
+                // S2-INV-06 approval-authority inheritance + S2-INV-03
+                // workspace isolation: the child's tool invocations run
+                // under the parent's runtime sandbox / approval /
+                // file-history authority. `DispatchContext::
                 // runtime_context` documents this as "inherited by child
                 // tool invocations ... they must not get a fresh approval
-                // authority"; before this line the child silently dropped
-                // it, leaving every child tool call with `None`
-                // (no sandbox, approval defaulting to `Skip`) — strictly
-                // more permissive than the parent. Forwarding it is a
-                // tightening, not isolation: rebasing the sandbox
-                // `writable_roots` onto a materialized per-run workspace
-                // (S2-INV-03) is a separate follow-on; here the child
-                // simply inherits whatever the parent already enforces.
-                runtime_context: request.ctx.runtime_context.clone(),
+                // authority"; before it was wired the child silently
+                // dropped it (no sandbox, approval defaulting to `Skip`
+                // — strictly more permissive than the parent). When an
+                // isolated workspace was materialized this is the
+                // rebased context (sandbox `writable_roots` =
+                // [workspace_root]); otherwise it is the inherited
+                // parent context verbatim.
+                runtime_context: child_runtime_context,
                 ..ToolLoopConfig::default()
             };
 
@@ -1052,7 +1114,7 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 &model,
                 request.history.clone(),
                 request.invocation.prompt.clone(),
-                request.ctx.tool_registry,
+                child_registry,
                 tool_loop_config,
                 &mut observer,
             );
@@ -1955,6 +2017,8 @@ mod tests {
             task_id: "task-id".to_string(),
             agent_run_id: AgentRunId::new(),
             history: Vec::new(),
+            workspace_registry: None,
+            workspace_runtime_context: None,
         };
 
         let runner = DefaultSubAgentChildRunner::new();

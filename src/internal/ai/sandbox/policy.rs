@@ -590,6 +590,51 @@ impl SandboxPolicy {
         Self::default()
     }
 
+    /// Return a copy of this policy with its writable roots rebased onto
+    /// a single sub-agent workspace root (CEX-S2-12 / S2-INV-03).
+    ///
+    /// When a sub-agent runs in a materialized isolated workspace, the
+    /// inherited [`Self::WorkspaceWrite`] policy still carries the
+    /// *parent's* `writable_roots` (the main worktree), which would let
+    /// an absolute-path `shell` write escape the workspace. Rebasing the
+    /// writable roots to `[workspace_root]` is what makes the OS sandbox
+    /// deny those escapes; re-rooting the tool registry's working dir
+    /// alone only redirects *relative* paths.
+    ///
+    /// `ReadOnly` is already non-writable, so it is returned unchanged.
+    /// `DangerFullAccess` / `ExternalSandbox` deliberately opt out of
+    /// `writable_roots` enforcement (full-disk or externally-managed),
+    /// so they cannot be tightened here — they are returned unchanged
+    /// with a warning that workspace isolation is best-effort under
+    /// those postures (silently upgrading them would override the
+    /// operator's explicit choice).
+    pub fn rebased_to_workspace(&self, workspace_root: &Path) -> Self {
+        match self {
+            Self::WorkspaceWrite {
+                network_access,
+                exclude_tmpdir_env_var,
+                exclude_slash_tmp,
+                ..
+            } => Self::WorkspaceWrite {
+                writable_roots: vec![workspace_root.to_path_buf()],
+                network_access: network_access.clone(),
+                exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
+                exclude_slash_tmp: *exclude_slash_tmp,
+            },
+            Self::ReadOnly => Self::ReadOnly,
+            Self::DangerFullAccess | Self::ExternalSandbox { .. } => {
+                tracing::warn!(
+                    workspace_root = %workspace_root.display(),
+                    policy = ?self,
+                    "sub-agent workspace isolation is best-effort under a full-disk / \
+                     external-sandbox policy: writable_roots cannot be narrowed to the \
+                     workspace, so absolute-path writes are not OS-denied",
+                );
+                self.clone()
+            }
+        }
+    }
+
     pub fn has_full_disk_write_access(&self) -> bool {
         matches!(self, Self::DangerFullAccess | Self::ExternalSandbox { .. })
     }
@@ -821,6 +866,55 @@ fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CEX-S2-12 / S2-INV-03: rebasing a `WorkspaceWrite` policy onto a
+    /// sub-agent workspace must replace `writable_roots` with exactly
+    /// the workspace root while preserving the network / tmpdir knobs,
+    /// so the OS sandbox denies absolute-path writes to the parent
+    /// worktree. The other three policy postures are returned unchanged.
+    #[test]
+    fn rebased_to_workspace_narrows_writable_roots_for_workspace_write() {
+        let workspace = Path::new("/tmp/libra-task-workspace");
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/repo/main-worktree")],
+            network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        match policy.rebased_to_workspace(workspace) {
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                exclude_tmpdir_env_var,
+                exclude_slash_tmp,
+            } => {
+                assert_eq!(writable_roots, vec![workspace.to_path_buf()]);
+                assert_eq!(network_access, NetworkAccess::Full);
+                assert!(exclude_tmpdir_env_var);
+                assert!(exclude_slash_tmp);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebased_to_workspace_leaves_non_workspace_write_policies_unchanged() {
+        let workspace = Path::new("/tmp/libra-task-workspace");
+
+        assert_eq!(
+            SandboxPolicy::ReadOnly.rebased_to_workspace(workspace),
+            SandboxPolicy::ReadOnly,
+        );
+        assert_eq!(
+            SandboxPolicy::DangerFullAccess.rebased_to_workspace(workspace),
+            SandboxPolicy::DangerFullAccess,
+        );
+        let external = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Denied,
+        };
+        assert_eq!(external.rebased_to_workspace(workspace), external);
+    }
 
     #[test]
     fn sandbox_enforcement_accepts_stable_spellings() {

@@ -115,6 +115,13 @@ pub struct MultiAgentConfig {
 
     #[serde(default = "default_subagent_timeout_ms")]
     pub subagent_timeout_ms: u64,
+
+    /// CEX-S2-12 / S2-INV-03: permit the expensive full-copy fallback
+    /// when a sub-agent's isolated workspace cannot be materialized via
+    /// the preferred (size-selected) strategy. Defaults to `false` so an
+    /// operator opts in to duplicating the whole worktree per run.
+    #[serde(default)]
+    pub allow_full_copy: bool,
 }
 
 impl Default for MultiAgentConfig {
@@ -124,6 +131,7 @@ impl Default for MultiAgentConfig {
             max_subagent_depth: default_max_subagent_depth(),
             max_concurrent_subagents: default_max_concurrent_subagents(),
             subagent_timeout_ms: default_subagent_timeout_ms(),
+            allow_full_copy: false,
         }
     }
 }

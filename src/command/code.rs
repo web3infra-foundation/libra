@@ -3696,7 +3696,19 @@ async fn build_subagent_runtime_for_session(
             ),
         },
     )
-    .with_default_child_runner();
+    .with_default_child_runner()
+    // CEX-S2-12 / S2-INV-03: confine each dispatched sub-agent to a
+    // materialized per-run workspace so its writes never touch the main
+    // worktree. `sessions_root` = the `.libra/sessions` dir the per-run
+    // `AgentRunEventStore` records the `WorkspaceMaterialized` event
+    // under (transcript path `sessions_root/{thread}/agents/{run}.jsonl`).
+    .with_workspace_isolation(
+        crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+            fuse_state: crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+            sessions_root: storage_root.join("sessions"),
+            allow_full_copy: agents_config.multi_agent.allow_full_copy,
+        },
+    );
 
     // OC-Phase 3 P3.4 / P3.7 interactive permission asker (v0.17.788):
     // construct a ChannelPermissionAsker + spawn a background

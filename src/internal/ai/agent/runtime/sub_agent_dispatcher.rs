@@ -141,6 +141,14 @@ pub struct DefaultSubAgentDispatcher {
     /// and a `with_child_runner` constructor; nothing else in the
     /// dispatcher needs to change.
     child_runner: Option<Arc<dyn super::sub_agent::SubAgentChildRunner>>,
+    /// CEX-S2-12 / S2-INV-03 workspace isolation inputs. When `Some`,
+    /// the dispatch tail materializes a per-run isolated workspace,
+    /// re-roots the child tool registry onto it, and rebases the
+    /// inherited sandbox `writable_roots` to it before invoking the
+    /// child runner — so sub-agent writes land in the workspace, not
+    /// the main worktree. `None` (every gate-only test and any flag-off
+    /// path) means no isolation: behaviour is unchanged.
+    workspace_isolation: Option<super::sub_agent::WorkspaceIsolationConfig>,
 }
 
 impl DefaultSubAgentDispatcher {
@@ -150,7 +158,21 @@ impl DefaultSubAgentDispatcher {
             config,
             in_flight: Arc::new(AtomicU32::new(0)),
             child_runner: None,
+            workspace_isolation: None,
         }
+    }
+
+    /// Attach workspace-isolation inputs (CEX-S2-12 / S2-INV-03). When
+    /// set, the dispatch tail materializes an isolated workspace for
+    /// each sub-agent run and confines the child's writes to it. Wired
+    /// by `libra code`'s `build_subagent_runtime_for_session`; left
+    /// unset by gate-only tests so their behaviour is unchanged.
+    pub fn with_workspace_isolation(
+        mut self,
+        isolation: super::sub_agent::WorkspaceIsolationConfig,
+    ) -> Self {
+        self.workspace_isolation = Some(isolation);
+        self
     }
 
     /// Attach a [`SubAgentChildRunner`] to the dispatcher. The runner
@@ -480,6 +502,15 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // so existing gate-only tests keep working unchanged. The
             // runner branch is the seam OC-Phase 3 P3.4 fills in;
             // today every test path takes the placeholder branch.
+            // CEX-S2-12 / S2-INV-03: holds the materialized isolated
+            // workspace (if any) so it survives the child run and is
+            // cleaned up after the terminal event below. The RAII guard
+            // is a panic backstop: if the child run unwinds before the
+            // explicit post-terminal cleanup, the guard's `Drop` still
+            // tears the workspace down (no leak). The happy path
+            // `take()`s the workspace out of the guard first, so its
+            // `Drop` is a no-op there.
+            let mut workspace_guard = WorkspaceCleanupGuard { workspace: None };
             let outcome = if let Some(runner) = self.child_runner.as_ref() {
                 // OC-Phase 4 minimum-viable handoff (v0.17.773) +
                 // P4.4 compacted handoff (v0.17.785): load the
@@ -543,16 +574,72 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     (Some(frame), None) => frame.to_handoff_messages(),
                     (None, _) => Vec::new(),
                 };
-                let request = super::sub_agent::SubAgentChildRunRequest {
-                    ctx: &ctx,
-                    invocation: &invocation,
-                    sub_spec: &sub_spec,
-                    effective_ruleset: &_effective,
-                    task_id: task_id.clone(),
-                    agent_run_id,
-                    history,
+
+                // CEX-S2-12 / S2-INV-03: when isolation is configured,
+                // materialize a per-run workspace and hand the child a
+                // registry re-rooted onto it + the inherited runtime
+                // context with sandbox `writable_roots` rebased to it.
+                //
+                // FAIL CLOSED: if isolation is configured but the
+                // workspace cannot be materialized, refuse the dispatch
+                // (`SafetyDenied`) rather than running the sub-agent
+                // unsandboxed against the main worktree — a mutating
+                // child must never fall back to the parent worktree when
+                // isolation was required (S2-INV-03). When isolation is
+                // NOT configured (`workspace_isolation == None`: every
+                // flag-off / gate-only path) the child runs with the
+                // parent registry/context exactly as before.
+                let isolation_overrides: Result<
+                    (
+                        Option<crate::internal::ai::tools::ToolRegistry>,
+                        Option<crate::internal::ai::sandbox::ToolRuntimeContext>,
+                    ),
+                    TaskFailure,
+                > = match self.workspace_isolation.as_ref() {
+                    Some(isolation) => {
+                        match materialize_isolated_workspace(&ctx, agent_run_id, isolation) {
+                            Ok((registry, runtime_context, workspace)) => {
+                                workspace_guard.workspace = Some(workspace);
+                                Ok((Some(registry), runtime_context))
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    agent_run_id = %agent_run_id.0,
+                                    subagent = %invocation.subagent_type,
+                                    "refusing to dispatch sub-agent: isolated workspace could \
+                                     not be materialized and isolation is required",
+                                );
+                                Err(TaskFailure::SafetyDenied(SafetyDecisionDenial {
+                                    reason: format!(
+                                        "sub-agent workspace isolation could not be \
+                                         materialized ({err}); refusing to run the sub-agent \
+                                         unsandboxed against the main worktree"
+                                    ),
+                                }))
+                            }
+                        }
+                    }
+                    None => Ok((None, None)),
                 };
-                runner.run(request).await
+
+                match isolation_overrides {
+                    Ok((workspace_registry, workspace_runtime_context)) => {
+                        let request = super::sub_agent::SubAgentChildRunRequest {
+                            ctx: &ctx,
+                            invocation: &invocation,
+                            sub_spec: &sub_spec,
+                            effective_ruleset: &_effective,
+                            task_id: task_id.clone(),
+                            agent_run_id,
+                            history,
+                            workspace_registry,
+                            workspace_runtime_context,
+                        };
+                        runner.run(request).await
+                    }
+                    Err(failure) => Err(failure),
+                }
             } else {
                 Ok(TaskResult {
                     task_id,
@@ -596,9 +683,168 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 );
             }
 
+            // CEX-S2-12 / S2-INV-03 + CEX-S2-11 (5): tear down the
+            // isolated workspace now that the child run is done so no
+            // workspace leaks. FUSE cleanup blocks on the runtime
+            // (`Handle::block_on`), so route it through
+            // `spawn_blocking`; awaiting keeps the teardown observable
+            // (a test can assert the workspace is gone) without
+            // blocking the async runtime thread.
+            //
+            // TODO(CEX-S2-12-cancel): on a parent abort, the child
+            // tool-loop future is dropped cooperatively but a tool
+            // handler's detached `spawn_blocking` write (e.g.
+            // `apply_patch`) may still be running against the workspace
+            // when this teardown fires. This is a cleanup/lifecycle
+            // race, not an S2-INV-03 breach (the detached write is
+            // confined to the workspace, never the main worktree), and
+            // on unix the teardown is benign (the dir entry is removed
+            // and the in-flight write completes against the unlinked
+            // inode). The correct fix — propagating cancellation into
+            // the blocking tool handlers and awaiting in-flight tasks
+            // before teardown — is a cross-cutting tool-loop change
+            // tracked separately, not part of this isolation slice.
+            if let Some(workspace) = workspace_guard.workspace.take() {
+                match tokio::task::spawn_blocking(move || workspace.cleanup()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to clean up isolated sub-agent workspace",
+                    ),
+                    Err(join_err) => tracing::warn!(
+                        error = %join_err,
+                        agent_run_id = %agent_run_id.0,
+                        "isolated sub-agent workspace cleanup task panicked",
+                    ),
+                }
+            }
+
             // `_slot` drops here, releasing the concurrency slot.
             outcome
         })
+    }
+}
+
+/// Materialize an isolated workspace for a sub-agent run and return the
+/// re-rooted child tool registry + the inherited runtime context with
+/// its sandbox `writable_roots` rebased onto the workspace
+/// (CEX-S2-12 / S2-INV-03).
+///
+/// The returned [`SubAgentWorkspace`] must be held by the caller until
+/// the child run completes and then cleaned up (no leaked workspaces,
+/// CEX-S2-11 (5)). On any materialization failure the caller degrades
+/// to running the child WITHOUT isolation rather than failing the
+/// dispatch.
+fn materialize_isolated_workspace(
+    ctx: &DispatchContext<'_>,
+    agent_run_id: AgentRunId,
+    isolation: &super::sub_agent::WorkspaceIsolationConfig,
+) -> Result<
+    (
+        crate::internal::ai::tools::ToolRegistry,
+        Option<crate::internal::ai::sandbox::ToolRuntimeContext>,
+        crate::internal::ai::orchestrator::workspace::SubAgentWorkspace,
+    ),
+    crate::internal::ai::orchestrator::workspace::SubAgentWorkspaceError,
+> {
+    use crate::internal::ai::{
+        agent_run::{event_store::AgentRunEventStore, workspace_sizing::measure_workspace_sizing},
+        orchestrator::workspace::materialize_sub_agent_workspace,
+    };
+
+    let main_working_dir = ctx.tool_registry.working_dir().to_path_buf();
+    let sizing = measure_workspace_sizing(
+        &main_working_dir.join(crate::utils::util::ROOT_DIR),
+        &main_working_dir,
+    );
+    // `thread_id` only names the `WorkspaceMaterialized` transcript
+    // path; `parent_thread_id` is a free-form `String` today, so parse
+    // with a fresh-uuid fallback.
+    let thread_id =
+        uuid::Uuid::parse_str(ctx.parent_thread_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let store = AgentRunEventStore::new(isolation.sessions_root.clone());
+
+    let workspace = materialize_sub_agent_workspace(
+        &main_working_dir,
+        sizing,
+        thread_id,
+        agent_run_id,
+        isolation.allow_full_copy,
+        &isolation.fuse_state,
+        &store,
+    )?;
+
+    let workspace_root = workspace.root().to_path_buf();
+    // Re-root the child registry onto the workspace, aliasing the
+    // user-facing repo path into it so provider calls that reuse the
+    // main-worktree absolute path still resolve inside the workspace.
+    let registry = ctx
+        .tool_registry
+        .clone_with_working_dir_and_alias(workspace_root.clone(), main_working_dir);
+    // Rebase the inherited sandbox `writable_roots` onto the workspace
+    // so an absolute-path `shell` write to the main worktree is denied.
+    let runtime_context = ctx.runtime_context.clone().map(|mut rc| {
+        if let Some(sandbox) = rc.sandbox.as_mut() {
+            sandbox.policy = sandbox.policy.rebased_to_workspace(&workspace_root);
+        }
+        rc
+    });
+
+    Ok((registry, runtime_context, workspace))
+}
+
+/// Panic backstop for a materialized sub-agent workspace
+/// (CEX-S2-12 / S2-INV-03 + CEX-S2-11 (5): no leaked workspaces).
+///
+/// The dispatch tail cleans the workspace up explicitly (and
+/// observably, via an awaited `spawn_blocking`) after the terminal
+/// lifecycle event, `take()`ing it out of the guard first. This guard's
+/// `Drop` only fires when the dispatch *unwinds* before that point —
+/// e.g. a child-runner panic — so the workspace is still torn down.
+///
+/// `Drop` must never block the current thread (a FUSE unmount uses
+/// `Handle::block_on`), so on unwind it schedules the teardown on the
+/// blocking pool when a runtime is available, falling back to an inline
+/// best-effort removal otherwise.
+struct WorkspaceCleanupGuard {
+    workspace: Option<crate::internal::ai::orchestrator::workspace::SubAgentWorkspace>,
+}
+
+impl Drop for WorkspaceCleanupGuard {
+    fn drop(&mut self) {
+        use crate::internal::ai::orchestrator::types::TaskWorkspaceBackend;
+
+        let Some(workspace) = self.workspace.take() else {
+            return;
+        };
+        // A FUSE teardown unmounts via `Handle::block_on`, which must
+        // NOT run on the async runtime thread (this `Drop` may fire
+        // mid-unwind inside the dispatch future) — route it to the
+        // blocking pool when a runtime is available. A copy-backend
+        // teardown is plain filesystem removal, safe to run inline even
+        // during an unwind, so we do it synchronously (this is also what
+        // makes a panicking-child regression test deterministic under
+        // the copy backend).
+        if matches!(workspace.backend(), TaskWorkspaceBackend::Fuse)
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn_blocking(move || {
+                if let Err(err) = workspace.cleanup() {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to clean up sub-agent workspace during unwind",
+                    );
+                }
+            });
+            return;
+        }
+        if let Err(err) = workspace.cleanup() {
+            tracing::warn!(
+                error = %err,
+                "failed to clean up sub-agent workspace during unwind",
+            );
+        }
     }
 }
 
@@ -2163,5 +2409,514 @@ mod tests {
             }
             other => panic!("expected Cancelled terminal event, got {other:?}"),
         }
+    }
+
+    /// CEX-S2-12 / S2-INV-03: materializing an isolated workspace must
+    /// hand the child a tool registry re-rooted onto the workspace
+    /// (NOT the main worktree) and a runtime context whose sandbox
+    /// `writable_roots` are rebased to it, and the workspace must mirror
+    /// the main worktree's files. This is the deterministic core of the
+    /// isolation mechanics (copy backend, since `fuse_disabled_by_default`
+    /// is `true` under `#[cfg(test)]`).
+    #[tokio::test]
+    async fn materialize_isolated_workspace_reroots_registry_and_rebases_sandbox() {
+        use crate::internal::ai::{
+            sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+            tools::{ToolInvocation, ToolPayload, handlers::ApplyPatchHandler},
+        };
+
+        const TARGET_BEFORE: &str = "line 1\nline 2\nline 3\n";
+
+        let main = tempfile::tempdir().expect("tempdir");
+        let main_dir = main.path().to_path_buf();
+        std::fs::write(main_dir.join("target.txt"), TARGET_BEFORE).expect("seed file");
+
+        let (_dispatcher, _registry, usage, store) =
+            dispatcher_test_harness(MultiAgentConfig::default()).await;
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let permission_service =
+            PermissionService::new(Arc::new(TestAsker::always(PermissionReply::Once)));
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-iso-materialize".to_string();
+        let parent_session: SessionId = "session-iso-materialize".to_string();
+        // Register the real apply_patch handler so the re-rooted child
+        // registry (cloned from this one) can exercise the production
+        // write path against the workspace.
+        let mut tool_registry = ToolRegistry::with_working_dir(main_dir.clone());
+        tool_registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let runtime_context = Some(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![main_dir.clone()],
+                    network_access: Default::default(),
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            ..ToolRuntimeContext::default()
+        });
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-iso-materialize"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let isolation = crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+            fuse_state: crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+            sessions_root: main_dir.join(".libra").join("sessions"),
+            allow_full_copy: true,
+        };
+
+        let (registry, rebased_ctx, workspace) =
+            materialize_isolated_workspace(&context, AgentRunId::new(), &isolation)
+                .expect("materialization must succeed on a plain temp worktree");
+
+        let workspace_root = workspace.root().to_path_buf();
+        assert_ne!(
+            registry.working_dir(),
+            main_dir.as_path(),
+            "the child registry must NOT be rooted at the main worktree",
+        );
+        assert_eq!(
+            registry.working_dir(),
+            workspace_root.as_path(),
+            "the child registry must be re-rooted onto the isolated workspace",
+        );
+        assert!(
+            workspace_root.join("target.txt").exists(),
+            "the workspace must mirror the main worktree's files",
+        );
+
+        let sandbox = rebased_ctx
+            .expect("the inherited runtime context must be present")
+            .sandbox
+            .expect("the inherited sandbox context must be present");
+        match sandbox.policy {
+            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => assert_eq!(
+                writable_roots,
+                vec![workspace_root.clone()],
+                "sandbox writable_roots must be rebased onto the workspace, denying \
+                 absolute-path writes to the main worktree",
+            ),
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+
+        // Drive a REAL apply_patch through the re-rooted child registry
+        // and confirm BOTH halves of isolation deterministically: the
+        // write SUCCEEDS in the workspace, and it does NOT touch the
+        // main worktree. (`registry.dispatch` forces the invocation's
+        // working_dir to the registry's — the workspace root.)
+        let patch = "*** Begin Patch\n*** Update File: target.txt\n@@\n line 1\n-line 2\n+line 2 modified\n line 3\n*** End Patch";
+        let invocation = ToolInvocation::new(
+            "call-iso-patch",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({ "input": patch }).to_string(),
+            },
+            main_dir.clone(),
+        );
+        registry
+            .dispatch(invocation)
+            .await
+            .expect("apply_patch via the re-rooted registry must succeed in the workspace");
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("target.txt"))
+                .expect("read workspace target.txt"),
+            "line 1\nline 2 modified\nline 3\n",
+            "the child's apply_patch must have applied INSIDE the workspace",
+        );
+        assert_eq!(
+            std::fs::read_to_string(main_dir.join("target.txt")).expect("read main target.txt"),
+            TARGET_BEFORE,
+            "the child's apply_patch must NOT touch the main worktree (S2-INV-03)",
+        );
+
+        // Tear the workspace down through the RAII `WorkspaceCleanupGuard`
+        // (the same path that fires on an unwind) and assert the
+        // workspace directory is actually gone — CEX-S2-11 (5): no
+        // leaked workspaces.
+        assert!(
+            workspace_root.exists(),
+            "workspace must exist before cleanup"
+        );
+        let guard = WorkspaceCleanupGuard {
+            workspace: Some(workspace),
+        };
+        drop(guard);
+        assert!(
+            !workspace_root.exists(),
+            "WorkspaceCleanupGuard::drop must remove the materialized workspace, but {} remains",
+            workspace_root.display(),
+        );
+    }
+
+    /// CEX-S2-12 / S2-INV-03 acceptance test (`flag_on_does_not_touch_main_worktree`):
+    /// a dispatched sub-agent that calls the real `ApplyPatchHandler`
+    /// must leave the MAIN worktree byte-for-byte unchanged — its write
+    /// lands in the materialized isolated workspace instead. The
+    /// sibling `child_apply_patch_records_undo_preimage_under_inherited_batch`
+    /// integration test proves the same `apply_patch` DOES modify the
+    /// file when NOT isolated, so this "unchanged" assertion genuinely
+    /// proves the write was redirected, not that it silently failed.
+    #[cfg(feature = "test-provider")]
+    #[tokio::test]
+    async fn flag_on_does_not_touch_main_worktree() {
+        use crate::internal::ai::{
+            providers::ProviderBuildOptions,
+            sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+            tools::handlers::ApplyPatchHandler,
+        };
+
+        const TARGET_BEFORE: &str = "line 1\nline 2\nline 3\n";
+
+        let main = tempfile::tempdir().expect("tempdir");
+        let main_dir = main.path().to_path_buf();
+        std::fs::write(main_dir.join("target.txt"), TARGET_BEFORE).expect("seed target.txt");
+
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let usage = UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let store = crate::internal::ai::session::jsonl::SessionJsonlStore::new(
+            main_dir
+                .join(".libra")
+                .join("sessions")
+                .join("session-iso-e2e"),
+        );
+        let permission_service =
+            PermissionService::new(Arc::new(TestAsker::always(PermissionReply::Once)));
+        let provider_factory = ProviderFactory;
+
+        let mut fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fixture_path.push("tests/fixtures/sub_agent/apply_patch_then_done.json");
+        let provider_options = ProviderBuildOptions {
+            fake_fixture_path: Some(fixture_path),
+            ..ProviderBuildOptions::default()
+        };
+
+        // Real apply_patch handler so the child exercises the production
+        // write path; the parent registry is rooted at the main worktree.
+        let mut tool_registry = ToolRegistry::with_working_dir(main_dir.clone());
+        tool_registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+
+        let patcher = AgentExecutionSpec {
+            name: "patcher".to_string(),
+            description: "patches target.txt".to_string(),
+            mode: AgentMode::Subagent,
+            model: ModelBinding::parse("fake/some-model"),
+            tools: ToolSelection::Inherit,
+            ..AgentExecutionSpec::default()
+        };
+        let registry = Arc::new(TestRegistry::default());
+        registry.insert(patcher);
+        let dispatcher = DefaultSubAgentDispatcher::new(
+            registry,
+            MultiAgentConfig {
+                enabled: true,
+                max_subagent_depth: 4,
+                max_concurrent_subagents: 4,
+            },
+        )
+        .with_default_child_runner()
+        .with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: main_dir.join(".libra").join("sessions"),
+                allow_full_copy: true,
+            },
+        );
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let parent_thread = "thread-iso-e2e".to_string();
+        let parent_session: SessionId = "session-iso-e2e".to_string();
+        // WorkspaceWrite rooted at the main worktree, to exercise the
+        // sandbox rebase onto the workspace.
+        let runtime_context = Some(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![main_dir.clone()],
+                    network_access: Default::default(),
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            ..ToolRuntimeContext::default()
+        });
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-iso-e2e"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &provider_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let invocation = TaskInvocation {
+            description: "patch target.txt".to_string(),
+            prompt: "please apply the patch to target.txt".to_string(),
+            subagent_type: "patcher".to_string(),
+            task_id: None,
+        };
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                invocation,
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+            .expect("isolated child run must complete against the fake provider");
+        assert_eq!(result.agent_name, "patcher");
+
+        // The acceptance criterion: the MAIN worktree is byte-for-byte
+        // unchanged after the mutating sub-agent run — the child's
+        // apply_patch wrote into the isolated workspace, not here.
+        assert_eq!(
+            std::fs::read_to_string(main_dir.join("target.txt")).expect("read main target.txt"),
+            TARGET_BEFORE,
+            "the sub-agent's apply_patch must NOT touch the main worktree (S2-INV-03)",
+        );
+    }
+
+    /// CEX-S2-12 / S2-INV-03 panic safety: if the child runner panics
+    /// after the isolated workspace is materialized, the dispatch must
+    /// unwind cleanly (the panic propagates and is catchable) rather
+    /// than aborting the process — proving `WorkspaceCleanupGuard`'s
+    /// `Drop` backstop tears the workspace down without itself panicking
+    /// or blocking the async runtime thread. (Under `#[cfg(test)]` the
+    /// copy backend is used, so the guard's teardown runs inline.)
+    #[tokio::test]
+    async fn workspace_guard_is_panic_safe_when_child_runner_panics() {
+        use futures::FutureExt;
+
+        struct PanickingRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for PanickingRunner {
+            fn run<'a>(
+                &'a self,
+                _request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async { panic!("simulated child-runner panic after materialization") })
+            }
+        }
+
+        let main = tempfile::tempdir().expect("tempdir");
+        let main_dir = main.path().to_path_buf();
+        std::fs::write(main_dir.join("file.txt"), "x\n").unwrap();
+
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let usage = UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let store = crate::internal::ai::session::jsonl::SessionJsonlStore::new(
+            main_dir
+                .join(".libra")
+                .join("sessions")
+                .join("session-panic"),
+        );
+        let permission_service =
+            PermissionService::new(Arc::new(TestAsker::always(PermissionReply::Once)));
+        let provider_factory = ProviderFactory;
+
+        let registry = Arc::new(TestRegistry::default());
+        registry.insert(explore_subagent());
+        let dispatcher = DefaultSubAgentDispatcher::new(
+            registry,
+            MultiAgentConfig {
+                enabled: true,
+                max_subagent_depth: 4,
+                max_concurrent_subagents: 4,
+            },
+        )
+        .with_child_runner(Arc::new(PanickingRunner))
+        .with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: main_dir.join(".libra").join("sessions"),
+                allow_full_copy: true,
+            },
+        );
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let parent_thread = "thread-panic".to_string();
+        let parent_session: SessionId = "session-panic".to_string();
+        let tool_registry = ToolRegistry::with_working_dir(main_dir.clone());
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-panic"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let dispatch = std::panic::AssertUnwindSafe(dispatcher.dispatch(
+            context,
+            invocation("explore"),
+            TaskEntryKind::UserInitiated {
+                bypass_permission_ask: true,
+            },
+        ));
+        let result = dispatch.catch_unwind().await;
+        assert!(
+            result.is_err(),
+            "the child-runner panic must unwind through dispatch (caught here); reaching this \
+             with Ok would mean the panic was swallowed, and a process abort would mean the \
+             workspace guard's Drop double-panicked or blocked",
+        );
+    }
+
+    /// CEX-S2-12 / S2-INV-03 fail-closed: when isolation is configured
+    /// but the workspace cannot be materialized, the dispatch must be
+    /// refused with `SafetyDenied` rather than running the sub-agent
+    /// unsandboxed against the main worktree. Failure is injected by
+    /// rooting the parent tool registry at a non-existent directory so
+    /// `snapshot_workspace` (hence materialization) errors.
+    #[tokio::test]
+    async fn dispatch_fails_closed_when_isolation_materialization_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Intentionally NOT created: makes materialization fail.
+        let missing_main = temp.path().join("does-not-exist");
+
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        let usage = UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let store = crate::internal::ai::session::jsonl::SessionJsonlStore::new(
+            temp.path()
+                .join(".libra")
+                .join("sessions")
+                .join("session-fail-closed"),
+        );
+        let permission_service =
+            PermissionService::new(Arc::new(TestAsker::always(PermissionReply::Once)));
+        let provider_factory = ProviderFactory;
+
+        let registry = Arc::new(TestRegistry::default());
+        registry.insert(explore_subagent());
+        let dispatcher = DefaultSubAgentDispatcher::new(
+            registry,
+            MultiAgentConfig {
+                enabled: true,
+                max_subagent_depth: 4,
+                max_concurrent_subagents: 4,
+            },
+        )
+        .with_default_child_runner()
+        .with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: temp.path().join(".libra").join("sessions"),
+                allow_full_copy: true,
+            },
+        );
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let parent_thread = "thread-fail-closed".to_string();
+        let parent_session: SessionId = "session-fail-closed".to_string();
+        let tool_registry = ToolRegistry::with_working_dir(missing_main.clone());
+
+        let context = DispatchContext {
+            parent_thread_id: &parent_thread,
+            parent_session_id: &parent_session,
+            parent_agent: &parent,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg-fail-closed"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: default_provider_build_options(),
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                invocation("explore"),
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await;
+        match result {
+            Err(TaskFailure::SafetyDenied(SafetyDecisionDenial { reason })) => assert!(
+                reason.contains("isolation could not be materialized"),
+                "fail-closed denial must explain the isolation failure, got: {reason}",
+            ),
+            other => panic!("expected SafetyDenied (fail closed), got {other:?}"),
+        }
+        // The main worktree path was never created, and no isolated
+        // workspace ran, so nothing was written there.
+        assert!(
+            !missing_main.exists(),
+            "fail-closed must not create the main worktree"
+        );
     }
 }
