@@ -1109,6 +1109,26 @@ mod tests {
         (service, asker)
     }
 
+    /// Load the known `AgentRunEvent`s the dispatcher wrote to the
+    /// parent session JSONL, in append order (skips non-AgentRun /
+    /// unknown envelopes). Used by the lifecycle-fixture tests to assert
+    /// the Spawned + terminal event pair.
+    fn agent_run_events(
+        store: &crate::internal::ai::session::jsonl::SessionJsonlStore,
+    ) -> Vec<AgentRunEvent> {
+        store
+            .load_events()
+            .expect("JSONL readable")
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                crate::internal::ai::session::jsonl::SessionEvent::AgentRun(known) => {
+                    known.known().cloned()
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Test-only registry storing specs in a HashMap; the doc says any
     /// registry works as long as it implements the trait.
     #[derive(Default)]
@@ -2286,6 +2306,168 @@ mod tests {
         assert!(
             matches!(events[1], AgentRunEvent::TimedOut { .. }),
             "TaskFailure::Timeout must map to AgentRunEvent::TimedOut, got: {:?}",
+            events[1],
+        );
+    }
+
+    /// CEX-S2-12 criterion (3) — generic-failure fixture: a child run
+    /// that returns a non-typed `TaskFailure` (here
+    /// `ChildToolLoopFailed`) is recorded end-to-end as
+    /// `AgentRunEvent::Failed` (the catch-all terminal), distinct from
+    /// the structurally-typed Timeout / Cancelled / BudgetExceeded
+    /// fixtures.
+    #[tokio::test]
+    async fn dispatch_runner_generic_failure_emits_failed_event() {
+        use crate::internal::ai::agent::runtime::ToolLoopError;
+
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+
+        struct GenericFailingRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for GenericFailingRunner {
+            fn run<'a>(
+                &'a self,
+                _request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async {
+                    Err(TaskFailure::ChildToolLoopFailed(
+                        ToolLoopError::StepBudgetExhausted { steps: 48 },
+                    ))
+                })
+            }
+        }
+
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let dispatcher = dispatcher.with_child_runner(Arc::new(GenericFailingRunner));
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-generic-fail".to_string();
+        let parent_session: SessionId = "session-generic-fail".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let err = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("runner Err must surface from dispatch");
+        assert!(matches!(err, TaskFailure::ChildToolLoopFailed(_)));
+
+        let events = agent_run_events(&store);
+        assert_eq!(
+            events.len(),
+            2,
+            "a generic runner failure must still emit Spawned + Failed"
+        );
+        assert!(matches!(events[0], AgentRunEvent::Spawned { .. }));
+        assert!(
+            matches!(events[1], AgentRunEvent::Failed { .. }),
+            "a non-typed TaskFailure must map to AgentRunEvent::Failed, got: {:?}",
+            events[1],
+        );
+    }
+
+    /// CEX-S2-12 criterion (3) — budget fixture: a child run that
+    /// returns `TaskFailure::BudgetExceeded` is recorded end-to-end as
+    /// `AgentRunEvent::BudgetExceeded` carrying the mapped dimension.
+    #[tokio::test]
+    async fn dispatch_runner_budget_exceeded_emits_budget_exceeded_event() {
+        use crate::internal::ai::{
+            agent::runtime::BudgetExceededReason, agent_run::BudgetDimension,
+        };
+
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+
+        struct BudgetFailingRunner;
+        impl crate::internal::ai::agent::runtime::SubAgentChildRunner for BudgetFailingRunner {
+            fn run<'a>(
+                &'a self,
+                _request: crate::internal::ai::agent::runtime::SubAgentChildRunRequest<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async {
+                    Err(TaskFailure::BudgetExceeded(
+                        BudgetExceededReason::CostHardCap,
+                    ))
+                })
+            }
+        }
+
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        let dispatcher = dispatcher.with_child_runner(Arc::new(BudgetFailingRunner));
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-budget".to_string();
+        let parent_session: SessionId = "session-budget".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let err = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect_err("runner Err must surface from dispatch");
+        assert!(matches!(
+            err,
+            TaskFailure::BudgetExceeded(BudgetExceededReason::CostHardCap)
+        ));
+
+        let events = agent_run_events(&store);
+        assert_eq!(
+            events.len(),
+            2,
+            "a budget failure must still emit Spawned + BudgetExceeded"
+        );
+        assert!(matches!(events[0], AgentRunEvent::Spawned { .. }));
+        assert!(
+            matches!(
+                events[1],
+                AgentRunEvent::BudgetExceeded {
+                    dimension: BudgetDimension::Cost,
+                    ..
+                }
+            ),
+            "TaskFailure::BudgetExceeded(CostHardCap) must map to AgentRunEvent::BudgetExceeded{{Cost}}, got: {:?}",
             events[1],
         );
     }
