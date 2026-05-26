@@ -16,7 +16,10 @@ use clap::Parser;
 use byteorder::{BigEndian, ReadBytesExt};
 use git_internal::{
 	hash::{ObjectHash, get_hash_kind},
-	internal::object::{commit::Commit, tree::Tree, types::ObjectType},
+	internal::{
+		index::Index,
+		object::{commit::Commit, tree::Tree, types::ObjectType},
+	},
 	utils::read_sha,
 };
 use sea_orm::EntityTrait;
@@ -27,7 +30,7 @@ use crate::{
 		db,
 		head::Head,
 		log::date_parser::parse_date,
-		model::reference,
+		model::{reference, reflog},
 	},
 	utils::{
 		client_storage::ClientStorage,
@@ -42,7 +45,10 @@ const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: u64 = 256 * 4;
 
 const PRUNE_LONG_ABOUT: &str =
-	"Prune unreachable loose objects from the repository.\n\nBy default, objects reachable from refs (and any provided heads) are kept.\nWhen --expire is provided, only loose objects older than the given time are removed.";
+	"Prune unreachable loose objects from the repository.
+	
+By default, objects reachable from refs (and any provided heads) and do not already exist in any packfile are kept.
+When --expire is provided, only loose objects older than the given time are removed.";
 
 const PRUNE_AFTER_HELP: &str = "Examples:
   libra prune
@@ -259,6 +265,37 @@ async fn collect_starting_points(
 			);
 		}
 		starting_points.insert(hash);
+	}
+
+	let reflogs = reflog::Entity::find()
+		.all(&db_conn)
+		.await
+		.map_err(|error| {
+			CliError::fatal(format!("failed to load reflogs: {error}"))
+				.with_stable_code(StableErrorCode::RepoCorrupt)
+		})?;
+
+	for reflog_entry in reflogs {
+		let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
+        if !is_null_oid(&reflog_entry.old_oid)
+            && let Some(hash) = parse_object_hash(&reflog_entry.old_oid)
+        {
+            starting_points.insert(hash);
+        }
+        if !is_null_oid(&reflog_entry.new_oid)
+            && let Some(hash) = parse_object_hash(&reflog_entry.new_oid)
+        {
+            starting_points.insert(hash);
+        }
+	}
+
+	let index_path = path::index();
+	if index_path.exists()
+		&& let Ok(index) = Index::load(&index_path)
+	{
+		for entry in index.tracked_entries(0) {
+			starting_points.insert(entry.hash);
+		}
 	}
 
 	let head = Head::current_result().await.map_err(|error| {
