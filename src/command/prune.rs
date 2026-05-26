@@ -7,14 +7,17 @@
 use std::{
 	collections::{HashSet, VecDeque},
 	fs, io,
+    io::{Read, Seek},
 	path::{Path, PathBuf},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
+use byteorder::{BigEndian, ReadBytesExt};
 use git_internal::{
-	hash::ObjectHash,
+	hash::{ObjectHash, get_hash_kind},
 	internal::object::{commit::Commit, tree::Tree, types::ObjectType},
+	utils::read_sha,
 };
 use sea_orm::EntityTrait;
 
@@ -34,6 +37,9 @@ use crate::{
 		util,
 	},
 };
+
+const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
+const FANOUT_LEN: u64 = 256 * 4;
 
 const PRUNE_LONG_ABOUT: &str =
 	"Prune unreachable loose objects from the repository.\n\nBy default, objects reachable from refs (and any provided heads) are kept.\nWhen --expire is provided, only loose objects older than the given time are removed.";
@@ -109,8 +115,9 @@ pub async fn execute_safe(args: PruneArgs, _output: &OutputConfig) -> CliResult<
 	let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
 
 	let reachable = collect_reachable_objects(&storage, &args.heads).await?;
+	let packed = collect_packed_objects(&storage).await?;
 	let loose_objects = list_loose_objects(&storage, expire_before.is_some())?;
-	let plan = build_prune_plan(loose_objects, &reachable, expire_before);
+	let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
 
 	apply_prune_plan(
 		&plan,
@@ -151,6 +158,67 @@ async fn collect_reachable_objects(
 ) -> CliResult<HashSet<ObjectHash>> {
 	let starting_points = collect_starting_points(storage, heads).await?;
 	Ok(bfs_mark_reachable(&starting_points, storage))
+}
+
+// Collect duplicate objects already in packfiles.
+async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
+	let mut packed_objects = HashSet::new();
+    let pack_dir = storage.base_path().join("pack");
+    if pack_dir.exists()
+        && let Ok(entries) = fs::read_dir(&pack_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "idx")
+                && let Ok(packed) = list_idx_objects(&path)
+            {
+				packed_objects.extend(packed);
+            }
+        }
+    }
+
+    Ok(packed_objects)
+}
+
+// List all objects contained in a pack index file.
+fn list_idx_objects(idx_path: &Path) -> io::Result<Vec<ObjectHash>> {
+	let hash_size = get_hash_kind().size() as u64;
+    let mut idx_file = fs::File::open(idx_path)?;
+    let mut magic = [0u8; 4];
+    idx_file.read_exact(&mut magic)?;
+	if magic == IDX_MAGIC {
+		// Index v2
+        idx_file.seek(io::SeekFrom::Start(FANOUT_LEN + 8))?;
+        let mut fanout_entry = [0u8; 4];
+        idx_file.read_exact(&mut fanout_entry)?;
+
+        let object_count = u32::from_be_bytes(fanout_entry) as usize;
+		let mut objs = Vec::with_capacity(object_count);
+		for _ in 0..object_count {
+			let hash = read_sha(&mut idx_file)?;
+			objs.push(hash);
+		}
+		Ok(objs)
+	} else {
+		// Index v1
+		if hash_size != 20 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pack index v1 only supports sha1",
+            ));
+		}
+		idx_file.seek(io::SeekFrom::Start(FANOUT_LEN))?;
+        let mut fanout_entry = [0u8; 4];
+        idx_file.read_exact(&mut fanout_entry)?;
+        let object_count = u32::from_be_bytes(fanout_entry) as usize;
+		let mut objs = Vec::with_capacity(object_count);
+		for _ in 0..object_count {
+            let _offset = idx_file.read_u32::<BigEndian>()?;
+            let hash = read_sha(&mut idx_file)?;
+            objs.push(hash);
+		}
+		Ok(objs)
+	}
 }
 
 /// Gather starting points for reachability from references and explicit heads.
@@ -236,12 +304,14 @@ async fn resolve_head_commit(head: &str) -> CliResult<ObjectHash> {
 fn build_prune_plan(
 	loose_objects: Vec<LooseObjectInfo>,
 	reachable: &HashSet<ObjectHash>,
+	packed: &HashSet<ObjectHash>,
 	expire_before: Option<SystemTime>,
 ) -> PrunePlan {
 	let prunable = loose_objects
 		.into_iter()
 		.filter(|info| {
-			!reachable.contains(&info.hash)
+			(!reachable.contains(&info.hash)
+				|| packed.contains(&info.hash))
 				&& is_expired(info.modified, expire_before)
 		})
 		.collect();
@@ -505,4 +575,41 @@ fn bfs_mark_reachable(
 	}
 
 	reachable
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Write;
+
+	use git_internal::hash::{HashKind, set_hash_kind_for_test};
+	use tempfile::tempdir;
+
+	use super::*;
+
+	#[test]
+	fn list_idx_objects_reads_v2_hashes() {
+		let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+		let temp = tempdir().expect("tempdir");
+		let idx_path = temp.path().join("pack-test.idx");
+
+		let hashes = vec![
+			ObjectHash::from_bytes(&[0x11; 20]).expect("hash1"),
+			ObjectHash::from_bytes(&[0x22; 20]).expect("hash2"),
+		];
+
+		let mut bytes = Vec::new();
+		bytes.extend_from_slice(&IDX_MAGIC);
+		bytes.extend_from_slice(&2u32.to_be_bytes());
+		bytes.extend_from_slice(&vec![0u8; FANOUT_LEN as usize]);
+		bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
+		for hash in &hashes {
+			bytes.extend_from_slice(hash.as_ref());
+		}
+
+		let mut file = fs::File::create(&idx_path).expect("create idx");
+		file.write_all(&bytes).expect("write idx");
+
+		let read = list_idx_objects(&idx_path).expect("read idx objects");
+		assert_eq!(read, hashes);
+	}
 }
