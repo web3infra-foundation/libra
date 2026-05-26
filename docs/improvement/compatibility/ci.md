@@ -104,11 +104,11 @@ jobs:
     name: security-codeql-${{ matrix.language }}
 ```
 
-可选 / 手动触发的 live 矩阵（保留现有 feature gate，新文件 `compat-live.yml` 可后续追加；本批仅占位）：
+可选 / 手动触发的 live 矩阵已落地在 [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml)，保留现有 feature gate，且不进入 base required checks：
 
 ```yaml
-# Future: compat-live-ai (workflow_dispatch + scheduled)
-# Future: compat-live-cloud (workflow_dispatch + scheduled)
+# compat-live-ai (workflow_dispatch + scheduled, skips when DEEPSEEK_API_KEY is absent)
+# compat-live-cloud (workflow_dispatch + scheduled, skips when D1/R2 secrets are absent)
 ```
 
 ### `tests/compat/` 目录约定
@@ -168,6 +168,7 @@ tests/compat/
 ## 测试与验收
 
 - [x] [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) 出现 `compat-rustfmt` / `compat-clippy` / `compat-web-check` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` 唯一 display name。
+- [x] [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) 出现 `compat-live-ai` / `compat-live-cloud`，仅 `workflow_dispatch` / `schedule` 触发，缺少 secrets 时显式 skip；[`tests/compat/live_compat_workflow.rs`](../../../tests/compat/live_compat_workflow.rs) 防止 optional live gate 漂回 `base.yml`。
 - [x] [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 CodeQL matrix 使用 `security-codeql-${{ matrix.language }}`，即 `security-codeql-actions` / `security-codeql-rust`。
 - [x] `compat-clippy` 使用 `cargo clippy --all-targets --all-features -- -D warnings`。
 - [x] [`tests/compat/README.md`](../../../tests/compat/README.md) 已说明该目录由 `compat-offline-core` 覆盖，并列出现有兼容性测试文件。

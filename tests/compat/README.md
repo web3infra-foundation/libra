@@ -32,6 +32,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
 | `matrix_alignment.rs` | C2 | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
+| `live_compat_workflow.rs` | C2 | optional `compat-live-ai` / `compat-live-cloud` workflow stays manual/scheduled, secret-gated, and outside `base.yml` |
 | `branch_lossy_wrapper_guard.rs` | branch follow-up | `src/` production code must use branch `*_result` APIs instead of lossy compatibility wrappers |
 | `lfs_client_production_unwrap_guard.rs` | unwrap audit (v0.17.260) | `src/internal/protocol/lfs_client.rs` must not regress on bare `.unwrap()` |
 | `config_production_unwrap_guard.rs` | unwrap audit (v0.17.261) | `src/internal/config.rs` must not regress on bare `.unwrap()` |
