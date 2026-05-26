@@ -170,5 +170,6 @@ job that runs L1.
 |----------|--------|---------|
 | `base.yml` (PR gate) | L1 + `tests/compat/*` (`compat-offline-core` job); a single L2 file — `tests/network_remotes_test.rs` — via the `compat-network-remotes` job under `--features test-network` | Every push / PR |
 | `model-generation-nightly.yml` (nightly) | One L3 file — `tests/code_ui_remote_model_generation_matrix.rs` — under `LIBRA_RUN_LIVE=1` + `DEEPSEEK_API_KEY` | Daily 03:00 UTC + manual dispatch |
+| `live-compat.yml` (nightly / manual) | L3 live AI (`ai_agent_test`, `ai_chat_agent_test`) and live Cloudflare (`cloud_storage_backup_test`, `publish_live_test`, `storage_r2_test`) under `test-live-ai` / `test-live-cloud`; jobs skip with warnings when required secrets are missing | Daily 04:30 UTC + manual dispatch |
 
-Other L2 / L3 surfaces (full GitHub-namespace tests, S3/D1 round-trips, broader live-AI suites) are not wired into a scheduled workflow; run them locally by sourcing `.env.test` and invoking `cargo test --all` with the corresponding feature flag.
+Other L2 / L3 surfaces that need local infrastructure or maintainer-only setup, such as full GitHub-namespace tests and local Ollama gates, are still manual; run them locally by sourcing `.env.test` and invoking `cargo test --all` with the corresponding feature flag.

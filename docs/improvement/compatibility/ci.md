@@ -140,8 +140,8 @@ tests/compat/
 | `compat-network-remotes` | `test-network` | ✅ | PR / push |
 | `security-codeql-actions` | 无 | ✅ | PR / push / scheduled |
 | `security-codeql-rust` | 无 | ✅ | PR / push / scheduled |
-| `compat-live-ai`（占位） | `test-live-ai` | ❌ | workflow_dispatch / scheduled |
-| `compat-live-cloud`（占位） | `test-live-cloud` | ❌ | workflow_dispatch / scheduled |
+| `compat-live-ai` | `test-live-ai` | ✅（非 required，缺 secret 时显式 skip） | workflow_dispatch / scheduled |
+| `compat-live-cloud` | `test-live-cloud` | ✅（非 required，缺 secret 时显式 skip） | workflow_dispatch / scheduled |
 
 ### required-checks 平台切换 runbook（由维护者在 GitHub UI 执行）
 
@@ -158,6 +158,7 @@ tests/compat/
 |-----|-----|-----|
 | [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) | 修改 | 现有质量门重命名为 `compat-*`；普通测试与 network/live 测试拆清 |
 | [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) | 修改 | matrix job 重命名为 `security-codeql-actions` / `security-codeql-rust` |
+| [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) | 新建 | `compat-live-ai` / `compat-live-cloud` nightly + manual gates；缺少 secrets 时 no-op skip |
 | [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) | 新建 | `src/cli.rs::Commands` ↔ `COMPATIBILITY.md` 顶层命令漂移检测 |
 | [`tests/compat/README.md`](../../../tests/compat/README.md) | 新建 | 目录用途说明 + 文件命名约定 |
 | [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) | 新建 | 通过 Cargo test 运行矩阵漂移检测脚本 |
@@ -173,6 +174,7 @@ tests/compat/
 - [x] [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast。
 - [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 已通过 Cargo `[[test]]` 接入 `cargo test --all`。
 - [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
+- [x] [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) 已提供 `compat-live-ai` / `compat-live-cloud` 非 required L3 gate，支持 nightly 和 manual dispatch，缺少 secret 时输出 warning 并 skip。
 - 外部平台确认：GitHub UI branch protection 完成 required-checks 切换后，经 PR 页面验证新名称会阻塞失败检查。该项不能由代码提交自动完成，不计入本仓库代码验收 checkbox。
 
 ## 风险与缓解
