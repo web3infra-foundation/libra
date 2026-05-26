@@ -475,6 +475,14 @@ fn test_lfs_help_lists_examples_banner() {
         stdout.contains("EXAMPLES:"),
         "lfs --help should include EXAMPLES banner, stdout: {stdout}"
     );
+    assert!(
+        stdout.contains(".libra_attributes"),
+        "lfs --help should name the real Libra attributes file, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".libraattributes"),
+        "lfs --help should not mention the old misspelled attributes file, stdout: {stdout}"
+    );
     for invocation in [
         "libra lfs track",
         "libra lfs untrack",

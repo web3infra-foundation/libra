@@ -43,7 +43,7 @@ use crate::{
 pub const LFS_EXAMPLES: &str = "\
 EXAMPLES:
     libra lfs track                       List currently tracked LFS attribute patterns
-    libra lfs track '*.bin' '*.psd'       Add LFS patterns to .libraattributes
+    libra lfs track '*.bin' '*.psd'       Add LFS patterns to .libra_attributes
     libra lfs untrack '*.bin'             Remove an LFS pattern
     libra lfs ls-files                    List LFS-tracked files in the working tree
     libra lfs ls-files --long --size      Show full OIDs and sizes
@@ -63,7 +63,7 @@ pub enum LfsCmds {
     },
     /// Remove LFS paths from Libra Attributes
     Untrack {
-        /// One or more glob patterns to remove from `.libraattributes`
+        /// One or more glob patterns to remove from `.libra_attributes`
         path: Vec<String>,
     },
     /// Lists currently locked files from the Libra LFS server. (Current Branch)
