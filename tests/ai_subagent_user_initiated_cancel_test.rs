@@ -383,13 +383,19 @@ async fn mid_flight_cancel_during_child_run_writes_cancelled_event() {
         2,
         "mid-flight cancel must still emit Spawned + Cancelled; got {agent_run_events:?}",
     );
-    assert!(
-        matches!(agent_run_events[0], AgentRunEvent::Spawned { .. }),
-        "first event must be Spawned, got: {:?}",
-        agent_run_events[0],
-    );
+    let spawned_run_id = match &agent_run_events[0] {
+        AgentRunEvent::Spawned { agent_run_id, .. } => agent_run_id,
+        other => panic!("first event must be Spawned, got: {other:?}"),
+    };
     match &agent_run_events[1] {
-        AgentRunEvent::Cancelled { reason, .. } => {
+        AgentRunEvent::Cancelled {
+            agent_run_id,
+            reason,
+        } => {
+            assert_eq!(
+                agent_run_id, spawned_run_id,
+                "Cancelled terminal event must keep the Spawned agent_run_id",
+            );
             assert!(
                 matches!(reason, CancellationReason::UserRequested),
                 "ParentAbort must map to UserRequested, got: {reason:?}",
