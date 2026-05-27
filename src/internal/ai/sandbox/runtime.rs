@@ -2191,4 +2191,18 @@ mod tests {
             "network enforcement failed: allowlist proxy unavailable in Required mode",
         );
     }
+
+    #[test]
+    fn seatbelt_base_policy_denies_iottyclient_user_client() {
+        const SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
+
+        assert!(
+            SEATBELT_BASE_POLICY.contains("(deny iokit-open"),
+            "Seatbelt policy must carry an explicit iokit-open deny block"
+        );
+        assert!(
+            SEATBELT_BASE_POLICY.contains("(iokit-user-client-class \"IOTTYClient\")"),
+            "Seatbelt policy must deny IOTTYClient terminal user clients"
+        );
+    }
 }
