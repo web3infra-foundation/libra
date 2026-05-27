@@ -672,6 +672,47 @@ async fn test_lfs_unlock_by_path_resolves_lock_id_via_get_locks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock <path>` (no `--id`) must surface a typed error when
+/// `get_locks?path=...` returns an empty list — there is no id to
+/// unlock by. Asserts the fatal error envelope carries
+/// `LBR-REPO-001` (`RepoStateInvalid`) and a hint-bearing message
+/// rather than a generic 500 from the unlock leg or, worse, a panic.
+async fn test_lfs_unlock_by_path_returns_typed_error_when_no_lock_found() {
+    let app = Router::new().route(
+        "/locks",
+        get(|| async { Json(json!({ "locks": [], "next_cursor": "" })) }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "absent.bin", "--force"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        !output.status.success(),
+        "lfs unlock without a lock should fail; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("error envelope should be JSON: {err}; stderr={stderr}"));
+    assert_eq!(envelope["error_code"], "LBR-REPO-003");
+    assert!(
+        envelope["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no lock found for path 'absent.bin'")),
+        "message should mention the offending path; envelope={envelope}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// `lfs unlock --id <id> <path>` should succeed when the path does not
 /// exist locally — `--id` makes the path purely a label (the id is the
 /// lookup key on the server). Prior to the fix, this case required
