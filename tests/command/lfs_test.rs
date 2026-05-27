@@ -326,6 +326,96 @@ async fn test_lfs_locks_cli_returns_locks_from_mock_server() {
     assert_eq!(stdout["data"]["locks"][0]["id"], "lock-1");
 }
 
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs track "*.txt"` ran twice in a row would
+/// produce zero stdout on the second invocation — the dedup fix in
+/// v0.17.1057 returned an empty `added` Vec and the human renderer
+/// silently no-op'd. Pin the confirmed-already-tracked notice so the
+/// command never looks like a hang.
+async fn test_lfs_track_prints_notice_when_all_patterns_already_tracked() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // First track adds the pattern; second track has nothing new to add.
+    libra_command(temp_path)
+        .args(["lfs", "track", "*.txt"])
+        .output()
+        .expect("first track should succeed");
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "track", "*.txt"])
+        .output()
+        .expect("second track should succeed");
+    assert!(
+        output.status.success(),
+        "second track should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No new patterns added (already tracked)"),
+        "duplicate-track should print the already-tracked notice, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs untrack "*.txt"` on a pattern that was
+/// never tracked produced zero stdout — the human renderer silently
+/// no-op'd. Pin the confirmed-no-match notice.
+async fn test_lfs_untrack_prints_notice_when_no_match() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "untrack", "*.never-tracked"])
+        .output()
+        .expect("untrack should succeed");
+    assert!(
+        output.status.success(),
+        "untrack of an untracked pattern should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching LFS patterns to untrack"),
+        "no-match untrack should print the no-op notice, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
+/// Pre-v0.17.1067 `libra lfs ls-files` on a repo with no LFS-tracked
+/// files printed zero stdout. Pin the confirmed-empty notice for the
+/// default human path while preserving silence under `--name-only`
+/// (which shell pipelines rely on).
+async fn test_lfs_ls_files_prints_notice_when_empty_but_silent_with_name_only() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // Default human mode → notice present.
+    let output = libra_command(temp_path)
+        .args(["lfs", "ls-files"])
+        .output()
+        .expect("ls-files should succeed");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No LFS files"),
+        "empty ls-files should print the no-op notice, stdout={stdout:?}"
+    );
+
+    // --name-only → silent (pipeline consumers).
+    let output = libra_command(temp_path)
+        .args(["lfs", "ls-files", "--name-only"])
+        .output()
+        .expect("ls-files --name-only should succeed");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "empty ls-files --name-only should stay silent, stdout={stdout:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// Pre-v0.17.1066 `libra lfs locks` (human mode) printed nothing when
 /// the server returned an empty list — same silent-no-op UX class as

@@ -371,8 +371,18 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
 
     match result.action.as_str() {
         "track" => {
-            for pattern in &result.patterns {
-                println!("Tracking \"{pattern}\"");
+            // Same silent-empty UX class as the `track-list` and `locks`
+            // fixes (v0.17.1065 / v0.17.1066): if every requested pattern
+            // was already tracked, `add_lfs_patterns` returns an empty
+            // `added` Vec and the user previously saw zero output. Emit
+            // a confirmed-already-tracked notice so the command never
+            // looks like a hang.
+            if result.patterns.is_empty() {
+                println!("No new patterns added (already tracked)");
+            } else {
+                for pattern in &result.patterns {
+                    println!("Tracking \"{pattern}\"");
+                }
             }
         }
         "track-list" => {
@@ -387,8 +397,15 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
             }
         }
         "untrack" => {
-            for pattern in &result.patterns {
-                println!("Untracking \"{pattern}\"");
+            // Same silent-empty fix: if the file had no matching LFS
+            // patterns for the user-supplied args, we previously
+            // printed nothing. Emit a confirmed-no-op notice.
+            if result.patterns.is_empty() {
+                println!("No matching LFS patterns to untrack");
+            } else {
+                for pattern in &result.patterns {
+                    println!("Untracking \"{pattern}\"");
+                }
             }
         }
         "locks" => {
@@ -427,12 +444,22 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
             }
         }
         "ls-files" => {
-            for file in &result.files {
-                let tail = file.display_size.as_deref().unwrap_or("");
-                if result.name_only {
-                    println!("{}{}", file.path, tail);
-                } else {
-                    println!("{} {} {}{}", file.oid, file.marker, file.path, tail);
+            // Same silent-empty fix: a repo with no LFS-tracked files
+            // previously rendered zero stdout. `--name-only` consumers
+            // (e.g. shell pipelines) intentionally expect bare output,
+            // so the notice is gated on the not-name-only path.
+            if result.files.is_empty() {
+                if !result.name_only {
+                    println!("No LFS files in the working tree");
+                }
+            } else {
+                for file in &result.files {
+                    let tail = file.display_size.as_deref().unwrap_or("");
+                    if result.name_only {
+                        println!("{}{}", file.path, tail);
+                    } else {
+                        println!("{} {} {}{}", file.oid, file.marker, file.path, tail);
+                    }
                 }
             }
         }
