@@ -130,6 +130,33 @@ fn test_diff_progress_none_suppresses_scan_progress() {
     );
 }
 
+#[test]
+fn test_diff_non_default_algorithm_fails_instead_of_silent_noop() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["diff", "--algorithm", "myers"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "unsupported algorithm must not emit a best-effort diff to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("diff --algorithm=myers is not supported yet"),
+        "unsupported algorithm should be explicit, stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Error-Code: LBR-CLI-002"),
+        "unsupported algorithm should carry a stable CLI error code, stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("Scanning working tree"),
+        "algorithm validation should fail before the worktree scan, stderr={stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_diff_empty_output_does_not_initialize_pager() {
@@ -846,13 +873,13 @@ async fn test_diff_algorithms() {
     ]);
     diff::execute(args).await;
 
-    // Test myers algorithm
+    // Non-default algorithms are accepted by clap for forward
+    // compatibility but fail closed until the backend is actually wired.
     let myers_file = output_dir.path().join("myers_diff.txt");
     let myers_str = myers_file.to_str().unwrap();
     let args = DiffArgs::parse_from(["diff", "--algorithm", "myers", "--output", myers_str]);
-    diff::execute(args).await;
+    let myers_result = diff::execute_safe(args, &OutputConfig::default()).await;
 
-    // Test myersMinimal algorithm
     let myers_min_file = output_dir.path().join("myersMinimal_diff.txt");
     let myers_min_str = myers_min_file.to_str().unwrap();
     let args = DiffArgs::parse_from([
@@ -862,19 +889,26 @@ async fn test_diff_algorithms() {
         "--output",
         myers_min_str,
     ]);
-    diff::execute(args).await;
+    let myers_min_result = diff::execute_safe(args, &OutputConfig::default()).await;
 
-    // Verify all output files exist
     assert!(
         fs::metadata(&histogram_file).is_ok(),
         "Histogram output file should exist"
     );
     assert!(
-        fs::metadata(&myers_file).is_ok(),
-        "Myers output file should exist"
+        myers_result.is_err(),
+        "Myers should fail closed until a real backend is wired"
     );
     assert!(
-        fs::metadata(&myers_min_file).is_ok(),
-        "MyersMinimal output file should exist"
+        myers_min_result.is_err(),
+        "MyersMinimal should fail closed until a real backend is wired"
+    );
+    assert!(
+        !myers_file.exists(),
+        "unsupported Myers should not write a default diff to the output file"
+    );
+    assert!(
+        !myers_min_file.exists(),
+        "unsupported MyersMinimal should not write a default diff to the output file"
     );
 }

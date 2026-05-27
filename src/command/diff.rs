@@ -64,8 +64,7 @@ pub struct DiffArgs {
     #[clap(help = "Files to compare")]
     pathspec: Vec<String>,
 
-    // TODO: forward selected algorithm to git-internal once it exposes one
-    /// Diff algorithm: `histogram` (default), `myers`, or `myersMinimal`
+    /// Diff algorithm. `histogram` is currently the only implemented backend.
     #[clap(
         long,
         default_value = "histogram",
@@ -151,6 +150,11 @@ enum DiffError {
 
     #[error("failed to write output file '{path}': {detail}")]
     OutputWrite { path: String, detail: String },
+
+    #[error(
+        "diff --algorithm={0} is not supported yet; only --algorithm=histogram is currently implemented"
+    )]
+    UnsupportedAlgorithm(String),
 }
 
 impl From<DiffError> for CliError {
@@ -176,6 +180,11 @@ impl From<DiffError> for CliError {
             DiffError::OutputWrite { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
+            DiffError::UnsupportedAlgorithm(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "omit --algorithm or use --algorithm=histogram until alternate diff backends are available",
+                ),
         }
     }
 }
@@ -190,9 +199,17 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     if util::require_repo().is_err() {
         return Err(CliError::from(DiffError::NotInRepo));
     }
+    validate_diff_algorithm(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
     let result = run_diff(&args).await.map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
+}
+
+fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {
+    match args.algorithm.as_deref().unwrap_or("histogram") {
+        "histogram" => Ok(()),
+        unsupported => Err(DiffError::UnsupportedAlgorithm(unsupported.to_string())),
+    }
 }
 
 fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
@@ -886,27 +903,41 @@ mod test {
             assert!(args.is_err());
             assert!(args.err().unwrap().kind() == clap::error::ErrorKind::MissingRequiredArgument);
         }
-        // TODO: Enable these tests when --algorithm arg is fully implemented
-        // {
-        //     // --algorithm arg
-        //     let args = DiffArgs::try_parse_from([
-        //         "diff",
-        //         "--old",
-        //         "old",
-        //         "--new",
-        //         "new",
-        //         "--algorithm",
-        //         "myers",
-        //         "target paths",
-        //     ])
-        //     .unwrap();
-        //     assert_eq!(args.algorithm, Some("myers".to_string()));
-        // }
-        // {
-        //     // --algorithm arg with default value
-        //     let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
-        //     assert_eq!(args.algorithm, Some("histogram".to_string()));
-        // }
+        {
+            // --algorithm arg is parsed separately from execution-time support.
+            let args = DiffArgs::try_parse_from([
+                "diff",
+                "--old",
+                "old",
+                "--new",
+                "new",
+                "--algorithm",
+                "myers",
+                "target paths",
+            ])
+            .unwrap();
+            assert_eq!(args.algorithm, Some("myers".to_string()));
+        }
+        {
+            // --algorithm defaults to the only currently supported backend.
+            let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
+            assert_eq!(args.algorithm, Some("histogram".to_string()));
+        }
+        {
+            let args = DiffArgs::try_parse_from([
+                "diff",
+                "--old",
+                "old",
+                "--new",
+                "new",
+                "--algorithm",
+                "myers",
+                "target paths",
+            ])
+            .unwrap();
+            let err = validate_diff_algorithm(&args).expect_err("myers is not wired yet");
+            assert!(matches!(err, DiffError::UnsupportedAlgorithm(value) if value == "myers"));
+        }
     }
 
     #[test]

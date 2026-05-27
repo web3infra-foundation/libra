@@ -16,8 +16,8 @@
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
 - `execute()` / `execute_safe(args, _output)` 双入口已存在（`diff.rs`）
 - `Pager` 支持 `Pager::with_config(output)` 自动检测 TTY 与 `--no-pager`
-- `git_internal::Diff::diff()` 提供核心 diff 算法（histogram、myers、myersMinimal）
-- `--old` / `--new` / `--staged` / `--algorithm` / `--output` / pathspec 已实现
+- `git_internal::Diff::diff()` 提供核心 diff 生成；当前可执行后端只有默认 `histogram` 行为
+- `--old` / `--new` / `--staged` / `--output` / pathspec 已实现；`--algorithm=histogram` 可用，`myers` / `myersMinimal` 现在显式返回 `LBR-CLI-002`，避免继续静默当作默认算法执行
 - 彩色输出已实现（TTY 检测，bold/cyan/red/green）
 - `run_diff()` + `DiffOutput` 已落地，`--json` / `--machine` 可返回 hunk 级结构化 diff
 - `DiffError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
@@ -34,11 +34,13 @@
 - `--name-only` / `--name-status` / `--numstat` / `--stat` 已补齐，JSON 恒定返回完整结构，不受 human 视图标志影响
 - `--quiet` 契约已与用户习惯对齐：仅抑制 stdout，通过退出码表达“有无差异”
 - `--output` 在 JSON 模式下被忽略；human 模式下即使搭配 `--quiet` 也会保留文件写入副作用
+- `--algorithm=myers|myersMinimal` 不再静默 no-op；当前会在 worktree scan 前失败并输出稳定 CLI 错误码，后续只有在 backend 真正支持时才应改回成功路径
 
 后续维护重点：
 
 - 继续用回归测试锁住 `--quiet`、`--output`、`--staged` 和 pathspec 组合行为
 - 大 diff / 二进制 diff 的性能与 pager 体验继续观察，但不阻塞第三批验收
+- 若后续 `git_internal` 暴露可选 diff backend，再把 `myers` / `myersMinimal` 从显式 unsupported 改为真实执行，并补输出差异回归测试
 
 ### 目标与非目标
 
@@ -52,7 +54,7 @@
 - **不改变 `git_internal::Diff::diff()` 核心算法**。diff 生成逻辑不变
 - **不引入 word-level diff**。这是独立特性，不在本批范围
 - **不引入 diff 缓存**。每次执行重新计算
-- **不改变 `--algorithm` 选项**。histogram/myers/myersMinimal 保持现有行为
+- **不假装支持未接线算法**。`histogram` 保持现有行为；`myers` / `myersMinimal` 在 backend 支持前 fail-closed，而不是静默回退
 - **不在 JSON 中输出颜色信息**。颜色是 human 表示层概念
 
 ### 设计原则
@@ -314,7 +316,7 @@ D       src/deleted_file.rs
 |----|------|-----------------|
 | **A** | 退出码 `0/128/129` | 参数错误（无效 revision）→ exit `129`；运行时错误（object 损坏、I/O 失败）→ exit `128`；成功（无论是否有差异）→ exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
-| **F** | 拼写纠错 | `--algorithm` 值不匹配时提示 `did you mean 'histogram'?` |
+| **F** | 拼写纠错 | `--algorithm` 值不匹配时由 clap 提示有效值；已知但未接线的 `myers` / `myersMinimal` 由命令层返回 `LBR-CLI-002` |
 | **G** | Issues URL | 仅在 `DiffCompute` / `ObjectLoad` 错误时输出 Issues URL |
 
 ### `--help` EXAMPLES 段
@@ -337,7 +339,8 @@ EXAMPLES:
 
 #### `tests/command/diff_test.rs`（核心执行路径扩展）
 
-- **（已有）** 基础 diff（working tree、staged、commit-to-commit）、pathspec、algorithm、output file
+- **（已有）** 基础 diff（working tree、staged、commit-to-commit）、pathspec、`--algorithm=histogram`、output file
+- **（新增）`--algorithm` unsupported 回归**：`myers` / `myersMinimal` 在 backend 支持前必须返回 exit `129` + `LBR-CLI-002`，且不得先扫描 worktree 或输出默认 diff
 - **（新增）`DiffError` 变体覆盖**：
   - `InvalidRevision`：无效 `--old` 或 `--new` 返回 exit `129`
   - `IndexLoad`：损坏 index 返回 exit `128`
