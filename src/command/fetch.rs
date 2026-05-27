@@ -1992,8 +1992,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FetchError, RemoteProgressBuffer, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
-        cleanup_expired_vault_ssh_temp_files_in, ensure_vault_ssh_tmp_dir, read_fetch_stream,
+        FetchError, PackCompletionTracker, RemoteProgressBuffer, RemoteSpecErrorKind,
+        SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
+        ensure_vault_ssh_tmp_dir, parse_pack_entry_data_offset, read_be_u32, read_fetch_stream,
         redact_url_credentials,
     };
     use crate::{
@@ -2335,5 +2336,107 @@ mod tests {
                 .contains("stored branch reference 'refs/remotes/origin/main' is corrupt"),
             "unexpected fetch error: {error}"
         );
+    }
+
+    /// `read_be_u32` returns `None` for any range that would overflow
+    /// the input slice; it must not panic. Pins the `offset + 4 > len`
+    /// short-circuit added with `PackCompletionTracker` in v0.17.1060.
+    #[test]
+    fn read_be_u32_decodes_big_endian_and_short_circuits_on_overflow() {
+        // Happy path: 4 BE bytes at offset 0.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00, 0x05], 0), Some(5));
+        assert_eq!(read_be_u32(&[0xDE, 0xAD, 0xBE, 0xEF], 0), Some(0xDEAD_BEEF));
+        // Happy path: 4 BE bytes at a non-zero offset.
+        assert_eq!(read_be_u32(&[0xAA, 0x00, 0x00, 0x00, 0x07], 1), Some(7));
+        // Short input: only 3 bytes available at offset 0.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00], 0), None);
+        // Offset past end.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00, 0x00], 4), None);
+        // Empty input.
+        assert_eq!(read_be_u32(&[], 0), None);
+    }
+
+    /// `PackCompletionTracker::read_header` accepts well-formed PACK v2
+    /// and v3 headers and rejects everything else without panicking.
+    /// The state mutations (`object_count`, `offset`) are part of the
+    /// public contract that `observe` relies on, so pin them here.
+    #[test]
+    fn pack_completion_tracker_read_header_validates_magic_version_and_state() {
+        // Reject: empty input.
+        let mut tracker = PackCompletionTracker::default();
+        assert!(!tracker.read_header(&[]));
+        assert_eq!(tracker.object_count, None);
+
+        // Reject: less than 12 bytes (header is exactly 12).
+        let mut tracker = PackCompletionTracker::default();
+        let short = [b'P', b'A', b'C', b'K', 0, 0, 0, 2, 0, 0, 0];
+        assert!(!tracker.read_header(&short));
+        assert_eq!(tracker.object_count, None);
+
+        // Reject: wrong magic bytes.
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_magic = b"PACX".to_vec();
+        bad_magic.extend_from_slice(&2_u32.to_be_bytes());
+        bad_magic.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_magic));
+
+        // Reject: unsupported version (1 — packs predate widespread use).
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_version = b"PACK".to_vec();
+        bad_version.extend_from_slice(&1_u32.to_be_bytes());
+        bad_version.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_version));
+
+        // Reject: unsupported version (4).
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_version = b"PACK".to_vec();
+        bad_version.extend_from_slice(&4_u32.to_be_bytes());
+        bad_version.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_version));
+
+        // Accept: PACK v2 with 0 objects; `offset` advances to 12.
+        let mut tracker = PackCompletionTracker::default();
+        let mut empty_v2 = b"PACK".to_vec();
+        empty_v2.extend_from_slice(&2_u32.to_be_bytes());
+        empty_v2.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(tracker.read_header(&empty_v2));
+        assert_eq!(tracker.object_count, Some(0));
+        assert_eq!(tracker.offset, 12);
+
+        // Accept: PACK v3 with 7 objects.
+        let mut tracker = PackCompletionTracker::default();
+        let mut seven_v3 = b"PACK".to_vec();
+        seven_v3.extend_from_slice(&3_u32.to_be_bytes());
+        seven_v3.extend_from_slice(&7_u32.to_be_bytes());
+        assert!(tracker.read_header(&seven_v3));
+        assert_eq!(tracker.object_count, Some(7));
+        assert_eq!(tracker.offset, 12);
+    }
+
+    /// `parse_pack_entry_data_offset` returns `None` when the entry
+    /// header runs past the end of the slice and `Some(offset)`
+    /// pointing past the variable-length size header for the
+    /// happy-path object types (1..=4 = commit/tree/blob/tag).
+    #[test]
+    fn parse_pack_entry_data_offset_returns_data_start_for_simple_object() {
+        // Single byte header: type=3 (blob = 0b011), size <= 15, no
+        // continuation bit. First byte: 0b0_011_0000 = 0x30 (size 0).
+        // `data_offset` should equal `offset + 1`.
+        let entry = [0x30_u8, 0x78, 0x9C]; // 0x78 0x9C = zlib stream begin
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), Some(1));
+
+        // Two-byte size header: first byte has continuation bit set
+        // (0b1_011_0000 = 0xB0), second byte is the last size chunk
+        // (0b0_0000001 = 0x01). data_offset = 2.
+        let entry = [0xB0_u8, 0x01, 0x78, 0x9C];
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), Some(2));
+
+        // Reject: header truncated mid-continuation.
+        let entry = [0xB0_u8]; // says "continue" but nothing follows
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), None);
+
+        // Reject: unknown object type (5 is reserved, not 1..=4 / 6 / 7).
+        let entry = [0x50_u8]; // 0b0_101_0000 = type 5
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), None);
     }
 }
