@@ -375,7 +375,12 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
                 println!("Tracking \"{pattern}\"");
             }
         }
-        "track-list" if !result.patterns.is_empty() => {
+        "track-list" => {
+            // Always print the header so `libra lfs track` (list mode) is
+            // never silent — pre-v0.17.1065 an empty pattern list rendered
+            // nothing at all and the user couldn't tell whether the command
+            // ran or hung. Matches `git lfs track`'s behavior on an empty
+            // repo (header + no rows).
             println!("Listing tracked patterns");
             for pattern in &result.patterns {
                 println!("    {} ({})", pattern, util::ATTRIBUTES);

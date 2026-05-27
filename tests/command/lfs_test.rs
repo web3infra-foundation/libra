@@ -119,6 +119,32 @@ async fn test_lfs_track_untrack() {
 }
 
 #[tokio::test]
+/// Pre-v0.17.1065 `libra lfs track` (list mode) printed nothing at all
+/// on a fresh repo with no tracked patterns — the user could not tell
+/// whether the command had run or hung. Pin the new behavior: the
+/// "Listing tracked patterns" header is always emitted so empty is a
+/// confirmed-empty, not a silent no-op.
+async fn test_lfs_track_list_prints_header_on_empty_repo() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    let output = libra_command(temp_path)
+        .args(["lfs", "track"])
+        .output()
+        .expect("failed to run lfs track");
+    assert!(
+        output.status.success(),
+        "lfs track (list) should succeed on empty repo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Listing tracked patterns"),
+        "empty-repo lfs track should still print the header, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test]
 /// Test JSON output for local LFS tracking operations.
 async fn test_lfs_track_and_untrack_json_output() {
     let temp_repo = init_temp_repo();
