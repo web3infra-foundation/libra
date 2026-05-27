@@ -22,6 +22,7 @@ import {
   PlanCard,
   ReleaseCard,
   RunsCard,
+  TasksCard,
   ValidationCard,
 } from "./cards";
 import { deriveWorkflow } from "./derive";
@@ -260,6 +261,11 @@ function PipelineView({
         plan={workflow.plans.test}
         planKind="test"
         gated
+        onOpen={onOpen}
+        activeDetail={activeDetail}
+      />
+      <TasksCard
+        tasks={workflow.tasks}
         onOpen={onOpen}
         activeDetail={activeDetail}
       />
