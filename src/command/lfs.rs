@@ -123,7 +123,6 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
         LfsCmds::Track { pattern } => {
-            // TODO: deduplicate
             match pattern {
                 Some(pattern) => {
                     let pattern = convert_patterns_to_workdir(pattern); //
@@ -485,9 +484,9 @@ fn add_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Vec<St
     }
 
     let lfs_patterns = lfs::extract_lfs_patterns(file_path)?;
-    let mut added = Vec::new();
+    let mut added: Vec<String> = Vec::new();
     for pattern in patterns {
-        if lfs_patterns.contains(&pattern) {
+        if lfs_patterns.contains(&pattern) || added.contains(&pattern) {
             continue;
         }
         added.push(pattern.clone());
@@ -574,5 +573,24 @@ mod tests {
             err.details().get("body"),
             Some(&serde_json::json!("upstream unavailable"))
         );
+    }
+
+    #[test]
+    fn add_lfs_patterns_deduplicates_within_a_single_call() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_string_lossy().into_owned();
+        let added = add_lfs_patterns(
+            &path,
+            vec![
+                "*.png".to_string(),
+                "*.png".to_string(),
+                "*.jpg".to_string(),
+            ],
+        )
+        .expect("add_lfs_patterns");
+        assert_eq!(added, vec!["*.png".to_string(), "*.jpg".to_string()]);
+
+        let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
+        assert_eq!(on_disk, vec!["*.png".to_string(), "*.jpg".to_string()]);
     }
 }
