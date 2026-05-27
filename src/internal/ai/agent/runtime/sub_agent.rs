@@ -1,20 +1,19 @@
 //! Sub-agent dispatcher contract — types and trait definitions only.
 //!
-//! This module is the OC-Phase 3 P3.2 deliverable from
-//! `docs/improvement/opencode.md`. It defines the **vocabulary** that
-//! P3.3 → P3.7 will fill in: a [`SubAgentDispatcher`] trait that the tool
-//! loop forwards `task` calls into, the [`DispatchContext`] that carries
-//! the parent-session state the dispatcher needs, and the
-//! [`TaskInvocation`] / [`TaskResult`] / [`TaskFailure`] types that bound
-//! the call shape on either side.
+//! This module started as the OC-Phase 3 P3.2 vocabulary from
+//! `docs/improvement/opencode.md` and now also carries the shared
+//! runtime collaborators used by the shipped dispatcher tail:
+//! [`SubAgentDispatcher`], [`DispatchContext`], the task
+//! invocation/result/failure shapes, permission asking, context-frame
+//! loading, provider-option resolution, and the default child runner.
 //!
 //! What this module is:
-//! - Pure data and trait definitions. No runtime implementation, no
-//!   registration into the tool loop, no `code.multi_agent.enabled` gate.
-//!   The dispatcher landing in P3.3+ will live next to or replace this
-//!   file.
-//! - Forward-stable shapes the doc commits to. Any field rename here
-//!   has to update the contract section of `opencode.md` first.
+//! - Forward-stable shapes and small services the dispatcher and tool
+//!   loop share. Any field rename here has to update the contract
+//!   section of `opencode.md` first.
+//! - The object-safe seams that let tests substitute permission
+//!   askers, provider-option resolvers, and child runners without
+//!   constructing a full TUI session.
 //!
 //! What this module is **not**:
 //! - It does not register the `task` tool — that is OC-Phase 3 P3.1's
@@ -22,9 +21,9 @@
 //! - It does not implement the 14-step dispatcher main flow from the
 //!   doc — that lands in P3.3 / P3.4 / P3.7.
 //! - It does not own the runtime services it references
-//!   ([`PermissionService`], [`ContextFrameLoader`]). Those are
-//!   placeholder shells that the real wiring PRs replace; their **names
-//!   and method signatures** are the future contract, not the bodies.
+//!   ([`PermissionService`], [`ContextFrameLoader`]). Their method
+//!   signatures are the public contract; their bodies are intentionally
+//!   small and test-pinned.
 
 use std::sync::{
     Arc, Mutex,
@@ -931,25 +930,23 @@ pub trait SubAgentChildRunner: Send + Sync {
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
 }
 
-/// Default production runner that drives a sub-agent through a
-/// single-shot completion call.
+/// Default production runner that drives a sub-agent through the
+/// normal tool loop.
 ///
-/// This is the OC-Phase 3 P3.4 step 13 minimum viable wiring: the
-/// runner builds an [`AnyCompletionModel`] via
-/// [`DispatchContext::build_child_model`], constructs a
-/// [`CompletionRequest`] from the invocation's prompt, calls
-/// `model.completion(...).await`, and folds the assistant text into a
-/// [`TaskResult`]. Tool-loop integration (`run_tool_loop_with_history_and_observer`),
-/// `ContextHandoff` injection, and child JSONL session creation are
-/// deliberately out of scope here — they ride in follow-up PRs without
-/// changing the runner's public shape because the seam is the
-/// `SubAgentChildRunner` trait.
+/// The runner builds an [`AnyCompletionModel`] via
+/// [`DispatchContext::build_child_model`], threads any dispatcher-built
+/// handoff history into `run_tool_loop_with_history_and_observer`,
+/// enforces the child tool allow-list, forwards the inherited runtime
+/// context, and folds the assistant result into a [`TaskResult`].
 ///
 /// What this runner DOES today:
 /// - Builds the child model from `sub_spec.model` using the
 ///   resolver-aware build helper.
-/// - Sends a single user message with the invocation's `prompt`.
+/// - Sends the dispatcher-provided handoff history plus the
+///   invocation's `prompt`.
 /// - Aggregates assistant text content into `final_text`.
+/// - Lets the child call tools allowed by
+///   `ToolRegistry::available_for(sub_spec, effective_ruleset)`.
 /// - Surfaces provider errors verbatim as
 ///   `TaskFailure::ProviderError(CompletionError)`.
 /// - Honours `ctx.abort_token.is_cancelled()` pre-call so a parent
@@ -957,11 +954,6 @@ pub trait SubAgentChildRunner: Send + Sync {
 ///   leak a stale request to the wire.
 ///
 /// What this runner does NOT do (yet):
-/// - No tool loop. The child cannot call `read_file`, `apply_patch`,
-///   or any other tool today; that wiring lands as a follow-up.
-/// - No `ContextHandoff`. The child sees only the `invocation.prompt`
-///   user message; parent transcript replay arrives with the handoff
-///   builder integration.
 /// - No child JSONL session. The runner does not write child
 ///   per-turn events; the dispatcher continues to write only the
 ///   parent-side `Spawned` / terminal events.

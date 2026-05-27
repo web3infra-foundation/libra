@@ -36,17 +36,16 @@
 //! (v0.17.757). The runner trait itself is the OC-Phase 3 P3.4
 //! entry seam.
 //!
-//! Steps 9–13 (model build, handoff via `ContextHandoffBuilder`,
-//! child JSONL session, child run_tool_loop) have shipped as
-//! callable helpers — [`DispatchContext::resolve_provider_build_options`]
-//! (v0.17.752), [`DispatchContext::build_child_model`] (v0.17.755),
-//! [`ContextFrameLoader::latest_frame_for_session`] (v0.17.744), and
-//! [`crate::internal::ai::context_budget::ContextHandoffBuilder`]
-//! (v0.17.740). The remaining P3.4 work is purely to implement the
-//! `SubAgentChildRunner` that drives those helpers through
-//! `run_tool_loop_with_history_and_observer` for the child run. No
-//! restructure of the dispatcher itself is required to land it.
+//! Steps 9–13 (model build, handoff, child run) now route through
+//! [`DefaultSubAgentChildRunner`], which drives
+//! `run_tool_loop_with_history_and_observer` with dispatcher-built
+//! handoff history, child tool filtering, inherited runtime context,
+//! and parent-abort cancellation. The remaining S3/P3.4 gap is the
+//! split child JSONL session / byte-for-byte parent+child transcript
+//! fixture; the parent side already writes `Spawned` plus a typed
+//! terminal event.
 //!
+//! [`DefaultSubAgentChildRunner`]: super::sub_agent::DefaultSubAgentChildRunner
 //! [`SubAgentChildRunner`]: super::sub_agent::SubAgentChildRunner
 //! [`DispatchContext::resolve_provider_build_options`]: super::sub_agent::DispatchContext::resolve_provider_build_options
 //! [`DispatchContext::build_child_model`]: super::sub_agent::DispatchContext::build_child_model
@@ -733,9 +732,9 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
 ///
 /// The returned [`SubAgentWorkspace`] must be held by the caller until
 /// the child run completes and then cleaned up (no leaked workspaces,
-/// CEX-S2-11 (5)). On any materialization failure the caller degrades
-/// to running the child WITHOUT isolation rather than failing the
-/// dispatch.
+/// CEX-S2-11 (5)). When isolation is configured, materialization
+/// failure is terminal for the dispatch: running a mutating child
+/// against the main worktree would violate S2-INV-03.
 fn materialize_isolated_workspace(
     ctx: &DispatchContext<'_>,
     agent_run_id: AgentRunId,
