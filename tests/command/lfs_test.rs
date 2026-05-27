@@ -605,6 +605,73 @@ async fn test_lfs_unlock_cli_success_with_force_and_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock <path>` (no `--id`) exercises the path → id lookup
+/// branch in `LfsCmds::Unlock`: the CLI first calls `GET /locks?path=...`
+/// to resolve the lock id, then issues `POST /locks/<id>/unlock`. No
+/// prior CLI test covered this branch — only the `--id`-supplied paths.
+async fn test_lfs_unlock_by_path_resolves_lock_id_via_get_locks() {
+    let app = Router::new()
+        .route(
+            "/locks",
+            get(|| async {
+                Json(json!({
+                    "locks": [{
+                        "id": "lock-by-path",
+                        "path": "tracked.bin",
+                        "locked_at": "2026-01-01T00:00:00Z",
+                        "owner": { "name": "tester" }
+                    }],
+                    "next_cursor": ""
+                }))
+            }),
+        )
+        .route(
+            "/locks/{id}/unlock",
+            post(|| async {
+                Json(json!({
+                    "lock": {
+                        "id": "lock-by-path",
+                        "path": "tracked.bin",
+                        "locked_at": "2026-01-01T00:00:00Z",
+                        "owner": { "name": "tester" }
+                    }
+                }))
+            }),
+        );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    // Use `--force` to bypass the path-existence + clean-tree pre-checks.
+    // `force` short-circuits the pre-check guard in `LfsCmds::Unlock` but
+    // does *not* skip the `id.is_none()` lookup branch in the unlock body,
+    // which is exactly what this test exercises: the path → id resolution
+    // via `get_locks`. We assert the resolved id came from the server
+    // response, proving we went through the path branch and not a `--id`
+    // arg.
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "tracked.bin", "--force"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs unlock by path should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("unlock stdout should be JSON");
+    assert_eq!(stdout["data"]["action"], "unlock");
+    assert_eq!(stdout["data"]["path"], "tracked.bin");
+    // The id must come from the get_locks response, not from a --id arg.
+    assert_eq!(stdout["data"]["id"], "lock-by-path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// `lfs unlock --id <id> <path>` should succeed when the path does not
 /// exist locally — `--id` makes the path purely a label (the id is the
 /// lookup key on the server). Prior to the fix, this case required
