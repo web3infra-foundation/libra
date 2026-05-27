@@ -22,7 +22,7 @@ use crate::{
     },
     lfs_structs::LockListQuery,
     utils::{
-        error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
+        error::{CliError, CliResult, StableErrorCode},
         lfs,
         output::{OutputConfig, emit_json_data},
         path,
@@ -472,10 +472,14 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
 pub(crate) async fn current_refspec() -> Option<String> {
     match Head::current().await {
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
-        Head::Detached(_) => {
-            emit_legacy_stderr("fatal: HEAD is detached");
-            None
-        }
+        // Return None silently — every caller wraps the None branch in
+        // a typed error (`current_refspec_or_err` → CliError, the
+        // `lfs_client.rs` `push_objects` site → LfsPushError). Pre-fix
+        // we also `emit_legacy_stderr("fatal: HEAD is detached")` here,
+        // which doubled the error envelope on stderr (legacy line +
+        // typed-error envelope from the caller), confusing `--json` /
+        // `--machine` consumers.
+        Head::Detached(_) => None,
     }
 }
 

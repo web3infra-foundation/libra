@@ -672,6 +672,104 @@ async fn test_lfs_unlock_by_path_resolves_lock_id_via_get_locks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Pre-v0.17.1071 `current_refspec` printed
+/// `"fatal: HEAD is detached"` via `emit_legacy_stderr` then returned
+/// `None`. Every caller wrapped the `None` in a typed error and
+/// reported it again through the normal `OutputConfig` error renderer.
+/// Net effect: detached-HEAD users (especially `--json` consumers) saw
+/// two stderr lines for a single failure — the legacy text plus the
+/// typed envelope.
+///
+/// Pin the deduplicated behavior by running `lfs locks --json` on a
+/// detached HEAD and asserting stderr parses as exactly one JSON
+/// envelope (no leading legacy line, no trailing duplicate).
+async fn test_lfs_locks_on_detached_head_emits_single_error_envelope() {
+    let temp_repo = init_temp_repo();
+    let temp_path = temp_repo.path();
+
+    // Need at least one commit so HEAD can be detached to it.
+    for (k, v) in [
+        ("user.name", "tester"),
+        ("user.email", "tester@example.com"),
+    ] {
+        let cfg = libra_command(temp_path)
+            .args(["config", k, v])
+            .output()
+            .unwrap();
+        assert!(
+            cfg.status.success(),
+            "config {k}: {}",
+            String::from_utf8_lossy(&cfg.stderr)
+        );
+    }
+    fs::write(temp_path.join("seed.txt"), b"hi").unwrap();
+    let add = libra_command(temp_path)
+        .args(["add", "seed.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = libra_command(temp_path)
+        .args(["commit", "-m", "seed"])
+        .output()
+        .unwrap();
+    assert!(
+        commit.status.success(),
+        "commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    // Detach HEAD by checking out the commit hash directly.
+    let head = libra_command(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert!(
+        !head_hash.is_empty(),
+        "rev-parse HEAD returned empty; stderr={}",
+        String::from_utf8_lossy(&head.stderr)
+    );
+    let detach = libra_command(temp_path)
+        .args(["switch", "--detach", &head_hash])
+        .output()
+        .unwrap();
+    assert!(
+        detach.status.success(),
+        "switch --detach {head_hash}: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
+
+    let output = libra_command(temp_path)
+        .args(["--json", "lfs", "locks"])
+        .output()
+        .expect("lfs locks should run");
+    assert!(
+        !output.status.success(),
+        "lfs locks on detached HEAD should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+
+    // The whole stderr must parse as exactly one JSON envelope; no
+    // unwrapped "fatal: HEAD is detached" line leaking before it.
+    let envelope: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|err| {
+        panic!("stderr should parse as a single JSON envelope: {err}; stderr={trimmed:?}")
+    });
+    assert_eq!(envelope["error_code"], "LBR-REPO-003");
+
+    // Defensive: the legacy text "fatal: HEAD is detached" must NOT
+    // appear as a standalone line before the JSON envelope.
+    assert!(
+        !trimmed.starts_with("fatal: HEAD is detached"),
+        "stderr should not begin with the legacy plain-text error; stderr={trimmed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// `lfs unlock <path>` (no `--id`) must surface a typed error when
 /// `get_locks?path=...` returns an empty list — there is no id to
 /// unlock by. Asserts the fatal error envelope carries
