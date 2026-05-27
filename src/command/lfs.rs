@@ -225,7 +225,13 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
             })
         }
         LfsCmds::Unlock { path, force, id } => {
-            if !force {
+            // When `--id` is provided the lock is looked up by id on the
+            // server (see the `Some(id) => id` branch below); `path` is
+            // only kept as a label for the audit output. Skipping the
+            // path-existence and clean-tree checks in that case avoids
+            // friction when unlocking a file that has been deleted
+            // locally but still holds a server-side lock.
+            if !force && id.is_none() {
                 if !Path::new(&path).exists() {
                     return Err(CliError::fatal(format!(
                         "pathspec '{path}' did not match any files"

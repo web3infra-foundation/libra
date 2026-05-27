@@ -453,6 +453,52 @@ async fn test_lfs_unlock_cli_success_with_force_and_id() {
     assert_eq!(stdout["data"]["path"], "tracked.txt");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// `lfs unlock --id <id> <path>` should succeed when the path does not
+/// exist locally — `--id` makes the path purely a label (the id is the
+/// lookup key on the server). Prior to the fix, this case required
+/// `--force`, which has stronger semantics (force-release a lock you do
+/// not own).
+async fn test_lfs_unlock_with_id_skips_path_existence_check() {
+    let app = Router::new().route(
+        "/locks/{id}/unlock",
+        post(|| async {
+            Json(json!({
+                "lock": {
+                    "id": "lock-99",
+                    "path": "deleted.bin",
+                    "locked_at": "2026-01-01T00:00:00Z",
+                    "owner": { "name": "tester" }
+                }
+            }))
+        }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    // Note: no `--force`, and `deleted.bin` does not exist in the repo.
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["--json", "lfs", "unlock", "deleted.bin", "--id", "lock-99"])
+            .output()
+            .expect("failed to run lfs unlock")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs unlock --id should bypass path check; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("unlock stdout should be JSON");
+    assert_eq!(stdout["data"]["action"], "unlock");
+    assert_eq!(stdout["data"]["id"], "lock-99");
+    assert_eq!(stdout["data"]["path"], "deleted.bin");
+}
+
 /// `libra lfs --help` surfaces the EXAMPLES banner so users see the
 /// canonical invocation per sub-command (`track`, `untrack`, `ls-files`,
 /// `locks`, `lock`, `unlock`) plus a JSON variant without reading the
