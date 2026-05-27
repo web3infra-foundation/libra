@@ -21,11 +21,14 @@
 mod harness;
 
 #[cfg(feature = "test-provider")]
+use std::{path::PathBuf, time::Duration};
+
+#[cfg(feature = "test-provider")]
 use anyhow::Result;
 #[cfg(feature = "test-provider")]
-use harness::CodeSession;
-#[cfg(feature = "test-provider")]
 use harness::matrix::{Case, CaseFile, build_session_options, find_case, load_case_file};
+#[cfg(feature = "test-provider")]
+use harness::{CodeSession, CodeSessionOptions};
 #[cfg(feature = "test-provider")]
 use serial_test::serial;
 
@@ -74,8 +77,51 @@ state_case!(state_payload_at_257_kib_returns_413);
 #[cfg(feature = "test-provider")]
 state_case!(state_payload_at_drain_limit_1_mib_returns_413_without_hanging);
 
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn state_detach_while_thinking_allows_turn_to_settle() -> Result<()> {
+    let client_id = "state-detach-thinking";
+    let mut session = CodeSession::spawn(CodeSessionOptions::new(
+        "state-detach-thinking",
+        fixture("delayed_chat"),
+    ))?;
+    session.attach_automation(client_id)?;
+    session.submit_message("/chat slow")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        snapshot.get("status").and_then(|v| v.as_str()) == Some("thinking")
+    })?;
+
+    session.detach_automation(client_id)?;
+    session.wait_for_snapshot(Duration::from_secs(15), |snapshot| {
+        let status_idle = snapshot.get("status").and_then(|v| v.as_str()) == Some("idle");
+        let controller_released = snapshot
+            .pointer("/controller/kind")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| kind == "tui" || kind == "none");
+        let transcript = snapshot
+            .get("transcript")
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_default();
+        status_idle
+            && controller_released
+            && transcript.contains("fake assistant: delayed response")
+    })?;
+
+    session.shutdown()
+}
+
 #[cfg(not(feature = "test-provider"))]
 #[test]
 fn state_matrix_requires_test_provider_feature() {
     eprintln!("skipping state matrix; enable --features test-provider");
+}
+
+#[cfg(feature = "test-provider")]
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("code_ui")
+        .join(format!("{name}.json"))
 }

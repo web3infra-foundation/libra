@@ -300,9 +300,9 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - 已完成：thinking 中二次 submit → 409 `SESSION_BUSY`。
   - 已完成：cancel idle → 409 `SESSION_BUSY` 且文档化。
   - 已完成：257 KiB / 1 MiB 拒绝且不挂死。
-  - Deferred：streaming 进行中 detach → assistant 状态收敛到 idle 而非死锁。
+  - 已完成：streaming / delayed turn 进行中 detach → controller lease 释放回 TUI/none，turn 继续收敛到 idle，并保留最终 assistant transcript。
 - **优先级**：P1。
-- **测试位置**：**L2 已新增** `tests/code_ui_remote_state_matrix.rs` runner。
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_state_matrix.rs` runner；`state_detach_while_thinking_allows_turn_to_settle` 覆盖 mid-turn detach 不死锁。
 
 ### 5.18 性能与稳定性 smoke
 
