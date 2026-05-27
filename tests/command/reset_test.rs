@@ -15,7 +15,10 @@ use libra::{
         reset::{self, ResetArgs},
         status::{changes_to_be_committed, changes_to_be_staged},
     },
-    internal::{branch::Branch as InternalBranch, config::ConfigKv},
+    internal::{
+        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        config::ConfigKv,
+    },
     utils::test::setup_with_new_libra_in,
 };
 
@@ -258,6 +261,28 @@ fn test_reset_onto_locked_branch_rejects_agent_traces_suffix() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_refuses_ai_managed_current_branch() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Head::update_result(Head::Branch(AGENT_TRACES_BRANCH.to_string()), None)
+            .await
+            .expect("point HEAD at agent-traces");
+    }
+
+    let output = run_libra_command(&["reset", "--hard", "HEAD"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        stderr.contains("refusing to reset locked current branch 'agent-traces'"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]

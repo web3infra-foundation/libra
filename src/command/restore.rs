@@ -73,6 +73,10 @@ pub enum RestoreError {
     /// should not be able to overwrite with `restore --source`.
     #[error("refusing to restore from locked branch '{0}'")]
     LockedSource(String),
+    /// Refused to mutate the worktree while HEAD is attached to a
+    /// Libra-managed AI branch.
+    #[error("refusing to restore worktree while on locked branch '{0}'")]
+    LockedCurrentBranch(String),
 }
 
 impl RestoreError {
@@ -88,6 +92,7 @@ impl RestoreError {
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
             Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
         }
     }
 }
@@ -119,6 +124,9 @@ impl From<RestoreError> for CliError {
                 .with_hint(
                     "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
                 ),
+            RestoreError::LockedCurrentBranch(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("switch to a user branch before modifying the worktree"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -202,6 +210,9 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
         && branch::is_locked_revision(src)
     {
         return Err(RestoreError::LockedSource(src.to_string()));
+    }
+    if worktree {
+        reject_restore_on_ai_managed_current_branch().await?;
     }
 
     let storage = util::objects_storage();
@@ -658,6 +669,18 @@ fn map_restore_branch_store_error(error: BranchStoreError) -> RestoreError {
     }
 }
 
+async fn reject_restore_on_ai_managed_current_branch() -> Result<(), RestoreError> {
+    match Head::current_result()
+        .await
+        .map_err(map_restore_branch_store_error)?
+    {
+        Head::Branch(name) if branch::is_ai_managed_branch(&name) => {
+            Err(RestoreError::LockedCurrentBranch(name))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn preprocess_blobs(blobs: &[(PathBuf, ObjectHash)]) -> HashMap<PathBuf, ObjectHash> {
     blobs
         .iter()
@@ -1040,6 +1063,10 @@ mod tests {
             RestoreError::LockedSource("intent".to_string()).to_string(),
             "refusing to restore from locked branch 'intent'",
         );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
+            "refusing to restore worktree while on locked branch 'agent-traces'",
+        );
     }
 
     /// Pin the `stable_code()` mapping for every variant of
@@ -1051,7 +1078,7 @@ mod tests {
     /// reroutes any of them (for example flipping `LfsDownload` from
     /// `NetworkUnavailable` to `IoReadFailed`) silently changes
     /// client retry classification unless every variant has its own
-    /// guard. Enumerate all 10 variants so a new variant trips both
+    /// guard. Enumerate all 11 variants so a new variant trips both
     /// this exhaustive list and the `stable_code()` impl's match.
     #[test]
     fn restore_error_stable_code_pins_each_variant() {
@@ -1094,6 +1121,10 @@ mod tests {
         assert_eq!(
             RestoreError::LockedSource("ignored".to_string()).stable_code(),
             StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RestoreError::LockedCurrentBranch("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
         );
     }
 }

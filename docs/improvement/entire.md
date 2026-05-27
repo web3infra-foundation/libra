@@ -428,8 +428,8 @@ async fn process_hook_event_with_target(
 
 ### 7.5 与现有命令交互
 
-- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）与 `switch`（create）均已调用
-- 部分：[`command/restore.rs`](../../src/command/restore.rs) 已通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`；[`command/reset.rs`](../../src/command/reset.rs) 已通过 `ResetError::LockedTarget` 守 `reset --hard <locked-ref>`。但**cwd 当前位于锁定分支时拦截 worktree-modifying commands** 属于行为变更，仍留作独立切片，未在本批落地
+- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）、`switch`（create / existing target）与 `checkout` 均已调用
+- ✅ 锁定分支互操作已收口：[`command/restore.rs`](../../src/command/restore.rs) 通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`，并通过 `RestoreError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的 worktree restore；[`command/reset.rs`](../../src/command/reset.rs) 通过 `ResetError::LockedTarget` 守 `reset <locked-ref>`，并通过 `ResetError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的整树 reset。`main` 仍只在 branch-management 语义下锁定，不阻塞普通用户工作树。
 - ✅ `git log refs/libra/agent-traces` 直接可用
 
 ---

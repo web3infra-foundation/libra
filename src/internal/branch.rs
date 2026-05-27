@@ -52,6 +52,16 @@ pub fn is_locked_branch(name: &str) -> bool {
     name == DEFAULT_BRANCH || name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
 }
 
+/// Return `true` for Libra-owned AI branches whose checked-out worktree must
+/// not be used for ordinary user edits.
+///
+/// This deliberately excludes [`DEFAULT_BRANCH`]. `main` is locked for
+/// branch-management operations such as delete/rename, but it remains the
+/// normal user worktree branch.
+pub fn is_ai_managed_branch(name: &str) -> bool {
+    name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
+}
+
 /// Return `true` if the user-supplied revision string targets a locked
 /// branch — including via revision suffixes (`agent-traces~1`,
 /// `intent^`, `agent-traces@{0}`).
@@ -621,6 +631,15 @@ mod tests {
         assert!(!is_locked_branch("agent-traces-feature"));
         assert!(!is_locked_branch("not-locked"));
         assert!(!is_locked_branch(""));
+    }
+
+    #[test]
+    fn is_ai_managed_branch_excludes_main() {
+        assert!(!is_ai_managed_branch(DEFAULT_BRANCH));
+        assert!(is_ai_managed_branch(INTENT_BRANCH));
+        assert!(is_ai_managed_branch(AGENT_TRACES_BRANCH));
+        assert!(!is_ai_managed_branch("agent-traces-feature"));
+        assert!(!is_ai_managed_branch(""));
     }
 
     /// CEX-EntireIO: `is_locked_revision` must strip `~` / `^` / `@`

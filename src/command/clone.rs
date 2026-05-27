@@ -850,6 +850,10 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout attempted to restore from locked branch '{name}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        RestoreError::LockedCurrentBranch(name) => CliError::fatal(format!(
+            "internal error: clone checkout attempted to write worktree while on locked branch '{name}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 

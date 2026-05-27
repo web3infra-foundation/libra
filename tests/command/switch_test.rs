@@ -3,7 +3,13 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use git_internal::internal::index::Index;
-use libra::utils::{client_storage::ClientStorage, path};
+use libra::{
+    internal::{
+        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        head::Head,
+    },
+    utils::{client_storage::ClientStorage, path, test::ChangeDirGuard},
+};
 
 use super::*;
 
@@ -52,6 +58,31 @@ fn test_switch_create_agent_traces_branch_is_blocked() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_existing_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit()
+            .await
+            .expect("committed repo should have HEAD");
+        InternalBranch::update_branch(AGENT_TRACES_BRANCH, &head.to_string(), None)
+            .await
+            .expect("seed agent-traces branch");
+    }
+
+    let output = run_libra_command(&["switch", AGENT_TRACES_BRANCH], repo.path());
+
+    assert!(!output.status.success());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains(AGENT_TRACES_BRANCH),
         "expected the agent-traces branch name in the message, got: {stderr}"
     );
 }

@@ -204,6 +204,11 @@ enum ResetError {
     #[error("refusing to reset to locked branch '{0}'")]
     LockedTarget(String),
 
+    /// Refused to move HEAD/index/worktree while HEAD is attached to a
+    /// Libra-managed AI branch.
+    #[error("refusing to reset locked current branch '{0}'")]
+    LockedCurrentBranch(String),
+
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback {
         primary: Box<ResetError>,
@@ -232,6 +237,7 @@ impl ResetError {
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
             Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
             Self::Rollback { primary, .. } => primary.stable_code(),
         }
     }
@@ -260,6 +266,7 @@ impl ResetError {
             Self::LockedTarget(_) => Some(
                 "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
             ),
+            Self::LockedCurrentBranch(_) => Some("switch to a user branch before running reset"),
             Self::RevisionRead(_) => {
                 Some("check whether the repository references and object storage are readable.")
             }
@@ -326,6 +333,18 @@ fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
     }
 }
 
+async fn reject_reset_on_ai_managed_current_branch() -> Result<(), ResetError> {
+    match Head::current_result()
+        .await
+        .map_err(map_reset_head_commit_error)?
+    {
+        Head::Branch(name) if branch::is_ai_managed_branch(&name) => {
+            Err(ResetError::LockedCurrentBranch(name))
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
 
@@ -377,6 +396,8 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
             warnings: Vec::new(),
         });
     }
+
+    reject_reset_on_ai_managed_current_branch().await?;
 
     let target_commit_id = resolve_commit(&args.target).await?;
     let reset_stats = perform_reset(target_commit_id, mode, &args.target).await?;
@@ -1088,6 +1109,10 @@ mod tests {
             ResetError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
             "pathspec 'src/missing.rs' did not match any file(s) known to libra",
         );
+        assert_eq!(
+            ResetError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
+            "refusing to reset locked current branch 'agent-traces'",
+        );
         // ObjectLoad — three structured fields.
         assert_eq!(
             ResetError::ObjectLoad {
@@ -1102,7 +1127,7 @@ mod tests {
 
     /// Pin the `stable_code()` mapping for every variant of
     /// [`ResetError`]. The [`StableErrorCode`] is what `--json`
-    /// consumers branch on; ResetError has 19 variants spread across
+    /// consumers branch on; ResetError has 20 variants spread across
     /// repo-state (RepoNotFound / RepoStateInvalid / RepoCorrupt),
     /// I/O (IoReadFailed / IoWriteFailed), and CLI input
     /// (CliInvalidArguments / CliInvalidTarget) buckets. A future
@@ -1193,6 +1218,10 @@ mod tests {
         assert_eq!(
             ResetError::LockedTarget("ignored".to_string()).stable_code(),
             StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::LockedCurrentBranch("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
         );
         // Rollback delegates to its primary error's stable_code via
         // recursion; pinning the delegation surfaces a future change
