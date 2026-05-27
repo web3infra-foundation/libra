@@ -739,6 +739,20 @@ mod tests {
                 StableErrorCode::ConflictOperationBlocked,
             ),
             (
+                CheckoutError::BranchStoreRead {
+                    context: "resolve branch".to_string(),
+                    detail: "database is locked".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::BranchStoreCorrupt {
+                    context: "resolve branch".to_string(),
+                    detail: "ref points to non-commit object".to_string(),
+                },
+                StableErrorCode::RepoCorrupt,
+            ),
+            (
                 CheckoutError::RemoteHeadMissing,
                 StableErrorCode::RepoStateInvalid,
             ),

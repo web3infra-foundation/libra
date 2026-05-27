@@ -91,7 +91,7 @@
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
 | **9** | `switch` | ✅ 已落地 | 第二批主改造已落地；后续仅维护回归测试、文档同步与大仓库切换性能观察（详见 [switch.md](switch.md)） |
-| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地；第 30 批补充结构化输出 | 已完成 `SwitchError` 变体匹配适配、`--help` EXAMPLES、`CheckoutOutput`、JSON/machine 成功路径与 checkout-owned stable code；剩余 `CheckoutError` typed enum 另行处理（详见 [checkout.md](checkout.md)） |
+| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地；第 30 批补充结构化输出和 typed error 收口 | 已完成 `SwitchError` 变体匹配适配、`--help` EXAMPLES、`CheckoutOutput`、JSON/machine 成功路径、checkout-owned stable code，以及完整 `CheckoutError` typed enum（含 branch-store 与 remote-sync 细分映射）；后续仅维护回归测试和文档同步（详见 [checkout.md](checkout.md)） |
 | **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
 | **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
 | **12** | `branch` | ✅ 已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪；v0.17.211 → v0.17.217 已把 `tests/command/*` 全部迁到 `*_result` 并删除 8 个 lossy wrapper（详见 [branch.md](branch.md)） | 后续仅维护回归测试和文档同步 |
