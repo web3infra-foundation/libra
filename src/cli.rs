@@ -32,7 +32,7 @@ Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, worktree
   History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
-  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
@@ -270,6 +270,8 @@ enum Commands {
     Checkout(command::checkout::CheckoutArgs),
     #[command(about = "Create a new tag")]
     Tag(command::tag::TagArgs),
+    #[command(about = "Add, show, list, or remove notes attached to commits")]
+    Notes(command::notes::NotesArgs),
     #[command(about = "Merge changes")]
     Merge(command::merge::MergeArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
@@ -1055,6 +1057,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
         Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,

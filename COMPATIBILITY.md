@@ -47,6 +47,7 @@ batch document.
 | symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | supported | |
 | tag | supported | |
+| notes | partial | `add` / `list` / `show` / `remove` supported; `append` / `edit` / `copy` / `merge` / `prune` / `get-ref` not implemented |
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
