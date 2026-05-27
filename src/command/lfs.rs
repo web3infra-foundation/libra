@@ -392,19 +392,28 @@ fn render_lfs_output(result: &LfsOutput, output: &OutputConfig) -> CliResult<()>
             }
         }
         "locks" => {
-            let max_path_len = result
-                .locks
-                .iter()
-                .map(|lock| lock.path.len())
-                .max()
-                .unwrap_or(0);
-            for lock in &result.locks {
-                println!(
-                    "{:<path_width$}\tID:{}",
-                    lock.path,
-                    lock.id,
-                    path_width = max_path_len
-                );
+            // Same UX class as the `track-list` empty fix in v0.17.1065:
+            // an empty lock list previously printed nothing, leaving the
+            // user unable to distinguish "no locks held" from "command
+            // hung" or "wrong subcommand". Emit a confirmed-empty notice
+            // so the success signal is always visible.
+            if result.locks.is_empty() {
+                println!("No locks on the current branch");
+            } else {
+                let max_path_len = result
+                    .locks
+                    .iter()
+                    .map(|lock| lock.path.len())
+                    .max()
+                    .unwrap_or(0);
+                for lock in &result.locks {
+                    println!(
+                        "{:<path_width$}\tID:{}",
+                        lock.path,
+                        lock.id,
+                        path_width = max_path_len
+                    );
+                }
             }
         }
         "lock" => {

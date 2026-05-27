@@ -327,6 +327,41 @@ async fn test_lfs_locks_cli_returns_locks_from_mock_server() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Pre-v0.17.1066 `libra lfs locks` (human mode) printed nothing when
+/// the server returned an empty list — same silent-no-op UX class as
+/// the `track-list` fix in v0.17.1065. Pin the new "No locks on the
+/// current branch" notice so users always see a confirmed-empty signal.
+async fn test_lfs_locks_human_prints_notice_when_empty() {
+    let app = Router::new().route(
+        "/locks",
+        get(|| async { Json(json!({ "locks": [], "next_cursor": "" })) }),
+    );
+    let addr = spawn_mock_lfs_server(app).await;
+    let repo = init_repo_with_mock_remote(&format!("http://{addr}"));
+    let repo_path = repo.path().to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        libra_command(&repo_path)
+            .args(["lfs", "locks"])
+            .output()
+            .expect("failed to run lfs locks")
+    })
+    .await
+    .expect("spawn_blocking join failed");
+
+    assert!(
+        output.status.success(),
+        "lfs locks should succeed on empty server response; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No locks"),
+        "empty `lfs locks` should still print a notice, stdout={stdout:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// `lfs locks --json` against a mock server that returns 403; verifies the CLI surfaces
 /// stable error code `LBR-AUTH-002` and exits non-zero.
 async fn test_lfs_locks_cli_forbidden_returns_auth_permission_denied() {
