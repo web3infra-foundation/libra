@@ -161,7 +161,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - 继续检查 `web/out/` 与 source 变更同步。
 - [x] 增加 browser smoke：`browser_static_app_loads_and_submit_updates_snapshot` 打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread 内容，发送 browser message 后 snapshot 更新。
 - [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
-- `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致。
+- [x] `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致；`compat_matrix_alignment::docs_consistency_script_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `scripts/check_docs_consistency.sh` 覆盖全部端点。
 
 **验收命令：**
 

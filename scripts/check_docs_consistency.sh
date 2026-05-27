@@ -17,11 +17,16 @@ for endpoint in \
   "/api/code/session" \
   "/api/code/events" \
   "/api/code/diagnostics" \
+  "/api/code/threads" \
+  "/api/code/goal/status" \
   "/api/code/controller/attach" \
   "/api/code/controller/detach" \
   "/api/code/messages" \
   "/api/code/interactions/{id}" \
-  "/api/code/control/cancel"
+  "/api/code/control/cancel" \
+  "/api/code/task/dispatch" \
+  "/api/code/goal/start" \
+  "/api/code/goal/cancel"
 do
   require_doc "$endpoint" "docs/automation/local-tui-control.md"
 done

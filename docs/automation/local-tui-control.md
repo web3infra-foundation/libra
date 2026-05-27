@@ -57,7 +57,7 @@ Automation write control currently covers:
 - `POST /api/code/goal/start`
 - `POST /api/code/goal/cancel`
 
-Write request bodies are limited to 256KiB. `GET /api/code/session`, `GET /api/code/events`, `GET /api/code/diagnostics`, and `GET /api/code/goal/status` remain observe-only loopback endpoints. Diagnostics are generated from a whitelist of session fields and must not include the control token, controller token, auth headers, provider request bodies, or environment dumps.
+Write request bodies are limited to 256KiB. `GET /api/code/session`, `GET /api/code/events`, `GET /api/code/diagnostics`, `GET /api/code/threads`, and `GET /api/code/goal/status` remain observe-only loopback endpoints. Diagnostics are generated from a whitelist of session fields and must not include the control token, controller token, auth headers, provider request bodies, or environment dumps.
 
 Control attach, detach, submit, respond, cancel, task dispatch, and goal mutation operations emit `local-tui-control/v1` audit events. Control-specific fields are serialized into the existing `AuditEvent.redacted_summary` JSON string; the audit event schema itself is unchanged.
 
