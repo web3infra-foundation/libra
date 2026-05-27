@@ -21,7 +21,7 @@ use libra::internal::ai::{
     tools::{
         ToolRegistryBuilder,
         context::{UserInputQuestion, UserInputRequest, UserInputResponse},
-        handlers::ReadFileHandler,
+        handlers::{PlanHandler, ReadFileHandler},
     },
     web::{
         code_ui::{
@@ -88,6 +88,7 @@ fn build_runtime_with_persistence(
                 Arc::new(TracingAuditSink),
             ))
             .register("read_file", Arc::new(ReadFileHandler))
+            .register("update_plan", Arc::new(PlanHandler))
             .build(),
     );
 
@@ -246,21 +247,57 @@ async fn submit_message_persists_resumable_session_snapshot() {
     panic!("session store did not receive the completed headless turn before deadline");
 }
 
-/// The headless runtime advertises only the surfaces it can actually deliver
-/// in v0; locking these down catches accidental capability drift (e.g.
-/// turning on `interactiveApprovals` before the InteractionPanel routing is
-/// wired into the headless path).
+/// The headless runtime advertises the Phase 3 v1 browser surfaces it can
+/// actually deliver. Locking these down catches accidental capability drift
+/// between the Rust runtime and the Web UI feature gates.
 #[test]
-fn headless_capabilities_match_phase3_v0_contract() {
+fn headless_capabilities_match_phase3_v1_contract() {
     let caps = headless_capabilities();
     assert!(caps.message_input);
     assert!(caps.streaming_text);
     assert!(caps.tool_calls);
-    assert!(!caps.plan_updates);
-    assert!(!caps.patchsets);
+    assert!(caps.plan_updates);
+    assert!(caps.patchsets);
     assert!(caps.interactive_approvals);
     assert!(caps.structured_questions);
     assert!(caps.provider_session_resume);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_plan_tool_call_projects_plan_into_snapshot() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("plan_update", workdir.path().to_path_buf());
+
+    runtime
+        .submit_message("please update the plan".to_string())
+        .await
+        .expect("headless submit should accept a prompt that triggers update_plan");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if let Some(plan) = snapshot
+            .plans
+            .iter()
+            .find(|plan| plan.id == "call_update_plan_1")
+            && plan.status == "completed"
+        {
+            assert_eq!(plan.summary.as_deref(), Some("Project the live plan"));
+            assert_eq!(plan.steps.len(), 2);
+            assert_eq!(plan.steps[0].step, "Inspect Web UI contract");
+            assert_eq!(plan.steps[0].status, "completed");
+            assert_eq!(plan.steps[1].step, "Pin snapshot projection");
+            assert_eq!(plan.steps[1].status, "in_progress");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let snapshot = runtime.snapshot().await;
+    panic!(
+        "update_plan call did not project a completed plan into snapshot: {:?}",
+        snapshot.plans
+    );
 }
 
 /// `cancel_turn` must finalize the streaming assistant entry — leaving it

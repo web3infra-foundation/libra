@@ -59,7 +59,7 @@
 | `code_resume_test` | 2 | Session resume across restarts | `src/internal/ai/session/`, `src/command/code.rs` |
 | `code_codex_default_tui_test` | 2 | Codex runtime default TUI wiring | `src/internal/ai/agent/codex*` |
 | `code_codex_runtime_test` | 2 | Codex runtime tool loop regression | `src/internal/ai/agent/codex*`, `src/internal/ai/tools/` |
-| `ai_code_ui_headless_test` | 2 | Headless TUI rendering / event coverage | `src/internal/tui/` |
+| `ai_code_ui_headless_test` | 2 | Headless Code UI runtime and projection coverage | `src/internal/ai/web/headless.rs` |
 | `ai_code_ui_projection_test` | 2 | Projection snapshot replication | `src/internal/ai/history.rs`, `src/internal/tui/` |
 | `ai_code_ui_wire_test` | 2 | Wire-format contract for UI events | `src/internal/tui/`, `src/internal/ai/agent/` |
 | `intent_flow_test` | 2 | IntentSpec → Plan → Run pipeline (no live LLM) | `src/internal/ai/intentspec/`, `src/internal/ai/orchestrator/` |
