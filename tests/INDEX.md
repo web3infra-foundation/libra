@@ -22,7 +22,7 @@
 | `compat_bisect_subcommand_surface` | 1 | Guards `libra bisect` subcommand surface | `src/command/bisect.rs` |
 | `compat_worktree_delete_dir` | 1 | Guards worktree delete semantics on dir removal | `src/command/worktree.rs` |
 | `compat_checkout_alias_help` | 1 | Guards `--help` text for checkout aliases | `src/command/checkout.rs` |
-| `compat_matrix_alignment` | 1 | Guards public docs matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/automation/local-tui-control.md`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
+| `compat_matrix_alignment` | 1 | Guards public docs/release matrices vs. real CLI/API surfaces | `COMPATIBILITY.md`, `docs/automation/local-tui-control.md`, `.github/workflows/base.yml`, `src/cli.rs`, `src/internal/ai/web/mod.rs` |
 | `compat_live_compat_workflow` | 1 | Guards optional live AI/cloud workflow remains manual/scheduled and secret-gated | `.github/workflows/live-compat.yml` |
 | `compat_branch_lossy_wrapper_guard` | 1 | Guards branch-name lossy conversion wrapper | `src/internal/branch.rs` |
 | `compat_lfs_client_production_unwrap_guard` | 1 | Bans `unwrap()/expect()` in `internal/protocol/lfs_client.rs` | `src/internal/protocol/lfs_client.rs` |

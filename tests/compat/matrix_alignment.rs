@@ -65,3 +65,21 @@ fn docs_consistency_script_covers_code_ui_router_matrix() {
         );
     }
 }
+
+#[test]
+fn web_build_job_checks_static_export_drift() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workflow = std::fs::read_to_string(repo.join(".github/workflows/base.yml"))
+        .expect("read .github/workflows/base.yml");
+    assert!(
+        workflow.contains("bash scripts/check_web_out_clean.sh"),
+        "web build CI job must run scripts/check_web_out_clean.sh after pnpm build"
+    );
+
+    let script = std::fs::read_to_string(repo.join("scripts/check_web_out_clean.sh"))
+        .expect("read scripts/check_web_out_clean.sh");
+    assert!(
+        script.contains("git status --porcelain -- web/out"),
+        "web/out drift script must detect modified and untracked static export files"
+    );
+}

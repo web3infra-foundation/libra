@@ -100,6 +100,9 @@ jobs:
       - name: Build web (static export → web/out/)
         run: pnpm --dir web build
 
+      - name: Check web/out static export drift
+        run: bash scripts/check_web_out_clean.sh
+
   redundancy:
     name: compat-redundancy
     runs-on: [self-hosted]
