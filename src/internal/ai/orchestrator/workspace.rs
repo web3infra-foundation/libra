@@ -1010,7 +1010,7 @@ fn remove_partial_workspace_on_error<T>(
     if result.is_err()
         && let Err(cleanup_err) = remove_cleanup_root(cleanup_root)
     {
-        warn!(
+        tracing::warn!(
             path = %cleanup_root.display(),
             "failed to remove partial task worktree after materialization error: {cleanup_err}",
         );

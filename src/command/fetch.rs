@@ -1141,6 +1141,176 @@ struct FetchStreamData {
     unshallow: Vec<String>,
 }
 
+/// Tracks packfile boundaries so fetch can finish once the pack checksum is
+/// present, even if the SSH transport stays open after `git-upload-pack` is done.
+#[derive(Default)]
+struct PackCompletionTracker {
+    object_count: Option<usize>,
+    objects_seen: usize,
+    offset: usize,
+    current_object: Option<PackObjectInflate>,
+    complete: bool,
+}
+
+struct PackObjectInflate {
+    start: usize,
+    inflater: flate2::Decompress,
+}
+
+impl PackCompletionTracker {
+    fn observe(&mut self, pack_data: &[u8]) -> bool {
+        if self.complete {
+            return true;
+        }
+
+        if self.object_count.is_none() && !self.read_header(pack_data) {
+            return false;
+        }
+
+        let Some(object_count) = self.object_count else {
+            return false;
+        };
+
+        while self.objects_seen < object_count {
+            if !self.advance_object(pack_data) {
+                return false;
+            }
+        }
+
+        self.complete = self.has_valid_trailing_checksum(pack_data);
+        self.complete
+    }
+
+    fn read_header(&mut self, pack_data: &[u8]) -> bool {
+        if pack_data.len() < 12 || &pack_data[..4] != b"PACK" {
+            return false;
+        }
+        let Some(version) = read_be_u32(pack_data, 4) else {
+            return false;
+        };
+        if version != 2 && version != 3 {
+            return false;
+        }
+        let Some(object_count) = read_be_u32(pack_data, 8) else {
+            return false;
+        };
+        self.object_count = Some(object_count as usize);
+        self.offset = 12;
+        true
+    }
+
+    fn advance_object(&mut self, pack_data: &[u8]) -> bool {
+        if self.current_object.is_none() {
+            let Some(data_offset) =
+                parse_pack_entry_data_offset(pack_data, self.offset, get_hash_kind().size())
+            else {
+                return false;
+            };
+            self.current_object = Some(PackObjectInflate {
+                start: data_offset,
+                inflater: flate2::Decompress::new(true),
+            });
+        }
+
+        let complete_offset = {
+            let Some(current) = self.current_object.as_mut() else {
+                return false;
+            };
+            let mut output = [0_u8; 8192];
+            loop {
+                let consumed = current.inflater.total_in() as usize;
+                let Some(input_offset) = current.start.checked_add(consumed) else {
+                    return false;
+                };
+                let Some(input) = pack_data.get(input_offset..) else {
+                    return false;
+                };
+                if input.is_empty() {
+                    return false;
+                }
+
+                let before_in = current.inflater.total_in();
+                let before_out = current.inflater.total_out();
+                let status = match current.inflater.decompress(
+                    input,
+                    &mut output,
+                    flate2::FlushDecompress::None,
+                ) {
+                    Ok(status) => status,
+                    Err(_) => return false,
+                };
+                if matches!(status, flate2::Status::StreamEnd) {
+                    break current
+                        .start
+                        .checked_add(current.inflater.total_in() as usize);
+                }
+                if before_in == current.inflater.total_in()
+                    && before_out == current.inflater.total_out()
+                {
+                    return false;
+                }
+            }
+        };
+
+        let Some(complete_offset) = complete_offset else {
+            return false;
+        };
+        self.offset = complete_offset;
+        self.current_object = None;
+        self.objects_seen += 1;
+        true
+    }
+
+    fn has_valid_trailing_checksum(&self, pack_data: &[u8]) -> bool {
+        let hash_len = get_hash_kind().size();
+        let Some(end) = self.offset.checked_add(hash_len) else {
+            return false;
+        };
+        if pack_data.len() != end {
+            return false;
+        }
+        let expected = ObjectHash::new(&pack_data[..self.offset]);
+        ObjectHash::from_bytes(&pack_data[self.offset..end]).is_ok_and(|actual| actual == expected)
+    }
+}
+
+fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn parse_pack_entry_data_offset(
+    pack_data: &[u8],
+    mut offset: usize,
+    hash_len: usize,
+) -> Option<usize> {
+    let first = *pack_data.get(offset)?;
+    offset += 1;
+    let object_type = (first >> 4) & 0b111;
+    let mut byte = first;
+    while byte & 0x80 != 0 {
+        byte = *pack_data.get(offset)?;
+        offset += 1;
+    }
+
+    match object_type {
+        1..=4 => Some(offset),
+        6 => {
+            byte = *pack_data.get(offset)?;
+            offset += 1;
+            while byte & 0x80 != 0 {
+                byte = *pack_data.get(offset)?;
+                offset += 1;
+            }
+            Some(offset)
+        }
+        7 => offset
+            .checked_add(hash_len)
+            .filter(|end| *end <= pack_data.len()),
+        _ => None,
+    }
+}
+
 async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
@@ -1148,6 +1318,7 @@ async fn read_fetch_stream(
 ) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut data_out = FetchStreamData::default();
+    let mut pack_completion = PackCompletionTracker::default();
     let mut reach_pack = false;
     let mut saw_shallow_response = false;
     let render_progress = matches!(output.progress, ProgressMode::Text);
@@ -1187,6 +1358,9 @@ async fn read_fetch_stream(
                 if let Some(progress) = &progress {
                     progress.tick(data_out.pack_data.len() as u64);
                 }
+                if pack_completion.observe(&data_out.pack_data) {
+                    break;
+                }
                 continue;
             }
         }
@@ -1209,6 +1383,9 @@ async fn read_fetch_stream(
                         data_out.pack_data.extend(payload);
                         if let Some(progress) = &progress {
                             progress.tick(data_out.pack_data.len() as u64);
+                        }
+                        if pack_completion.observe(&data_out.pack_data) {
+                            break;
                         }
                     }
                     2 => handle_remote_progress(
@@ -1930,6 +2107,62 @@ mod tests {
         let data = read_fetch_stream(&mut stream, &output, "fetch origin")
             .await
             .expect("EOF after a complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_finishes_complete_pack_when_transport_stays_open() {
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())])
+                .chain(stream::pending())
+                .boxed();
+        let output = OutputConfig::default();
+
+        let data = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_fetch_stream(&mut stream, &output, "fetch origin"),
+        )
+        .await
+        .expect("complete pack should not wait for transport EOF or flush")
+        .expect("complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_finishes_non_empty_pack_when_transport_stays_open() {
+        let pack = include_bytes!("../../tests/data/packs/small-sha1.pack").to_vec();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())])
+                .chain(stream::pending())
+                .boxed();
+        let output = OutputConfig::default();
+
+        let data = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_fetch_stream(&mut stream, &output, "fetch origin"),
+        )
+        .await
+        .expect("complete non-empty pack should not wait for transport EOF or flush")
+        .expect("complete non-empty pack should finish the fetch stream");
 
         assert_eq!(data.pack_data, pack);
     }
