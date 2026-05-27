@@ -984,14 +984,6 @@ pub fn emit_legacy_stderr(message: impl Into<String>) {
     CliError::from_legacy_string(message).print_stderr();
 }
 
-/// Emit a legacy CLI message to stderr and terminate the process with the
-/// inferred exit code.
-pub fn exit_with_legacy_stderr(message: impl Into<String>) -> ! {
-    let err = CliError::from_legacy_string(message.into());
-    err.print_stderr();
-    std::process::exit(err.exit_code());
-}
-
 /// Print a user-facing error to stderr.
 ///
 /// New command code should prefer returning [`CliError`] instead of printing
