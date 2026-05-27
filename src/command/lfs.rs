@@ -512,11 +512,15 @@ fn untrack_lfs_patterns(file_path: &str, patterns: Vec<String>) -> io::Result<Ve
     for line in reader.lines() {
         let line = line?;
         let mut matched_pattern = None;
-        // delete the specified lfs patterns
+        // delete the specified lfs patterns. We compare against the
+        // on-disk (escaped-space) form, but record the *original* input
+        // pattern in `removed` so the return value is symmetric with
+        // `add_lfs_patterns` (both surface the un-escaped user-facing
+        // form).
         for pattern in &patterns {
-            let pattern = pattern.replace(" ", r"\ ");
-            if line.trim_start().starts_with(&pattern) && line.contains("filter=lfs") {
-                matched_pattern = Some(pattern);
+            let escaped = pattern.replace(" ", r"\ ");
+            if line.trim_start().starts_with(&escaped) && line.contains("filter=lfs") {
+                matched_pattern = Some(pattern.clone());
                 break;
             }
         }
@@ -592,5 +596,26 @@ mod tests {
 
         let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
         assert_eq!(on_disk, vec!["*.png".to_string(), "*.jpg".to_string()]);
+    }
+
+    #[test]
+    fn untrack_lfs_patterns_returns_unescaped_form_symmetric_with_add() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_string_lossy().into_owned();
+
+        // Track a pattern with an internal space; on-disk form is escaped.
+        let added =
+            add_lfs_patterns(&path, vec!["my dir/*.png".to_string()]).expect("add_lfs_patterns");
+        assert_eq!(added, vec!["my dir/*.png".to_string()]);
+
+        // Untrack with the un-escaped user-facing form. The return value
+        // must match the input, not the on-disk escaped form, so that
+        // `LfsOutput.patterns` from track and untrack is symmetric.
+        let removed = untrack_lfs_patterns(&path, vec!["my dir/*.png".to_string()])
+            .expect("untrack_lfs_patterns");
+        assert_eq!(removed, vec!["my dir/*.png".to_string()]);
+
+        let on_disk = lfs::extract_lfs_patterns(&path).expect("extract");
+        assert!(on_disk.is_empty(), "expected empty, got {on_disk:?}");
     }
 }
