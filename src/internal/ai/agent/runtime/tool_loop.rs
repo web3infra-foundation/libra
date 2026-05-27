@@ -193,13 +193,13 @@ pub struct ToolLoopConfig {
     /// when callers want to pin a turn to a specific Goal, matching
     /// the supervisor's [`GoalStopPolicy`] enum.
     ///
-    /// Schema-only contract field for OC-Phase 6 P6.3: the
-    /// [`super::run_tool_loop_with_history_and_observer`] entry
-    /// point does **not** branch on this today — the Goal-aware
-    /// driver in `goal::driver` reads `GoalSupervisor::stop_policy`
-    /// directly. The field exists so future loop integrations can
-    /// thread the policy through the config without breaking the
-    /// existing call sites.
+    /// OC-Phase 6 P6.3 contract field: the TUI Goal path binds
+    /// `Some(GoalBound { goal_id })` into this config before calling
+    /// the Goal-aware driver. The inner
+    /// [`super::run_tool_loop_with_history_and_observer`] entry point
+    /// still does not branch on it; the field keeps policy visible to
+    /// observers and future loop integrations without changing legacy
+    /// non-Goal callers.
     pub goal_stop_policy: Option<GoalStopPolicy>,
 }
 
@@ -1474,26 +1474,25 @@ mod tests {
         usage::UsageRecorder,
     };
 
-    /// Default `ToolLoopConfig` is the legacy non-Goal shape: the
-    /// schema-only `goal_stop_policy` field is `None`. The
-    /// supervisor-aware driver in `goal::driver` is the only caller
-    /// that reads this today and treats `None` as
-    /// `GoalStopPolicy::Normal`.
+    /// Default `ToolLoopConfig` is the legacy non-Goal shape:
+    /// `goal_stop_policy` is `None`. The TUI Goal path binds
+    /// `GoalStopPolicy::GoalBound { goal_id }` explicitly before it
+    /// enters the supervisor-aware driver.
     #[test]
     fn tool_loop_config_default_goal_stop_policy_is_none() {
         let config = ToolLoopConfig::default();
         assert!(
             config.goal_stop_policy.is_none(),
-            "schema-only field must default to None so existing callers stay on the legacy non-Goal path",
+            "goal_stop_policy must default to None so existing callers stay on the legacy non-Goal path",
         );
     }
 
     /// `goal_stop_policy` accepts a `GoalBound { goal_id }` policy
     /// without translation — the field is a plain
-    /// `Option<GoalStopPolicy>` so future driver wiring can pattern
-    /// match on the variant directly. This pins the schema shape;
-    /// changing it (e.g. to `Option<Uuid>` or to a sibling enum)
-    /// trips this guard.
+    /// `Option<GoalStopPolicy>` so callers can distinguish legacy
+    /// non-Goal `None` from an explicitly bound Goal policy. This
+    /// pins the schema shape; changing it (e.g. to `Option<Uuid>` or
+    /// to a sibling enum) trips this guard.
     #[test]
     fn tool_loop_config_accepts_goal_bound_stop_policy() {
         let goal_id = Uuid::from_u128(0xbadc_afed_eadb_eef0_0000_0000_0000_0001);

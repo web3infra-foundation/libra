@@ -3191,10 +3191,10 @@ where
                     }
                     attach_memory_anchor_prompt_context(&mut config);
                     let result = if let Some(goal_state) = active_goal_state {
+                        let stop_policy =
+                            bind_goal_stop_policy(&mut config, goal_state.spec.goal_id);
                         let supervisor = GoalSupervisor {
-                            stop_policy: GoalStopPolicy::GoalBound {
-                                goal_id: goal_state.spec.goal_id,
-                            },
+                            stop_policy,
                             verifier: DeterministicGoalVerifier,
                             prompt_builder: DefaultGoalContinuationPromptBuilder,
                         };
@@ -8906,14 +8906,15 @@ mod tests {
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
         apply_developer_network_access, apply_final_usage_update, apply_goal_tool_visibility,
         apply_streaming_usage_delta, automatic_plan_repair_request_from_report,
-        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        changed_path_from_short_status_line, classify_execution_failure_revision,
-        classify_first_turn_task_intent, code_ui_response_from_managed_selection,
-        default_chat_allowed_tools, estimate_streamed_output_tokens,
-        exec_approval_decision_from_selection, execution_failure_report,
-        execution_failure_revision_message, execution_requires_plan_repair,
-        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
+        automatic_plan_repair_threshold_message, bind_goal_stop_policy,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, changed_path_from_short_status_line,
+        classify_execution_failure_revision, classify_first_turn_task_intent,
+        code_ui_response_from_managed_selection, default_chat_allowed_tools,
+        estimate_streamed_output_tokens, exec_approval_decision_from_selection,
+        execution_failure_report, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
@@ -8937,6 +8938,7 @@ mod tests {
                 AssistantContent, CompletionError, CompletionModel, CompletionRequest,
                 CompletionResponse, CompletionUsageSummary, Message, Text,
             },
+            goal::GoalStopPolicy,
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
@@ -9426,6 +9428,20 @@ mod tests {
                 "update_goal_progress".to_string(),
                 "submit_goal_complete".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn goal_stop_policy_is_bound_into_tool_loop_config() {
+        let goal_id = uuid::Uuid::new_v4();
+        let mut config = ToolLoopConfig::default();
+
+        let policy = bind_goal_stop_policy(&mut config, goal_id);
+
+        assert_eq!(policy, GoalStopPolicy::GoalBound { goal_id });
+        assert_eq!(
+            config.goal_stop_policy,
+            Some(GoalStopPolicy::GoalBound { goal_id })
         );
     }
 
@@ -11598,6 +11614,12 @@ fn apply_goal_tool_visibility(
     } else {
         allowed_tools.retain(|name| !is_goal_tool(name));
     }
+}
+
+fn bind_goal_stop_policy(config: &mut ToolLoopConfig, goal_id: uuid::Uuid) -> GoalStopPolicy {
+    let policy = GoalStopPolicy::GoalBound { goal_id };
+    config.goal_stop_policy = Some(policy);
+    policy
 }
 
 fn is_goal_tool(tool_name: &str) -> bool {
