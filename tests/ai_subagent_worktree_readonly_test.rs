@@ -1,11 +1,11 @@
-//! OC-Phase 3 sub-agent worktree readonly contract.
+//! OC-Phase 3 sub-agent worktree isolation contract.
 //!
-//! `docs/improvement/opencode.md` line 1019..1030 commits Libra to a
-//! temporary sub-agent worktree posture: until CEX-S2-11 lands a real
-//! isolated workspace, an OC-Phase 3 sub-agent **cannot** write to the
-//! parent's main worktree. The doc names the regression target by
-//! file (`tests/ai_subagent_worktree_readonly_test.rs`) so future PRs
-//! that ship Phase 3 hardening have an obvious place to extend.
+//! `docs/improvement/opencode.md` originally named this file as the
+//! temporary readonly regression target. CEX-S2-11 / CEX-S2-12 now
+//! materialize an isolated workspace before a mutating child runner is
+//! invoked, so this target pins both the historical schema filter and
+//! the production bootstrap wiring that turns isolation on for
+//! `libra code`.
 //!
 //! This integration test pins the registry-level contract that the
 //! pre-filter (`ToolRegistry::available_for`) strips every member of
@@ -13,6 +13,10 @@
 //! resolved ruleset carries `[{edit:*: deny}]`. Schema-level filtering
 //! is the contract that keeps `apply_patch` out of the model's tool
 //! menu — the model literally cannot see the tool to call it.
+//! Runtime redirection is covered inside
+//! `sub_agent_dispatcher::tests::flag_on_does_not_touch_main_worktree`;
+//! the source guard below prevents `libra code` from forgetting to wire
+//! that isolation config into the dispatcher.
 //!
 //! Two scenarios:
 //! 1. The doc's named example (`apply_patch`) is filtered when the
@@ -96,10 +100,9 @@ fn sub_agent_spec() -> AgentExecutionSpec {
     }
 }
 
-/// Per opencode.md line 1030: "fake sub-agent 试图调用 `apply_patch`,
-/// 应在 `available_for()` 阶段被过滤". A sub-agent whose effective
-/// ruleset includes `[{edit:*: deny}]` must NOT see `apply_patch` in
-/// the schema returned by `ToolRegistry::available_for`.
+/// Historical opencode.md contract: a sub-agent whose effective ruleset
+/// includes `[{edit:*: deny}]` must NOT see `apply_patch` in the schema
+/// returned by `ToolRegistry::available_for`.
 #[test]
 fn sub_agent_with_edit_deny_ruleset_cannot_see_apply_patch_in_schema() {
     let registry = registry_with_edit_tools_and_read_file();
@@ -149,4 +152,36 @@ fn sub_agent_with_edit_deny_ruleset_strips_full_edit_tools_alias_set() {
              under [{{edit:*: deny}}]; got surviving = {surviving:?}"
         );
     }
+}
+
+/// CEX-S2-11 / CEX-S2-12 production wiring guard: the `libra code`
+/// session bootstrap must attach workspace isolation to the default
+/// dispatcher when `code.sub_agents.enabled = true`. The dispatcher unit
+/// tests prove the runtime mechanics; this source-level guard pins the
+/// bootstrap call site so the feature cannot silently regress to the old
+/// parent-worktree behavior.
+#[test]
+fn libra_code_subagent_runtime_wires_workspace_isolation() {
+    let code_rs = include_str!("../src/command/code.rs");
+    let bootstrap = code_rs
+        .split("async fn build_subagent_runtime_for_session")
+        .nth(1)
+        .expect("code.rs must keep the sub-agent runtime bootstrap function");
+
+    assert!(
+        bootstrap.contains(".with_workspace_isolation("),
+        "build_subagent_runtime_for_session must attach workspace isolation to the dispatcher"
+    );
+    assert!(
+        bootstrap.contains("WorkspaceIsolationConfig"),
+        "bootstrap must construct WorkspaceIsolationConfig, not a placeholder gate"
+    );
+    assert!(
+        bootstrap.contains("sessions_root: storage_root.join(\"sessions\")"),
+        "workspace materialization events must be written under the session store root"
+    );
+    assert!(
+        bootstrap.contains("allow_full_copy: agents_config.multi_agent.allow_full_copy"),
+        "bootstrap must honor the operator's full-copy fallback setting"
+    );
 }

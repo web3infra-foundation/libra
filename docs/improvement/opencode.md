@@ -1016,18 +1016,20 @@ fn assert_no_escalation(
 
 测试 fixture 见 [tests/ai_subagent_permission_test.rs] 的「父 deny + 子 allow」案例。
 
-**Sub-Agent Worktree 合同（OC-Phase 3 临时态）**
+**Sub-Agent Worktree 合同（当前落地态）**
 
-`agent.md` Step 2.2「Isolated Workspace & Tool Boundary」（CEX-S2-11 workspace 抽象 + CEX-S2-12 sub-agent dispatcher 真正消费 workspace）尚未落地。OC-Phase 3 的 sub-agent **不能**写主 worktree；这是临时合同，CEX-S2-11 + CEX-S2-12 落地后会被替换为完整的 isolated workspace。（注意：CEX-S2-13 是 “Human-gated merge candidate”，不是 workspace 抽象本身。）
+`agent.md` Step 2.2「Isolated Workspace & Tool Boundary」（CEX-S2-11 workspace 抽象）与 Step 2.3 dispatcher 消费 workspace 的主路径已经落地。`libra code` 在 `code.sub_agents.enabled = true` 时通过 `build_subagent_runtime_for_session(...).with_workspace_isolation(WorkspaceIsolationConfig { ... })` 配置 dispatcher；dispatcher 在 child runner 前 materialize per-run workspace、把 child `ToolRegistry` re-root 到 workspace，并把继承的 sandbox `writable_roots` rebase 到 workspace。CEX-S2-13 仍是后续 “Human-gated merge candidate”，不是 workspace 抽象本身。
 
 | 工具类 | OC-Phase 3 行为 | 后续（CEX-S2-13 之后） |
 |--------|-----------------|--------------------------|
 | 只读（grep/glob/read/list/web_search） | 直接走父 cwd，readonly | 同左 |
-| `apply_patch` / `write_file` / `edit` | dispatcher 在 `available_for()` 阶段过滤；模型看不到 | 走 isolated worktree，patch 由 CEX-S2-15 merge |
-| `shell` / `bash` | dispatcher 在 `available_for()` 阶段过滤，除非父 spec 显式 allow + sub-spec 显式 allow + sandbox=ReadOnly + network=Deny | 同上但解除 readonly 限制 |
+| `apply_patch` / `write_file` / `edit` | 父/子 effective ruleset 显式允许时可进入 child tool loop；写入落到 isolated workspace，主 worktree byte-for-byte 不变；`edit:*:deny` 仍会在 `available_for()` 阶段过滤整组 edit tools | patch 由 CEX-S2-15 merge |
+| `shell` / `bash` | 父 spec 显式 allow + sub-spec 显式 allow 后才可进入 child tool loop；继承 sandbox 的 `writable_roots` 已 rebase 到 isolated workspace，绝对路径写主 worktree 被 deny | merge / publish 仍归后续 CEX-S2-13/15 |
 | MCP bridge | source-pool trust_tier 决定；OC-Phase 3 默认只暴露 trust_tier=`builtin` | 不变 |
 
-OC-Phase 3 的 PR 必须有 `tests/ai_subagent_worktree_readonly_test.rs`：fake sub-agent 试图调用 `apply_patch`，应在 `available_for()` 阶段被过滤，模型不会看到该工具。
+覆盖：
+- `tests/ai_subagent_worktree_readonly_test.rs` 保留历史 `edit:*:deny` schema filter，并新增 `libra_code_subagent_runtime_wires_workspace_isolation` source guard，防止 `libra code` bootstrap 忘记 `.with_workspace_isolation(...)`。
+- `src/internal/ai/agent/runtime/sub_agent_dispatcher.rs::tests::flag_on_does_not_touch_main_worktree` 使用 fake provider + real `ApplyPatchHandler` 验证 child `apply_patch` 成功执行但主 worktree 保持原样。
 
 **硬约束**
 
@@ -1035,7 +1037,7 @@ OC-Phase 3 的 PR 必须有 `tests/ai_subagent_worktree_readonly_test.rs`：fake
 - 默认 `max_subagent_depth = 1`、`max_concurrent_subagents = 1`；即使 spec 显式允许，OC-Phase 3 内不放开。
 - 子 agent 默认 readonly；任何写文件能力都需 sub_spec 显式 allow + 父 effective allow。
 - 子 agent 不能批准自己的 approval；`PermissionService` 必须使用父 instance。
-- sub-agent 结果不得直接 merge 到主 worktree；写入隔离 workspace 或返回 patch/evidence，merge 归 agent.md CEX-S2-13。
+- sub-agent 结果不得直接 merge 到主 worktree；写入 isolated workspace 或返回 patch/evidence，merge 归 agent.md CEX-S2-13。
 - sub-agent 不得写 `refs/libra/agent-traces`，也不得创建 entire.md 的 `agent_session` / `agent_checkpoint`。外部 Agent 捕获由 `libra agent` / `ObservedAgent` 路径负责。
 - 如果 entire.md 的 session namespace 隔离已落地，child JSONL 必须位于 `code/` namespace，而不是 `agent/` namespace。
 - `task_id` 复用必须验证 `parent_thread_id` 一致，否则返回 `TaskFailure::UnknownSubagent`。
