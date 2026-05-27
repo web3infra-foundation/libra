@@ -201,7 +201,11 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         .with_stable_code(StableErrorCode::NetworkUnavailable)
                 })?
                 .lock(path.clone(), refspec.clone())
-                .await;
+                .await
+                .map_err(|e| {
+                    CliError::network(format!("LFS lock request failed: {e}"))
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?;
             if code == StatusCode::FORBIDDEN {
                 return Err(
                     CliError::fatal("You must have push access to create a lock")
@@ -278,7 +282,11 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
                         .with_stable_code(StableErrorCode::NetworkUnavailable)
                 })?
                 .unlock(id.clone(), refspec.clone(), force)
-                .await;
+                .await
+                .map_err(|e| {
+                    CliError::network(format!("LFS unlock request failed: {e}"))
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                })?;
             if code == StatusCode::FORBIDDEN {
                 return Err(CliError::fatal("You must have push access to unlock")
                     .with_stable_code(StableErrorCode::AuthPermissionDenied));

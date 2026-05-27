@@ -792,7 +792,7 @@ impl LFSClient {
 
     /// lock an LFS file
     /// - `refspec` is must in Mega Server, but optional in Git Doc
-    pub async fn lock(&self, path: String, refspec: String) -> StatusCode {
+    pub async fn lock(&self, path: String, refspec: String) -> Result<StatusCode, reqwest::Error> {
         // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
         // construction; joining a static relative URL onto a valid base URL
         // cannot fail.
@@ -808,17 +808,21 @@ impl LFSClient {
                 },
             })
         })
-        .await
-        .expect("LFS lock request failed after retries (callers receive StatusCode, not Result)");
+        .await?;
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
             tracing::warn!(status = %code, body = %body, "LFS lock failed");
         }
-        code
+        Ok(code)
     }
 
-    pub async fn unlock(&self, id: String, refspec: String, force: bool) -> StatusCode {
+    pub async fn unlock(
+        &self,
+        id: String,
+        refspec: String,
+        force: bool,
+    ) -> Result<StatusCode, reqwest::Error> {
         // INVARIANT: `id` comes from a prior `get_locks` response or
         // user-supplied `--id` argument and is treated as a single path
         // segment; if it contains URL-special characters, `Url::join`
@@ -836,14 +840,13 @@ impl LFSClient {
                 },
             })
         })
-        .await
-        .expect("LFS unlock request failed after retries (callers receive StatusCode, not Result)");
+        .await?;
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
             tracing::warn!(status = %code, body = %body, "LFS unlock failed");
         }
-        code
+        Ok(code)
     }
 
     /// List Locks for Verification
@@ -1163,7 +1166,8 @@ mod tests {
         let client = test_lfs_client(&base_url);
         let code = client
             .lock("tracked.txt".to_string(), "refs/heads/main".to_string())
-            .await;
+            .await
+            .expect("lock should reach mock server and return a status");
         assert_eq!(code, StatusCode::CONFLICT);
     }
 
@@ -1185,8 +1189,47 @@ mod tests {
         let client = test_lfs_client(&base_url);
         let code = client
             .unlock("lock-1".to_string(), "refs/heads/main".to_string(), false)
-            .await;
+            .await
+            .expect("unlock should reach mock server and return a status");
         assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Pre-v0.17.1063 `LFSClient::lock` / `::unlock` called
+    /// `.expect("LFS … request failed after retries (...)")` on the
+    /// `BasicAuth::send` result, which panicked on any network error.
+    /// They now return `Result<StatusCode, reqwest::Error>` so callers
+    /// can propagate a typed CliError instead. Pinning the new contract
+    /// by pointing the client at a closed loopback port: the request
+    /// must surface as an `Err`, not a panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_returns_err_on_connection_refused_instead_of_panicking() {
+        // Bind, capture the port, then drop the listener so the port
+        // is closed before the request runs. This produces a clean
+        // ECONNREFUSED that reqwest surfaces as a `reqwest::Error`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+
+        let result = client
+            .lock("tracked.txt".to_string(), "refs/heads/main".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on closed port, got Ok({:?})",
+            result.ok()
+        );
+
+        let result = client
+            .unlock("lock-1".to_string(), "refs/heads/main".to_string(), false)
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on closed port, got Ok({:?})",
+            result.ok()
+        );
     }
 
     /// Regression for v0.17.194: `LFSClient::download_object` previously
