@@ -28,7 +28,7 @@ use crate::{
         head::Head,
         tag,
     },
-    utils::{client_storage::ClientStorage, error::emit_legacy_stderr, path, path_ext::PathExt},
+    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
 };
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
@@ -262,17 +262,6 @@ pub fn storage_path() -> PathBuf {
 /// Return an error instead of printing when the current directory is not a repository.
 pub fn require_repo() -> io::Result<()> {
     try_get_storage_path(None).map(|_| ())
-}
-
-/// Legacy repository check that still prints for commands not yet migrated.
-pub fn check_repo_exist() -> bool {
-    if require_repo().is_err() {
-        emit_legacy_stderr(
-            "fatal: not a libra repository (or any of the parent directories): .libra",
-        );
-        return false;
-    }
-    true
 }
 
 /// Get `ClientStorage` for the `objects` directory
