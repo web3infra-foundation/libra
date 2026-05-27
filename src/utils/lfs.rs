@@ -49,7 +49,7 @@ lazy_static! {
 /// - absolute path
 ///
 /// Returns `false` on any internal failure (malformed pattern, non-UTF-8 path,
-/// gitignore build error) so a corrupt `.libraattributes` cannot crash `libra add`
+/// gitignore build error) so a corrupt `.libra_attributes` cannot crash `libra add`
 /// or other LFS-aware flows. Errors are logged via `tracing::warn!`.
 pub fn is_lfs_tracked<P>(path: P) -> bool
 where

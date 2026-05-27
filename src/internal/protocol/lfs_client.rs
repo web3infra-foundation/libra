@@ -523,10 +523,16 @@ impl LFSClient {
         .await?;
 
         let text = response.text().await?;
-        tracing::debug!(
-            "LFS download response:\n {:#?}",
-            serde_json::from_str::<serde_json::Value>(&text)?
-        );
+        // Pre-fix this debug! macro called `serde_json::from_str::<Value>(&text)?`
+        // inline so the response was parsed twice (once for the pretty
+        // debug snapshot, once for the typed `LfsBatchResponse` two
+        // lines below). Worse, `?` inside a `debug!` macro is NOT
+        // gated by log-level — the closure is always evaluated, so a
+        // non-JSON body would fail the entire download with a "expected
+        // value" serde error even when `RUST_LOG` was at info or above.
+        // Log the raw text instead; the typed parse below is the real
+        // source of truth and surfaces its own error.
+        tracing::debug!("LFS download response: {}", text);
         let resp = serde_json::from_str::<LfsBatchResponse>(&text)?;
         let obj = resp.objects.first().ok_or_else(|| {
             anyhow!(

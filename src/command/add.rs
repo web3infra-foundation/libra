@@ -1075,7 +1075,7 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
 /// Generate a `Blob` from a file.
 ///
 /// Functional scope:
-/// - When the file matches a `.libraattributes` LFS filter, returns a pointer
+/// - When the file matches a `.libra_attributes` LFS filter, returns a pointer
 ///   blob via [`Blob::from_lfs_file`]; otherwise reads the file content
 ///   verbatim into a regular blob.
 fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
