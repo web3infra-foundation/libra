@@ -188,6 +188,11 @@ pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult
     render_restore_output(&result, output)
 }
 
+pub(crate) async fn execute_to_output(args: RestoreArgs) -> CliResult<RestoreOutput> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    run_restore(args).await.map_err(CliError::from)
+}
+
 // ── Core execution ───────────────────────────────────────────────────
 
 async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {

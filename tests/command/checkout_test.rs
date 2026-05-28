@@ -648,6 +648,111 @@ fn test_checkout_json_create_branch() {
 }
 
 #[test]
+fn test_checkout_separator_path_restores_worktree_from_index() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "tracked.txt"], repo.path());
+    assert_cli_success(&branch, "branch tracked.txt");
+
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(&["checkout", "--", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "checkout -- tracked.txt");
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+
+    let branch = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_cli_success(&branch, "branch --show-current");
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
+}
+
+#[test]
+fn test_checkout_plain_name_stays_branch_mode_when_file_matches_branch() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "tracked.txt"], repo.path());
+    assert_cli_success(&branch, "branch tracked.txt");
+
+    let output = run_libra_command(&["checkout", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "checkout tracked.txt");
+
+    let branch = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_cli_success(&branch, "branch --show-current");
+    assert_eq!(
+        String::from_utf8_lossy(&branch.stdout).trim(),
+        "tracked.txt"
+    );
+}
+
+#[test]
+fn test_checkout_json_treeish_separator_path_restores_index_and_worktree() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "staged edit\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add, "add staged edit");
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(
+        &["--json", "checkout", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json checkout HEAD -- tracked.txt");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "restore-paths");
+    assert_eq!(json["data"]["switched"], false);
+    assert_eq!(json["data"]["restore"]["source"], "HEAD");
+    assert_eq!(json["data"]["restore"]["worktree"], true);
+    assert_eq!(json["data"]["restore"]["staged"], true);
+    assert_eq!(json["data"]["restore"]["restored_files"][0], "tracked.txt");
+    assert!(output.stderr.is_empty());
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+
+    let status = run_libra_command(&["status", "--porcelain"], repo.path());
+    assert_cli_success(&status, "status --porcelain");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "checkout HEAD -- path should leave index and worktree clean, got: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn test_checkout_machine_separator_path_outputs_single_json_line() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(&["--machine", "checkout", "--", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "machine checkout -- tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "expected one JSON line, got: {stdout}"
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("expected JSON");
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "restore-paths");
+    assert_eq!(json["data"]["restore"]["source"], serde_json::Value::Null);
+    assert_eq!(json["data"]["restore"]["worktree"], true);
+    assert_eq!(json["data"]["restore"]["staged"], false);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn test_checkout_machine_outputs_single_json_line() {
     use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
 

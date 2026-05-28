@@ -8,7 +8,7 @@ C5（Audit P2）
 
 ### 已确认落地的基线（2026-05-11 复核）
 - [`src/cli.rs`](../../../src/cli.rs) 中 `Checkout` 已作为顶层可见命令暴露，about 文案明确为 branch compatibility surface，并推荐 `switch` / `restore`。
-- [`src/command/checkout.rs`](../../../src/command/checkout.rs) 已实现 checkout 的分支类基础语义（显示当前分支、切换本地分支、`-b` 新建并切换、远端同名分支 auto-track + pull）。内部使用 `restore` 将工作树 materialize 到目标 commit，但当前 CLI **不支持** `git checkout -- <path>` 形式的文件恢复；文件恢复仍由 `libra restore` 承担。
+- [`src/command/checkout.rs`](../../../src/command/checkout.rs) 已实现 checkout 的分支类基础语义（显示当前分支、切换本地分支、`-b` 新建并切换、远端同名分支 auto-track + pull）。内部使用 `restore` 将工作树 materialize 到目标 commit；C9 后又补齐显式 `--` path mode：`libra checkout -- <path>` 从 index 恢复 worktree，`libra checkout <tree-ish> -- <path>` 从指定 source 恢复 index + worktree。
 - 第 30 批已完整落地（v0.17.372）：`CheckoutOutput`、JSON/machine 成功输出、执行/渲染拆分、checkout-owned stable code 全部就绪，并已补齐完整 `CheckoutError` typed enum（[`src/command/checkout.rs:75`](../../../src/command/checkout.rs)）含 `CheckingOutBranchBlocked` / `CreatingBranchBlocked` / `SwitchingToBranchBlocked` / `BranchNotFound` / `PathSpecNotMatched` / `DirtyUnstaged` / `DirtyUncommitted` / `UntrackedOverwrite` / `BranchStoreRead` / `BranchStoreCorrupt` / `RemoteHeadMissing` / `RemoteSyncFailed { stage, source }` / `DelegatedCli` 13 个变体；`get_remote()` 内 `set_upstream` / `pull` 代理调用已通过 `RemoteSyncFailed` 细分层透传底层 `StableErrorCode`。
 - [docs/improvement/checkout.md](../checkout.md) 已记录"第二批兼容收口已落地，完整现代化留第 30 批"。
 - [`docs/commands/checkout.md`](../../commands/checkout.md) 已说明 checkout 是兼容 surface；顶层索引不再标 hidden。
@@ -118,3 +118,76 @@ COMMANDS:
 2. **取消 hide 后 shell 自动补全脚本需要刷新** → 缓解：clap 自动补全在重新生成时会自动包含 checkout，无需手动改；如有用户通过 `libra completions` 生成的旧脚本，建议在 release notes 提示重新生成。
 3. **第 30 批完整现代化时与本批 banner 冲突** → 缓解：第 30 批不应动 `--help` 文案；本批的 banner 文案是稳定面向用户的对外契约，不随内部 typed error 升级而改变。
 4. **`docs/commands/checkout.md` 与 switch / restore 文档重复维护** → 缓解：checkout 文档主要写"何时用 / 与 switch / restore 的对应关系"，不重复 switch / restore 的语义；交叉引用即可。
+
+## 下一阶段：C9 文件恢复兼容入口
+
+### 所属批次
+
+C9（后续 Git surface P2）
+
+### 当前缺口
+
+C5 已让 `checkout` 成为可发现的分支类兼容入口。C9 已在不改变推荐命令的前提下补齐显式兼容入口：只有出现 `--` separator 时才进入 path mode；普通 `checkout <name>` 仍保持分支语义。
+
+### 目标与非目标
+
+**已落地目标：**
+
+- `libra checkout -- <pathspec>...` 等价于从 index 恢复工作树路径，行为对应 `libra restore --worktree <pathspec>...`。
+- `libra checkout <tree-ish> -- <pathspec>...` 等价于从指定 tree-ish 恢复路径，并按文档化语义更新 index + worktree。
+- `libra switch` / `libra restore` 仍是推荐新工作流；`checkout -- <path>` 仅是 Git 兼容入口。
+- `--json` / `--machine` 输出保持 checkout 单一 envelope，不让 delegated restore 输出污染 stdout。
+- help、`docs/commands/checkout.md`、`docs/commands/restore.md` 和 `COMPATIBILITY.md` 已明确这是 explicit `--` separator path mode。
+
+**非目标：**
+
+- 不在 C9 引入 patch mode、`--ours` / `--theirs`、`--merge`、interactive restore 等高级 checkout path flags。
+- 不把 `libra checkout <commit>` 扩展为 detached HEAD；这仍应走 `switch --detach` 或后续独立计划。
+- 不改变 `restore` 的主入口地位；新文档仍应推荐用户直接使用 `libra restore`。
+
+### 设计要点
+
+解析以显式 `--` separator 区分 branch mode 与 path mode，避免把文件名误解析为分支名。checkout 执行结果扩展出 `action: "restore-paths"`，并把 delegated restore 的 `source`、`worktree`、`staged`、`restored_files`、`deleted_files` 放入 checkout data 的 `restore` 对象中。
+
+兼容映射建议：
+
+| Git muscle memory | Libra delegated behavior |
+|-------------------|--------------------------|
+| `libra checkout -- file.txt` | `libra restore --worktree file.txt` |
+| `libra checkout HEAD -- file.txt` | `libra restore --source HEAD --staged --worktree file.txt` 或文档化的等价实现 |
+| `libra checkout <tree-ish> -- dir/` | 从 `<tree-ish>` 恢复路径，按 restore 的 pathspec 规则处理 |
+
+### `COMPATIBILITY.md` 行更新
+
+C9 已更新 checkout 行：
+
+```markdown
+| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
+```
+
+### 关键文件与改动
+
+| 文件 | 操作 | 说明 |
+|-----|-----|-----|
+| [`src/command/checkout.rs`](../../../src/command/checkout.rs) | 修改 | `--` path mode parser、restore delegation、JSON schema 扩展 |
+| [`src/command/restore.rs`](../../../src/command/restore.rs) | 复用/评估 | 确认 source + staged/worktree 映射满足 Git checkout path 语义 |
+| [`docs/commands/checkout.md`](../../commands/checkout.md) | 修改 | 增加 path restoration compatibility 示例 |
+| [`docs/commands/restore.md`](../../commands/restore.md) | 修改 | 说明 checkout path mode 只是兼容别名 |
+| [`tests/command/checkout_test.rs`](../../../tests/command/checkout_test.rs) | 修改 | `checkout -- path`、`checkout HEAD -- path`、JSON/machine |
+| [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) | 修改 | help 文案继续推荐 restore，同时展示兼容入口 |
+| [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 修改 | checkout notes 更新 |
+
+### 测试与验收
+
+- [x] `libra checkout -- file.txt` 从 index 恢复工作树文件，不切换分支。
+- [x] `libra checkout HEAD -- file.txt` 从 HEAD 恢复文件，并按文档化语义更新 index/worktree。
+- [x] 文件名与分支名相同时，只有显式 `--` path mode 触发文件恢复。
+- [x] `--json` / `--machine` 输出只有 checkout envelope，且 action 明确为 `restore-paths`。
+- [x] help 与命令文档仍把 `libra restore` 标为推荐入口。
+- [ ] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all` 通过。
+
+### 风险与缓解
+
+1. **重新引入 Git checkout 的语义混乱**：只接受显式 `--` path mode，普通 `checkout <name>` 保持分支语义。
+2. **delegated restore 输出破坏 checkout JSON schema**：由 checkout 包装 restore result，保证 stdout 只有一个 command envelope。
+3. **source + path 映射与 Git 不一致**：先为 `checkout -- path` 和 `checkout HEAD -- path` 写回归测试，再扩展其他 tree-ish。

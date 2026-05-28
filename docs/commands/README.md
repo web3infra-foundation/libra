@@ -62,7 +62,7 @@ Every Libra command accepts the following global flags:
 | `libra branch` | `br` | Create, delete, rename, list, and inspect branches | [branch.md](branch.md) |
 | `libra tag` | | Create, list, or delete lightweight and annotated tags | [tag.md](tag.md) |
 | `libra switch` | `sw` | Switch branches, create new branches, or detach HEAD with fuzzy suggestions | [switch.md](switch.md) |
-| `libra checkout` | | Branch compatibility surface; prefer `switch` for branches and `restore` for files | [checkout.md](checkout.md) |
+| `libra checkout` | | Branch compatibility surface and explicit `--` path-restore alias; prefer `switch` / `restore` | [checkout.md](checkout.md) |
 
 ### History Manipulation
 

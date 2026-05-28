@@ -7,6 +7,7 @@
 //! - The top-level `libra --help` lists `checkout` (no longer hidden).
 //! - `libra checkout --help` includes the migration banner directing users
 //!   to `switch` for branch navigation and `restore` for file restoration.
+//! - The same banner documents the explicit `--` path-restoration alias.
 
 use std::process::Command;
 
@@ -57,5 +58,9 @@ fn checkout_help_recommends_switch_and_restore() {
     assert!(
         stdout.contains("restore"),
         "checkout --help must recommend `libra restore`; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("checkout -- file.txt"),
+        "checkout --help must show the explicit path restoration alias; stdout: {stdout}"
     );
 }
