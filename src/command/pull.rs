@@ -6,7 +6,7 @@ use clap::Parser;
 use git_internal::errors::GitError;
 use serde::Serialize;
 
-use super::{fetch, merge};
+use super::{fetch, merge, rebase};
 use crate::{
     internal::{
         config::{ConfigKv, RemoteConfig},
@@ -22,8 +22,15 @@ const PULL_EXAMPLES: &str = "\
 EXAMPLES:
     libra pull                             Pull from tracking remote
     libra pull origin main                 Pull specific branch from origin
+    libra pull --rebase                    Rebase the current branch onto the upstream
     libra pull --json                      Structured JSON output for agents
-    libra pull --quiet                     Suppress progress output";
+    libra pull --quiet                     Suppress progress output
+
+NOTES:
+    The default integration step only supports fast-forward merges
+    (true three-way merge is tracked under the merge batch in
+    docs/improvement/merge.md). When the upstream has diverged, use
+    --rebase to replay your local commits onto the upstream tip.";
 
 /// Fetch from a remote and integrate changes into the current branch.
 // EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
@@ -38,6 +45,13 @@ pub struct PullArgs {
     /// The refspec to pull, usually a branch name
     #[clap(requires("repository"))]
     refspec: Option<String>,
+
+    /// Rebase the current branch onto the upstream after fetching,
+    /// instead of trying to fast-forward merge. Useful when the
+    /// upstream has diverged and a non-fast-forward merge would
+    /// otherwise be required.
+    #[clap(long, short = 'r')]
+    rebase: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,11 +80,35 @@ pub struct PullMergeResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PullRebaseResult {
+    /// One of `"fast-forwarded"`, `"already-up-to-date"`,
+    /// `"completed"`, or `"no-commits"`.
+    pub status: String,
+    /// HEAD before the rebase.
+    pub old_commit: String,
+    /// HEAD after the rebase.
+    pub commit: String,
+    /// Number of commits replayed onto the upstream tip. `0` for
+    /// fast-forward / already-up-to-date / no-commits branches.
+    pub replay_count: usize,
+    /// True when the rebase advanced the local branch (i.e. HEAD
+    /// changed). False for already-up-to-date / no-commits paths.
+    pub up_to_date: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PullOutput {
     pub branch: String,
     pub upstream: String,
     pub fetch: PullFetchResult,
-    pub merge: PullMergeResult,
+    /// Populated when pull integrates via merge (the default path).
+    /// `None` when `--rebase` was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge: Option<PullMergeResult>,
+    /// Populated when pull integrates via `--rebase`. `None` for the
+    /// default merge path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<PullRebaseResult>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +130,9 @@ pub(crate) enum PullError {
 
     #[error("pull failed during merge phase: {0}")]
     Merge(#[source] merge::PullMergeError),
+
+    #[error("pull failed during rebase phase: {0}")]
+    Rebase(#[source] rebase::RebaseError),
 }
 
 impl From<PullError> for CliError {
@@ -120,10 +161,14 @@ impl From<PullError> for CliError {
             ))
             .with_stable_code(StableErrorCode::ConflictOperationBlocked)
             .with_hint(format!(
-                "run 'libra fetch' first if needed, then merge manually with 'libra merge {upstream}'"
+                "rerun with 'libra pull --rebase' to replay your local commits onto '{upstream}'"
+            ))
+            .with_hint(format!(
+                "or run 'libra fetch' then 'libra rebase {upstream}' manually"
             ))
             .with_detail("phase", "merge"),
             PullError::Merge(error) => map_merge_error_to_cli(&error).with_detail("phase", "merge"),
+            PullError::Rebase(error) => CliError::from(error).with_detail("phase", "rebase"),
         }
     }
 }
@@ -133,6 +178,7 @@ impl PullArgs {
         Self {
             repository,
             refspec,
+            rebase: false,
         }
     }
 }
@@ -186,6 +232,54 @@ pub(crate) async fn run_pull(
     .await
     .map_err(PullError::Fetch)?;
 
+    let fetch_summary = PullFetchResult {
+        remote: fetch_result.remote,
+        url: fetch_result.url,
+        refs_updated: fetch_result
+            .refs_updated
+            .into_iter()
+            .map(|update| PullRefUpdate {
+                remote_ref: update.remote_ref,
+                old_oid: update.old_oid,
+                new_oid: update.new_oid,
+            })
+            .collect(),
+        objects_fetched: fetch_result.objects_fetched,
+    };
+
+    if args.rebase {
+        // Rebase resolves its upstream via `get_commit_base`, which
+        // understands the `<remote>/<branch>` shortcut — pass the
+        // human-friendly form so its error messages also surface
+        // `origin/main` rather than the `refs/remotes/...` path.
+        let rebase_summary = rebase::run_rebase_for_pull(&target.upstream)
+            .await
+            .map_err(PullError::Rebase)?;
+        // The underlying rebase machinery reports `"fast-forwarded"`
+        // both for "HEAD strictly behind upstream" AND for the
+        // degenerate "HEAD already equals upstream" case (since the
+        // merge base equals HEAD in both). Treat the latter as
+        // up-to-date by checking commit equality alongside the
+        // status strings rebase emits as no-ops.
+        let up_to_date = matches!(
+            rebase_summary.status.as_str(),
+            "already-up-to-date" | "no-commits"
+        ) || rebase_summary.old_commit == rebase_summary.commit;
+        return Ok(PullOutput {
+            branch: target.branch,
+            upstream: target.upstream,
+            fetch: fetch_summary,
+            merge: None,
+            rebase: Some(PullRebaseResult {
+                status: rebase_summary.status,
+                old_commit: rebase_summary.old_commit,
+                commit: rebase_summary.commit,
+                replay_count: rebase_summary.replay_count,
+                up_to_date,
+            }),
+        });
+    }
+
     let merge_result =
         merge::run_merge_for_pull(&target.merge_target, &target.upstream, &child_output)
             .await
@@ -199,27 +293,15 @@ pub(crate) async fn run_pull(
     Ok(PullOutput {
         branch: target.branch,
         upstream: target.upstream,
-        fetch: PullFetchResult {
-            remote: fetch_result.remote,
-            url: fetch_result.url,
-            refs_updated: fetch_result
-                .refs_updated
-                .into_iter()
-                .map(|update| PullRefUpdate {
-                    remote_ref: update.remote_ref,
-                    old_oid: update.old_oid,
-                    new_oid: update.new_oid,
-                })
-                .collect(),
-            objects_fetched: fetch_result.objects_fetched,
-        },
-        merge: PullMergeResult {
+        fetch: fetch_summary,
+        merge: Some(PullMergeResult {
             strategy: merge_result.strategy,
             old_commit: merge_result.old_commit,
             commit: merge_result.commit,
             files_changed: merge_result.files_changed,
             up_to_date: merge_result.up_to_date,
-        },
+        }),
+        rebase: None,
     })
 }
 
@@ -331,26 +413,88 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
         }
     }
 
-    if result.merge.up_to_date {
+    if let Some(rebase) = &result.rebase {
+        render_pull_rebase_summary(&mut writer, &result.upstream, rebase)?;
+        return Ok(());
+    }
+
+    let Some(merge) = &result.merge else {
+        return Ok(());
+    };
+
+    if merge.up_to_date {
         writeln!(writer, "Already up to date.")
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
         return Ok(());
     }
 
-    if let (Some(old), Some(new)) = (&result.merge.old_commit, &result.merge.commit) {
+    if let (Some(old), Some(new)) = (&merge.old_commit, &merge.commit) {
         writeln!(writer, "Updating {}..{}", short_oid(old), short_oid(new))
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
     }
     writeln!(writer, "Fast-forward")
         .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
-    if result.merge.files_changed > 0 {
-        let noun = if result.merge.files_changed == 1 {
+    if merge.files_changed > 0 {
+        let noun = if merge.files_changed == 1 {
             "file"
         } else {
             "files"
         };
-        writeln!(writer, " {} {} changed", result.merge.files_changed, noun)
+        writeln!(writer, " {} {} changed", merge.files_changed, noun)
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
+    }
+    Ok(())
+}
+
+fn render_pull_rebase_summary<W: Write>(
+    writer: &mut W,
+    upstream: &str,
+    rebase: &PullRebaseResult,
+) -> CliResult<()> {
+    let map_io_err =
+        |error: std::io::Error| CliError::io(format!("failed to write pull summary: {error}"));
+    if rebase.up_to_date {
+        writeln!(
+            writer,
+            "Current branch is already up to date with '{upstream}'."
+        )
+        .map_err(map_io_err)?;
+        return Ok(());
+    }
+    match rebase.status.as_str() {
+        "already-up-to-date" | "no-commits" => {
+            writeln!(
+                writer,
+                "Current branch is already up to date with '{upstream}'."
+            )
+            .map_err(map_io_err)?;
+        }
+        "fast-forwarded" => {
+            writeln!(
+                writer,
+                "Fast-forwarded onto '{upstream}' ({}..{}).",
+                short_oid(&rebase.old_commit),
+                short_oid(&rebase.commit),
+            )
+            .map_err(map_io_err)?;
+        }
+        _ => {
+            let commits_noun = if rebase.replay_count == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
+            writeln!(
+                writer,
+                "Successfully rebased {count} {noun} onto '{upstream}' ({old}..{new}).",
+                count = rebase.replay_count,
+                noun = commits_noun,
+                old = short_oid(&rebase.old_commit),
+                new = short_oid(&rebase.commit),
+                upstream = upstream,
+            )
+            .map_err(map_io_err)?;
+        }
     }
     Ok(())
 }

@@ -354,3 +354,119 @@ fn test_pull_json_manual_merge_error_includes_phase_detail() {
     assert_eq!(report["error_code"], "LBR-CONFLICT-002");
     assert_eq!(report["details"]["phase"], "merge");
 }
+
+/// `libra pull --rebase` replays the local-only commit on top of the
+/// freshly-fetched upstream tip when the histories have diverged.
+/// Without `--rebase` the same scenario blocks with
+/// `LBR-CONFLICT-002` (covered by
+/// `test_pull_manual_merge_required_returns_conflict_code`).
+#[tokio::test]
+#[serial]
+async fn test_pull_rebase_replays_local_commit_onto_diverged_upstream() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let remote_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    fs::write(local_repo.path().join("local.txt"), "local change\n").expect("write local change");
+    let add = run_libra_command(&["add", "local.txt"], local_repo.path());
+    assert_cli_success(&add, "stage local change");
+    let commit = run_libra_command(
+        &["commit", "-m", "local update", "--no-verify"],
+        local_repo.path(),
+    );
+    assert_cli_success(&commit, "commit local change");
+
+    let output = run_libra_command(&["--json", "pull", "--rebase"], local_repo.path());
+    assert_cli_success(&output, "rebase pull");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let data = &parsed["data"];
+
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "pull");
+    // The default merge integration must be absent on the rebase path.
+    assert!(data["merge"].is_null());
+    assert_eq!(data["rebase"]["status"], "completed");
+    assert_eq!(data["rebase"]["replay_count"], 1);
+    assert_eq!(data["rebase"]["up_to_date"], false);
+    assert!(data["rebase"]["commit"].is_string());
+    assert!(data["rebase"]["old_commit"].is_string());
+
+    // The new HEAD must be a child of the freshly-fetched upstream
+    // tip; the replayed commit picks up `remote.txt` from the
+    // upstream, plus the local-only `local.txt`.
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "rebase should have brought in remote.txt"
+    );
+    assert!(
+        local_repo.path().join("local.txt").exists(),
+        "rebase should keep local.txt"
+    );
+
+    // Sanity: the replayed commit is NOT the remote tip itself (it's
+    // a new commit on top of it).
+    let new_commit = data["rebase"]["commit"].as_str().expect("commit string");
+    assert_ne!(
+        new_commit, remote_head,
+        "rebased commit must be a child of upstream, not the upstream tip itself"
+    );
+}
+
+/// `libra pull --rebase` on an already-up-to-date branch reports
+/// `already-up-to-date` rather than rebuilding HEAD or emitting the
+/// generic Fast-forward summary.
+#[tokio::test]
+#[serial]
+async fn test_pull_rebase_already_up_to_date_reports_noop() {
+    let (_temp_root, remote_dir, _work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let output = run_libra_command(&["--json", "pull", "--rebase"], local_repo.path());
+    assert_cli_success(&output, "rebase pull (no-op)");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let data = &parsed["data"];
+
+    // The rebase machinery reports `"fast-forwarded"` whenever the
+    // merge base equals HEAD — including the no-op case where HEAD
+    // is already at the upstream tip. Pull surfaces the no-op via
+    // the derived `up_to_date` flag (and the human renderer prints
+    // "Already up to date.") rather than rewriting the underlying
+    // status string.
+    assert_eq!(data["rebase"]["replay_count"], 0);
+    assert_eq!(data["rebase"]["up_to_date"], true);
+    let old = data["rebase"]["old_commit"]
+        .as_str()
+        .expect("old_commit string");
+    let new_commit = data["rebase"]["commit"].as_str().expect("commit string");
+    assert_eq!(
+        old, new_commit,
+        "HEAD must not move when there is nothing to rebase"
+    );
+}

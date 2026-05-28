@@ -1,19 +1,24 @@
 # `libra pull`
 
-Fetch objects from a remote and integrate them into the current branch via fast-forward merge.
+Fetch objects from a remote and integrate them into the current branch via fast-forward merge (default) or rebase (`--rebase`).
 
 ## Synopsis
 
 ```
-libra pull [<repository> [<refspec>]]
+libra pull [-r|--rebase] [<repository> [<refspec>]]
 ```
 
 ## Description
 
-`libra pull` combines `fetch` and `merge` (fast-forward only) into a single operation.
-It downloads new objects from the remote, updates remote-tracking refs, and advances the
-current branch's HEAD if the remote is strictly ahead. The working tree is updated to
-match the new HEAD.
+`libra pull` combines `fetch` with an integration step into a single operation. By
+default the integration step is a fast-forward merge: it downloads new objects from the
+remote, updates remote-tracking refs, and advances the current branch's HEAD if the
+remote is strictly ahead. The working tree is updated to match the new HEAD.
+
+With `--rebase` (`-r`), the integration step instead replays local-only commits on top
+of the fetched upstream tip — equivalent to `libra fetch` followed by `libra rebase
+<upstream>`. This is the canonical way to integrate when the upstream has diverged
+without creating a merge commit.
 
 When invoked with no arguments, the command reads the current branch's tracking
 configuration (`branch.<name>.remote` and `branch.<name>.merge`) to determine which
@@ -21,9 +26,10 @@ remote and branch to pull from. When `<repository>` is given alone, the current 
 name is used as the remote branch. When both `<repository>` and `<refspec>` are given,
 the specified remote branch is fetched and merged.
 
-Only fast-forward merges are performed. If the remote branch has diverged (i.e., the
-local branch has commits not present on the remote), the pull is rejected with an
-actionable error suggesting manual fetch-then-merge.
+The default (merge) integration only performs fast-forward merges. If the remote branch
+has diverged (i.e., the local branch has commits not present on the remote), the merge
+path is rejected with an actionable error suggesting `--rebase` or manual
+fetch-then-merge / fetch-then-rebase.
 
 ## Options
 
@@ -31,15 +37,17 @@ actionable error suggesting manual fetch-then-merge.
 |-----------------|-------------|---------|
 | `<repository>` | Remote name to pull from. When omitted, uses the current branch's configured upstream. | `libra pull origin` |
 | `<refspec>` | Branch name on the remote. Requires `<repository>`. When omitted, uses the current branch name. | `libra pull origin main` |
+| `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of trying a fast-forward merge. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra pull --machine` |
-| `--quiet` | Suppress all progress and the merge summary. | `libra pull --quiet` |
+| `--quiet` | Suppress all progress and the integration summary. | `libra pull --quiet` |
 
 ## Common Commands
 
 ```bash
 libra pull
 libra pull origin main
+libra pull --rebase
 libra pull --json
 ```
 
@@ -64,7 +72,15 @@ From git@github.com:user/repo.git
 Already up to date.
 ```
 
-`--quiet` suppresses all progress and the merge summary.
+Rebase (with `--rebase`):
+
+```text
+From git@github.com:user/repo.git
+   abc1234..def5678  origin/main
+Successfully rebased 2 commits onto 'origin/main' (1111111..2222222).
+```
+
+`--quiet` suppresses all progress and the integration summary.
 
 ## Structured Output (JSON examples)
 
@@ -132,15 +148,58 @@ Already up-to-date:
 }
 ```
 
+Rebase (with `--rebase`):
+
+```json
+{
+  "ok": true,
+  "command": "pull",
+  "data": {
+    "branch": "main",
+    "upstream": "origin/main",
+    "fetch": {
+      "remote": "origin",
+      "url": "git@github.com:user/repo.git",
+      "refs_updated": [
+        {
+          "remote_ref": "refs/remotes/origin/main",
+          "old_oid": "abc1234...",
+          "new_oid": "def5678..."
+        }
+      ],
+      "objects_fetched": 12
+    },
+    "rebase": {
+      "status": "completed",
+      "old_commit": "1111111...",
+      "commit": "2222222...",
+      "replay_count": 2,
+      "up_to_date": false
+    }
+  }
+}
+```
+
 ### Schema Notes
 
 - `branch` is the current local branch being updated
 - `upstream` is the remote tracking branch name (e.g. `"origin/main"`)
 - `fetch.refs_updated` lists remote refs that changed during fetch
+- Exactly one of `merge` or `rebase` is present, depending on whether
+  `--rebase` was passed; the other key is omitted from the JSON
 - `merge.old_commit` is the pre-merge `HEAD`; it is `null` on the first pull into an empty local branch
 - `merge.strategy` is `"fast-forward"` or `"already-up-to-date"`
 - `merge.commit` is the new HEAD commit after merge; `null` when up-to-date
 - `merge.files_changed` is the number of files modified by the merge
+- `rebase.status` is `"completed"` when commits were replayed, `"fast-forwarded"`
+  when the local branch was strictly behind the upstream, or `"no-commits"` when
+  there was nothing to replay
+- `rebase.old_commit` / `rebase.commit` are the HEAD OIDs before and after the rebase
+  (they are equal in the no-op case)
+- `rebase.replay_count` is the number of local commits replayed onto the upstream tip
+- `rebase.up_to_date` is `true` whenever the rebase did not move HEAD (covers both
+  the `already-up-to-date` / `no-commits` statuses and the degenerate fast-forward
+  with `old_commit == commit`)
 
 ## Design Rationale
 
@@ -154,15 +213,22 @@ linear. When the local branch has diverged, the user is directed to fetch and me
 rebase) manually, making the decision explicit. This is consistent with Libra's design
 philosophy of making destructive or history-altering operations require deliberate action.
 
-### Why no --rebase?
+### About --rebase
 
-`git pull --rebase` silently rewrites local commits onto the remote tip. While convenient,
-it changes commit hashes, which can confuse AI agents that reference specific commits by
-SHA, break bisect sessions in progress, and create subtle issues in collaborative
-workflows. Libra keeps `pull` as a simple fetch+fast-forward operation. When rebasing is
-desired, `libra fetch` followed by `libra rebase` provides the same result with full
-visibility into what is happening at each step. This two-command approach also allows
-agents to inspect the fetched state before deciding whether to rebase.
+`libra pull --rebase` is an explicit, opt-in alternative to the default
+fast-forward-only merge. It composes `libra fetch` and `libra rebase <upstream>`
+into a single command so users can integrate diverged histories without
+creating merge commits. Because rebase rewrites commit hashes, the flag is
+deliberately not the default — callers (humans or agents) must ask for it.
+When `--rebase` is not passed and the histories have diverged, pull still
+refuses to merge automatically (see "Why fast-forward only?" above) and
+surfaces an actionable hint suggesting `--rebase` as the next step.
+
+If a conflict surfaces during the rebase, pull exits with
+`LBR-CONFLICT-001` and leaves the repository in the standard rebase
+in-progress state. Resolve the conflicts, then run `libra rebase
+--continue` (or `--skip` / `--abort`) exactly as you would for a
+standalone rebase.
 
 ### Why no --no-ff?
 
@@ -179,7 +245,7 @@ and never modifies the commit graph in unexpected ways.
 |-----------|-------|-----|----|
 | Basic pull | `libra pull` | `git pull` | N/A (jj uses `jj git fetch` + working copy) |
 | Pull from specific remote | `libra pull origin main` | `git pull origin main` | N/A |
-| Rebase on pull | Not supported | `git pull --rebase` | N/A (jj rebases automatically) |
+| Rebase on pull | `libra pull --rebase` | `git pull --rebase` | N/A (jj rebases automatically) |
 | Force merge commit | Not supported | `git pull --no-ff` | N/A |
 | Fast-forward only | Default (only mode) | `git pull --ff-only` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
@@ -200,7 +266,10 @@ sub-errors are transparently forwarded with a `phase` detail for diagnostics.
 | Fetch: authentication failed | `LBR-AUTH-001` | 128 | "check SSH key or HTTP credentials" |
 | Fetch: protocol error | `LBR-NET-002` | 128 | "the remote did not respond correctly" |
 | Fetch: timeout | `LBR-NET-001` | 128 | "check network connectivity and retry" |
-| Manual merge required | `LBR-CONFLICT-002` | 128 | "run 'libra fetch' then merge manually with 'libra merge \<upstream>'" |
+| Manual merge required | `LBR-CONFLICT-002` | 128 | "rerun with 'libra pull --rebase' to replay your local commits onto \<upstream>" |
+| Rebase: conflict during replay | `LBR-CONFLICT-001` | 128 | "resolve conflicts, stage them, then run 'libra rebase --continue'" |
+| Rebase: dirty worktree | `LBR-REPO-003` | 128 | "commit or stash your changes before rebasing" |
+| Rebase: no common ancestor | `LBR-CLI-003` | 129 | "verify the upstream ref shares history with the current branch" |
 | Merge: invalid target | `LBR-CLI-003` | 129 | "verify the upstream ref and try again" |
 | Merge: unrelated histories | `LBR-REPO-003` | 128 | "the local and remote branches share no common ancestor" |
 | Merge: repository state error | `LBR-REPO-003` | 128 | "the repository state blocks an automatic pull merge" |
@@ -209,5 +278,6 @@ sub-errors are transparently forwarded with a `phase` detail for diagnostics.
 
 ### Phase Detail
 
-When a fetch or merge sub-operation fails, the error JSON includes a `phase` key in the
-details object (`"fetch"` or `"merge"`) so agents can distinguish which stage failed.
+When a sub-operation fails, the error JSON includes a `phase` key in the details
+object (`"fetch"`, `"merge"`, or `"rebase"`) so agents can distinguish which
+stage failed.
