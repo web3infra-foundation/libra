@@ -237,3 +237,4 @@ path = "tests/compat/help_flag_descriptions.rs"
 [[test]]
 name = "compat_help_no_impl_meta_leak"
 path = "tests/compat/help_no_impl_meta_leak.rs"
+

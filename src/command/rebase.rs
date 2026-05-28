@@ -571,7 +571,7 @@ struct RebaseReplaySummary {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum RebaseError {
+pub(crate) enum RebaseError {
     #[error("no rebase in progress")]
     NoRebaseInProgress,
     #[error("failed to check rebase state: {0}")]
@@ -1188,6 +1188,51 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
         skipped_commit: None,
         skipped_subject: None,
         remaining: Some(state.todo.len()),
+    })
+}
+
+/// Slim summary returned to `libra pull --rebase`. The full
+/// [`RebaseOutput`] carries fields that only make sense for the
+/// rebase subcommand (e.g. `restored`, `applied_commits`,
+/// `skipped_subject`); pull only needs to render the integration
+/// outcome alongside its fetch summary.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PullRebaseSummary {
+    /// One of `"fast-forwarded"`, `"already-up-to-date"`,
+    /// `"completed"`, or `"no-commits"`.
+    pub status: String,
+    /// The branch that was rebased.
+    pub branch: String,
+    /// HEAD before the rebase.
+    pub old_commit: String,
+    /// HEAD after the rebase (== `old_commit` for the no-op cases).
+    pub commit: String,
+    /// The upstream tip the branch was rebased onto.
+    pub onto: String,
+    /// Number of commits replayed during the rebase. `0` for the
+    /// fast-forward / already-up-to-date / no-commits branches.
+    pub replay_count: usize,
+}
+
+/// Run `run_rebase_start` and project the result down to the
+/// [`PullRebaseSummary`] that `libra pull --rebase` renders. Failure
+/// modes (conflict, dirty worktree, etc.) propagate via
+/// [`RebaseError`] which already has a `From<…> for CliError` impl
+/// with structured hints — pull just wraps it in its own error
+/// variant so the `phase=rebase` detail can be attached.
+pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
+    let output = run_rebase_start(upstream).await?;
+    let old_commit = output
+        .previous_commit
+        .clone()
+        .unwrap_or_else(|| output.commit.clone());
+    Ok(PullRebaseSummary {
+        status: output.status,
+        branch: output.branch,
+        old_commit,
+        commit: output.commit,
+        onto: output.onto.unwrap_or_else(|| upstream.to_string()),
+        replay_count: output.replay_count.unwrap_or(0),
     })
 }
 
