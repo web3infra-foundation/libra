@@ -138,7 +138,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- Workflow：`plans[].steps[].status` 与 `toolCalls[].status` 已映射到 phase strip / execution runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。后续仍需新增 `tasks[]` 单列，并把 patchsets / richer plan metadata 映射进详情页。
+- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。后续仅剩 patchsets / richer plan metadata 映射进详情页。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
 - Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；v0.17.1049 已把 `/api/code/diagnostics` best-effort 映射进 Agent 行（pid、web/mcp 端口、log file、active interaction、last error）。

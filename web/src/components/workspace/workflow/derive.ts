@@ -105,21 +105,22 @@ function deriveTasks(tasks: CodeUiTaskSnapshot[]): WorkflowTask[] {
 
 function deriveRuns(toolCalls: CodeUiToolCallSnapshot[]): ExecutionRun[] {
   return toolCalls.map((tool) => {
-    const result =
-      tool.status === "succeeded"
-        ? "pass"
-        : tool.status === "failed"
-          ? "fail"
-          : "running";
     return {
       id: tool.id,
       step: tool.toolName,
-      result,
+      result: normalizeRunResult(tool.status),
       ago: relativeAgo(tool.updatedAt),
       label: tool.summary ?? tool.toolName,
       details: tool.details,
     };
   });
+}
+
+function normalizeRunResult(status: string): ExecutionRun["result"] {
+  const lower = status.toLowerCase();
+  if (lower === "succeeded" || lower === "completed") return "pass";
+  if (lower === "failed" || lower === "error" || lower === "cancelled") return "fail";
+  return "running";
 }
 
 function relativeAgo(updatedAt: string | undefined): string {

@@ -222,16 +222,18 @@ export function deriveTerminalRows(
 }
 
 function toolCallRow(tool: CodeUiToolCallSnapshot): TerminalRow {
-  const kind: TerminalRowKind = tool.status === "succeeded"
-    ? "pass"
-    : tool.status === "failed"
-      ? "fail"
-      : tool.status === "running"
-        ? "run"
-        : "info";
+  const kind = toolCallRowKind(tool.status);
   const heading = tool.summary ?? `${tool.toolName} (${tool.status})`;
   const text = tool.details ? `${heading}\n${tool.details}` : heading;
   return truncateTerminalRow(kind, text);
+}
+
+function toolCallRowKind(status: string): TerminalRowKind {
+  const lower = status.toLowerCase();
+  if (lower === "succeeded" || lower === "completed") return "pass";
+  if (lower === "failed" || lower === "error" || lower === "cancelled") return "fail";
+  if (lower === "running" || lower === "preview") return "run";
+  return "info";
 }
 
 function truncateTerminalRow(kind: TerminalRowKind, text: string): TerminalRow {
