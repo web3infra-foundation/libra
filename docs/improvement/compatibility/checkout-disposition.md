@@ -184,7 +184,7 @@ C9 已更新 checkout 行：
 - [x] 文件名与分支名相同时，只有显式 `--` path mode 触发文件恢复。
 - [x] `--json` / `--machine` 输出只有 checkout envelope，且 action 明确为 `restore-paths`。
 - [x] help 与命令文档仍把 `libra restore` 标为推荐入口。
-- [ ] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all` 通过。
+- [x] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && cargo test --test command_test checkout_test -- --test-threads=1`、`source .env.test && cargo test --test compat_checkout_alias_help` 通过。
 
 ### 风险与缓解
 

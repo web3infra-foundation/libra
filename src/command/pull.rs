@@ -63,6 +63,14 @@ pub struct PullMergeResult {
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub continued: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +79,10 @@ pub struct PullOutput {
     pub upstream: String,
     pub fetch: PullFetchResult,
     pub merge: PullMergeResult,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,9 +98,6 @@ pub(crate) enum PullError {
 
     #[error("pull failed during fetch phase: {0}")]
     Fetch(#[source] fetch::FetchError),
-
-    #[error("pull requires a non-fast-forward merge from '{upstream}', which is not yet supported")]
-    ManualMergeRequired { upstream: String },
 
     #[error("pull failed during merge phase: {0}")]
     Merge(#[source] merge::PullMergeError),
@@ -109,20 +118,12 @@ impl From<PullError> for CliError {
                         "or set upstream with 'libra branch --set-upstream-to=<remote>/<branch>'",
                     )
             }
-            PullError::RemoteNotFound(remote) => CliError::command_usage(format!(
-                "remote '{remote}' not found"
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra remote -v' to see configured remotes"),
+            PullError::RemoteNotFound(remote) => {
+                CliError::command_usage(format!("remote '{remote}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra remote -v' to see configured remotes")
+            }
             PullError::Fetch(error) => map_fetch_error_to_cli(&error).with_detail("phase", "fetch"),
-            PullError::ManualMergeRequired { upstream } => CliError::failure(format!(
-                "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
-            ))
-            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-            .with_hint(format!(
-                "run 'libra fetch' first if needed, then merge manually with 'libra merge {upstream}'"
-            ))
-            .with_detail("phase", "merge"),
             PullError::Merge(error) => map_merge_error_to_cli(&error).with_detail("phase", "merge"),
         }
     }
@@ -189,12 +190,7 @@ pub(crate) async fn run_pull(
     let merge_result =
         merge::run_merge_for_pull(&target.merge_target, &target.upstream, &child_output)
             .await
-            .map_err(|error| match error {
-                merge::PullMergeError::ManualMergeRequired { upstream } => {
-                    PullError::ManualMergeRequired { upstream }
-                }
-                other => PullError::Merge(other),
-            })?;
+            .map_err(PullError::Merge)?;
 
     Ok(PullOutput {
         branch: target.branch,
@@ -219,6 +215,10 @@ pub(crate) async fn run_pull(
             commit: merge_result.commit,
             files_changed: merge_result.files_changed,
             up_to_date: merge_result.up_to_date,
+            parents: merge_result.parents,
+            conflicted_paths: merge_result.conflicted_paths,
+            aborted: merge_result.aborted,
+            continued: merge_result.continued,
         },
     })
 }
@@ -341,8 +341,11 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
         writeln!(writer, "Updating {}..{}", short_oid(old), short_oid(new))
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
     }
-    writeln!(writer, "Fast-forward")
-        .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
+    match result.merge.strategy.as_str() {
+        "three-way" => writeln!(writer, "Merge made by the 'three-way' strategy."),
+        _ => writeln!(writer, "Fast-forward"),
+    }
+    .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
     if result.merge.files_changed > 0 {
         let noun = if result.merge.files_changed == 1 {
             "file"
@@ -462,6 +465,10 @@ fn is_timeout_io_error(error: &std::io::Error) -> bool {
 
 fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
     match error {
+        merge::PullMergeError::MissingAction | merge::PullMergeError::ConflictingAction => {
+            CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        }
         merge::PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidTarget),
         merge::PullMergeError::TargetLoad { .. }
@@ -473,13 +480,28 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::UnrelatedHistories => {
             CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
-        // ManualMergeRequired is extracted into PullError::ManualMergeRequired in run_pull(),
-        // so this arm is unreachable via PullError::Merge. Keep it for exhaustiveness in case
-        // map_merge_error_to_cli is called from other contexts.
-        merge::PullMergeError::ManualMergeRequired { upstream } => CliError::failure(format!(
-            "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
-        ))
-        .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+        merge::PullMergeError::Conflicts { .. }
+        | merge::PullMergeError::DirtyWorktree
+        | merge::PullMergeError::UntrackedOverwrite { .. }
+        | merge::PullMergeError::MergeInProgress
+        | merge::PullMergeError::UnresolvedConflicts => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("resolve conflicts, then run 'libra merge --continue'")
+            .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
+        merge::PullMergeError::NoMergeInProgress => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
+        merge::PullMergeError::StateLoad(..) | merge::PullMergeError::IndexLoad(..) => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        merge::PullMergeError::StateSave(..)
+        | merge::PullMergeError::StateCleanup(..)
+        | merge::PullMergeError::IndexSave(..)
+        | merge::PullMergeError::TreeCreate(..)
+        | merge::PullMergeError::CommitSave(..)
+        | merge::PullMergeError::WorkdirReset(..) => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+        }
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
         }
@@ -527,13 +549,6 @@ mod tests {
         assert_eq!(
             PullError::RemoteNotFound("origin".to_string()).to_string(),
             "remote 'origin' not found",
-        );
-        assert_eq!(
-            PullError::ManualMergeRequired {
-                upstream: "origin/main".to_string(),
-            }
-            .to_string(),
-            "pull requires a non-fast-forward merge from 'origin/main', which is not yet supported",
         );
     }
 }

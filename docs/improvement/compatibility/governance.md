@@ -80,7 +80,7 @@ C1（Audit P0）
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | --autosquash / --reapply-cherry-picks not supported |
-| merge | partial | fast-forward only; other strategies unsupported |
+| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |
@@ -88,7 +88,7 @@ C1（Audit P0）
 | cherry-pick | supported | |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
 | fetch | supported | --depth public flag |
-| pull | partial | --ff-only / --rebase / --squash subset |
+| pull | partial | fetch + fast-forward/three-way merge supported; --ff-only / --rebase / --squash flags deferred |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
@@ -135,8 +135,8 @@ C1（Audit P0）
 | worktree | intentionally-different | C5 ✅ | intentionally-different | `remove` keeps disk dir by default; `--delete-dir` for Git-style behavior |
 | submodule | — | C6 | unsupported | intentional product boundary (see compatibility/declined.md) |
 | sparse-checkout | — | C6 | unsupported | no public sparse checkout command |
-| merge | partial | C7 | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
-| pull | partial | C7 | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |
+| merge | partial | C7 ✅ | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
+| pull | partial | C7 ✅ | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |
 | push | partial | C8 | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
 | checkout | partial | C9 | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |
 

@@ -6,10 +6,11 @@ C7（后续 Git surface P1）
 
 ## 当前代码状态
 
-- [`docs/commands/merge.md`](../../commands/merge.md) 当前对外契约是 fast-forward only。
-- [`src/command/merge.rs`](../../../src/command/merge.rs) 只处理 fast-forward / already-up-to-date 路径；非 fast-forward 返回 `LBR-CONFLICT-002`。
-- [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) 中 `merge` 为 `partial`，notes 为 `fast-forward only; other strategies unsupported`。
-- [`pull`](../../commands/pull.md) 复用 fetch + merge，因此真实协作中最常见的 divergent history 也会被 merge 能力限制。
+- [`docs/commands/merge.md`](../../commands/merge.md) 当前对外契约已覆盖 fast-forward、single-head three-way、冲突 lifecycle、`--continue` / `--abort`。
+- [`src/command/merge.rs`](../../../src/command/merge.rs) 保留 fast-forward / already-up-to-date 路径；diverged 单目标 merge 会执行三方合并，无冲突时创建双父 merge commit，有冲突时写 marker、index stage 和 Libra merge state。
+- [`src/command/status.rs`](../../../src/command/status.rs) 会在 merge state 存在时提示 `libra merge --continue` / `libra merge --abort`。
+- [`src/command/pull.rs`](../../../src/command/pull.rs) 复用同一 merge engine；non-fast-forward pull 可 clean three-way，冲突时返回 merge-owned `LBR-CONFLICT-002` 并带 `phase: "merge"`。
+- [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) 中 `merge` / `pull` 均保留 `partial`，notes 明确 fast-forward + single-head three-way 已支持，高级策略仍 deferred。
 
 ## 为什么排第一
 
@@ -82,14 +83,14 @@ C7 落地后更新以下行：
 
 ## 测试与验收
 
-- [ ] Fast-forward merge 与 already-up-to-date 行为保持兼容，现有 JSON schema 不破坏。
-- [ ] 两个分支修改不同文件时，`libra merge <branch>` 创建双父 merge commit。
-- [ ] 两个分支修改同一文件同一区域时，工作树出现冲突标记，命令返回 `LBR-CONFLICT-002`，`status` 能提示 continue / abort。
-- [ ] 解决冲突并 `libra add <path>` 后，`libra merge --continue` 创建双父 merge commit。
-- [ ] `libra merge --abort` 恢复 merge 开始前 HEAD、index 和 worktree。
-- [ ] Dirty worktree / untracked overwrite 场景在写入任何 merge state 前拒绝。
-- [ ] `libra pull` 在远端与本地分叉时复用同一 merge engine，并在冲突时给出相同下一步提示。
-- [ ] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all` 通过。
+- [x] Fast-forward merge 与 already-up-to-date 行为保持兼容，现有 JSON schema 不破坏。
+- [x] 两个分支修改不同文件时，`libra merge <branch>` 创建双父 merge commit。
+- [x] 两个分支修改同一文件同一区域时，工作树出现冲突标记，命令返回 `LBR-CONFLICT-002`，`status` 能提示 continue / abort。
+- [x] 解决冲突并 `libra add <path>` 后，`libra merge --continue` 创建双父 merge commit。
+- [x] `libra merge --abort` 恢复 merge 开始前 HEAD、index 和 worktree。
+- [x] Dirty worktree / untracked overwrite 场景在写入任何 merge state 前拒绝。
+- [x] `libra pull` 在远端与本地分叉时复用同一 merge engine，并在冲突时给出相同下一步提示。
+- [x] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && cargo test --test command_test merge_test -- --test-threads=1`、`source .env.test && cargo test --test command_test pull_test -- --test-threads=1` 通过。
 
 ## 风险与缓解
 

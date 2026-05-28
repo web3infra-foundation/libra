@@ -50,7 +50,7 @@ batch document.
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward only; other strategies unsupported |
+| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |
@@ -58,7 +58,7 @@ batch document.
 | cherry-pick | supported | |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
-| pull | partial | fast-forward only (mirroring `merge`); no `--ff-only` / `--rebase` / `--squash` strategy flags exposed; non-FF integrations report `ManualMergeRequired` |
+| pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
