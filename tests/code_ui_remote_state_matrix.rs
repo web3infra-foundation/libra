@@ -10,12 +10,9 @@
 //! 3. submit-while-thinking surfaces 409 `SESSION_BUSY`,
 //! 4. cancel-while-idle surfaces 409 `SESSION_BUSY`,
 //! 5. body-size boundary cases — 256 KiB accepted, 257 KiB and
-//!    1 MiB rejected with `PAYLOAD_TOO_LARGE` and no hang.
-//!
-//! P2 case (`tool_call_fixture_reaches_tool_phase_or_deferred_l1`)
-//! is intentionally not wired here — the doc tags it as P2 and
-//! defers it pending a stable tool-phase fixture; the runner stays
-//! a one-line addition once that lands.
+//!    1 MiB rejected with `PAYLOAD_TOO_LARGE` and no hang,
+//! 6. mid-turn detach/cancel paths settle active turns without
+//!    leaving controller or tool-call state stuck.
 
 #[cfg(feature = "test-provider")]
 mod harness;
@@ -106,6 +103,76 @@ fn state_detach_while_thinking_allows_turn_to_settle() -> Result<()> {
         status_idle
             && controller_released
             && transcript.contains("fake assistant: delayed response")
+    })?;
+
+    session.shutdown()
+}
+
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn state_cancel_while_executing_tool_settles_running_tool_call() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("state-cancel-executing-tool", fixture("slow_shell_tool"))
+            .with_context("dev")
+            .with_approval_policy("allow-all"),
+    )?;
+    session.attach_automation("state-cancel-executing-tool")?;
+    session.submit_message("/run slow-shell-tool")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        let status_executing =
+            snapshot.get("status").and_then(|value| value.as_str()) == Some("executing_tool");
+        let tool_running = snapshot
+            .get("toolCalls")
+            .and_then(|value| value.as_array())
+            .is_some_and(|tool_calls| {
+                tool_calls.iter().any(|tool_call| {
+                    tool_call.get("id").and_then(|value| value.as_str()) == Some("slow-shell-1")
+                        && tool_call.get("status").and_then(|value| value.as_str())
+                            == Some("running")
+                })
+            });
+        status_executing && tool_running
+    })?;
+
+    session.cancel_turn()?;
+    session.wait_for_snapshot(Duration::from_secs(5), |snapshot| {
+        let status_idle = snapshot.get("status").and_then(|value| value.as_str()) == Some("idle");
+        let tool_settled = snapshot
+            .get("toolCalls")
+            .and_then(|value| value.as_array())
+            .is_some_and(|tool_calls| {
+                tool_calls.iter().any(|tool_call| {
+                    tool_call.get("id").and_then(|value| value.as_str()) == Some("slow-shell-1")
+                        && tool_call.get("status").and_then(|value| value.as_str())
+                            == Some("failed")
+                        && tool_call
+                            .get("details")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|details| details.contains("Interrupted"))
+                })
+            });
+        let transcript_settled = snapshot
+            .get("transcript")
+            .and_then(|value| value.as_array())
+            .is_some_and(|entries| {
+                let tool_entry = entries.iter().any(|entry| {
+                    entry.get("id").and_then(|value| value.as_str()) == Some("slow-shell-1")
+                        && entry.get("status").and_then(|value| value.as_str()) == Some("failed")
+                        && entry.get("streaming").and_then(|value| value.as_bool()) == Some(false)
+                });
+                let assistant_entry = entries.iter().any(|entry| {
+                    entry.get("id").and_then(|value| value.as_str()) == Some("turn-1-assistant")
+                        && entry.get("status").and_then(|value| value.as_str()) == Some("cancelled")
+                        && entry.get("streaming").and_then(|value| value.as_bool()) == Some(false)
+                        && entry
+                            .get("content")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|content| content.contains("Interrupted"))
+                });
+                tool_entry && assistant_entry
+            });
+        status_idle && tool_settled && transcript_settled
     })?;
 
     session.shutdown()

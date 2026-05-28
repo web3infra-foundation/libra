@@ -1540,7 +1540,7 @@ where
         self.complete_running_tool_cells_with_interrupt();
         self.schedule_draw();
         if let Some(code_ui_session) = self.code_ui_session.clone() {
-            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+            code_ui_session.cancel_active_turn("Interrupted.").await;
         }
         Ok(())
     }

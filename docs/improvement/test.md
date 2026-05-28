@@ -294,15 +294,16 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.17 并发边界 / 体积限制
 
-- **现状 ✅**：`code_ui_scenarios.rs` 覆盖 256 KiB 边界与第二浏览器 conflict；[tests/code_ui_remote_state_matrix.rs](../../tests/code_ui_remote_state_matrix.rs) 已覆盖 7 条 state case。
-- **缺口**（`state_cases.json` 已写 8 条）：
+- **现状 ✅**：`code_ui_scenarios.rs` 覆盖 256 KiB 边界与第二浏览器 conflict；[tests/code_ui_remote_state_matrix.rs](../../tests/code_ui_remote_state_matrix.rs) 已覆盖 7 条 data-driven state case，并用 direct regression 覆盖 mid-turn detach / executing-tool cancel。
+- **缺口**：
   - 已完成：两线程并发 attach → 一胜一负（200 / 409）。
   - 已完成：thinking 中二次 submit → 409 `SESSION_BUSY`。
   - 已完成：cancel idle → 409 `SESSION_BUSY` 且文档化。
   - 已完成：257 KiB / 1 MiB 拒绝且不挂死。
   - 已完成：streaming / delayed turn 进行中 detach → controller lease 释放回 TUI/none，turn 继续收敛到 idle，并保留最终 assistant transcript。
+  - 已完成：`executing_tool` 阶段 cancel → Code UI snapshot 回到 idle，running toolCall / transcript tool entry 收敛为 failed，streaming assistant entry 收敛为 cancelled。
 - **优先级**：P1。
-- **测试位置**：**L2 已新增** `tests/code_ui_remote_state_matrix.rs` runner；`state_detach_while_thinking_allows_turn_to_settle` 覆盖 mid-turn detach 不死锁。
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_state_matrix.rs` runner；`state_detach_while_thinking_allows_turn_to_settle` 覆盖 mid-turn detach 不死锁，`state_cancel_while_executing_tool_settles_running_tool_call` 覆盖 mid-tool cancel 不留下 running/streaming 快照。
 
 ### 5.18 性能与稳定性 smoke
 
@@ -334,7 +335,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ## L2 远端矩阵
 
-本节是 §5 中 5.4 / 5.5 / 5.10 / 5.15 / 5.17 / 5.19 的合并实施细节。历史“L2 远端测试落地”方案已基本实现；本节保留当前设计约束和剩余 deferred 项。
+本节是 §5 中 5.4 / 5.5 / 5.10 / 5.15 / 5.17 / 5.19 的合并实施细节。历史“L2 远端测试落地”方案已基本实现；本节保留当前设计约束和外部运行型 deferred 项。
 
 ### 6.1 可行性判断
 
@@ -343,7 +344,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 - controller attach 的 missing/invalid control token、invalid kind、conflict、detach、stale token、same client renewal。
 - SSE initial replay、status_changed、session_updated、controller_changed、双订阅者、断线后重连读取最新 snapshot。
 - 通过 `/api/code/messages` 调用 Code 服务，输入完整代码生成请求。确定性回归由 fake provider 驱动 `apply_patch`；模型能力回归默认使用仓库根目录 `.env.test` 中的 DeepSeek `deepseek-v4-flash` 配置，并开启 thinking/high reasoning。
-- 并发 attach 一胜一负、busy submit、256 KiB 边界、1 MiB drain 不挂死、cancel idle 返回文档化错误。
+- 并发 attach 一胜一负、busy submit、256 KiB 边界、1 MiB drain 不挂死、cancel idle 返回文档化错误、mid-turn detach 收敛、`executing_tool` cancel 收敛 running/streaming 快照。
 - diagnostics redaction、`/threads` query validation/clamp、route 级 non-loopback 拒绝顺序。
 
 **已经完成的小改造：**
@@ -356,7 +357,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 **建议推迟或降级：**
 
 - “lagged stream 不死”跨进程测试容易依赖 socket backpressure 和 broadcast polling 时序，放到 P2 或以 in-process 单元测试覆盖解析器。
-- “cancel during executing tool phase”若要稳定命中 `executing_tool`，需要 fake fixture 支持一次性/序列化响应，或选择稳定长耗时 tool。当前仍保留为 deferred 候选。
+- 1 小时真网 SSE soak 继续作为 nightly / 外部运行项；不阻塞本地 L2 矩阵。
 
 ### 6.2 数据驱动设计
 
@@ -610,7 +611,7 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 | 5.14 | MCP 双入口一致 | – | done | smoke + both directions observe | – | ✅ | 无 |
 | 5.15 | Diagnostics redaction | done | exist | done | – | ✅ | 持续随 diagnostics 字段增量维护 |
 | 5.16 | Session resume / kill | – | – | done | – | ✅ | 并发同 thread 由 5.6 control-instance lock 覆盖 |
-| 5.17 | 并发 / size limits | – | – | done | – | ✅⚠️ | streaming detach during tool phase deferred |
+| 5.17 | 并发 / size limits | – | – | done | – | ✅ | 无 |
 | 5.18 | 性能 smoke | – | – | done(ignore) | – | ✅⚠️ | 1 小时真网 SSE soak |
 | 5.19 | 真实模型生成 | – | – | – | done(gated) | ✅⚠️ | secret + 5-day nightly pass-rate |
 | 5.20 | 错误码契约 | done | – | – | – | ✅ | 新 error code 需同步文档和测试 |
@@ -724,7 +725,7 @@ cargo test --all --all-features
 | 4 | SSE 全量 | ✅ closed | 1 小时真网 SSE soak deferred | 无 |
 | 5 | 生成 fake | ✅ closed | 无 | 无 |
 | 6 | Approval flow | ✅ closed | 无 | 无 |
-| 7 | State / Security 矩阵 | ✅ closed | streaming detach candidate | 无 |
+| 7 | State / Security 矩阵 | ✅ closed | 无 | 无 |
 | 8 | Orchestrator gate / max_turns / Tool ACL | ✅ closed | 无 | 无 |
 | 9 | Codex runtime + MCP 双入口 + resume | ✅ closed | 无 | 无新增依赖 |
 | 10 | TUI render + provider boot/flag passthrough | ✅ closed | provider boot 7/7、missing-key、`--api-base`、TUI 复杂状态 render 均已闭合 | 不再要求 `insta` / `httpmock` |

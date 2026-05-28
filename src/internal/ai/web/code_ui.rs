@@ -505,6 +505,41 @@ impl CodeUiSession {
         .await;
     }
 
+    pub async fn cancel_active_turn(&self, message: impl Into<String>) {
+        let message = message.into();
+        self.mutate("session_updated", move |snapshot| {
+            let now = Utc::now();
+            snapshot.status = CodeUiSessionStatus::Idle;
+            for tool_call in &mut snapshot.tool_calls {
+                if matches!(tool_call.status.as_str(), "preview" | "running") {
+                    tool_call.status = "failed".to_string();
+                    tool_call.details = Some(message.clone());
+                    tool_call.updated_at = now;
+                }
+            }
+            for entry in &mut snapshot.transcript {
+                match entry.kind {
+                    CodeUiTranscriptEntryKind::AssistantMessage if entry.streaming => {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("cancelled".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    CodeUiTranscriptEntryKind::ToolCall
+                        if matches!(entry.status.as_deref(), Some("preview" | "running")) =>
+                    {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("failed".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+    }
+
     pub async fn upsert_transcript_entry(&self, entry: CodeUiTranscriptEntry) {
         self.mutate("session_updated", |snapshot| {
             upsert_by_id(&mut snapshot.transcript, entry, |item| item.id.as_str());

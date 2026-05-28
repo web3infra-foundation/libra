@@ -48,7 +48,7 @@
 | `code_ui_scenarios` | 2 | End-to-end scenarios on the Code UI through the harness | `src/command/code.rs`, `src/internal/tui/` |
 | `code_ui_remote_lease_matrix` | 2 | Browser/automation lease lifecycle matrix | `src/command/code.rs` controller, `src/command/code_control.rs` |
 | `code_ui_remote_sse_matrix` | 2 | SSE event stream matrix from web view | `src/internal/tui/`, `src/command/code.rs` (axum) |
-| `code_ui_remote_state_matrix` | 2 | Cross-surface state replication matrix | `src/internal/tui/`, `src/command/code_control.rs` |
+| `code_ui_remote_state_matrix` | 2 | Cross-surface state replication matrix, including mid-turn detach/cancel settling | `src/internal/tui/`, `src/internal/ai/web/code_ui.rs`, `src/command/code_control.rs` |
 | `code_ui_remote_security_matrix` | 2 | Auth/token/origin enforcement matrix | `src/command/code_control*.rs` |
 | `code_ui_remote_generation_matrix` | 2 | Generation control across surfaces (no live LLM) | `src/internal/tui/app.rs` |
 | `code_ui_remote_approval_matrix` | 2 | Approval flow across TUI/Web/automation | `src/internal/ai/agent/` approvals |
