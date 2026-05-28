@@ -59,7 +59,7 @@ pub fn create_tree_from_index(index: &Index) -> Result<Tree, GitError> {
 /// `/`. Unsigned or server-side `index-pack --strict` rejects tree objects that
 /// do not use this order.
 pub fn sort_tree_items_for_git(tree_items: &mut [TreeItem]) {
-    tree_items.sort_by(|a, b| git_tree_sort_key(a).cmp(&git_tree_sort_key(b)));
+    tree_items.sort_by_key(git_tree_sort_key);
 }
 
 fn git_tree_sort_key(item: &TreeItem) -> Vec<u8> {
