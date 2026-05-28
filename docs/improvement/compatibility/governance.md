@@ -86,7 +86,7 @@ C1（Audit P0）
 | rev-list | supported | |
 | describe | supported | |
 | cherry-pick | supported | |
-| push | partial | local file remote rejected (intentional, see push.md) |
+| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
 | fetch | supported | --depth public flag |
 | pull | partial | --ff-only / --rebase / --squash subset |
 | diff | supported | |

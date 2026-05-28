@@ -651,6 +651,256 @@ fn test_push_explicit_refspec_uses_destination_branch_name() {
 #[cfg(unix)]
 #[test]
 #[serial]
+fn test_push_multi_refspec_delete_tags_and_mirror_dry_run() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let feature_out = libra_command(&local_dir)
+        .args(["branch", "feature"])
+        .output()
+        .expect("failed to create feature branch");
+    assert!(
+        feature_out.status.success(),
+        "feature branch creation failed: {}",
+        String::from_utf8_lossy(&feature_out.stderr)
+    );
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args([
+            "--json",
+            "push",
+            "origin",
+            &current_branch,
+            "feature:feature",
+        ])
+        .output()
+        .expect("failed to push multi-refspec");
+    assert!(
+        push_out.status.success(),
+        "multi-refspec push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&push_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("multi-refspec push should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    let updates = json["data"]["updates"]
+        .as_array()
+        .expect("updates should be an array");
+    assert_eq!(updates.len(), 2, "expected two ref updates: {json}");
+    assert!(updates.iter().all(|update| update["kind"] == "update"));
+    assert!(
+        updates
+            .iter()
+            .any(|update| { update["remote_ref"] == format!("refs/heads/{current_branch}") })
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|update| update["remote_ref"] == "refs/heads/feature")
+    );
+
+    let feature_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            "refs/heads/feature",
+        ])
+        .output()
+        .expect("failed to inspect remote feature ref");
+    assert!(
+        feature_ref_out.status.success(),
+        "remote feature ref should exist after multi-refspec push"
+    );
+
+    let invalid_upstream_delete_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "-u", "origin", ":feature"])
+        .output()
+        .expect("failed to attempt invalid upstream delete push");
+    assert!(
+        !invalid_upstream_delete_out.status.success(),
+        "-u with a delete refspec should fail before deleting the remote ref"
+    );
+    let stderr = String::from_utf8_lossy(&invalid_upstream_delete_out.stderr);
+    assert!(
+        stderr.contains("--set-upstream only supports branch update refspecs"),
+        "unexpected invalid upstream delete stderr: {stderr}"
+    );
+    let feature_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            "refs/heads/feature",
+        ])
+        .output()
+        .expect("failed to inspect remote feature ref after rejected -u delete");
+    assert!(
+        feature_ref_out.status.success(),
+        "rejected -u delete must not remove the remote feature ref"
+    );
+
+    let delete_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "origin", ":feature"])
+        .output()
+        .expect("failed to delete remote feature ref");
+    assert!(
+        delete_out.status.success(),
+        "delete ref push failed: {}",
+        String::from_utf8_lossy(&delete_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&delete_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("delete push should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    assert_eq!(json["data"]["updates"][0]["kind"], "delete");
+    assert_eq!(
+        json["data"]["updates"][0]["remote_ref"],
+        "refs/heads/feature"
+    );
+    let feature_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            "refs/heads/feature",
+        ])
+        .output()
+        .expect("failed to inspect remote feature ref after delete");
+    assert!(
+        !feature_ref_out.status.success(),
+        "remote feature ref should be deleted"
+    );
+
+    let tag_out = libra_command(&local_dir)
+        .args(["tag", "v1.0"])
+        .output()
+        .expect("failed to create local tag");
+    assert!(
+        tag_out.status.success(),
+        "tag create failed: {}",
+        String::from_utf8_lossy(&tag_out.stderr)
+    );
+    let tags_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "--tags", "origin"])
+        .output()
+        .expect("failed to push tags");
+    assert!(
+        tags_out.status.success(),
+        "--tags push failed: {}",
+        String::from_utf8_lossy(&tags_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&tags_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("tags push should emit valid JSON, got: {stdout}\nerror: {e}"));
+    assert_eq!(json["data"]["updates"][0]["remote_ref"], "refs/tags/v1.0");
+    let tag_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            "refs/tags/v1.0",
+        ])
+        .output()
+        .expect("failed to inspect remote tag ref");
+    assert!(tag_ref_out.status.success(), "remote tag should exist");
+
+    let main_hash = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read remote main hash")
+            .stdout,
+    )
+    .expect("remote hash should be utf8")
+    .trim()
+    .to_string();
+    assert!(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "update-ref",
+                "refs/heads/remote-only",
+                &main_hash,
+            ])
+            .status()
+            .expect("failed to create remote-only ref")
+            .success()
+    );
+
+    let mirror_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "--mirror", "--dry-run", "origin"])
+        .output()
+        .expect("failed to preview mirror push");
+    assert!(
+        mirror_out.status.success(),
+        "mirror dry-run failed: {}",
+        String::from_utf8_lossy(&mirror_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&mirror_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("mirror dry-run should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    let updates = json["data"]["updates"]
+        .as_array()
+        .expect("mirror updates should be an array");
+    assert!(updates.iter().any(|update| {
+        update["kind"] == "delete" && update["remote_ref"] == "refs/heads/remote-only"
+    }));
+    let remote_only_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            "refs/heads/remote-only",
+        ])
+        .output()
+        .expect("failed to inspect remote-only ref after dry-run");
+    assert!(
+        remote_only_ref_out.status.success(),
+        "mirror dry-run must not delete remote-only ref"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
 fn test_push_json_with_set_upstream_keeps_structured_output_clean() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");

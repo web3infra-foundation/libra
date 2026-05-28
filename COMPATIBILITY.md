@@ -56,7 +56,7 @@ batch document.
 | rev-list | supported | |
 | describe | supported | |
 | cherry-pick | supported | |
-| push | partial | local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
+| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
 | pull | partial | fast-forward only (mirroring `merge`); no `--ff-only` / `--rebase` / `--squash` strategy flags exposed; non-FF integrations report `ManualMergeRequired` |
 | diff | supported | |

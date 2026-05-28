@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use clap::Parser;
 use git_internal::{
     errors::GitError,
@@ -18,6 +18,7 @@ use git_internal::{
         object::{
             blob::Blob,
             commit::Commit,
+            tag::Tag as GitTagObject,
             tree::{Tree, TreeItemMode},
         },
         pack::{encode::PackEncoder, entry::Entry},
@@ -43,6 +44,7 @@ use crate::{
             ssh_client::is_ssh_spec,
         },
         reflog::{Reflog, ReflogAction, ReflogContext},
+        tag,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
@@ -71,6 +73,12 @@ pub const PUSH_EXAMPLES: &str = "\
 EXAMPLES:
     libra push                          Push current branch to tracking remote
     libra push origin main              Push main branch to origin
+    libra push origin main feature:release
+                                        Push multiple refspecs in one request
+    libra push origin :feature          Delete the remote feature branch
+    libra push --tags origin            Push local tags
+    libra push --mirror --dry-run origin
+                                        Preview a mirror sync without writing
     libra push -u origin feature-x      Push and set upstream tracking
     libra push --force origin main      Force push (overwrites remote history)
     libra push --dry-run                Preview what would be pushed without sending
@@ -80,14 +88,13 @@ EXAMPLES:
 #[command(after_help = PUSH_EXAMPLES)]
 pub struct PushArgs {
     /// repository, e.g. origin
-    #[clap(requires("refspec"))]
     repository: Option<String>,
-    /// ref to push, e.g. master or local_branch:remote_branch
-    #[clap(requires("repository"))]
-    refspec: Option<String>,
+    /// refs to push, e.g. master or local_branch:remote_branch
+    #[clap(value_name = "REFSPEC")]
+    refspecs: Vec<String>,
 
     /// Record the upstream tracking ref so future pushes/pulls default to it
-    #[clap(long, short = 'u', requires("refspec"), requires("repository"))]
+    #[clap(long, short = 'u', requires("repository"))]
     set_upstream: bool,
 
     /// force push to remote repository
@@ -97,6 +104,14 @@ pub struct PushArgs {
     /// Do everything except actually send the updates
     #[clap(long, short = 'n')]
     pub dry_run: bool,
+
+    /// Push all local tag refs under refs/tags/*
+    #[clap(long, requires("repository"))]
+    pub tags: bool,
+
+    /// Mirror all local refs/heads/* and refs/tags/* to the remote, deleting remote-only refs
+    #[clap(long, requires("repository"))]
+    pub mirror: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +134,9 @@ pub enum PushError {
 
     #[error("invalid refspec '{0}'")]
     InvalidRefspec(String),
+
+    #[error("{0}")]
+    InvalidArguments(String),
 
     #[error("source ref '{0}' not found")]
     SourceRefNotFound(String),
@@ -199,6 +217,8 @@ impl From<PushError> for CliError {
             PushError::InvalidRefspec(..) => CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("use '<name>' or '<src>:<dst>'"),
+            PushError::InvalidArguments(..) => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
             PushError::SourceRefNotFound(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("verify the local branch/ref exists before pushing"),
@@ -267,8 +287,16 @@ impl From<PushError> for CliError {
 // Structured output types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushRefUpdateKind {
+    Update,
+    Delete,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PushRefUpdate {
+    pub kind: PushRefUpdateKind,
     pub local_ref: String,
     pub remote_ref: String,
     pub old_oid: Option<String>,
@@ -305,21 +333,23 @@ pub struct PushOutput {
 // Refspec parsing
 // ---------------------------------------------------------------------------
 
-/// Parsed refspec: local source branch and remote destination branch.
-struct ParsedRefspec {
-    /// Local branch name to push from
-    src: String,
-    /// Remote branch name to push to
-    dst: String,
+/// Parsed refspec before repository state resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedRefspec {
+    /// Update a remote ref from a local source ref.
+    Update { src: String, dst: String },
+    /// Delete a remote ref by sending a zero object id.
+    Delete { dst: String },
 }
 
-/// Parse a refspec string into source and destination.
+/// Parse a refspec string into an update or deletion request.
 ///
 /// Supported forms:
 /// - `<name>` — push local `<name>` to remote `<name>`
 /// - `<src>:<dst>` — push local `<src>` to remote `<dst>`
+/// - `:<dst>` — delete remote `<dst>`
 ///
-/// Empty src or dst (e.g. `:dst`, `src:`) is not supported.
+/// Empty destinations (e.g. `src:`) are rejected.
 fn parse_refspec(refspec: &str) -> Result<ParsedRefspec, PushError> {
     if refspec.is_empty() {
         return Err(PushError::InvalidRefspec(refspec.to_string()));
@@ -331,19 +361,46 @@ fn parse_refspec(refspec: &str) -> Result<ParsedRefspec, PushError> {
     }
 
     if let Some((src, dst)) = refspec.split_once(':') {
-        if src.is_empty() || dst.is_empty() {
+        if dst.is_empty() {
             return Err(PushError::InvalidRefspec(refspec.to_string()));
         }
-        Ok(ParsedRefspec {
-            src: src.to_string(),
-            dst: dst.to_string(),
-        })
+        if src.is_empty() {
+            Ok(ParsedRefspec::Delete {
+                dst: dst.to_string(),
+            })
+        } else {
+            Ok(ParsedRefspec::Update {
+                src: src.to_string(),
+                dst: dst.to_string(),
+            })
+        }
     } else {
-        Ok(ParsedRefspec {
+        Ok(ParsedRefspec::Update {
             src: refspec.to_string(),
             dst: refspec.to_string(),
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalRefKind {
+    Branch,
+    Tag,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedLocalRef {
+    full_ref: String,
+    oid: ObjectHash,
+    kind: LocalRefKind,
+}
+
+#[derive(Debug, Clone)]
+struct RefUpdatePlan {
+    update: PushRefUpdate,
+    old_oid: ObjectHash,
+    new_oid: Option<ObjectHash>,
+    local_kind: Option<LocalRefKind>,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,22 +427,38 @@ pub async fn execute(args: PushArgs) {
 /// configuration is missing, authentication/network negotiation fails, pack data
 /// cannot be read, or upstream config cannot be written.
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
-    if args.repository.is_some() ^ args.refspec.is_some() {
-        return Err(CliError::command_usage(
-            "both repository and refspec should be provided",
-        ));
-    }
-    if args.set_upstream && args.refspec.is_none() {
-        return Err(CliError::command_usage(
-            "--set-upstream requires a branch name",
-        ));
-    }
+    validate_push_args(&args).map_err(CliError::from)?;
 
     let result = run_push(args, output).await.map_err(CliError::from)?;
     render_push_output(&result, output)?;
     if !result.dry_run && !result.up_to_date && !result.updates.is_empty() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
     }
+    Ok(())
+}
+
+fn validate_push_args(args: &PushArgs) -> Result<(), PushError> {
+    if args.repository.is_none() && (!args.refspecs.is_empty() || args.tags || args.mirror) {
+        return Err(PushError::InvalidArguments(
+            "repository is required when specifying refspecs, --tags, or --mirror".to_string(),
+        ));
+    }
+    if args.repository.is_some() && args.refspecs.is_empty() && !args.tags && !args.mirror {
+        return Err(PushError::InvalidArguments(
+            "repository-only push requires a refspec, --tags, or --mirror".to_string(),
+        ));
+    }
+    if args.set_upstream && (args.refspecs.len() != 1 || args.tags) {
+        return Err(PushError::InvalidArguments(
+            "--set-upstream requires exactly one branch refspec".to_string(),
+        ));
+    }
+    if args.mirror && (!args.refspecs.is_empty() || args.tags || args.set_upstream) {
+        return Err(PushError::InvalidArguments(
+            "--mirror cannot be combined with refspecs, --tags, or --set-upstream".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -396,13 +469,13 @@ pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()
 /// Pure execution entry point. Does NOT render output — returns [`PushOutput`]
 /// on success for the caller to render.
 pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutput, PushError> {
+    validate_push_args(&args)?;
+
     let current_branch = match Head::current().await {
         Head::Branch(name) => name,
         Head::Detached(_) => return Err(PushError::DetachedHead),
     };
-    let explicit_refspec = args.refspec.is_some();
-
-    let repository = match args.repository {
+    let repository = match args.repository.clone() {
         Some(repo) => repo,
         None => {
             let remote = ConfigKv::get_remote(&current_branch).await.ok().flatten();
@@ -423,23 +496,6 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 suggestion,
             });
         }
-    };
-
-    // Parse refspec: supports <name> and <src>:<dst>
-    let (local_branch, remote_branch) = match args.refspec {
-        Some(ref refspec) => {
-            let parsed = parse_refspec(refspec)?;
-            (parsed.src, parsed.dst)
-        }
-        None => (current_branch.clone(), current_branch.clone()),
-    };
-
-    let commit_hash = match Branch::find_branch_result(&local_branch, None)
-        .await
-        .map_err(|error| PushError::RepoState(error.to_string()))?
-    {
-        Some(branch_info) => branch_info.commit.to_string(),
-        None => return Err(PushError::SourceRefNotFound(local_branch.clone())),
     };
 
     // Local file path remotes are not supported for push
@@ -497,26 +553,78 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
     set_wire_hash_kind(discovery.hash_kind);
-    let refs = discovery.refs;
+    let remote_refs = remote_ref_map(&discovery.refs);
 
-    let tracked_branch = if explicit_refspec {
-        format!("refs/heads/{remote_branch}")
+    let mut warnings = Vec::new();
+    let mut plans = if args.mirror {
+        build_mirror_update_plan(&remote_refs, &mut warnings).await?
     } else {
-        ConfigKv::get(&format!("branch.{current_branch}.merge"))
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.value)
-            .unwrap_or_else(|| format!("refs/heads/{remote_branch}"))
+        let mut plans = Vec::new();
+        let mut seen_remote_refs = HashSet::new();
+
+        if args.refspecs.is_empty() && !args.tags {
+            let tracked_ref = ConfigKv::get(&format!("branch.{current_branch}.merge"))
+                .await
+                .ok()
+                .flatten()
+                .map(|e| e.value)
+                .unwrap_or_else(|| format!("refs/heads/{current_branch}"));
+            add_update_ref_plan(
+                resolve_local_ref(&current_branch).await?,
+                tracked_ref,
+                &remote_refs,
+                args.force,
+                &mut warnings,
+                &mut seen_remote_refs,
+                &mut plans,
+            )?;
+        }
+
+        for refspec in &args.refspecs {
+            match parse_refspec(refspec)? {
+                ParsedRefspec::Update { src, dst } => {
+                    let local_ref = resolve_local_ref(&src).await?;
+                    let remote_ref = normalize_destination_ref(&dst, local_ref.kind)?;
+                    add_update_ref_plan(
+                        local_ref,
+                        remote_ref,
+                        &remote_refs,
+                        args.force,
+                        &mut warnings,
+                        &mut seen_remote_refs,
+                        &mut plans,
+                    )?;
+                }
+                ParsedRefspec::Delete { dst } => {
+                    let remote_ref = normalize_delete_ref(&dst)?;
+                    add_delete_ref_plan(
+                        remote_ref,
+                        &remote_refs,
+                        &mut seen_remote_refs,
+                        &mut plans,
+                    )?;
+                }
+            }
+        }
+
+        if args.tags {
+            add_all_tag_update_plans(
+                &remote_refs,
+                args.force,
+                &mut warnings,
+                &mut seen_remote_refs,
+                &mut plans,
+            )
+            .await?;
+        }
+
+        plans
     };
 
-    let tracked_ref = refs.iter().find(|r| r._ref == tracked_branch);
-    let remote_hash = tracked_ref
-        .map(|r| r._hash.clone())
-        .unwrap_or(ObjectHash::zero_str(get_hash_kind()));
+    validate_set_upstream_plan(&args, &plans)?;
+    plans.retain(|plan| plan.update.old_oid.as_deref() != Some(&plan.update.new_oid));
 
-    // Up-to-date check
-    if remote_hash == commit_hash {
+    if plans.is_empty() {
         return Ok(PushOutput {
             remote: repository.clone(),
             url: repo_url,
@@ -532,58 +640,18 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         });
     }
 
-    // Fast-forward check
-    let remote_oid = ObjectHash::from_str(&remote_hash)
-        .map_err(|_| PushError::RepoState(format!("invalid remote hash: {remote_hash}")))?;
-    let local_oid = ObjectHash::from_str(&commit_hash)
-        .map_err(|_| PushError::RepoState(format!("invalid local hash: {commit_hash}")))?;
-    let zero_oid = zero_object_hash();
-    let can_fast_forward = if remote_oid == zero_oid {
-        true
-    } else {
-        is_ancestor(&remote_oid, &local_oid)
-    };
-
-    let mut warnings = Vec::new();
-
-    if !can_fast_forward && !args.force {
-        return Err(PushError::NonFastForward {
-            local_ref: local_branch.clone(),
-            remote_ref: tracked_branch.clone(),
-        });
-    } else if !can_fast_forward && args.force {
-        warnings.push("force push overwrites remote history".to_string());
-    }
-
-    let is_forced = !can_fast_forward && args.force;
-    let old_oid_str = if remote_oid == zero_oid {
-        None
-    } else {
-        Some(remote_hash.clone())
-    };
+    let obj_result = collect_push_objects(&plans).await?;
+    let objs = obj_result.objs;
+    warnings.extend(obj_result.warnings);
+    let obj_count = objs.len();
 
     // Dry-run: compute what would be pushed but do not send
     if args.dry_run {
-        let result = incremental_objs(
-            ObjectHash::from_str(&commit_hash).map_err(|_| {
-                PushError::ObjectCollection(format!("invalid commit hash: {commit_hash}"))
-            })?,
-            ObjectHash::from_str(&remote_hash).map_err(|_| {
-                PushError::ObjectCollection(format!("invalid remote hash: {remote_hash}"))
-            })?,
-        );
-        warnings.extend(result.warnings);
         return Ok(PushOutput {
             remote: repository.clone(),
             url: repo_url,
-            updates: vec![PushRefUpdate {
-                local_ref: format!("refs/heads/{local_branch}"),
-                remote_ref: tracked_branch.clone(),
-                old_oid: old_oid_str,
-                new_oid: commit_hash,
-                forced: is_forced,
-            }],
-            objects_pushed: result.objs.len(),
+            updates: plans.iter().map(|plan| plan.update.clone()).collect(),
+            objects_pushed: obj_count,
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
             lfs_upload: LfsUploadSummary { files_uploaded: 0 },
@@ -600,27 +668,34 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         capabilities.push("object-format=sha256");
     }
     let capability = capabilities.join(" ");
-    add_pkt_line_string(
-        &mut data,
-        format!("{remote_hash} {commit_hash} {tracked_branch}\0{capability}\n"),
-    );
+    let zero_oid = ObjectHash::zero_str(get_hash_kind());
+    for (index, plan) in plans.iter().enumerate() {
+        let old_oid = plan
+            .update
+            .old_oid
+            .as_deref()
+            .unwrap_or(&zero_oid)
+            .to_string();
+        let new_oid = match plan.update.kind {
+            PushRefUpdateKind::Update => plan.update.new_oid.clone(),
+            PushRefUpdateKind::Delete => zero_oid.clone(),
+        };
+        let suffix = if index == 0 {
+            format!("\0{capability}")
+        } else {
+            String::new()
+        };
+        add_pkt_line_string(
+            &mut data,
+            format!("{old_oid} {new_oid} {}{suffix}\n", plan.update.remote_ref),
+        );
+    }
     data.extend_from_slice(b"0000");
     tracing::debug!("{:?}", data);
 
-    let obj_result = incremental_objs(
-        ObjectHash::from_str(&commit_hash).map_err(|_| {
-            PushError::ObjectCollection(format!("invalid commit hash: {commit_hash}"))
-        })?,
-        ObjectHash::from_str(&remote_hash).map_err(|_| {
-            PushError::ObjectCollection(format!("invalid remote hash: {remote_hash}"))
-        })?,
-    );
-    let objs = obj_result.objs;
-    warnings.extend(obj_result.warnings);
-
     // Upload LFS files (only for HTTP remotes)
     let mut lfs_files_uploaded = 0;
-    if !is_ssh {
+    if !is_ssh && !objs.is_empty() {
         let url = Url::parse(&repo_url).map_err(|e| PushError::InvalidRemoteUrl {
             url: repo_url.clone(),
             detail: e.to_string(),
@@ -637,44 +712,45 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 })?;
     }
 
-    let obj_count = objs.len();
-    let (entry_tx, entry_rx) = mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
-    let (stream_tx, mut stream_rx) = mpsc::channel(1_000_000);
-
-    let encoder = PackEncoder::new(objs.len(), 0, stream_tx);
-    encoder
-        .encode_async(entry_rx)
-        .await
-        .map_err(|e| PushError::PackEncoding(e.to_string()))?;
-
-    let progress_output = progress_output_config(output);
-    let progress = ProgressReporter::new(
-        "Compressing objects",
-        Some(objs.len() as u64),
-        &progress_output,
-    );
-    for (i, obj) in objs.iter().cloned().enumerate() {
-        let meta_entry = MetaAttached {
-            inner: obj,
-            meta: EntryMeta::default(),
-        };
-        if let Err(e) = entry_tx.send(meta_entry).await {
-            return Err(PushError::PackEncoding(format!(
-                "failed to send entry: {e}"
-            )));
-        }
-        progress.tick((i + 1) as u64);
-    }
-    drop(entry_tx);
-    progress.finish();
-
-    let progress = ProgressReporter::new("Writing objects", None, &progress_output);
     let mut pack_data = Vec::new();
-    while let Some(chunk) = stream_rx.recv().await {
-        pack_data.extend(chunk);
-        progress.tick(pack_data.len() as u64);
+    if !objs.is_empty() {
+        let (entry_tx, entry_rx) = mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
+        let (stream_tx, mut stream_rx) = mpsc::channel(1_000_000);
+
+        let encoder = PackEncoder::new(objs.len(), 0, stream_tx);
+        encoder
+            .encode_async(entry_rx)
+            .await
+            .map_err(|e| PushError::PackEncoding(e.to_string()))?;
+
+        let progress_output = progress_output_config(output);
+        let progress = ProgressReporter::new(
+            "Compressing objects",
+            Some(objs.len() as u64),
+            &progress_output,
+        );
+        for (i, obj) in objs.iter().cloned().enumerate() {
+            let meta_entry = MetaAttached {
+                inner: obj,
+                meta: EntryMeta::default(),
+            };
+            if let Err(e) = entry_tx.send(meta_entry).await {
+                return Err(PushError::PackEncoding(format!(
+                    "failed to send entry: {e}"
+                )));
+            }
+            progress.tick((i + 1) as u64);
+        }
+        drop(entry_tx);
+        progress.finish();
+
+        let progress = ProgressReporter::new("Writing objects", None, &progress_output);
+        while let Some(chunk) = stream_rx.recv().await {
+            pack_data.extend(chunk);
+            progress.tick(pack_data.len() as u64);
+        }
+        progress.finish();
     }
-    progress.finish();
 
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
@@ -688,19 +764,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 .send_pack(data.freeze())
                 .await
                 .map_err(|e| classify_transport_error("send-pack", e))?;
-            let mut response_data = response_bytes;
-            let (_, pkt_line) = read_pkt_line(&mut response_data);
-            if pkt_line != "unpack ok\n" {
-                return Err(PushError::RemoteUnpackFailed);
-            }
-            let (_, pkt_line) = read_pkt_line(&mut response_data);
-            if !pkt_line.starts_with("ok".as_ref()) {
-                let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
-                return Err(PushError::RemoteRefUpdateFailed {
-                    refname: tracked_branch.clone(),
-                    reason: detail,
-                });
-            }
+            validate_receive_pack_response(response_bytes, &plans)?;
         }
         RemoteClient::Http(http_client) => {
             let res = http_client.send_pack(data.freeze()).await.map_err(|e| {
@@ -712,44 +776,35 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                     res.status()
                 )));
             }
-            let mut data = res.bytes().await.map_err(|e| {
+            let data = res.bytes().await.map_err(|e| {
                 classify_transport_error("receive-pack", std::io::Error::other(e.to_string()))
             })?;
-            let (_, pkt_line) = read_pkt_line(&mut data);
-            if pkt_line != "unpack ok\n" {
-                return Err(PushError::RemoteUnpackFailed);
-            }
-            let (_, pkt_line) = read_pkt_line(&mut data);
-            if !pkt_line.starts_with("ok".as_ref()) {
-                let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
-                return Err(PushError::RemoteRefUpdateFailed {
-                    refname: tracked_branch.clone(),
-                    reason: detail,
-                });
-            }
-            let (len, _) = read_pkt_line(&mut data);
-            if len != 0 {
-                return Err(PushError::Network(
-                    "unexpected trailing data in server response".to_string(),
-                ));
-            }
+            validate_receive_pack_response(data, &plans)?;
         }
         _ => {
             return Err(PushError::UnsupportedLocalFileRemote);
         }
     }
 
-    // Update remote tracking branch
-    let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, remote_branch);
-    update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository)
-        .await
-        .map_err(|e| PushError::TrackingRefUpdate(e.message().to_string()))?;
+    update_remote_tracking_refs(&repository, &plans).await?;
 
-    // Set upstream if requested
     let upstream_set = if args.set_upstream {
+        let first_update = plans.first().ok_or_else(|| {
+            PushError::RepoState("--set-upstream requires a ref update".to_string())
+        })?;
+        let local_branch = first_update
+            .update
+            .local_ref
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&first_update.update.local_ref);
+        let remote_branch = first_update
+            .update
+            .remote_ref
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&first_update.update.remote_ref);
         let upstream = format!("{repository}/{remote_branch}");
         let silent_output = silent_output_config(output);
-        branch::set_upstream_safe_with_output(&local_branch, &upstream, &silent_output)
+        branch::set_upstream_safe_with_output(local_branch, &upstream, &silent_output)
             .await
             .map_err(|e| PushError::TrackingRefUpdate(e.message().to_string()))?;
         Some(upstream)
@@ -760,13 +815,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     Ok(PushOutput {
         remote: repository,
         url: repo_url,
-        updates: vec![PushRefUpdate {
-            local_ref: format!("refs/heads/{local_branch}"),
-            remote_ref: tracked_branch,
-            old_oid: old_oid_str,
-            new_oid: commit_hash,
-            forced: is_forced,
-        }],
+        updates: plans.iter().map(|plan| plan.update.clone()).collect(),
         objects_pushed: obj_count,
         bytes_pushed,
         lfs_files_uploaded,
@@ -778,6 +827,564 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         upstream_set,
         warnings,
     })
+}
+
+fn validate_set_upstream_plan(args: &PushArgs, plans: &[RefUpdatePlan]) -> Result<(), PushError> {
+    if !args.set_upstream {
+        return Ok(());
+    }
+
+    let [plan] = plans else {
+        return Err(PushError::InvalidRefspec(
+            "--set-upstream requires exactly one branch refspec".to_string(),
+        ));
+    };
+    if plan.local_kind != Some(LocalRefKind::Branch)
+        || plan.update.kind != PushRefUpdateKind::Update
+    {
+        return Err(PushError::InvalidRefspec(
+            "--set-upstream only supports branch update refspecs".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn remote_ref_map(refs: &[crate::internal::protocol::DiscRef]) -> HashMap<String, String> {
+    refs.iter()
+        .filter(|reference| !reference._ref.ends_with("^{}"))
+        .map(|reference| (reference._ref.clone(), reference._hash.clone()))
+        .collect()
+}
+
+fn validate_ref_name(refname: &str) -> bool {
+    if !(refname.starts_with("refs/heads/") || refname.starts_with("refs/tags/")) {
+        return false;
+    }
+    let Some(short) = refname
+        .strip_prefix("refs/heads/")
+        .or_else(|| refname.strip_prefix("refs/tags/"))
+    else {
+        return false;
+    };
+    if short.is_empty()
+        || short.starts_with('/')
+        || short.ends_with('/')
+        || short.ends_with('.')
+        || short.ends_with(".lock")
+        || short.contains("//")
+        || short.contains("..")
+        || short.contains("@{")
+    {
+        return false;
+    }
+    !short.chars().any(|c| {
+        c.is_ascii_control()
+            || c.is_whitespace()
+            || matches!(c, ':' | '\\' | '~' | '^' | '?' | '*' | '[')
+    })
+}
+
+fn ensure_valid_ref(refname: String, original: &str) -> Result<String, PushError> {
+    if validate_ref_name(&refname) {
+        Ok(refname)
+    } else {
+        Err(PushError::InvalidRefspec(original.to_string()))
+    }
+}
+
+fn normalize_branch_ref(input: &str) -> Result<String, PushError> {
+    if input.starts_with("refs/heads/") {
+        ensure_valid_ref(input.to_string(), input)
+    } else if input.starts_with("refs/") {
+        Err(PushError::InvalidRefspec(input.to_string()))
+    } else {
+        ensure_valid_ref(format!("refs/heads/{input}"), input)
+    }
+}
+
+fn normalize_tag_ref(input: &str) -> Result<String, PushError> {
+    if input.starts_with("refs/tags/") {
+        ensure_valid_ref(input.to_string(), input)
+    } else if input.starts_with("refs/") {
+        Err(PushError::InvalidRefspec(input.to_string()))
+    } else {
+        ensure_valid_ref(format!("refs/tags/{input}"), input)
+    }
+}
+
+fn normalize_destination_ref(input: &str, source_kind: LocalRefKind) -> Result<String, PushError> {
+    if input.starts_with("refs/") {
+        return ensure_valid_ref(input.to_string(), input);
+    }
+    match source_kind {
+        LocalRefKind::Branch => normalize_branch_ref(input),
+        LocalRefKind::Tag => normalize_tag_ref(input),
+    }
+}
+
+fn normalize_delete_ref(input: &str) -> Result<String, PushError> {
+    if input.starts_with("refs/") {
+        ensure_valid_ref(input.to_string(), input)
+    } else {
+        normalize_branch_ref(input)
+    }
+}
+
+async fn resolve_local_ref(input: &str) -> Result<ResolvedLocalRef, PushError> {
+    if input.starts_with("refs/heads/") {
+        let short_name = input
+            .strip_prefix("refs/heads/")
+            .unwrap_or(input)
+            .to_string();
+        return resolve_branch_ref(&short_name, input).await;
+    }
+    if input.starts_with("refs/tags/") {
+        let short_name = input
+            .strip_prefix("refs/tags/")
+            .unwrap_or(input)
+            .to_string();
+        return resolve_tag_ref(&short_name, input).await;
+    }
+    if input.starts_with("refs/") {
+        return Err(PushError::InvalidRefspec(input.to_string()));
+    }
+
+    if let Some(branch) = Branch::find_branch_result(input, None)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?
+    {
+        return Ok(ResolvedLocalRef {
+            full_ref: normalize_branch_ref(input)?,
+            oid: branch.commit,
+            kind: LocalRefKind::Branch,
+        });
+    }
+    if let Some(target) = tag::find_tag_ref(input)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?
+        .and_then(|reference| reference.target)
+    {
+        let oid = ObjectHash::from_str(&target).map_err(|error| {
+            PushError::RepoState(format!("invalid tag target '{input}': {error}"))
+        })?;
+        return Ok(ResolvedLocalRef {
+            full_ref: normalize_tag_ref(input)?,
+            oid,
+            kind: LocalRefKind::Tag,
+        });
+    }
+    Err(PushError::SourceRefNotFound(input.to_string()))
+}
+
+async fn resolve_branch_ref(
+    short_name: &str,
+    original: &str,
+) -> Result<ResolvedLocalRef, PushError> {
+    let branch = Branch::find_branch_result(short_name, None)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?
+        .ok_or_else(|| PushError::SourceRefNotFound(original.to_string()))?;
+    Ok(ResolvedLocalRef {
+        full_ref: normalize_branch_ref(short_name)?,
+        oid: branch.commit,
+        kind: LocalRefKind::Branch,
+    })
+}
+
+async fn resolve_tag_ref(short_name: &str, original: &str) -> Result<ResolvedLocalRef, PushError> {
+    let target = tag::find_tag_ref(short_name)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?
+        .and_then(|reference| reference.target)
+        .ok_or_else(|| PushError::SourceRefNotFound(original.to_string()))?;
+    let oid = ObjectHash::from_str(&target).map_err(|error| {
+        PushError::RepoState(format!("invalid tag target '{short_name}': {error}"))
+    })?;
+    Ok(ResolvedLocalRef {
+        full_ref: normalize_tag_ref(short_name)?,
+        oid,
+        kind: LocalRefKind::Tag,
+    })
+}
+
+fn add_update_ref_plan(
+    local_ref: ResolvedLocalRef,
+    remote_ref: String,
+    remote_refs: &HashMap<String, String>,
+    force: bool,
+    warnings: &mut Vec<String>,
+    seen_remote_refs: &mut HashSet<String>,
+    plans: &mut Vec<RefUpdatePlan>,
+) -> Result<(), PushError> {
+    if !seen_remote_refs.insert(remote_ref.clone()) {
+        return Err(PushError::InvalidRefspec(format!(
+            "duplicate destination ref '{remote_ref}'"
+        )));
+    }
+
+    let zero_oid = zero_object_hash();
+    let remote_hash = remote_refs
+        .get(&remote_ref)
+        .cloned()
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()));
+    let old_oid = ObjectHash::from_str(&remote_hash)
+        .map_err(|_| PushError::RepoState(format!("invalid remote hash: {remote_hash}")))?;
+
+    let can_update = match local_ref.kind {
+        LocalRefKind::Branch => old_oid == zero_oid || is_ancestor(&old_oid, &local_ref.oid),
+        LocalRefKind::Tag => old_oid == zero_oid || old_oid == local_ref.oid,
+    };
+    if !can_update && !force {
+        return Err(PushError::NonFastForward {
+            local_ref: local_ref.full_ref,
+            remote_ref,
+        });
+    }
+    let forced = !can_update && force;
+    if forced
+        && !warnings
+            .iter()
+            .any(|w| w == "force push overwrites remote history")
+    {
+        warnings.push("force push overwrites remote history".to_string());
+    }
+
+    plans.push(RefUpdatePlan {
+        update: PushRefUpdate {
+            kind: PushRefUpdateKind::Update,
+            local_ref: local_ref.full_ref,
+            remote_ref,
+            old_oid: (old_oid != zero_oid).then_some(remote_hash),
+            new_oid: local_ref.oid.to_string(),
+            forced,
+        },
+        old_oid,
+        new_oid: Some(local_ref.oid),
+        local_kind: Some(local_ref.kind),
+    });
+    Ok(())
+}
+
+fn add_delete_ref_plan(
+    remote_ref: String,
+    remote_refs: &HashMap<String, String>,
+    seen_remote_refs: &mut HashSet<String>,
+    plans: &mut Vec<RefUpdatePlan>,
+) -> Result<(), PushError> {
+    if !seen_remote_refs.insert(remote_ref.clone()) {
+        return Err(PushError::InvalidRefspec(format!(
+            "duplicate destination ref '{remote_ref}'"
+        )));
+    }
+    let Some(remote_hash) = remote_refs.get(&remote_ref).cloned() else {
+        return Ok(());
+    };
+    let old_oid = ObjectHash::from_str(&remote_hash)
+        .map_err(|_| PushError::RepoState(format!("invalid remote hash: {remote_hash}")))?;
+    plans.push(RefUpdatePlan {
+        update: PushRefUpdate {
+            kind: PushRefUpdateKind::Delete,
+            local_ref: String::new(),
+            remote_ref,
+            old_oid: Some(remote_hash),
+            new_oid: ObjectHash::zero_str(get_hash_kind()),
+            forced: false,
+        },
+        old_oid,
+        new_oid: None,
+        local_kind: None,
+    });
+    Ok(())
+}
+
+async fn add_all_tag_update_plans(
+    remote_refs: &HashMap<String, String>,
+    force: bool,
+    warnings: &mut Vec<String>,
+    seen_remote_refs: &mut HashSet<String>,
+    plans: &mut Vec<RefUpdatePlan>,
+) -> Result<(), PushError> {
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    for local_tag in tags {
+        let oid = tag_object_hash(&local_tag.object);
+        let full_ref = normalize_tag_ref(&local_tag.name)?;
+        add_update_ref_plan(
+            ResolvedLocalRef {
+                full_ref: full_ref.clone(),
+                oid,
+                kind: LocalRefKind::Tag,
+            },
+            full_ref,
+            remote_refs,
+            force,
+            warnings,
+            seen_remote_refs,
+            plans,
+        )?;
+    }
+    Ok(())
+}
+
+async fn build_mirror_update_plan(
+    remote_refs: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<RefUpdatePlan>, PushError> {
+    let mut plans = Vec::new();
+    let mut seen_remote_refs = HashSet::new();
+    let mut local_refs = HashSet::new();
+
+    let branches = Branch::list_branches_result(None)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    for branch in branches {
+        let full_ref = normalize_branch_ref(&branch.name)?;
+        local_refs.insert(full_ref.clone());
+        add_update_ref_plan(
+            ResolvedLocalRef {
+                full_ref: full_ref.clone(),
+                oid: branch.commit,
+                kind: LocalRefKind::Branch,
+            },
+            full_ref,
+            remote_refs,
+            true,
+            warnings,
+            &mut seen_remote_refs,
+            &mut plans,
+        )?;
+    }
+
+    let tags = tag::list()
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?;
+    for local_tag in tags {
+        let full_ref = normalize_tag_ref(&local_tag.name)?;
+        let oid = tag_object_hash(&local_tag.object);
+        local_refs.insert(full_ref.clone());
+        add_update_ref_plan(
+            ResolvedLocalRef {
+                full_ref: full_ref.clone(),
+                oid,
+                kind: LocalRefKind::Tag,
+            },
+            full_ref,
+            remote_refs,
+            true,
+            warnings,
+            &mut seen_remote_refs,
+            &mut plans,
+        )?;
+    }
+
+    for remote_ref in remote_refs.keys() {
+        if !(remote_ref.starts_with("refs/heads/") || remote_ref.starts_with("refs/tags/")) {
+            continue;
+        }
+        if local_refs.contains(remote_ref) {
+            continue;
+        }
+        add_delete_ref_plan(
+            remote_ref.clone(),
+            remote_refs,
+            &mut seen_remote_refs,
+            &mut plans,
+        )?;
+    }
+
+    if plans
+        .iter()
+        .any(|plan| plan.update.kind == PushRefUpdateKind::Delete)
+        && !warnings
+            .iter()
+            .any(|w| w == "mirror push will delete remote-only refs")
+    {
+        warnings.push("mirror push will delete remote-only refs".to_string());
+    }
+
+    Ok(plans)
+}
+
+fn tag_object_hash(object: &tag::TagObject) -> ObjectHash {
+    match object {
+        tag::TagObject::Commit(commit) => commit.id,
+        tag::TagObject::Tag(tag) => tag.id,
+        tag::TagObject::Tree(tree) => tree.id,
+        tag::TagObject::Blob(blob) => blob.id,
+    }
+}
+
+async fn collect_push_objects(plans: &[RefUpdatePlan]) -> Result<IncrementalObjsResult, PushError> {
+    let mut combined = IncrementalObjsResult {
+        objs: HashSet::new(),
+        warnings: Vec::new(),
+    };
+    for plan in plans {
+        let Some(new_oid) = plan.new_oid else {
+            continue;
+        };
+        let result = collect_objects_for_ref(new_oid, plan.old_oid, plan.local_kind).await?;
+        combined.objs.extend(result.objs);
+        combined.warnings.extend(result.warnings);
+    }
+    Ok(combined)
+}
+
+async fn collect_objects_for_ref(
+    new_oid: ObjectHash,
+    old_oid: ObjectHash,
+    kind: Option<LocalRefKind>,
+) -> Result<IncrementalObjsResult, PushError> {
+    match tag::load_object_trait(&new_oid)
+        .await
+        .map_err(|error| PushError::ObjectCollection(error.to_string()))?
+    {
+        tag::TagObject::Commit(commit) => {
+            let remote_base = if kind == Some(LocalRefKind::Tag) {
+                zero_object_hash()
+            } else {
+                old_oid
+            };
+            Ok(incremental_objs(commit.id, remote_base))
+        }
+        tag::TagObject::Tag(tag_object) => collect_tag_object_chain(tag_object).await,
+        tag::TagObject::Tree(tree) => {
+            let mut warnings = Vec::new();
+            Ok(IncrementalObjsResult {
+                objs: diff_tree_objs(None, &tree.id, &mut warnings),
+                warnings,
+            })
+        }
+        tag::TagObject::Blob(blob) => Ok(IncrementalObjsResult {
+            objs: HashSet::from([blob.into()]),
+            warnings: Vec::new(),
+        }),
+    }
+}
+
+async fn collect_tag_object_chain(
+    mut tag_object: GitTagObject,
+) -> Result<IncrementalObjsResult, PushError> {
+    let mut result = IncrementalObjsResult {
+        objs: HashSet::new(),
+        warnings: Vec::new(),
+    };
+    let mut seen_tags = HashSet::new();
+
+    loop {
+        if !seen_tags.insert(tag_object.id) {
+            return Err(PushError::ObjectCollection(format!(
+                "detected cycle while collecting tag object '{}'",
+                tag_object.id
+            )));
+        }
+
+        let target_oid = tag_object.object_hash;
+        result.objs.insert(tag_object.into());
+
+        match tag::load_object_trait(&target_oid)
+            .await
+            .map_err(|error| PushError::ObjectCollection(error.to_string()))?
+        {
+            tag::TagObject::Commit(commit) => {
+                let commit_result = incremental_objs(commit.id, zero_object_hash());
+                result.objs.extend(commit_result.objs);
+                result.warnings.extend(commit_result.warnings);
+                return Ok(result);
+            }
+            tag::TagObject::Tree(tree) => {
+                result
+                    .objs
+                    .extend(diff_tree_objs(None, &tree.id, &mut result.warnings));
+                return Ok(result);
+            }
+            tag::TagObject::Blob(blob) => {
+                result.objs.insert(blob.into());
+                return Ok(result);
+            }
+            tag::TagObject::Tag(next_tag_object) => {
+                tag_object = next_tag_object;
+            }
+        }
+    }
+}
+
+fn validate_receive_pack_response(
+    mut response_data: Bytes,
+    plans: &[RefUpdatePlan],
+) -> Result<(), PushError> {
+    let (_, pkt_line) = read_pkt_line(&mut response_data);
+    if pkt_line != "unpack ok\n" {
+        return Err(PushError::RemoteUnpackFailed);
+    }
+
+    let expected_refs: HashSet<_> = plans
+        .iter()
+        .map(|plan| plan.update.remote_ref.as_str())
+        .collect();
+    let mut seen_refs = HashSet::new();
+    loop {
+        let (len, pkt_line) = read_pkt_line(&mut response_data);
+        if len == 0 {
+            break;
+        }
+        let line = String::from_utf8_lossy(&pkt_line).trim().to_string();
+        if let Some(refname) = line.strip_prefix("ok ") {
+            seen_refs.insert(refname.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("ng ") {
+            let (refname, reason) = rest
+                .split_once(' ')
+                .unwrap_or((rest, "remote rejected update"));
+            return Err(PushError::RemoteRefUpdateFailed {
+                refname: refname.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+        return Err(PushError::Network(format!(
+            "unexpected receive-pack status line: {line}"
+        )));
+    }
+
+    for expected in expected_refs {
+        if !seen_refs.contains(expected) {
+            return Err(PushError::RemoteRefUpdateFailed {
+                refname: expected.to_string(),
+                reason: "missing status from remote".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn update_remote_tracking_refs(
+    repository: &str,
+    plans: &[RefUpdatePlan],
+) -> Result<(), PushError> {
+    for plan in plans {
+        let Some(remote_branch) = plan.update.remote_ref.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let remote_tracking_branch = format!("refs/remotes/{repository}/{remote_branch}");
+        match plan.update.kind {
+            PushRefUpdateKind::Update => {
+                update_remote_tracking(&remote_tracking_branch, &plan.update.new_oid, repository)
+                    .await
+                    .map_err(|e| PushError::TrackingRefUpdate(e.message().to_string()))?
+            }
+            PushRefUpdateKind::Delete => {
+                match Branch::delete_branch_result(&remote_tracking_branch, Some(repository)).await
+                {
+                    Ok(()) | Err(BranchStoreError::NotFound(_)) => {}
+                    Err(error) => return Err(PushError::TrackingRefUpdate(error.to_string())),
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -810,25 +1417,43 @@ fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<(
         let remote_short_name = update
             .remote_ref
             .strip_prefix("refs/heads/")
+            .or_else(|| update.remote_ref.strip_prefix("refs/tags/"))
             .unwrap_or(&update.remote_ref);
         let local_short_name = update
             .local_ref
             .strip_prefix("refs/heads/")
+            .or_else(|| update.local_ref.strip_prefix("refs/tags/"))
             .unwrap_or(&update.local_ref);
+
+        if update.kind == PushRefUpdateKind::Delete {
+            if result.dry_run {
+                writeln!(w, " - [deleted]         {} (dry run)", remote_short_name)
+                    .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+            } else {
+                writeln!(w, " - [deleted]         {}", remote_short_name)
+                    .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
+            }
+            continue;
+        }
 
         match &update.old_oid {
             None => {
+                let kind_label = if update.remote_ref.starts_with("refs/tags/") {
+                    "tag"
+                } else {
+                    "branch"
+                };
                 if result.dry_run {
                     writeln!(
                         w,
-                        " * [new branch]      {} -> {} (dry run)",
+                        " * [new {kind_label}]      {} -> {} (dry run)",
                         local_short_name, remote_short_name
                     )
                     .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
                 } else {
                     writeln!(
                         w,
-                        " * [new branch]      {} -> {}",
+                        " * [new {kind_label}]      {} -> {}",
                         local_short_name, remote_short_name
                     )
                     .map_err(|e| CliError::io(format!("failed to write push output: {e}")))?;
@@ -1519,6 +2144,10 @@ mod test {
             "invalid refspec '@invalid'",
         );
         assert_eq!(
+            PushError::InvalidArguments("bad push arguments".to_string()).to_string(),
+            "bad push arguments",
+        );
+        assert_eq!(
             PushError::SourceRefNotFound("topic/x".to_string()).to_string(),
             "source ref 'topic/x' not found",
         );
@@ -1602,15 +2231,17 @@ mod test {
         let args = vec!["push"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, None);
-        assert_eq!(args.refspec, None);
+        assert!(args.refspecs.is_empty());
         assert!(!args.set_upstream);
         assert!(!args.force);
         assert!(!args.dry_run);
+        assert!(!args.tags);
+        assert!(!args.mirror);
 
         let args = vec!["push", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
-        assert_eq!(args.refspec, Some("master".to_string()));
+        assert_eq!(args.refspecs, vec!["master".to_string()]);
         assert!(!args.set_upstream);
         assert!(!args.force);
         assert!(!args.dry_run);
@@ -1618,14 +2249,14 @@ mod test {
         let args = vec!["push", "-u", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
-        assert_eq!(args.refspec, Some("master".to_string()));
+        assert_eq!(args.refspecs, vec!["master".to_string()]);
         assert!(args.set_upstream);
         assert!(!args.force);
 
         let args = vec!["push", "--force", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
-        assert_eq!(args.refspec, Some("master".to_string()));
+        assert_eq!(args.refspecs, vec!["master".to_string()]);
         assert!(!args.set_upstream);
         assert!(args.force);
         assert!(!args.dry_run);
@@ -1633,10 +2264,31 @@ mod test {
         let args = vec!["push", "-f", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
-        assert_eq!(args.refspec, Some("master".to_string()));
+        assert_eq!(args.refspecs, vec!["master".to_string()]);
         assert!(!args.set_upstream);
         assert!(args.force);
         assert!(!args.dry_run);
+
+        let args = vec!["push", "origin", "master", "feature:release"];
+        let args = PushArgs::parse_from(args);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert_eq!(
+            args.refspecs,
+            vec!["master".to_string(), "feature:release".to_string()]
+        );
+
+        let args = vec!["push", "--tags", "origin"];
+        let args = PushArgs::parse_from(args);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert!(args.refspecs.is_empty());
+        assert!(args.tags);
+
+        let args = vec!["push", "--mirror", "--dry-run", "origin"];
+        let args = PushArgs::parse_from(args);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert!(args.refspecs.is_empty());
+        assert!(args.mirror);
+        assert!(args.dry_run);
     }
 
     #[test]
@@ -1646,7 +2298,7 @@ mod test {
         let args = PushArgs::parse_from(args);
         assert!(args.dry_run);
         assert_eq!(args.repository, Some("origin".to_string()));
-        assert_eq!(args.refspec, Some("master".to_string()));
+        assert_eq!(args.refspecs, vec!["master".to_string()]);
 
         let args = vec!["push", "-n", "origin", "master"];
         let args = PushArgs::parse_from(args);
@@ -1675,18 +2327,52 @@ mod test {
         let args = vec!["push", "-u"];
         let args = PushArgs::try_parse_from(args);
         assert!(args.is_err());
+    }
 
-        let args = vec!["push", "-u", "origin"];
-        let args = PushArgs::try_parse_from(args);
-        assert!(args.is_err());
+    #[test]
+    fn test_validate_push_args_rejects_invalid_combinations() {
+        let args = PushArgs::parse_from(["push", "origin"]);
+        assert!(matches!(
+            validate_push_args(&args),
+            Err(PushError::InvalidArguments(message))
+                if message == "repository-only push requires a refspec, --tags, or --mirror"
+        ));
 
-        let args = vec!["push", "-u", "master"];
-        let args = PushArgs::try_parse_from(args);
-        assert!(args.is_err());
+        let args = PushArgs::parse_from(["push", "-u", "origin", "main", "topic"]);
+        assert!(matches!(
+            validate_push_args(&args),
+            Err(PushError::InvalidArguments(message))
+                if message == "--set-upstream requires exactly one branch refspec"
+        ));
 
-        let args = vec!["push", "origin"];
-        let args = PushArgs::try_parse_from(args);
-        assert!(args.is_err());
+        let args = PushArgs::parse_from(["push", "-u", "--tags", "origin", "main"]);
+        assert!(matches!(
+            validate_push_args(&args),
+            Err(PushError::InvalidArguments(message))
+                if message == "--set-upstream requires exactly one branch refspec"
+        ));
+
+        let args = PushArgs::parse_from(["push", "--mirror", "--tags", "origin"]);
+        assert!(matches!(
+            validate_push_args(&args),
+            Err(PushError::InvalidArguments(message))
+                if message == "--mirror cannot be combined with refspecs, --tags, or --set-upstream"
+        ));
+
+        let args = PushArgs {
+            repository: None,
+            refspecs: vec!["main".to_string()],
+            set_upstream: false,
+            force: false,
+            dry_run: false,
+            tags: false,
+            mirror: false,
+        };
+        assert!(matches!(
+            validate_push_args(&args),
+            Err(PushError::InvalidArguments(message))
+                if message == "repository is required when specifying refspecs, --tags, or --mirror"
+        ));
     }
 
     #[test]
@@ -1698,15 +2384,36 @@ mod test {
     #[test]
     fn test_parse_refspec_simple_name() {
         let parsed = parse_refspec("main").unwrap();
-        assert_eq!(parsed.src, "main");
-        assert_eq!(parsed.dst, "main");
+        assert_eq!(
+            parsed,
+            ParsedRefspec::Update {
+                src: "main".to_string(),
+                dst: "main".to_string()
+            }
+        );
     }
 
     #[test]
     fn test_parse_refspec_src_dst() {
         let parsed = parse_refspec("local_branch:release").unwrap();
-        assert_eq!(parsed.src, "local_branch");
-        assert_eq!(parsed.dst, "release");
+        assert_eq!(
+            parsed,
+            ParsedRefspec::Update {
+                src: "local_branch".to_string(),
+                dst: "release".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_refspec_delete_dst() {
+        let parsed = parse_refspec(":release").unwrap();
+        assert_eq!(
+            parsed,
+            ParsedRefspec::Delete {
+                dst: "release".to_string()
+            }
+        );
     }
 
     #[test]
@@ -1716,7 +2423,10 @@ mod test {
 
     #[test]
     fn test_parse_refspec_empty_src_rejected() {
-        assert!(parse_refspec(":dst").is_err());
+        assert!(matches!(
+            parse_refspec(":dst"),
+            Ok(ParsedRefspec::Delete { dst }) if dst == "dst"
+        ));
     }
 
     #[test]
