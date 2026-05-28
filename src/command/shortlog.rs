@@ -97,7 +97,11 @@ pub struct ShortlogArgs {
 
     /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
     #[clap(long = "until", value_name = "DATE")]
+    
     pub until: Option<String>,
+    /// Show only the top N authors
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
 
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
@@ -247,6 +251,10 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| (std::cmp::Reverse(stats.count), stats.name.to_lowercase()));
     } else {
         authors.sort_by_key(|stats| stats.name.to_lowercase());
+    }
+
+    if let Some(top) = args.top {
+        authors.truncate(top);
     }
 
     ShortlogOutput {
