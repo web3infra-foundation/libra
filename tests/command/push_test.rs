@@ -651,6 +651,143 @@ fn test_push_explicit_refspec_uses_destination_branch_name() {
 #[cfg(unix)]
 #[test]
 #[serial]
+fn test_push_merge_commit_to_git_remote_succeeds() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(&local_dir, "base.txt", "base\n", "initial commit");
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let branch = current_branch_name(&local_dir);
+
+    let initial_push = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &branch])
+        .output()
+        .expect("failed to push initial branch");
+    assert!(
+        initial_push.status.success(),
+        "initial push failed: {}",
+        String::from_utf8_lossy(&initial_push.stderr)
+    );
+
+    let feature_out = libra_command(&local_dir)
+        .args(["branch", "feature"])
+        .output()
+        .expect("failed to create feature branch");
+    assert!(
+        feature_out.status.success(),
+        "feature branch creation failed: {}",
+        String::from_utf8_lossy(&feature_out.stderr)
+    );
+    let checkout_feature = libra_command(&local_dir)
+        .args(["checkout", "feature"])
+        .output()
+        .expect("failed to checkout feature");
+    assert!(
+        checkout_feature.status.success(),
+        "checkout feature failed: {}",
+        String::from_utf8_lossy(&checkout_feature.stderr)
+    );
+    fs::write(local_dir.join("feature.txt"), "feature\n").expect("failed to write feature file");
+    let add_feature = libra_command(&local_dir)
+        .args(["add", "feature.txt"])
+        .output()
+        .expect("failed to add feature file");
+    assert!(
+        add_feature.status.success(),
+        "add feature failed: {}",
+        String::from_utf8_lossy(&add_feature.stderr)
+    );
+    let commit_feature = libra_command(&local_dir)
+        .args(["commit", "-m", "feature update", "--no-verify"])
+        .output()
+        .expect("failed to commit feature");
+    assert!(
+        commit_feature.status.success(),
+        "commit feature failed: {}",
+        String::from_utf8_lossy(&commit_feature.stderr)
+    );
+
+    let checkout_main = libra_command(&local_dir)
+        .args(["checkout", &branch])
+        .output()
+        .expect("failed to checkout main branch");
+    assert!(
+        checkout_main.status.success(),
+        "checkout main failed: {}",
+        String::from_utf8_lossy(&checkout_main.stderr)
+    );
+    fs::write(local_dir.join("main.txt"), "main\n").expect("failed to write main file");
+    let add_main = libra_command(&local_dir)
+        .args(["add", "main.txt"])
+        .output()
+        .expect("failed to add main file");
+    assert!(
+        add_main.status.success(),
+        "add main failed: {}",
+        String::from_utf8_lossy(&add_main.stderr)
+    );
+    let commit_main = libra_command(&local_dir)
+        .args(["commit", "-m", "main update", "--no-verify"])
+        .output()
+        .expect("failed to commit main");
+    assert!(
+        commit_main.status.success(),
+        "commit main failed: {}",
+        String::from_utf8_lossy(&commit_main.stderr)
+    );
+
+    let merge_out = libra_command(&local_dir)
+        .args(["merge", "feature"])
+        .output()
+        .expect("failed to merge feature");
+    assert!(
+        merge_out.status.success(),
+        "merge feature failed: {}",
+        String::from_utf8_lossy(&merge_out.stderr)
+    );
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &branch])
+        .output()
+        .expect("failed to push merge commit");
+    assert!(
+        push_out.status.success(),
+        "push merge commit failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&push_out.stdout),
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let remote_head_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "rev-parse",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .expect("failed to read remote head");
+    assert!(
+        remote_head_out.status.success(),
+        "remote head should exist after merge push: {}",
+        String::from_utf8_lossy(&remote_head_out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
 fn test_push_multi_refspec_delete_tags_and_mirror_dry_run() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");

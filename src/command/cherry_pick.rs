@@ -473,6 +473,7 @@ fn build_tree_recursively(
         });
     }
 
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
     let tree = Tree::from_tree_items(current_items)
         .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to create tree: {e}")))?;
     save_object(&tree, &tree.id).map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;

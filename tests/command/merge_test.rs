@@ -382,6 +382,10 @@ async fn test_merge_diverged_branch_creates_two_parent_commit() {
         2,
         "diverged merge should create a two-parent commit"
     );
+    assert!(
+        commit.message.starts_with('\n'),
+        "merge commit body must retain Git's blank-line separator before the message"
+    );
 }
 
 #[test]
@@ -594,6 +598,10 @@ async fn test_merge_continue_after_resolving_conflict_creates_two_parent_commit(
         .expect("merge continue should create HEAD");
     let commit: Commit = load_object(&head).expect("load continued merge commit");
     assert_eq!(commit.parent_commit_ids.len(), 2);
+    assert!(
+        commit.message.starts_with('\n'),
+        "merge --continue commit body must retain Git's blank-line separator before the message"
+    );
     assert_eq!(
         std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read resolved file"),
         "resolved change\n"

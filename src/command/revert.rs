@@ -342,6 +342,7 @@ async fn build_tree_from_map(
                 id: subdir_tree.id,
             });
         }
+        crate::utils::tree::sort_tree_items_for_git(&mut tree_items);
         Tree::from_tree_items(tree_items).map_err(|e| RevertError::SaveObject(e.to_string()))
     }
 

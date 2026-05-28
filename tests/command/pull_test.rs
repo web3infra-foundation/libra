@@ -212,6 +212,10 @@ async fn test_pull_diverged_remote_creates_three_way_merge() {
         .expect("pull should create a merge commit");
     let commit: Commit = load_object(&head).expect("load pull merge commit");
     assert_eq!(commit.parent_commit_ids.len(), 2);
+    assert!(
+        commit.message.starts_with('\n'),
+        "pull merge commit body must retain Git's blank-line separator before the message"
+    );
     assert!(local_repo.path().join("remote.txt").exists());
     assert!(local_repo.path().join("local.txt").exists());
 }

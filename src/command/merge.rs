@@ -28,6 +28,7 @@ use super::{
     save_object, status, switch,
 };
 use crate::{
+    common_utils::format_commit_msg,
     info_println,
     internal::{
         branch::{Branch, BranchStoreError},
@@ -463,8 +464,11 @@ async fn perform_three_way_merge(
     let tree_id = create_tree_from_items_map(&merge_result.merged_items)
         .map_err(PullMergeError::TreeCreate)?;
     let message = format!("Merge {upstream} into {head_name}");
-    let merge_commit =
-        Commit::from_tree_id(tree_id, vec![current_commit.id, target_commit.id], &message);
+    let merge_commit = Commit::from_tree_id(
+        tree_id,
+        vec![current_commit.id, target_commit.id],
+        &format_commit_msg(&message, None),
+    );
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(&head_name, merge_commit.id, upstream, "three-way").await?;
@@ -611,7 +615,11 @@ async fn run_merge_continue(_output: &OutputConfig) -> Result<MergeOutput, Merge
     let files_changed = count_item_map_changes(&original_items, &index_items);
     let tree_id = create_tree_from_items_map(&index_items).map_err(MergeError::TreeCreate)?;
     let message = format!("Merge {} into {}", state.target_ref, state.head_name);
-    let merge_commit = Commit::from_tree_id(tree_id, vec![orig_head, target], &message);
+    let merge_commit = Commit::from_tree_id(
+        tree_id,
+        vec![orig_head, target],
+        &format_commit_msg(&message, None),
+    );
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| MergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(
@@ -1201,6 +1209,7 @@ fn build_tree_recursively(
         });
     }
 
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
     let tree = Tree::from_tree_items(current_items).map_err(|error| error.to_string())?;
     save_object(&tree, &tree.id).map_err(|error| error.to_string())?;
     Ok(tree.id)

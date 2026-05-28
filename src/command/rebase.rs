@@ -2921,6 +2921,7 @@ fn build_tree_recursively(
         });
     }
 
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
     // Create and save the tree object for this directory
     let tree = Tree::from_tree_items(current_items).map_err(|e| e.to_string())?;
     save_object(&tree, &tree.id).map_err(|e| e.to_string())?;

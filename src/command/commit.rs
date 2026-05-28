@@ -948,6 +948,7 @@ pub async fn create_tree(
             });
         }
     }
+    crate::utils::tree::sort_tree_items_for_git(&mut tree_items);
     let tree = {
         // `from_tree_items` can't create empty tree, so use `from_bytes` instead
         if tree_items.is_empty() {
