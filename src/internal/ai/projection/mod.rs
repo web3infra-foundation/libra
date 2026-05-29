@@ -17,7 +17,7 @@ pub use index::{
     RunEventIndexRow, RunPatchSetIndexRow, TaskRunIndexRow,
 };
 pub use rebuild::{MaterializedProjection, ProjectionRebuilder};
-pub use resolver::{ProjectionResolver, ThreadBundle};
+pub use resolver::{ProjectionResolver, ResumeAction, ResumeBundle, ResumeReason, ThreadBundle};
 pub use scheduler::{
     LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,
     SchedulerStateCasError, SchedulerStateRepository,

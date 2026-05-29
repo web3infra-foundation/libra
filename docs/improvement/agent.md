@@ -172,7 +172,7 @@
 | Phase 1 Wave 1A（Runtime contract + dagrs 0.8.1） | 100% | **100%** | — |
 | Phase 1 Wave 1B（TaskExecutor impl 收敛） | 100% | **~90%** | `CodexTaskExecutor` 的 schema + `impl TaskExecutor` 已在 `runtime/task_executors.rs` 落地（v0.17.579，stub body 返回自识别 `TaskExecutionError::Provider` error）；`CompletionTaskExecutor<M>` schema + 单次完成调用 body 已落地（v0.17.593：把 prompt 翻译成 `CompletionRequest`、stitch assistant text 到 `summary`、错误映射到 `TaskExecutionError::Provider`；v0.17.1106：provider tool-call response fail-closed 为 `TaskExecutionError::ToolPolicy`，避免未执行工具被误报 Completed）；`runtime/phase0.rs::write_intent` 已落地（v0.17.574）；`write_context_snapshot_if_needed` 已落地（v0.17.594，委托给 `LibraMcpServer::create_context_snapshot_impl`）；`runtime/phase1.rs::write_plan_set` 函数体已落地（v0.17.580，桥接到 `create_plan_set_revision`）；`apply_scheduler_mutation` 8/8 variants 已 wire（v0.17.588..v0.17.590）；`advance_scheduler` async 包装已落地（v0.17.592，load→apply→CAS-save 完整路径 + `AdvanceSchedulerError`）；`write_attempt_start` / `write_attempt_finish` 已落地（v0.17.591）；`handle_modify_request` 协调器已落地（v0.17.587）；`validate_paired_plan_revisions` 已落地（v0.17.595，跨链 lockstep 校验 + `PairingError`）；`audit_label()` 已落地（v0.17.597）。剩余 ~10%：仅剩 Codex WebSocket attempt loop / completion-model + tool-loop 集成（`CodexTaskExecutor` body 仍为 stub） |
 | Phase 1 Wave 1C（claudecode 硬删除） | 100% | **100%** | — |
-| Phase 2 Thread ID + Projection Resolver | 100% | ~72% | execution → barrier → test 两阶段语义仍在收口；v0.17.1109 起 `execute_dag()` 会把 dagrs `ExecutionReport` 的 succeeded/failed/skipped/total 计数写回 `RunStateStore`，不再只依赖事件 monitor 的中间 progress；`ExecutionTerminated` 仍由 monitor 作为停止信号消费 |
+| Phase 2 Thread ID + Projection Resolver | 100% | ~74% | execution → barrier → test 两阶段语义仍在收口；v0.17.1109 起 `execute_dag()` 会把 dagrs `ExecutionReport` 的 succeeded/failed/skipped/total 计数写回 `RunStateStore`，不再只依赖事件 monitor 的中间 progress；v0.17.1110 起 `ProjectionResolver::load_for_resume()` 会先走 targeted rebuild / freshness 处理，再返回 `phase_at_resume`、`resume_reason`、`resume_actions`，把 phase-aware resume 合同从隐式 bundle 读取提升为 typed contract；`ExecutionTerminated` 仍由 monitor 作为停止信号消费 |
 | Phase 3 Code UI Source Of Truth | 100% | ~40% | `CodeUiCommandAdapter` 已存在；完整 unification（typed delta / gap recovery）仍是后续 |
 | Phase 4 ArtifactLedger + ValidatorEngine + DecisionProposal | 100% | ~75% | **`ValidationReport` 字段在 `runtime/phase3.rs:115` 已完整定义**（`report_id` / `thread_id` / `run_id` / `policy_version` / `stale` / `is_latest` / `summary` / `created_at` / `updated_at`）；**`RiskScoreBreakdown` 字段在 `runtime/phase4.rs:50` 已完整定义**（`breakdown_id` / `thread_id` / `validation_report_id` / `policy_version` / `stale` / `is_latest` / `summary` / `created_at` / `updated_at`）；**持久化层已落地**：`ai_validation_report` 表的 update_many+find via `is_latest` flag + `risk_to_active_model` 写入路径已在 `runtime/phase3.rs:196..225` 和 `runtime/phase4.rs:259..332` 落地；`ai_decision_proposal` / `ai_risk_score_breakdown` 通过同样模式持久化；`ValidatorEngine` 仍归 planner gate；剩余复核项是 projection -> JSONL 镜像层（Snapshot/Event 流的复用程度）|
 | Phase 5 Security / Permission / Diagnostics / Hardening | 100% | **~100%** | `mcp/authz.rs` schema + 全面 server wiring + per-request principal threading 已落地（v0.17.573..v0.17.586，详见 :163 行）；13 个 MCP 入口全部 authz-gated，5 个 create_*_impl 已 per-actor principal threading；TUI direct provider bootstrap 与 Ollama headless web-only bootstrap 已收敛到 `ProviderFactory`；vault/env 统一接入已在 v0.17.549..v0.17.556 完成（`Client::from_resolved_env(LocalIdentityTarget<'_>)` × 7 providers + `resolve_env_sync` 接入 `build_any_completion_model_for_args`）；provider crate 公开 `from_env()` 保留/弃用策略已在 v0.17.1048 写入 provider Rustdoc 与 changelog |
@@ -4258,7 +4258,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 
 补充规则：
 
-1. `load_for_resume()` 的输出必须包含 `phase_at_resume`、`resume_reason`、`resume_actions`，并写入 `ContextFrame[E]` 作为审计轨迹。
+1. `load_for_resume()` 的输出必须包含 `phase_at_resume`、`resume_reason`、`resume_actions`；v0.17.1110 已把这三类字段提升为 `ResumeBundle` typed contract，`ContextFrame[E]` 恢复审计仍是后续事件化收口项。
 2. 只要发现 projection 缺失/过期，先按 Snapshot + Event targeted rebuild，再执行 phase-specific resume；不允许因 projection 缺失阻塞恢复。
 3. 恢复过程中的任何状态修复（如 interrupted 标记、queue 重建、review reopening）都必须事件化；projection 只缓存“当前视图”。
 4. Phase 0 / Phase 1 的恢复默认是“重开 review gate”，不是“自动重放 provider 输出”；只有执行阶段和系统验证阶段才允许进入 phase-aware rerun / resume 逻辑。
@@ -4311,7 +4311,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | **两套执行引擎共存** | 高 | `Orchestrator<M>` 与 Codex TUI turn loop 完全分离，持久化、控制流、resume 和审计语义已经分叉 |
 | **McpExecutionTracker 旁路写入** | 高 | TUI 层监听 Codex 事件并写 formal objects，UI 与核心模型严重耦合，formal writes 无法统一收口到共享 `Runtime` |
 | **Phase 3/4 formal pipeline 未落地** | 高 | 系统验证仍主要依赖 planner / gate task 与现有 Orchestrator 路径，`ArtifactLedger`、`ValidatorEngine`、`DecisionProposal` 尚未形成可重放、可恢复、可供 UI/MCP 直接消费的正式闭环 |
-| **`--resume` / phase-aware recovery 合同未落地** | 高 | 还没有围绕 canonical `thread_id` 的 `load_for_resume()`、phase 判定、interrupted run 恢复、degraded read 与恢复审计轨迹，恢复行为仍缺正式 contract |
+| **`--resume` / phase-aware recovery 合同部分落地** | 高 | v0.17.1110 已新增 `ProjectionResolver::load_for_resume(thread_id, rebuilder)` 与 `ResumeBundle { phase_at_resume, resume_reason, resume_actions }`，并覆盖 Fresh / InterruptedRun / StaleReadOnly / Unavailable 的恢复动作；non-terminal run 的事件化 interrupted 标记、ready-queue 重建和 `ContextFrame[E]` 恢复审计仍待收口 |
 | **Query Index / Rebuild 合同未落地** | 高 | 对象模型要求明确，但 targeted rebuild 的显式触发条件、降级读路径、projection freshness 与 rebuild failure 行为仍未正式定义 |
 | **Phase 2 的 DAG runtime 合同未完全收敛** | 高 | `dagrs` 依赖与 spike 已收敛到 `0.8.1`，但 Phase 2 graph build / event / report / retry / resume 语义仍需正式提升为共享 Runtime contract |
 | **Code UI 尚未收敛到共享 read model / interaction state / controller lease** | 高 | TUI / Web 仍各自维护 session snapshot 与交互状态，`pending_post_plan`、`pending_plan_revision`、approval、`request_user_input` 等还未进入共享 schema |
@@ -4632,16 +4632,27 @@ pub struct ThreadBundle {
     pub freshness: ProjectionFreshness,
 }
 
-#[async_trait]
-pub trait ProjectionResolver {
-    async fn load_for_read(&self, thread_id: ThreadId) -> Result<ThreadBundle>;
-    async fn load_for_resume(&self, thread_id: ThreadId) -> Result<ResumeBundle>;
-    async fn rebuild_thread(&self, thread_id: ThreadId) -> Result<MaterializedProjection>;
-    async fn apply_rebuild(
+pub struct ResumeBundle {
+    pub thread: ThreadProjection,
+    pub scheduler: SchedulerState,
+    pub freshness: ProjectionFreshness,
+    pub phase_at_resume: WorkflowPhase,
+    pub resume_reason: ResumeReason,
+    pub resume_actions: Vec<ResumeAction>,
+}
+
+impl ProjectionResolver {
+    async fn load_thread_bundle(&self, thread_id: ThreadId) -> Result<Option<ThreadBundle>>;
+    async fn load_or_rebuild_thread_bundle(
         &self,
-        expected: ProjectionVersions,
-        rebuild: MaterializedProjection,
-    ) -> Result<ThreadBundle>;
+        thread_id: ThreadId,
+        rebuilder: &ProjectionRebuilder<'_>,
+    ) -> Result<Option<ThreadBundle>>;
+    async fn load_for_resume(
+        &self,
+        thread_id: ThreadId,
+        rebuilder: &ProjectionRebuilder<'_>,
+    ) -> Result<Option<ResumeBundle>>;
 }
 ```
 

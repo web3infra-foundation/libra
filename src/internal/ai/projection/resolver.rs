@@ -2,18 +2,67 @@
 
 use anyhow::{Context, Result};
 use sea_orm::DatabaseConnection;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
     ProjectionRebuilder, SchedulerState, SchedulerStateRepository, ThreadId, ThreadProjection,
 };
-use crate::internal::ai::runtime::contracts::ProjectionFreshness;
+use crate::internal::ai::runtime::contracts::{ProjectionFreshness, WorkflowPhase};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadBundle {
     pub thread: ThreadProjection,
     pub scheduler: SchedulerState,
     pub freshness: ProjectionFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumeBundle {
+    pub thread: ThreadProjection,
+    pub scheduler: SchedulerState,
+    pub freshness: ProjectionFreshness,
+    pub phase_at_resume: WorkflowPhase,
+    pub resume_reason: ResumeReason,
+    pub resume_actions: Vec<ResumeAction>,
+}
+
+impl ResumeBundle {
+    pub fn from_thread_bundle(bundle: ThreadBundle) -> Self {
+        let phase_at_resume = infer_resume_phase(&bundle.thread, &bundle.scheduler);
+        let (resume_reason, resume_actions) =
+            resume_contract(bundle.freshness, phase_at_resume, &bundle.scheduler);
+
+        Self {
+            thread: bundle.thread,
+            scheduler: bundle.scheduler,
+            freshness: bundle.freshness,
+            phase_at_resume,
+            resume_reason,
+            resume_actions,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeReason {
+    FreshThread,
+    InterruptedRun,
+    ProjectionStale,
+    ProjectionUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeAction {
+    ReopenIntentReview,
+    ReopenPlanningReview,
+    ResumeScheduler,
+    RequeueInterruptedRun,
+    TriggerTargetedRebuild,
+    OpenReadOnly,
+    BlockAutomaticResume,
 }
 
 #[derive(Clone)]
@@ -83,6 +132,72 @@ impl ProjectionResolver {
                 }
             }
         }
+    }
+
+    pub async fn load_for_resume(
+        &self,
+        thread_id: ThreadId,
+        rebuilder: &ProjectionRebuilder<'_>,
+    ) -> Result<Option<ResumeBundle>> {
+        Ok(self
+            .load_or_rebuild_thread_bundle(thread_id, rebuilder)
+            .await?
+            .map(ResumeBundle::from_thread_bundle))
+    }
+}
+
+fn infer_resume_phase(thread: &ThreadProjection, scheduler: &SchedulerState) -> WorkflowPhase {
+    if scheduler.active_task_id.is_some()
+        || scheduler.active_run_id.is_some()
+        || scheduler.selected_plan_id.is_some()
+        || !scheduler.selected_plan_ids.is_empty()
+    {
+        WorkflowPhase::Execution
+    } else if thread.current_intent_id.is_some() || thread.latest_intent_id.is_some() {
+        WorkflowPhase::Planning
+    } else {
+        WorkflowPhase::Intent
+    }
+}
+
+fn resume_contract(
+    freshness: ProjectionFreshness,
+    phase_at_resume: WorkflowPhase,
+    scheduler: &SchedulerState,
+) -> (ResumeReason, Vec<ResumeAction>) {
+    match freshness {
+        ProjectionFreshness::Fresh
+            if scheduler.active_task_id.is_some() || scheduler.active_run_id.is_some() =>
+        {
+            (
+                ResumeReason::InterruptedRun,
+                vec![
+                    ResumeAction::ResumeScheduler,
+                    ResumeAction::RequeueInterruptedRun,
+                ],
+            )
+        }
+        ProjectionFreshness::Fresh => {
+            let action = match phase_at_resume {
+                WorkflowPhase::Intent => ResumeAction::ReopenIntentReview,
+                WorkflowPhase::Planning => ResumeAction::ReopenPlanningReview,
+                WorkflowPhase::Execution | WorkflowPhase::Validation | WorkflowPhase::Decision => {
+                    ResumeAction::ResumeScheduler
+                }
+            };
+            (ResumeReason::FreshThread, vec![action])
+        }
+        ProjectionFreshness::StaleReadOnly => (
+            ResumeReason::ProjectionStale,
+            vec![
+                ResumeAction::TriggerTargetedRebuild,
+                ResumeAction::OpenReadOnly,
+            ],
+        ),
+        ProjectionFreshness::Unavailable => (
+            ResumeReason::ProjectionUnavailable,
+            vec![ResumeAction::BlockAutomaticResume],
+        ),
     }
 }
 

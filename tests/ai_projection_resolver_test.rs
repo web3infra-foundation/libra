@@ -22,11 +22,12 @@ use libra::{
             history::HistoryManager,
             projection::{
                 LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef,
-                ProjectionRebuilder, ProjectionResolver, SchedulerState, SchedulerStateCasError,
-                SchedulerStateRepository, ThreadIntentLinkReason, ThreadIntentRef,
-                ThreadParticipant, ThreadParticipantRole, ThreadProjection,
+                ProjectionRebuilder, ProjectionResolver, ResumeAction, ResumeBundle, ResumeReason,
+                SchedulerState, SchedulerStateCasError, SchedulerStateRepository, ThreadBundle,
+                ThreadIntentLinkReason, ThreadIntentRef, ThreadParticipant, ThreadParticipantRole,
+                ThreadProjection,
             },
-            runtime::contracts::ProjectionFreshness,
+            runtime::contracts::{ProjectionFreshness, WorkflowPhase},
         },
         db,
     },
@@ -277,6 +278,137 @@ async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {
     assert_eq!(bundle.thread.thread_id, intent.header().object_id());
     assert_eq!(bundle.thread.intents.len(), 1);
     assert_eq!(bundle.scheduler.thread_id, intent.header().object_id());
+}
+
+/// Scenario: the resume entrypoint must do the rebuild/freshness step before
+/// returning phase-specific resume metadata. A thread rebuilt from an Intent + Task
+/// history has no selected plan yet, so resume must reopen the planning review rather
+/// than advancing the scheduler on an implicit stale bundle.
+#[tokio::test]
+#[serial]
+async fn projection_resolver_load_for_resume_rebuilds_and_classifies_planning_review() {
+    let (_dir, storage, history, db_conn) = setup_projection_history().await;
+    let actor = ActorRef::human("projection-resume").unwrap();
+    let intent = Intent::new(actor.clone(), "Resume missing projection").unwrap();
+    storage.put_tracked(&intent, &history).await.unwrap();
+    let mut task = Task::new(actor, "Recovered resume task", None).unwrap();
+    task.set_intent(Some(intent.header().object_id()));
+    storage.put_tracked(&task, &history).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db_conn.as_ref().clone());
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let resume = resolver
+        .load_for_resume(intent.header().object_id(), &rebuilder)
+        .await
+        .unwrap()
+        .expect("resume bundle");
+
+    assert_eq!(resume.thread.thread_id, intent.header().object_id());
+    assert_eq!(resume.scheduler.thread_id, intent.header().object_id());
+    assert_eq!(resume.freshness, ProjectionFreshness::Fresh);
+    assert_eq!(resume.phase_at_resume, WorkflowPhase::Planning);
+    assert_eq!(resume.resume_reason, ResumeReason::FreshThread);
+    assert_eq!(
+        resume.resume_actions,
+        vec![ResumeAction::ReopenPlanningReview]
+    );
+}
+
+/// Scenario: if the scheduler already has an active task/run, resume must surface
+/// the interrupted execution state explicitly. This guards the phase-aware contract
+/// from regressing into a generic "fresh thread" resume action.
+#[test]
+fn resume_bundle_marks_active_scheduler_as_interrupted_execution() {
+    let thread_id = id("88888888-8888-4888-8888-888888888888");
+    let active_task_id = id("99999999-9999-4999-8999-999999999999");
+    let active_run_id = id("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(active_task_id);
+    scheduler.active_run_id = Some(active_run_id);
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Fresh,
+    });
+
+    assert_eq!(resume.phase_at_resume, WorkflowPhase::Execution);
+    assert_eq!(resume.resume_reason, ResumeReason::InterruptedRun);
+    assert_eq!(
+        resume.resume_actions,
+        vec![
+            ResumeAction::ResumeScheduler,
+            ResumeAction::RequeueInterruptedRun
+        ]
+    );
+}
+
+/// Scenario: stale projection rows must request a targeted rebuild and only expose
+/// a read-only view. This keeps `--resume` from advancing the scheduler against a
+/// degraded projection.
+#[test]
+fn resume_bundle_routes_stale_projection_to_rebuild_and_read_only() {
+    let thread_id = id("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler: sample_scheduler(thread_id),
+        freshness: ProjectionFreshness::StaleReadOnly,
+    });
+
+    assert_eq!(resume.resume_reason, ResumeReason::ProjectionStale);
+    assert_eq!(
+        resume.resume_actions,
+        vec![
+            ResumeAction::TriggerTargetedRebuild,
+            ResumeAction::OpenReadOnly
+        ]
+    );
+}
+
+/// Scenario: unavailable projections must block automatic resume even when the
+/// scheduler shape looks executable. A rebuild failure is a diagnostics problem,
+/// not permission to continue with a stale active run.
+#[test]
+fn resume_bundle_blocks_unavailable_projection() {
+    let thread_id = id("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_run_id = Some(id("dddddddd-dddd-4ddd-8ddd-dddddddddddd"));
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Unavailable,
+    });
+
+    assert_eq!(resume.resume_reason, ResumeReason::ProjectionUnavailable);
+    assert_eq!(
+        resume.resume_actions,
+        vec![ResumeAction::BlockAutomaticResume]
+    );
+}
+
+/// Scenario: `ResumeBundle` is a read-side contract that can be exposed to UI /
+/// MCP / diagnostics. Pin the wire spelling for the phase, reason, and action list.
+#[test]
+fn resume_bundle_serializes_stable_contract_fields() {
+    let thread_id = id("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(id("ffffffff-ffff-4fff-8fff-ffffffffffff"));
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Fresh,
+    });
+    let value = serde_json::to_value(&resume).unwrap();
+
+    assert_eq!(value["phase_at_resume"], json!("execution"));
+    assert_eq!(value["resume_reason"], json!("interrupted_run"));
+    assert_eq!(
+        value["resume_actions"],
+        json!(["resume_scheduler", "requeue_interrupted_run"])
+    );
 }
 
 // ---------------------------------------------------------------------------
