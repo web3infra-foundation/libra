@@ -2166,6 +2166,14 @@ where
                 status = ?report.status,
                 "dagrs execution completed"
             );
+            run_state
+                .record_graph_execution_report(
+                    report.node_succeeded,
+                    report.node_failed,
+                    report.node_skipped,
+                    report.node_total,
+                )
+                .await;
             (Some(report), None)
         }
         Err(err) => {
