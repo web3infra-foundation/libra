@@ -47,6 +47,7 @@ In addition to objects reachable from any of our references, keep objects reacha
 
 ```bash
 $ libra prune HEAD~2
+$ libra prune test1 test2
 ```
 
 ## Examples
@@ -65,7 +66,7 @@ libra prune -v --expire "2 weeks ago"
 libra prune --expire 2024-01-01
 
 # Apart from refs, keep objects reachable from specified heads
-libra prune HEAD~2";
+libra prune HEAD~2
 ```
 
 ## Human Output
@@ -99,6 +100,27 @@ warnings and errors on stderr.
 - `--machine` writes the same schema as compact single-line JSON
 - `stderr` stays clean on success
 - dry-run output reports the planned prunable objects without actually removing objects.
+
+Example:
+
+```json
+{
+  "command": "prune",
+  "data": {
+    "expire": null,
+    "heads": [
+      "test"
+    ],
+    "prunable": [
+      "b13c288e945d00a4d16f195b33bf003b53d73dac",
+      "74689c87fb53b6d666de95efea667d99ba2fa52a"
+    ],
+    "dry_run": true,
+    "verbose": false
+  },
+  "ok": true
+}
+```
 
 ## Error Handling
 

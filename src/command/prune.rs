@@ -23,6 +23,7 @@ use git_internal::{
 	utils::read_sha,
 };
 use sea_orm::EntityTrait;
+use serde::Serialize;
 
 use crate::{
 	command::load_object,
@@ -35,7 +36,7 @@ use crate::{
 	utils::{
 		client_storage::ClientStorage,
 		error::{CliError, CliResult, StableErrorCode},
-		output::OutputConfig,
+		output::{OutputConfig, emit_json_data},
 		path,
 		util,
 	},
@@ -88,6 +89,15 @@ struct PrunePlan {
 	prunable: Vec<LooseObjectInfo>,
 }
 
+#[derive(Debug, Serialize)]
+struct PruneOutput {
+	prunable: Vec<String>,
+	expire: Option<String>,
+	heads: Vec<String>,
+	dry_run: bool,
+	verbose: bool,
+}
+
 /// Metadata for a loose object on disk.
 #[derive(Debug, Clone)]
 struct LooseObjectInfo {
@@ -114,7 +124,7 @@ pub async fn execute(args: PruneArgs) -> Result<(), String> {
 ///
 /// Returns `CliError` for invalid arguments, repository corruption, or IO
 /// failures while scanning or deleting objects.
-pub async fn execute_safe(args: PruneArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<()> {
 	util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
 	let storage = ClientStorage::init(path::objects());
@@ -131,6 +141,17 @@ pub async fn execute_safe(args: PruneArgs, _output: &OutputConfig) -> CliResult<
 		args.dry_run,
 		args.verbose || args.dry_run,
 	)?;
+
+	if output.is_json() {
+		let prune_output = PruneOutput {
+			prunable: plan.prunable.iter().map(|info| info.hash.to_string()).collect(),
+			expire: args.expire,
+			heads: args.heads,
+			dry_run: args.dry_run,
+			verbose: args.verbose,
+		};
+		emit_json_data("prune", &prune_output, output)?;
+	}
 
 	Ok(())
 }
