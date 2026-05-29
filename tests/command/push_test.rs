@@ -160,6 +160,22 @@ fn add_fake_ssh_remote(repo: &Path, remote_dir: &Path) {
     );
 }
 
+#[cfg(unix)]
+fn git_ref_exists(git_dir: &Path, refname: &str) -> bool {
+    Command::new("git")
+        .args([
+            "--git-dir",
+            git_dir.to_str().unwrap(),
+            "show-ref",
+            "--verify",
+            refname,
+        ])
+        .output()
+        .expect("failed to inspect git ref")
+        .status
+        .success()
+}
+
 #[test]
 fn test_push_cli_without_remote_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
@@ -1032,6 +1048,167 @@ fn test_push_multi_refspec_delete_tags_and_mirror_dry_run() {
     assert!(
         remote_only_ref_out.status.success(),
         "mirror dry-run must not delete remote-only ref"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_explicit_tag_refspec_uses_tag_namespace() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+
+    let tag_out = libra_command(&local_dir)
+        .args(["tag", "v1.0"])
+        .output()
+        .expect("failed to create local tag");
+    assert!(
+        tag_out.status.success(),
+        "tag create failed: {}",
+        String::from_utf8_lossy(&tag_out.stderr)
+    );
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "origin", "v1.0:release"])
+        .output()
+        .expect("failed to push explicit tag refspec");
+    assert!(
+        push_out.status.success(),
+        "explicit tag refspec push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&push_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("explicit tag refspec push should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    assert_eq!(json["data"]["updates"][0]["local_ref"], "refs/tags/v1.0");
+    assert_eq!(
+        json["data"]["updates"][0]["remote_ref"],
+        "refs/tags/release"
+    );
+
+    assert!(
+        git_ref_exists(&remote_dir, "refs/tags/release"),
+        "explicit tag refspec should create a remote tag ref"
+    );
+    assert!(
+        !git_ref_exists(&remote_dir, "refs/heads/release"),
+        "explicit tag refspec must not create a branch with the destination name"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_mirror_non_dry_run_deletes_remote_only_ref() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let initial_push = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &current_branch])
+        .output()
+        .expect("failed to push initial branch");
+    assert!(
+        initial_push.status.success(),
+        "initial push failed: {}",
+        String::from_utf8_lossy(&initial_push.stderr)
+    );
+
+    let main_hash = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read remote branch hash")
+            .stdout,
+    )
+    .expect("remote hash should be utf8")
+    .trim()
+    .to_string();
+    assert!(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "update-ref",
+                "refs/heads/remote-only",
+                &main_hash,
+            ])
+            .status()
+            .expect("failed to create remote-only ref")
+            .success()
+    );
+    assert!(
+        git_ref_exists(&remote_dir, "refs/heads/remote-only"),
+        "remote-only ref should exist before mirror push"
+    );
+
+    let mirror_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "--mirror", "origin"])
+        .output()
+        .expect("failed to run mirror push");
+    assert!(
+        mirror_out.status.success(),
+        "mirror push failed: {}",
+        String::from_utf8_lossy(&mirror_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&mirror_out.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("mirror push should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    let updates = json["data"]["updates"]
+        .as_array()
+        .expect("mirror updates should be an array");
+    assert!(updates.iter().any(|update| {
+        update["kind"] == "delete" && update["remote_ref"] == "refs/heads/remote-only"
+    }));
+    assert!(
+        !git_ref_exists(&remote_dir, "refs/heads/remote-only"),
+        "non-dry-run mirror push should delete remote-only ref"
     );
 }
 
