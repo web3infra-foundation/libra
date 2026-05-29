@@ -34,7 +34,8 @@ use super::goal_command::{
 };
 use crate::internal::ai::goal::{
     GoalActor, GoalBudget, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
-    GoalReplayOutcome, GoalSpec, GoalSpecError, GoalState, apply, replay,
+    GoalPlanStep, GoalReplayOutcome, GoalSpec, GoalSpecError, GoalState, GoalStepStatus, apply,
+    replay,
 };
 
 /// Schema-floor wrapper that re-runs `GoalSpec::new`'s objective
@@ -330,11 +331,12 @@ impl GoalSession {
 /// without requiring the user to invoke `/goal status` every turn.
 ///
 /// Shape (stable for golden tests):
-/// `Goal <8-hex-short> · <Status> · <completed>/<total> criteria[ · blocked: <reason>]`
+/// `Goal <8-hex-short> · <Status> · <completed>/<total> criteria[ · step <n>/<total> <StepStatus>: <label>][ · blocked: <reason>]`
 ///
 /// Examples:
 /// * Idle progress:  `Goal a1a1a1a1 · Active · 0/1 criteria`
-/// * Blocked:        `Goal a1a1a1a1 · Active · 0/1 criteria · blocked: BudgetApprovalRequired`
+/// * Running:        `Goal a1a1a1a1 · Running · 0/1 criteria · step 1/2 InProgress: run tests`
+/// * Blocked:        `Goal a1a1a1a1 · Blocked · 0/1 criteria · step 1/2 InProgress: run tests · blocked: BudgetApprovalRequired`
 /// * Completed:      `Goal a1a1a1a1 · Completed · 1/1 criteria`
 ///
 /// The short code is the first 8 hex digits of the Goal id; long
@@ -355,6 +357,17 @@ pub fn render_goal_status_line(state: &GoalState) -> String {
         "Goal {short_id} · {:?} · {completed}/{total} criteria",
         state.status,
     );
+    if !state.status.is_terminal()
+        && let Some((step_index, step)) = current_goal_status_step(state)
+    {
+        line.push_str(&format!(
+            " · step {}/{} {:?}: {}",
+            step_index + 1,
+            state.plan.len(),
+            step.status,
+            compact_goal_step_label(step)
+        ));
+    }
     if let Some(blocker) = state.blockers.last() {
         // `reason` is `GoalBlockReason`; use its Debug discriminant
         // name (everything before the first `{` / `(`) so a deep
@@ -368,6 +381,53 @@ pub fn render_goal_status_line(state: &GoalState) -> String {
         line.push_str(discriminant);
     }
     line
+}
+
+const GOAL_STATUS_STEP_LABEL_MAX_CHARS: usize = 48;
+
+fn current_goal_status_step(state: &GoalState) -> Option<(usize, &GoalPlanStep)> {
+    state
+        .plan
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.status == GoalStepStatus::InProgress)
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .find(|(_, step)| step.status == GoalStepStatus::Pending)
+        })
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .find(|(_, step)| step.status == GoalStepStatus::Skipped)
+        })
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, step)| step.status == GoalStepStatus::Completed)
+        })
+}
+
+fn compact_goal_step_label(step: &GoalPlanStep) -> String {
+    let label = if step.description.trim().is_empty() {
+        step.id.trim()
+    } else {
+        step.description.trim()
+    };
+    if label.chars().count() <= GOAL_STATUS_STEP_LABEL_MAX_CHARS {
+        return label.to_string();
+    }
+    let prefix_len = GOAL_STATUS_STEP_LABEL_MAX_CHARS.saturating_sub(3);
+    let mut compact: String = label.chars().take(prefix_len).collect();
+    compact.push_str("...");
+    compact
 }
 
 /// Render `state` as a multi-line human-readable summary — used by
@@ -814,6 +874,66 @@ mod tests {
             .unwrap();
         let line = render_goal_status_line(session.state());
         assert!(line.contains("0/1 criteria"), "got: {line}");
+    }
+
+    /// Once the supervisor has projected a live plan, the bottom
+    /// indicator includes the current step required by
+    /// `docs/improvement/opencode.md`'s Goal contract. The renderer
+    /// prefers an in-progress step over later pending work.
+    #[test]
+    fn render_goal_status_line_includes_current_plan_step() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let goal_id = session.state().spec.goal_id;
+        let base = session.state().updated_at;
+        let plan = GoalEventEnvelope::new(
+            goal_id,
+            base + chrono::Duration::seconds(1),
+            GoalEvent::PlanUpdated {
+                steps: vec![
+                    GoalPlanStep {
+                        id: "inspect".to_string(),
+                        description: "inspect docs".to_string(),
+                        status: GoalStepStatus::Pending,
+                        criterion_ids: Vec::new(),
+                    },
+                    GoalPlanStep {
+                        id: "test".to_string(),
+                        description: "run focused tests".to_string(),
+                        status: GoalStepStatus::Pending,
+                        criterion_ids: Vec::new(),
+                    },
+                ],
+            },
+        );
+        let started = GoalEventEnvelope::new(
+            goal_id,
+            base + chrono::Duration::seconds(2),
+            GoalEvent::StepStarted {
+                step_id: "test".to_string(),
+            },
+        );
+        session.append_supervisor_events(&[plan, started]).unwrap();
+
+        let line = render_goal_status_line(session.state());
+        assert!(
+            line.contains(" · step 2/2 InProgress: run focused tests"),
+            "got: {line}"
+        );
+
+        session
+            .cancel("stop after verification".to_string(), user_actor())
+            .unwrap();
+        let terminal_line = render_goal_status_line(session.state());
+        assert!(
+            !terminal_line.contains(" · step "),
+            "terminal Goal status lines should omit current-step details, got: {terminal_line}"
+        );
     }
 
     /// A terminal (Cancelled) session shows `Cancelled` in the
