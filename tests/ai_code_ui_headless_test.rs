@@ -113,6 +113,30 @@ fn build_runtime_with_persistence(
     )
 }
 
+/// The non-Codex headless runtime must expose a writable web-headless snapshot
+/// immediately, not the legacy read-only `web-ui-placeholder` snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn initial_snapshot_is_writable_non_placeholder_runtime() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("basic_chat", workdir.path().to_path_buf());
+
+    let snapshot = runtime.snapshot().await;
+
+    assert_eq!(snapshot.status, CodeUiSessionStatus::Idle);
+    assert_eq!(snapshot.provider.provider, "fake");
+    assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
+    assert!(snapshot.capabilities.message_input);
+    assert!(snapshot.capabilities.streaming_text);
+    assert!(snapshot.capabilities.tool_calls);
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .all(|entry| entry.id != "web-ui-placeholder"),
+        "headless web-only must not expose the read-only placeholder transcript",
+    );
+}
+
 /// Submitting a plain message must produce an assistant transcript entry that
 /// matches the fake provider's deterministic response, with the snapshot
 /// returning to `Idle` once the turn settles. This is the single anchor that
