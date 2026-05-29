@@ -1,13 +1,14 @@
 //! `libra agent clean [--all]` — drop temporary checkpoints from stopped
 //! sessions per `docs/improvement/entire.md` §7.4.
 //!
-//! V1 cuts temporary checkpoint rows from the SQLite catalog. Rewriting the
-//! `refs/libra/agent-traces` orphan ref tip to drop the matching commits is
-//! a follow-up in this same module — but Phase 2 first cut so far only
-//! emits `committed` checkpoints (no `temporary` ones), so the rewrite path
-//! has nothing to delete in practice. The CLI surface and the SQL deletion
-//! still ship now so users + tests can exercise the path; the ref-rewrite
-//! becomes meaningful once temporary checkpoints land in a follow-up.
+//! The default form scopes cleanup to the most recently stopped session;
+//! `--all` widens that to every stopped session. Active sessions are never
+//! cleaned because a temporary checkpoint may still be part of an in-flight
+//! external-agent turn.
+//!
+//! V1 cuts temporary checkpoint rows from the SQLite catalog. Rewriting
+//! `refs/libra/agent-traces` to make matching commits unreachable is a
+//! follow-up in this same module.
 
 use sea_orm::{ConnectionTrait, Statement};
 use serde::Serialize;
@@ -43,16 +44,10 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
         );
     }
 
-    // Count stopped sessions we'll consider. With --all we also include
-    // active sessions so an operator can wipe stale temp checkpoints on
-    // sessions whose host process crashed without firing SessionEnd.
-    let session_filter = if args.all {
-        "SELECT COUNT(*) AS n FROM agent_session"
-    } else {
-        "SELECT COUNT(*) AS n FROM agent_session WHERE state = 'stopped'"
-    };
+    let session_scope = session_scope_sql(args.all);
+    let session_filter = format!("SELECT COUNT(*) AS n FROM ({session_scope}) AS scoped_sessions");
     let row = conn
-        .query_one(Statement::from_sql_and_values(backend, session_filter, []))
+        .query_one(Statement::from_string(backend, session_filter))
         .await
         .map_err(|e| CliError::fatal(format!("failed to count agent_session: {e}")))?
         .ok_or_else(|| CliError::fatal("agent_session count returned no rows".to_string()))?;
@@ -62,13 +57,10 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
     // the chosen scope. The schema has ON DELETE CASCADE from session →
     // checkpoint, but a user calling `clean` only wants temporary rows
     // gone — committed rows stay regardless.
-    let delete_sql = if args.all {
+    let delete_sql = format!(
         "DELETE FROM agent_checkpoint WHERE scope = 'temporary' \
-         AND session_id IN (SELECT session_id FROM agent_session)"
-    } else {
-        "DELETE FROM agent_checkpoint WHERE scope = 'temporary' \
-         AND session_id IN (SELECT session_id FROM agent_session WHERE state = 'stopped')"
-    };
+         AND session_id IN (SELECT session_id FROM ({session_scope}) AS scoped_sessions)"
+    );
     let res = conn
         .execute(Statement::from_string(backend, delete_sql.to_string()))
         .await
@@ -84,6 +76,16 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
         },
         output,
     )
+}
+
+fn session_scope_sql(all: bool) -> &'static str {
+    if all {
+        return "SELECT session_id FROM agent_session WHERE state = 'stopped'";
+    }
+    "SELECT session_id FROM agent_session \
+     WHERE state = 'stopped' \
+     ORDER BY COALESCE(stopped_at, last_event_at, started_at) DESC, session_id DESC \
+     LIMIT 1"
 }
 
 fn emit_report(report: &CleanReport, output: &OutputConfig) -> CliResult<()> {
