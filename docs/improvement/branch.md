@@ -41,7 +41,7 @@
 
 - **生产调用点已迁移到 fallible API 并加回归守卫**：v0.17.148 已把 `stash branch` 的 branch-name 占用检查迁到 `exists_result()`，`bisect reset` 恢复原分支时已迁到 `find_branch_result()`；`tests/compat/branch_lossy_wrapper_guard.rs` 会扫描 `src/`，防止生产代码重新调用 `find_branch()` / `list_branches()` / `delete_branch()` / `exists()` 这类 lossy wrapper。
 - **`internal::branch` lossy wrapper 已删除**：v0.17.211 → v0.17.216 把 `log_test` / `fetch_test` / `reset_test` / `rebase_test` / `switch_test` / `commit_test` / `remote_test` / `branch_test` 共 39 处 lossy 调用全部迁到 `*_result` API；v0.17.217 删除 `list_branches[_with_conn]()` / `find_branch[_with_conn]()` / `delete_branch[_with_conn]()` / `exists[_with_conn]()` 全部 8 个 wrapper。后续重新引入 lossy 行为需要显式新增，`branch_lossy_wrapper_guard.rs` 仍作为防御性扫描保留。
-- **`DelegatedCli` 是兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；后续如需更细粒度 typed error 可再拆分
+- **`DelegatedCli` 是跨命令兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；v0.17.1102 起 `branch --contains` / `--no-contains` 的 `resolve_commits()` 与 `commit_contains()` 已收口到 branch-owned typed error，commit traversal 失败映射为 `CommitLoadFailed -> LBR-REPO-002`。
 
 ### 目标与非目标
 
@@ -49,7 +49,7 @@
 - `BranchError` typed error enum、显式 `StableErrorCode`、统一 `run_branch()` / `render_branch_output()`、create / force-delete 确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续收口少量 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
+- 继续收口 `switch` / `checkout` 这类跨命令 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
 
 **本批非目标：**
 - **不改变 `--contains` / `--no-contains` 过滤逻辑**。BFS 可达性检查保持现有算法
@@ -64,7 +64,7 @@
 3. **错误码显式映射**：每个 `BranchError` 变体都有确定的 `StableErrorCode`
 4. **JSON list 向后兼容**：现有 `branches` 数组 schema 不变，仅添加 `action` 字段作为 envelope 增量
 5. **先让底层 branch store 变成可失败 API**：命令层 typed error 不能建立在 `unwrap()` / `eprintln!()` / `None` 伪装失败之上
-6. **对复用 helper 保留 passthrough 例外**：`resolve_commits()` / `commit_contains()` 等当前仍返回 `CliError` 的路径，可先通过 `DelegatedCli` 透传，避免本批次过度扩散
+6. **对跨命令复用 helper 保留 passthrough 例外**：`resolve_commits()` / `commit_contains()` 已在 v0.17.1102 收口到 branch-owned typed error；剩余 `DelegatedCli` 例外只保留给 `switch` / `checkout` 这类跨命令委托，避免本批次过度扩散。
 
 ### 特性 1：BranchError typed error enum
 
@@ -179,7 +179,7 @@ pub enum BranchError {
 | `rename_branch:477-480` | `CliError::fatal("failed to create branch")` | `CreateFailed` |
 | `set_upstream_safe_with_output:210-213` | `CliError::fatal("invalid upstream")` | `InvalidUpstream` |
 | `execute_safe:161` | `detached_head_branch_error()` | `DetachedHead` |
-| `collect_branch_names()` / `list_branches()` | `resolve_commits()` / `commit_contains()` 现返 `CliError` | `DelegatedCli`（本批允许透传） |
+| `collect_branch_names()` / `list_branches()` | `resolve_commits()` / `commit_contains()` 已返回 `BranchError`；commit traversal 对象缺失映射为 `CommitLoadFailed` | `InvalidCommit` / `CommitLoadFailed` |
 
 **跨命令公开 API 边界说明：**
 

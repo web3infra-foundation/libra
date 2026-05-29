@@ -283,6 +283,9 @@ enum BranchError {
     #[error("failed to delete branch '{branch}': {detail}")]
     DeleteFailed { branch: String, detail: String },
 
+    #[error("failed to load commit {commit}: {detail}")]
+    CommitLoadFailed { commit: String, detail: String },
+
     #[error("too many arguments")]
     RenameTooManyArgs,
 
@@ -366,6 +369,10 @@ impl From<BranchError> for CliError {
             BranchError::DeleteFailed { branch, detail } => {
                 CliError::fatal(format!("failed to delete branch '{branch}': {detail}"))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            BranchError::CommitLoadFailed { commit, detail } => {
+                CliError::fatal(format!("failed to load commit {commit}: {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
             }
             BranchError::RenameTooManyArgs => CliError::command_usage("too many arguments")
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -828,15 +835,10 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         vec![]
     };
 
-    let contains_set = resolve_commits(&args.contains)
-        .await
-        .map_err(BranchError::DelegatedCli)?;
-    let no_contains_set = resolve_commits(&args.no_contains)
-        .await
-        .map_err(BranchError::DelegatedCli)?;
+    let contains_set = resolve_commits(&args.contains).await?;
+    let no_contains_set = resolve_commits(&args.no_contains).await?;
     for branches in [&mut local_branches, &mut remote_branches] {
-        filter_branches(branches, &contains_set, &no_contains_set)
-            .map_err(BranchError::DelegatedCli)?;
+        filter_branches_result(branches, &contains_set, &no_contains_set)?;
     }
     let local_branches_empty = local_branches.is_empty();
 
@@ -1134,10 +1136,18 @@ pub fn filter_branches(
     contains_set: &HashSet<ObjectHash>,
     no_contains_set: &HashSet<ObjectHash>,
 ) -> CliResult<()> {
+    filter_branches_result(branches, contains_set, no_contains_set).map_err(CliError::from)
+}
+
+fn filter_branches_result(
+    branches: &mut Vec<Branch>,
+    contains_set: &HashSet<ObjectHash>,
+    no_contains_set: &HashSet<ObjectHash>,
+) -> Result<(), BranchError> {
     // Filter branches, propagating errors.
     // `retain` doesn't support fallible predicates, so we capture the first
     // error and short-circuit the remaining iterations.
-    let mut error: Option<CliError> = None;
+    let mut error: Option<BranchError> = None;
     branches.retain(|branch| {
         if error.is_some() {
             return false;
@@ -1167,12 +1177,12 @@ pub fn filter_branches(
 }
 
 /// Resolve commit references to ObjectHash set.
-async fn resolve_commits(commits: &[String]) -> CliResult<HashSet<ObjectHash>> {
+async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, BranchError> {
     let mut set = HashSet::new();
     for commit in commits {
-        let target_commit = get_target_commit(commit).await.map_err(|e| {
-            CliError::fatal(format!("{}", e)).with_stable_code(StableErrorCode::CliInvalidTarget)
-        })?;
+        let target_commit = get_target_commit(commit)
+            .await
+            .map_err(|_| BranchError::InvalidCommit(commit.clone()))?;
         set.insert(target_commit);
     }
     Ok(set)
@@ -1184,7 +1194,7 @@ async fn resolve_commits(commits: &[String]) -> CliResult<HashSet<ObjectHash>> {
 fn commit_contains(
     branch: &Branch,
     target_commits: &HashSet<ObjectHash>,
-) -> Result<bool, CliError> {
+) -> Result<bool, BranchError> {
     // do BFS to find out whether `branch` contains `target_commit` or not
     let mut q = VecDeque::new();
     let mut visited = HashSet::new();
@@ -1199,10 +1209,11 @@ fn commit_contains(
         }
 
         // enqueue all parent commits of `current_commit`
-        let current_commit_object: Commit = load_object(&current_commit).map_err(|e| {
-            CliError::fatal(format!("failed to load commit {}: {}", current_commit, e))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-        })?;
+        let current_commit_object: Commit =
+            load_object(&current_commit).map_err(|error| BranchError::CommitLoadFailed {
+                commit: current_commit.to_string(),
+                detail: error.to_string(),
+            })?;
         for parent_commit in current_commit_object.parent_commit_ids {
             if !visited.contains(&parent_commit) {
                 visited.insert(parent_commit);
@@ -1250,14 +1261,14 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::HashSet, str::FromStr};
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
     use serial_test::serial;
 
     use super::{
-        Branch, BranchError, format_branch_name, load_remote_branches_with_conn,
+        Branch, BranchError, commit_contains, format_branch_name, load_remote_branches_with_conn,
         map_head_commit_store_error,
     };
     use crate::utils::error::{CliError, StableErrorCode};
@@ -1281,7 +1292,7 @@ mod tests {
     ///
     /// Source-chained / wrapper variants (ConfigReadFailed,
     /// ConfigWriteFailed, StorageQueryFailed, StoredReferenceCorrupt,
-    /// CreateFailed, DeleteFailed, DelegatedCli) wrap upstream error
+    /// CreateFailed, DeleteFailed, CommitLoadFailed, DelegatedCli) wrap upstream error
     /// messages and are intentionally skipped — their content is owned
     /// by the wrapped type.
     #[test]
@@ -1327,6 +1338,34 @@ mod tests {
         assert_eq!(
             BranchError::RenameTooManyArgs.to_string(),
             "too many arguments",
+        );
+    }
+
+    #[test]
+    fn commit_contains_surfaces_typed_commit_load_failure() {
+        let corrupt_commit = any_hash();
+        let branch = Branch {
+            name: "corrupt".to_string(),
+            commit: corrupt_commit,
+            remote: None,
+        };
+        let mut targets = HashSet::new();
+        targets.insert(
+            ObjectHash::from_str(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        );
+
+        let error = commit_contains(&branch, &targets)
+            .expect_err("corrupt branch commit should fail traversal");
+        let BranchError::CommitLoadFailed { commit, .. } = &error else {
+            panic!("expected CommitLoadFailed, got: {error:?}");
+        };
+        assert_eq!(commit, &corrupt_commit.to_string());
+        assert_eq!(
+            CliError::from(error).stable_code(),
+            StableErrorCode::RepoCorrupt
         );
     }
 
