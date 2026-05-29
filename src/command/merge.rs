@@ -200,6 +200,8 @@ pub(crate) enum PullMergeError {
     WorkdirReset(String),
     #[error("failed to load tree '{tree_id}': {detail}")]
     TreeLoad { tree_id: String, detail: String },
+    #[error("failed to load object '{object_id}': {detail}")]
+    ObjectLoad { object_id: String, detail: String },
     #[error("failed to resolve HEAD state: {0}")]
     HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
@@ -222,7 +224,8 @@ impl From<PullMergeError> for CliError {
             PullMergeError::TargetLoad { .. }
             | PullMergeError::CurrentLoad { .. }
             | PullMergeError::History(..)
-            | PullMergeError::TreeLoad { .. } => {
+            | PullMergeError::TreeLoad { .. }
+            | PullMergeError::ObjectLoad { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
             }
             PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
@@ -436,7 +439,7 @@ async fn perform_three_way_merge(
     let base_items = commit_tree_items(&base_commit)?;
     let our_items = commit_tree_items(&current_commit)?;
     let their_items = commit_tree_items(&target_commit)?;
-    let merge_result = merge_tree_items(&base_items, &our_items, &their_items);
+    let merge_result = merge_tree_items(&base_items, &our_items, &their_items)?;
     let files_changed = count_item_map_changes(&our_items, &merge_result.merged_items);
 
     if !merge_result.conflicts.is_empty() {
@@ -944,12 +947,12 @@ fn resolve_three_way(
     base: Option<&MergeTreeEntry>,
     ours: Option<&MergeTreeEntry>,
     theirs: Option<&MergeTreeEntry>,
-) -> MergeResolution {
+) -> Result<MergeResolution, PullMergeError> {
     let base_present = base.is_some();
     let ours_state = classify_relative_to_base(base, ours);
     let theirs_state = classify_relative_to_base(base, theirs);
 
-    match (base_present, ours_state, theirs_state) {
+    Ok(match (base_present, ours_state, theirs_state) {
         (false, RelativeState::Missing, RelativeState::Missing) => MergeResolution::Delete,
         (false, RelativeState::Added(ours), RelativeState::Missing) => MergeResolution::Use(ours),
         (false, RelativeState::Missing, RelativeState::Added(theirs)) => {
@@ -973,6 +976,10 @@ fn resolve_three_way(
         (true, RelativeState::Modified(ours), RelativeState::Modified(theirs)) => {
             if ours == theirs {
                 MergeResolution::Use(theirs)
+            } else if let Some(base) = base
+                && let Some(merged) = try_merge_blob_contents(base, ours, theirs)?
+            {
+                MergeResolution::Use(merged)
             } else {
                 MergeResolution::Conflict(ConflictKind::BothChanged {
                     ours: ours.hash,
@@ -992,14 +999,56 @@ fn resolve_three_way(
             MergeResolution::Conflict(ConflictKind::OursModifiedTheirsDeleted { ours: ours.hash })
         }
         _ => MergeResolution::Delete,
+    })
+}
+
+fn try_merge_blob_contents(
+    base: &MergeTreeEntry,
+    ours: MergeTreeEntry,
+    theirs: MergeTreeEntry,
+) -> Result<Option<MergeTreeEntry>, PullMergeError> {
+    if base.mode != ours.mode
+        || base.mode != theirs.mode
+        || !matches!(base.mode, TreeItemMode::Blob | TreeItemMode::BlobExecutable)
+    {
+        return Ok(None);
     }
+
+    let base_blob = load_merge_blob(base.hash)?;
+    let ours_blob = load_merge_blob(ours.hash)?;
+    let theirs_blob = load_merge_blob(theirs.hash)?;
+
+    let Ok(merged_bytes) = diffy::merge_bytes(&base_blob.data, &ours_blob.data, &theirs_blob.data)
+    else {
+        return Ok(None);
+    };
+
+    let merged_blob = Blob::from_content_bytes(merged_bytes);
+    save_object(&merged_blob, &merged_blob.id).map_err(|error| {
+        PullMergeError::TreeCreate(format!(
+            "failed to save auto-merged blob {}: {error}",
+            merged_blob.id
+        ))
+    })?;
+
+    Ok(Some(MergeTreeEntry {
+        hash: merged_blob.id,
+        mode: ours.mode,
+    }))
+}
+
+fn load_merge_blob(hash: ObjectHash) -> Result<Blob, PullMergeError> {
+    load_object(&hash).map_err(|error| PullMergeError::ObjectLoad {
+        object_id: hash.to_string(),
+        detail: error.to_string(),
+    })
 }
 
 fn merge_tree_items(
     base_items: &HashMap<PathBuf, MergeTreeEntry>,
     our_items: &HashMap<PathBuf, MergeTreeEntry>,
     their_items: &HashMap<PathBuf, MergeTreeEntry>,
-) -> ThreeWayMergeResult {
+) -> Result<ThreeWayMergeResult, PullMergeError> {
     let mut all_paths: HashSet<PathBuf> = base_items.keys().cloned().collect();
     all_paths.extend(our_items.keys().cloned());
     all_paths.extend(their_items.keys().cloned());
@@ -1011,7 +1060,7 @@ fn merge_tree_items(
             base_items.get(&path),
             our_items.get(&path),
             their_items.get(&path),
-        ) {
+        )? {
             MergeResolution::Use(hash) => {
                 merged_items.insert(path, hash);
             }
@@ -1020,10 +1069,10 @@ fn merge_tree_items(
         }
     }
 
-    ThreeWayMergeResult {
+    Ok(ThreeWayMergeResult {
         merged_items,
         conflicts,
-    }
+    })
 }
 
 fn count_item_map_changes(
@@ -1407,6 +1456,14 @@ mod tests {
             "failed to load tree 'abc123': decode failed",
         );
         assert_eq!(
+            PullMergeError::ObjectLoad {
+                object_id: "def456".to_string(),
+                detail: "blob missing".to_string(),
+            }
+            .to_string(),
+            "failed to load object 'def456': blob missing",
+        );
+        assert_eq!(
             PullMergeError::HeadResolve("db locked".to_string()).to_string(),
             "failed to resolve HEAD state: db locked",
         );
@@ -1432,7 +1489,8 @@ mod tests {
         let mut their_items = HashMap::new();
         their_items.insert(path.clone(), theirs);
 
-        let result = merge_tree_items(&base_items, &our_items, &their_items);
+        let result =
+            merge_tree_items(&base_items, &our_items, &their_items).expect("merge tree items");
 
         assert!(result.conflicts.is_empty());
         assert_eq!(result.merged_items.get(&path), Some(&theirs));

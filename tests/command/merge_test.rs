@@ -388,6 +388,71 @@ async fn test_merge_diverged_branch_creates_two_parent_commit() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_merge_same_file_non_overlapping_edits_merges_without_conflict() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(
+        temp_path,
+        "tracked.txt",
+        "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        "Prepare shared merge fixture",
+    );
+
+    let output = run_libra_command(&["branch", "feature"], temp_path);
+    assert_cli_success(&output, "create feature");
+
+    let output = run_libra_command(&["checkout", "feature"], temp_path);
+    assert_cli_success(&output, "checkout feature");
+
+    commit_file(
+        temp_path,
+        "tracked.txt",
+        "line 1\nline 2\nline 3\nline 4\nline 5 from feature\n",
+        "Edit last line on feature",
+    );
+
+    let output = run_libra_command(&["checkout", "main"], temp_path);
+    assert_cli_success(&output, "checkout main");
+
+    commit_file(
+        temp_path,
+        "tracked.txt",
+        "line 1 from main\nline 2\nline 3\nline 4\nline 5\n",
+        "Edit first line on main",
+    );
+
+    let merge_output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&merge_output, "non-overlapping same-file merge");
+
+    let merged = std::fs::read_to_string(temp_path.join("tracked.txt")).expect("read merged file");
+    assert_eq!(
+        merged, "line 1 from main\nline 2\nline 3\nline 4\nline 5 from feature\n",
+        "non-overlapping same-file edits should merge without conflict markers"
+    );
+    assert!(
+        !merged.contains("<<<<<<<") && !merged.contains("=======") && !merged.contains(">>>>>>>"),
+        "clean same-file merge must not leave conflict markers: {merged}"
+    );
+    assert!(
+        !temp_path.join(".libra").join("merge-state.json").exists(),
+        "clean same-file merge must not leave merge state"
+    );
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert_eq!(
+        commit.parent_commit_ids.len(),
+        2,
+        "clean same-file merge should create a two-parent commit"
+    );
+}
+
 #[test]
 #[serial]
 fn test_merge_diverged_nested_directory_file_survives_three_way() {
