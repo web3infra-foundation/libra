@@ -36,7 +36,7 @@
 | API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | API client、组件、browser audit scenario 已有回归；后续新增字段/错误码时继续同步测试 |
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
-| TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
+| TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease；v0.17.1126 已用 `browser_control_resolution_matrix_pins_mode_provider_and_host_contract` 固定 `{off, loopback} x {host} x {TUI, web-only}` 的解析矩阵 | 后续仅维护更高层 PTY/browser scenario 扩展 |
 | Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` / `submit_plan_draft` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
@@ -66,6 +66,11 @@
 - `LocalTui` 与 `Fixed { Tui }` 语义不同：前者是可被 browser/automation lease 接管的可见 TUI owner，后者是只读观察时的永久阻断。
 - Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`、`submit_plan_draft`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task`、`submit_intent_draft` 和完整 IntentSpec plan approval workflow 仍保持 gated。
 - `web/out/` 是 Rust embed 输入。任何 UI source 变更都必须 `pnpm --dir web build`，否则二进制仍服务旧页面。
+
+## 0.17.1126 增量收口（2026-05-30）
+
+- **Browser-control 解析矩阵已固定**：`src/command/code.rs` 新增 `browser_control_resolution_matrix_pins_mode_provider_and_host_contract`，覆盖 TUI 默认 off、TUI 显式 loopback、非 Codex web-only 默认 off、Codex web-only 默认 loopback、用户显式 off 覆盖默认值，以及非 loopback host 的 fail-closed 规则。
+- **文档状态调整**：上方 TUI write bridge 行不再把 `{off, loopback} x {host} x {TUI, web-only}` 解析矩阵列为待收口项；剩余工作只保留更高层 PTY / browser scenario 的 additive 扩展。
 
 ## 后续实施计划
 

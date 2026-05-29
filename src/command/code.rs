@@ -4370,6 +4370,130 @@ mod tests {
     }
 
     #[test]
+    fn browser_control_resolution_matrix_pins_mode_provider_and_host_contract() {
+        #[derive(Copy, Clone)]
+        struct BrowserControlCase {
+            name: &'static str,
+            web_only: bool,
+            provider: CodeProvider,
+            explicit: Option<BrowserControlMode>,
+            host: &'static str,
+            expected: Result<BrowserControlMode, &'static str>,
+        }
+
+        let cases = [
+            BrowserControlCase {
+                name: "tui default stays off even on non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "tui explicit off allows non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Off),
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "tui explicit loopback allows loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "127.0.0.1",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+            BrowserControlCase {
+                name: "tui explicit loopback rejects non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "non-codex web-only default stays off on non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Ollama,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "non-codex web-only explicit loopback rejects non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Ollama,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "codex web-only defaults to loopback on loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: None,
+                host: "localhost",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+            BrowserControlCase {
+                name: "codex web-only default loopback rejects non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "codex web-only explicit off allows non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: Some(BrowserControlMode::Off),
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "codex web-only explicit loopback allows ipv6 loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "::1",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+        ];
+
+        for case in cases {
+            let mut args = base_args();
+            args.web_only = case.web_only;
+            args.provider = case.provider;
+            args.browser_control = case.explicit;
+            args.host = case.host.to_string();
+
+            match (resolve_browser_control_mode(&args), case.expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(actual, expected, "case: {}", case.name);
+                }
+                (Err(error), Err(expected_text)) => {
+                    let rendered = error.to_string();
+                    assert!(
+                        rendered.contains(expected_text),
+                        "case: {}; expected error containing {expected_text:?}, got {rendered}",
+                        case.name
+                    );
+                }
+                (actual, expected) => {
+                    panic!(
+                        "case: {}; browser-control resolution mismatch; actual={actual:?}, expected={expected:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rejects_control_write_in_stdio_mode() {
         let mut args = base_args();
         args.stdio = true;
