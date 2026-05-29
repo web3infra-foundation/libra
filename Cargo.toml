@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1111"
+version = "0.17.1112"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -217,6 +217,10 @@ path = "tests/compat/all_production_unwrap_guard.rs"
 [[test]]
 name = "compat_agent_run_non_exhaustive_guard"
 path = "tests/compat/agent_run_non_exhaustive_guard.rs"
+
+[[test]]
+name = "compat_agent_docs_contract"
+path = "tests/compat/agent_docs_contract.rs"
 
 [[test]]
 name = "compat_help_examples_banner"

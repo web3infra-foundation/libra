@@ -4318,7 +4318,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | **安全 / 审批 / tool boundary 仍未由 Runtime 接管** | 高 | `approvalPolicy`、readonly tool 边界、鉴权、secret redaction 与 durable audit 仍以 provider-specific / ad hoc 方式存在，尚未形成共享执行边界 |
 | **prompt assembly 仍是 Codex / generic 双入口** | 中 | Intent / Planning / Task prompt 组装尚未统一到共享 `PromptPackage` / `IntentPromptBuilder` / `PlanningPromptBuilder` / `TaskPromptBuilder`，Phase 语义容易继续漂移 |
 | **共享函数边界未定义** | 中 | plan review、revision chain、formal write、projection update、interaction handling 哪些必须共享未说明 |
-| `claudecode` provider 仍存在 | 中 | `code.rs` 仍有 Claudecode provider 和相关分支；删除路径已由本文 [Implementation Phase 1: Runtime Foundation + Execution Contract](#implementation-phase-1-runtime-foundation--execution-contract) 中的 `Wave 1C: Provider Surface Cleanup + claudecode Hard Delete` 明确（同时见本文设计原则 #8）：cutover 完成后同一 PR 一次性删除 `CodeProvider::Claudecode` / flags / 帮助文本 / 文档 / 测试 / `src/internal/ai/claudecode/`，不保留 feature flag 或兼容别名 |
+| `claudecode` provider 已硬删除，迁移提示需保留 | 低 | `src/internal/ai/claudecode/` 不存在，`src/command/code.rs` 不再包含 `CodeProvider::Claudecode`；当前仅保留 `src/cli.rs::removed_code_claudecode_hints` 给旧命令返回迁移提示，并由 `tests/command/code_test.rs` + `compat_agent_docs_contract` 防止文档或 provider surface 回退 |
 | 多套 thread/session 标识并存 | 中 | `SessionState.id`、Code UI `session_id`、`provider_session_resume`、Codex `threadId` |
 | provider-specific history 仍为主真相源 | 中 | `codex/history.rs` 仍驱动 thread summary / rebuild |
 | `pending_plan_revision` 游离于 Scheduler 投影外 | 中 | 未映射到 `Scheduler.selected_plan_ids` / `current_plan_heads` |
