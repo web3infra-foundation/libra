@@ -265,6 +265,9 @@ enum BranchError {
     #[error("invalid upstream '{0}'")]
     InvalidUpstream(String),
 
+    #[error("remote '{0}' not found")]
+    RemoteNotFound(String),
+
     #[error("{0}")]
     ConfigReadFailed(String),
 
@@ -346,6 +349,11 @@ impl From<BranchError> for CliError {
                 CliError::fatal(format!("invalid upstream '{upstream}'"))
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("expected format: 'remote/branch'")
+            }
+            BranchError::RemoteNotFound(remote) => {
+                CliError::fatal(format!("remote '{remote}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra remote -v' to inspect configured remotes")
             }
             BranchError::ConfigReadFailed(detail) => CliError::fatal(detail)
                 .with_stable_code(StableErrorCode::IoReadFailed)
@@ -530,6 +538,16 @@ async fn set_upstream_with_conn<C: ConnectionTrait>(
     let (remote, remote_branch) = upstream
         .split_once('/')
         .ok_or_else(|| BranchError::InvalidUpstream(upstream.to_string()))?;
+    if remote.is_empty() || remote_branch.is_empty() {
+        return Err(BranchError::InvalidUpstream(upstream.to_string()));
+    }
+    if ConfigKv::remote_config_with_conn(db, remote)
+        .await
+        .map_err(|e| branch_config_read_error(format!("remote '{remote}' configuration"), e))?
+        .is_none()
+    {
+        return Err(BranchError::RemoteNotFound(remote.to_string()));
+    }
     let branch_config = ConfigKv::branch_config_with_conn(db, branch)
         .await
         .map_err(|e| {
@@ -1334,6 +1352,10 @@ mod tests {
         assert_eq!(
             BranchError::InvalidUpstream("origin/missing".to_string()).to_string(),
             "invalid upstream 'origin/missing'",
+        );
+        assert_eq!(
+            BranchError::RemoteNotFound("origin".to_string()).to_string(),
+            "remote 'origin' not found",
         );
         assert_eq!(
             BranchError::RenameTooManyArgs.to_string(),

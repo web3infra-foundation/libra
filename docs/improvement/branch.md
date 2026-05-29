@@ -35,6 +35,7 @@
 - **成功确认消息已落地**：create、safe delete、force-delete、rename、set-upstream、show-current 均已有 human 输出
 - **fuzzy suggestion 已落地**：分支不存在时会返回 Levenshtein 近似提示
 - **`--help` EXAMPLES 已落地**：帮助文本已同时保留 compatibility notes 和示例
+- **`--set-upstream-to` remote 存在性验证已落地（v0.17.1130）**：`branch -u <remote>/<branch>` 会在写入 `branch.<name>.remote/merge` 前验证 `remote.<remote>.url` 已配置；未知 remote 返回 `LBR-CLI-003`，避免 JSON/machine 消费者看到不可用的成功 tracking 输出
 - **现有测试已验证关键契约**：`branch_test.rs` 已覆盖 invalid start point error code、detached HEAD set-upstream 和 JSON create schema
 
 后续维护项：
@@ -54,7 +55,7 @@
 **本批非目标：**
 - **不改变 `--contains` / `--no-contains` 过滤逻辑**。BFS 可达性检查保持现有算法
 - **不改变 merge 检查逻辑**。`delete_branch_safe()` 的 merge 检查行为不变
-- **不引入 `--set-upstream-to` 的 JSON 输出中的 remote 验证**。remote 存在性检查留后续
+- **`--set-upstream-to` 的 remote 存在性检查已收口**。当前只验证 remote 配置存在，不要求对应 remote-tracking branch 已 fetch 到本地
 - **不改变 JSON list 现有 schema**。`branches` 数组中的 `name`/`current`/`commit` 字段保持兼容
 
 ### 设计原则

@@ -172,6 +172,30 @@ fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
     assert!(stderr.contains("checkout a branch first"));
 }
 
+/// Scenario: `branch --set-upstream-to <remote>/<branch>` must reject a
+/// remote name that has no configured `remote.<name>.url`. Previously this
+/// silently wrote `branch.main.remote=origin`, leaving JSON consumers with a
+/// successful set-upstream output that could not be used by later push/pull
+/// flows.
+#[test]
+fn test_branch_set_upstream_rejects_unknown_remote() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("remote 'origin' not found"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("libra remote -v"),
+        "missing remediation hint in stderr: {stderr}"
+    );
+}
+
 /// Scenario (Unix only): if SQLite write permission is revoked
 /// (`chmod 0o444`), `branch --set-upstream-to` must surface an
 /// `LBR-IO-002` error mentioning the failing config key. The original
@@ -187,6 +211,16 @@ fn test_branch_set_upstream_surfaces_config_write_failure() {
     }
 
     let repo = create_committed_repo_via_cli();
+    let remote_add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add origin");
     let db_path = repo.path().join(".libra").join("libra.db");
     let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
 
@@ -218,6 +252,16 @@ fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
     }
 
     let repo = create_committed_repo_via_cli();
+    let remote_add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add origin");
 
     let first = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
     assert_cli_success(&first, "initial set-upstream");

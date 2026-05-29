@@ -709,6 +709,16 @@ fn quiet_branch_set_upstream_suppresses_output() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo_with_commit_via_cli(&repo);
+    let remote_add = run(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        &repo,
+    );
+    assert_cli_success(&remote_add, "remote add origin");
 
     let output = run(
         &["--quiet", "branch", "--set-upstream-to", "origin/main"],
