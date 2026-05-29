@@ -2904,6 +2904,47 @@ mod tests {
             })
             .expect("dispatch must write a Spawned event with the child agent_run_id");
         let agent_run_id_string = agent_run_id.0.to_string();
+        let child_events = store
+            .child(&agent_run_id_string)
+            .load_events()
+            .expect("child session JSONL events readable");
+        let child_event_kinds: Vec<_> = child_events
+            .iter()
+            .map(crate::internal::ai::runtime::Event::event_kind)
+            .collect();
+        assert_eq!(
+            child_event_kinds,
+            vec![
+                "session_snapshot",
+                "tool_call",
+                "session_snapshot",
+                "tool_result",
+                "session_snapshot",
+                "session_snapshot",
+            ],
+            "child JSONL should persist dedicated tool_call/tool_result events between snapshots",
+        );
+        let child_tool_call = child_events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("child JSONL should include a dedicated tool_call event");
+        assert_eq!(child_tool_call.agent_run_id, agent_run_id);
+        assert_eq!(child_tool_call.tool_name, "apply_patch");
+        assert_eq!(child_tool_call.call_id, "call_apply_patch_1");
+        let child_tool_result = child_events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("child JSONL should include a dedicated tool_result event");
+        assert_eq!(child_tool_result.agent_run_id, agent_run_id);
+        assert_eq!(child_tool_result.tool_name, "apply_patch");
+        assert_eq!(child_tool_result.call_id, "call_apply_patch_1");
+        assert_eq!(child_tool_result.status, "success");
         let child_state = store
             .child(&agent_run_id_string)
             .load_state()

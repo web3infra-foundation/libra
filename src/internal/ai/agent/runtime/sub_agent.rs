@@ -43,7 +43,7 @@ use crate::internal::ai::{
     sandbox::ToolRuntimeContext,
     session::{
         SessionId, SessionMessage, SessionState,
-        jsonl::{SessionEvent, SessionJsonlStore},
+        jsonl::{SessionEvent, SessionJsonlStore, SessionToolCallEvent, SessionToolResultEvent},
     },
     tools::{ToolOutput, ToolRegistry},
     usage::UsageRecorder,
@@ -1022,6 +1022,16 @@ impl ChildRunObserver {
             },
         );
     }
+
+    fn append_child_event(&self, event: SessionEvent, warning: &'static str) {
+        append_child_session_event(
+            &self.child_store,
+            event,
+            warning,
+            self.agent_run_id,
+            &self.subagent_name,
+        );
+    }
 }
 
 impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
@@ -1050,6 +1060,18 @@ impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
+        self.append_child_event(
+            SessionEvent::tool_call(SessionToolCallEvent {
+                event_id: uuid::Uuid::new_v4(),
+                recorded_at: chrono::Utc::now(),
+                agent_run_id: self.agent_run_id,
+                subagent_name: self.subagent_name.clone(),
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.clone(),
+            }),
+            "failed to append sub-agent child tool-call event",
+        );
         self.push_child_message(
             "tool_call",
             serde_json::json!({
@@ -1068,17 +1090,43 @@ impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
         tool_name: &str,
         result: &Result<ToolOutput, String>,
     ) {
-        let payload = match result {
-            Ok(output) => serde_json::json!({
-                "id": call_id,
-                "name": tool_name,
-                "status": if output.is_success() { "success" } else { "failure" },
-                "result": output.clone().into_response(),
+        let (status, result_value, error_value) = match result {
+            Ok(output) => (
+                if output.is_success() {
+                    "success".to_string()
+                } else {
+                    "failure".to_string()
+                },
+                Some(output.clone().into_response()),
+                None,
+            ),
+            Err(error) => ("error".to_string(), None, Some(error.clone())),
+        };
+        self.append_child_event(
+            SessionEvent::tool_result(SessionToolResultEvent {
+                event_id: uuid::Uuid::new_v4(),
+                recorded_at: chrono::Utc::now(),
+                agent_run_id: self.agent_run_id,
+                subagent_name: self.subagent_name.clone(),
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                status: status.clone(),
+                result: result_value.clone(),
+                error: error_value.clone(),
             }),
-            Err(error) => serde_json::json!({
+            "failed to append sub-agent child tool-result event",
+        );
+        let payload = match error_value.as_ref() {
+            None => serde_json::json!({
                 "id": call_id,
                 "name": tool_name,
-                "status": "error",
+                "status": status,
+                "result": result_value,
+            }),
+            Some(error) => serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "status": status,
                 "error": error,
             }),
         };
@@ -1361,6 +1409,23 @@ fn append_child_session_snapshot(
     subagent_name: &str,
 ) {
     if let Err(error) = store.append(&SessionEvent::snapshot(state.clone())) {
+        tracing::warn!(
+            error = %error,
+            agent_run_id = %agent_run_id.0,
+            subagent = %subagent_name,
+            "{warning}",
+        );
+    }
+}
+
+fn append_child_session_event(
+    store: &SessionJsonlStore,
+    event: SessionEvent,
+    warning: &'static str,
+    agent_run_id: AgentRunId,
+    subagent_name: &str,
+) {
+    if let Err(error) = store.append(&event) {
         tracing::warn!(
             error = %error,
             agent_run_id = %agent_run_id.0,
