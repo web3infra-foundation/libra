@@ -622,9 +622,19 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     };
 
     validate_set_upstream_plan(&args, &plans)?;
+    let upstream_plan = if args.set_upstream && !args.dry_run {
+        plans.first().cloned()
+    } else {
+        None
+    };
     plans.retain(|plan| plan.update.old_oid.as_deref() != Some(&plan.update.new_oid));
 
     if plans.is_empty() {
+        let upstream_set = if let Some(plan) = upstream_plan.as_ref() {
+            Some(set_upstream_from_push_plan(&repository, plan, output).await?)
+        } else {
+            None
+        };
         return Ok(PushOutput {
             remote: repository.clone(),
             url: repo_url,
@@ -635,8 +645,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             lfs_upload: LfsUploadSummary { files_uploaded: 0 },
             dry_run: args.dry_run,
             up_to_date: true,
-            upstream_set: None,
-            warnings: vec![],
+            upstream_set,
+            warnings,
         });
     }
 
@@ -788,26 +798,8 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
 
     update_remote_tracking_refs(&repository, &plans).await?;
 
-    let upstream_set = if args.set_upstream {
-        let first_update = plans.first().ok_or_else(|| {
-            PushError::RepoState("--set-upstream requires a ref update".to_string())
-        })?;
-        let local_branch = first_update
-            .update
-            .local_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&first_update.update.local_ref);
-        let remote_branch = first_update
-            .update
-            .remote_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&first_update.update.remote_ref);
-        let upstream = format!("{repository}/{remote_branch}");
-        let silent_output = silent_output_config(output);
-        branch::set_upstream_safe_with_output(local_branch, &upstream, &silent_output)
-            .await
-            .map_err(|e| PushError::TrackingRefUpdate(e.message().to_string()))?;
-        Some(upstream)
+    let upstream_set = if let Some(plan) = upstream_plan.as_ref() {
+        Some(set_upstream_from_push_plan(&repository, plan, output).await?)
     } else {
         None
     };
@@ -848,6 +840,37 @@ fn validate_set_upstream_plan(args: &PushArgs, plans: &[RefUpdatePlan]) -> Resul
     }
 
     Ok(())
+}
+
+async fn set_upstream_from_push_plan(
+    repository: &str,
+    plan: &RefUpdatePlan,
+    output: &OutputConfig,
+) -> Result<String, PushError> {
+    if plan.local_kind != Some(LocalRefKind::Branch)
+        || plan.update.kind != PushRefUpdateKind::Update
+    {
+        return Err(PushError::InvalidRefspec(
+            "--set-upstream only supports branch update refspecs".to_string(),
+        ));
+    }
+
+    let local_branch = plan
+        .update
+        .local_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&plan.update.local_ref);
+    let remote_branch = plan
+        .update
+        .remote_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&plan.update.remote_ref);
+    let upstream = format!("{repository}/{remote_branch}");
+    let silent_output = silent_output_config(output);
+    branch::set_upstream_safe_with_output(local_branch, &upstream, &silent_output)
+        .await
+        .map_err(|e| PushError::TrackingRefUpdate(e.message().to_string()))?;
+    Ok(upstream)
 }
 
 fn remote_ref_map(refs: &[crate::internal::protocol::DiscRef]) -> HashMap<String, String> {

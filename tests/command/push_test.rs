@@ -1096,6 +1096,98 @@ fn test_push_json_with_set_upstream_keeps_structured_output_clean() {
 #[cfg(unix)]
 #[test]
 #[serial]
+fn test_push_set_upstream_when_remote_is_already_up_to_date() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let initial_push = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &current_branch])
+        .output()
+        .expect("failed to run initial push");
+    assert!(
+        initial_push.status.success(),
+        "initial push failed: {}",
+        String::from_utf8_lossy(&initial_push.stderr)
+    );
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "-u", "origin", &current_branch])
+        .output()
+        .expect("failed to run up-to-date -u push");
+    assert!(
+        push_out.status.success(),
+        "up-to-date -u push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&push_out.stdout);
+    let parsed: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("up-to-date -u push should emit valid JSON, got: {stdout}\nerror: {e}")
+    });
+    assert_eq!(
+        parsed["data"]["upstream_set"],
+        Value::String(format!("origin/{current_branch}"))
+    );
+    assert_eq!(parsed["data"]["updates"], Value::Array(vec![]));
+    assert_eq!(parsed["data"]["up_to_date"], Value::Bool(true));
+
+    let remote_config_out = libra_command(&local_dir)
+        .args([
+            "config",
+            "--get",
+            &format!("branch.{current_branch}.remote"),
+        ])
+        .output()
+        .expect("failed to read branch remote config");
+    assert!(
+        remote_config_out.status.success(),
+        "config get branch remote failed: {}",
+        String::from_utf8_lossy(&remote_config_out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&remote_config_out.stdout).trim(),
+        "origin"
+    );
+
+    let merge_config_out = libra_command(&local_dir)
+        .args(["config", "--get", &format!("branch.{current_branch}.merge")])
+        .output()
+        .expect("failed to read branch merge config");
+    assert!(
+        merge_config_out.status.success(),
+        "config get branch merge failed: {}",
+        String::from_utf8_lossy(&merge_config_out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&merge_config_out.stdout).trim(),
+        format!("refs/heads/{current_branch}")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
 fn test_push_machine_success_is_single_json_line() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
