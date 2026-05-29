@@ -2911,21 +2911,39 @@ mod tests {
             .expect("default child runner must persist a child session snapshot");
         assert_eq!(
             child_state.messages.len(),
-            2,
-            "child session JSONL should retain the child prompt and final assistant reply",
+            4,
+            "child session JSONL should retain prompt, tool call, tool result, and final assistant reply",
         );
         assert_eq!(child_state.messages[0].role, "user");
         assert_eq!(
             child_state.messages[0].content,
             "please apply the patch to target.txt"
         );
-        assert_eq!(child_state.messages[1].role, "assistant");
+        assert_eq!(child_state.messages[1].role, "tool_call");
+        let tool_call: serde_json::Value = serde_json::from_str(&child_state.messages[1].content)
+            .expect("tool_call message must carry JSON content");
+        assert_eq!(tool_call["id"], "call_apply_patch_1");
+        assert_eq!(tool_call["name"], "apply_patch");
         assert!(
-            child_state.messages[1]
+            tool_call["arguments"]["input"]
+                .as_str()
+                .expect("input argument must be a string")
+                .contains("line 2 modified"),
+            "tool_call snapshot should retain apply_patch input, got {tool_call:?}",
+        );
+        assert_eq!(child_state.messages[2].role, "tool_result");
+        let tool_result: serde_json::Value = serde_json::from_str(&child_state.messages[2].content)
+            .expect("tool_result message must carry JSON content");
+        assert_eq!(tool_result["id"], "call_apply_patch_1");
+        assert_eq!(tool_result["name"], "apply_patch");
+        assert_eq!(tool_result["status"], "success");
+        assert_eq!(child_state.messages[3].role, "assistant");
+        assert!(
+            child_state.messages[3]
                 .content
                 .contains("patcher sub-agent done"),
             "child assistant reply should be persisted, got {:?}",
-            child_state.messages[1].content,
+            child_state.messages[3].content,
         );
         assert_eq!(
             child_state

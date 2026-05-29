@@ -42,10 +42,10 @@ use crate::internal::ai::{
     providers::{ProviderBuildOptions, ProviderFactory},
     sandbox::ToolRuntimeContext,
     session::{
-        SessionId, SessionState,
+        SessionId, SessionMessage, SessionState,
         jsonl::{SessionEvent, SessionJsonlStore},
     },
-    tools::ToolRegistry,
+    tools::{ToolOutput, ToolRegistry},
     usage::UsageRecorder,
 };
 
@@ -946,7 +946,8 @@ pub trait SubAgentChildRunner: Send + Sync {
 ///   invocation's `prompt`.
 /// - Writes a child session JSONL stream under
 ///   `SessionJsonlStore::child(agent_run_id)`, with snapshots for the
-///   child prompt and final assistant response.
+///   child prompt, assistant step text, tool calls, tool results, and
+///   final assistant response.
 /// - Aggregates assistant text content into `final_text`.
 /// - Lets the child call tools allowed by
 ///   `ToolRegistry::available_for(sub_spec, effective_ruleset)`.
@@ -957,8 +958,9 @@ pub trait SubAgentChildRunner: Send + Sync {
 ///   leak a stale request to the wire.
 ///
 /// What this runner does NOT do (yet):
-/// - No byte-level child tool-call transcript. The child JSONL stream
-///   currently stores session snapshots, not per-tool child events.
+/// - No byte-for-byte golden transcript fixture. The child JSONL stream
+///   stores session snapshots for each tool step; later schema work may
+///   add dedicated `ToolCall` / `ToolResult` event variants.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultSubAgentChildRunner;
 
@@ -971,13 +973,55 @@ impl DefaultSubAgentChildRunner {
 }
 
 /// Lightweight tool-loop observer that accumulates the per-turn
-/// count and the total usage seen during a child run. The child
-/// runner uses this to surface real `steps_used` / `usage` on the
-/// returned `TaskResult` instead of always reporting 1 / default.
-#[derive(Debug, Default)]
+/// count, usage, and child-visible tool transcript seen during a child run.
+/// The child runner uses this to surface real `steps_used` / `usage` on the
+/// returned `TaskResult`, and to persist per-tool child session snapshots under
+/// `SessionJsonlStore::child(agent_run_id)`.
+#[derive(Debug)]
 struct ChildRunObserver {
     steps_used: u32,
     usage: CompletionUsageSummary,
+    child_store: SessionJsonlStore,
+    child_session: Arc<Mutex<SessionState>>,
+    agent_run_id: AgentRunId,
+    subagent_name: String,
+}
+
+impl ChildRunObserver {
+    fn new(
+        child_store: SessionJsonlStore,
+        child_session: Arc<Mutex<SessionState>>,
+        agent_run_id: AgentRunId,
+        subagent_name: String,
+    ) -> Self {
+        Self {
+            steps_used: 0,
+            usage: CompletionUsageSummary::default(),
+            child_store,
+            child_session,
+            agent_run_id,
+            subagent_name,
+        }
+    }
+
+    fn push_child_message(&self, role: &'static str, content: String, warning: &'static str) {
+        mutate_child_session_snapshot(
+            &self.child_store,
+            &self.child_session,
+            warning,
+            self.agent_run_id,
+            &self.subagent_name,
+            |state| {
+                let now = chrono::Utc::now();
+                state.messages.push(SessionMessage {
+                    role: role.to_string(),
+                    content,
+                    timestamp: now,
+                });
+                state.updated_at = now;
+            },
+        );
+    }
 }
 
 impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
@@ -990,6 +1034,59 @@ impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
         // `merge_optional_*` rule applies (saturating add, None
         // collapses to existing).
         self.usage.merge(usage);
+    }
+
+    fn on_assistant_step_text(&mut self, text: &str) {
+        self.push_child_message(
+            "assistant",
+            text.to_string(),
+            "failed to append sub-agent child assistant step snapshot",
+        );
+    }
+
+    fn on_tool_call_begin(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        self.push_child_message(
+            "tool_call",
+            serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "arguments": arguments,
+            })
+            .to_string(),
+            "failed to append sub-agent child tool-call snapshot",
+        );
+    }
+
+    fn on_tool_call_end(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        result: &Result<ToolOutput, String>,
+    ) {
+        let payload = match result {
+            Ok(output) => serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "status": if output.is_success() { "success" } else { "failure" },
+                "result": output.clone().into_response(),
+            }),
+            Err(error) => serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "status": "error",
+                "error": error,
+            }),
+        };
+        self.push_child_message(
+            "tool_result",
+            payload.to_string(),
+            "failed to append sub-agent child tool-result snapshot",
+        );
     }
 }
 
@@ -1056,19 +1153,19 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 .ctx
                 .session_store
                 .child(&request.agent_run_id.0.to_string());
-            let mut child_session = build_child_session_state(
+            let child_session = Arc::new(Mutex::new(build_child_session_state(
                 &request,
                 child_registry.working_dir(),
                 &provider_id,
                 &model_id,
-            );
-            child_session.add_user_message(&request.invocation.prompt);
-            append_child_session_snapshot(
+            )));
+            mutate_child_session_snapshot(
                 &child_store,
                 &child_session,
                 "failed to append sub-agent child session start snapshot",
                 request.agent_run_id,
                 &request.sub_spec.name,
+                |state| state.add_user_message(&request.invocation.prompt),
             );
 
             let allowed_tools: Vec<String> = child_registry
@@ -1120,7 +1217,12 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             // The dispatcher's `map_failure_to_terminal_event`
             // (v0.17.757) maps the returned `Cancelled` to
             // `AgentRunEvent::Cancelled { reason: UserRequested }`.
-            let mut observer = ChildRunObserver::default();
+            let mut observer = ChildRunObserver::new(
+                child_store.clone(),
+                Arc::clone(&child_session),
+                request.agent_run_id,
+                request.sub_spec.name.clone(),
+            );
             let abort_token_clone = request.ctx.abort_token.clone();
             let child_loop = run_tool_loop_with_history_and_observer(
                 &model,
@@ -1134,16 +1236,18 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             let turn_result = tokio::select! {
                 biased;
                 _ = abort_token_clone.cancelled() => {
-                    child_session.summary = "Sub-agent cancelled by parent abort".to_string();
-                    child_session
-                        .metadata
-                        .insert("status".to_string(), serde_json::json!("cancelled"));
-                    append_child_session_snapshot(
+                    mutate_child_session_snapshot(
                         &child_store,
                         &child_session,
                         "failed to append sub-agent child session cancellation snapshot",
                         request.agent_run_id,
                         &request.sub_spec.name,
+                        |state| {
+                            state.summary = "Sub-agent cancelled by parent abort".to_string();
+                            state
+                                .metadata
+                                .insert("status".to_string(), serde_json::json!("cancelled"));
+                        },
                     );
                     return Err(TaskFailure::Cancelled {
                         source: CancellationSource::ParentAbort,
@@ -1154,31 +1258,35 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
             let turn = match turn_result {
                 Ok(turn) => turn,
                 Err(error) => {
-                    child_session.summary = format!("Sub-agent failed: {error}");
-                    child_session
-                        .metadata
-                        .insert("status".to_string(), serde_json::json!("failed"));
-                    append_child_session_snapshot(
+                    mutate_child_session_snapshot(
                         &child_store,
                         &child_session,
                         "failed to append sub-agent child session failure snapshot",
                         request.agent_run_id,
                         &request.sub_spec.name,
+                        |state| {
+                            state.summary = format!("Sub-agent failed: {error}");
+                            state
+                                .metadata
+                                .insert("status".to_string(), serde_json::json!("failed"));
+                        },
                     );
                     return Err(TaskFailure::ProviderError(error));
                 }
             };
-            child_session.add_assistant_message(&turn.final_text);
-            child_session.summary = "Sub-agent completed".to_string();
-            child_session
-                .metadata
-                .insert("status".to_string(), serde_json::json!("completed"));
-            append_child_session_snapshot(
+            mutate_child_session_snapshot(
                 &child_store,
                 &child_session,
                 "failed to append sub-agent child session completion snapshot",
                 request.agent_run_id,
                 &request.sub_spec.name,
+                |state| {
+                    state.add_assistant_message(&turn.final_text);
+                    state.summary = "Sub-agent completed".to_string();
+                    state
+                        .metadata
+                        .insert("status".to_string(), serde_json::json!("completed"));
+                },
             );
 
             Ok(TaskResult {
@@ -1259,6 +1367,30 @@ fn append_child_session_snapshot(
             subagent = %subagent_name,
             "{warning}",
         );
+    }
+}
+
+fn mutate_child_session_snapshot(
+    store: &SessionJsonlStore,
+    state: &Arc<Mutex<SessionState>>,
+    warning: &'static str,
+    agent_run_id: AgentRunId,
+    subagent_name: &str,
+    mutate: impl FnOnce(&mut SessionState),
+) {
+    match state.lock() {
+        Ok(mut state) => {
+            mutate(&mut state);
+            append_child_session_snapshot(store, &state, warning, agent_run_id, subagent_name);
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                agent_run_id = %agent_run_id.0,
+                subagent = %subagent_name,
+                "{warning}: child session state lock poisoned",
+            );
+        }
     }
 }
 
