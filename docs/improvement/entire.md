@@ -62,7 +62,7 @@
 2. 不强制统一整库 transcript schema；保留 provider 原生格式（`jsonl/sqlite/markdown/binary`）的字节语义。
 3. **不建 `agent_session_event` 表**——`SessionStore` 的 JSONL 已承载事件流。
 4. **不建 shadow ref `refs/libra/agent-shadow/...`**——用 orphan commit 上的 `Libra-Scope: temporary` trailer 区分。
-5. **不实装 `libra agent checkpoint rewind` 的 transcript 覆写**——仅工作树恢复，transcript 截断需要每个 Provider 实现 `TranscriptTruncator`，归 v2。v1 命令打印明显警告。
+5. **不承诺统一 transcript 覆写**——v1 只对已实现 `TranscriptTruncator` 的 Agent 执行本地 transcript 截断（当前为 Claude Code）；其它 provider 仍只恢复工作树并打印明显 warning。
 6. 不向 D1 同步全量 `agent_session_event`（事件流量大，v1 仅同步 session/checkpoint 摘要）。
 
 ---
@@ -410,11 +410,10 @@ async fn process_hook_event_with_target(
 
 - `libra agent checkpoint show <id>`：展示 metadata + transcript 长度 + tree 摘要
 - `libra agent checkpoint rewind <id> --dry-run`：默认 dry-run，打印将影响的文件列表
-- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：仅恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；**不**覆写本地 transcript 文件——v1 命令明确打印：
+- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；若 checkpoint 属于 Claude Code 且 `metadata_json.transcript_path` 可用，则把本地 transcript 截断到 checkpoint boundary；其它 agent kind 明确打印 warning 并保持 transcript 不变：
   ```
-  Note: Transcript truncation for <provider> is not yet implemented in v1.
-  The Agent's local transcript file remains unchanged. Re-running the Agent
-  may produce inconsistent context.
+  Note: agent_kind '<provider>' has no TranscriptTruncator adapter yet;
+  the agent's local transcript was left untouched.
   ```
 
 ### 7.4 清理
@@ -538,7 +537,7 @@ libra agent
   session resume <id>                    # 标记 metadata state=active，不恢复 transcript 上下文
   checkpoint list [--session <id>]
   checkpoint show <id>                   # metadata + diff 摘要（合并自 explain）
-  checkpoint rewind <id> [--dry-run|--apply]   # v1: --apply 仅恢复工作树，不覆写 transcript
+  checkpoint rewind <id> [--dry-run|--apply]   # --apply 恢复工作树；Claude Code transcript 会按 checkpoint 截断
   clean [--all]
   doctor                                 # 诊断 hook 安装、stuck 状态、孤儿 checkpoint
   push [--remote <name>]                 # 推送 refs/libra/agent-traces
@@ -548,7 +547,7 @@ libra agent
 **v1 不实现**：
 - `session promote <id> --as-intent`（v2 跨体系提升）
 - `checkpoint explain <id>`（合并到 `checkpoint show`）
-- `checkpoint rewind <id> --apply` 的 transcript 截断（v2 接 `TranscriptTruncator`）
+- 非 Claude Code provider 的 `checkpoint rewind <id> --apply` transcript 截断（需各 provider 接 `TranscriptTruncator`）
 
 ### 9.1 初始化
 
@@ -647,7 +646,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 7 | **CAS 风暴** | P1 | 模拟单 session 100 events/s 持续 60s，`agent-traces` 写入成功率 100%；必要时调整 `HISTORY_HEAD_CONFLICT_MAX_RETRIES`（现 32） |
 | 8 | **Hook 失败安全** | P1 | 集成测试：安装 hook 后 `mv $(which libra) /tmp` 卸载 libra，Claude Code 仍能完整跑完一个 session（`|| true` 吃错误）；libra 还原后 `libra agent doctor` 报告"未捕获的 session N 个" |
 | 9 | **多 worktree SQLite 共享** | P2 | `agent_session` 必须存于 `git rev-parse --git-common-dir` 对应的 SQLite；`worktree_id` 列允许 `list` 按需过滤；多 worktree 试跑 |
-| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 时不动 transcript 文件且打印明显警告 |
+| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 只对已实现 `TranscriptTruncator` 的 Agent 改写 transcript（当前 Claude Code），其它 agent kind 保持 transcript 不变并打印明显 warning |
 | 11 | **Cursor SQLite transcript 取查** | P2 | `libra agent session show --extract-transcript <path>` 把 SQLite blob 物化到指定路径，文档说明用 `sqlite3` 查看 |
 | 12 | **Unknown-event-safe envelope 兼容** | P2 | 老 reader 读包含未来虚构事件 `kind=future_event_xyz` 的 metadata.json，应落到 `Unknown(Value)` 分支不报错（与 [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) 对外承诺一致） |
 
@@ -677,7 +676,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
 3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
 4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
-5. **Rewind dry-run**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径仅还原工作树并打印 transcript 不变更警告
+5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在 Claude Code checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
 6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
 
 **阶段 2 验收**：完整 Claude/Gemini session 能生成多个 checkpoint commit；`libra agent checkpoint list` 列出按时间排序；`git log refs/libra/agent-traces` 可读；`libra agent clean` 后 temporary commit 从 `agent-traces` 移除且 SQLite 索引同步清理。
@@ -695,7 +694,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 阶段 4（v2，本次不做）
 
-1. `TranscriptTruncator` 实装 + `checkpoint rewind --apply` 支持 transcript 覆写
+1. 非 Claude Code provider 的 `TranscriptTruncator` 实装 + `checkpoint rewind --apply` transcript 覆写
 2. `session promote <id> --as-intent` 跨体系提升
 3. 从 `agent_session` 反算 `ToolCallRecord` 回写 `ai_thread`
 4. 5 个 preview adapter → stable
@@ -812,7 +811,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **删除 shadow ref**：用 `agent-traces` 上的 orphan commit + scope trailer
   - **`RedactedBytes` 编译契约**：未脱敏字节类型层面无法进入持久化
   - **Adapter trait 拆分**：`ObservedAgent` 核心 + `ObservedAgentHooks` / `TranscriptTruncator` / `TranscriptChunker` 可选
-  - **v1 rewind 仅 dry-run / 工作树**：transcript 覆写归 v2
+  - **v1 rewind**：默认 dry-run；`--apply` 恢复工作树，Claude Code transcript 可截断，其它 provider transcript 覆写归 v2
   - **Migration 文件化**：`include_str!` 加载新增 `2026050303_agent_capture.sql`
   - **`is_locked_branch` 扩展**：加 `agent-traces`，并在 `restore`/`reset` 调用
   - **Phase 1 文件级落地清单**：新增第 16 章，把抽象计划落到具体文件

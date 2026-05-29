@@ -1,5 +1,6 @@
 //! `libra agent checkpoint …` subcommands. V1 ships read-only `list` /
-//! `show`; the mutating `rewind` path stays a phase-2 dry-run stub.
+//! `show`; `rewind --apply` restores the worktree and dispatches optional
+//! transcript truncation for agent kinds that implement `TranscriptTruncator`.
 
 use std::str::FromStr;
 
@@ -135,8 +136,8 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
 /// `dry-run` (the default when neither flag is set) lists the files the
 /// checkpoint's `parent_commit` snapshot would restore, without touching the
 /// worktree. `--apply` actually runs the worktree restore (delegating to the
-/// existing `restore --source <parent_commit>` path), prints the
-/// transcript-untouched warning, and leaves HEAD plus `refs/heads/*`
+/// existing `restore --source <parent_commit>` path), truncates supported
+/// agent transcripts when possible, and leaves HEAD plus `refs/heads/*`
 /// untouched per `docs/improvement/entire.md` §7.3.
 async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<()> {
     let conn = get_db_conn_instance().await;
