@@ -40,10 +40,10 @@
 //! [`DefaultSubAgentChildRunner`], which drives
 //! `run_tool_loop_with_history_and_observer` with dispatcher-built
 //! handoff history, child tool filtering, inherited runtime context,
-//! and parent-abort cancellation. The remaining S3/P3.4 gap is the
-//! split child JSONL session / byte-for-byte parent+child transcript
-//! fixture; the parent side already writes `Spawned` plus a typed
-//! terminal event.
+//! parent-abort cancellation, and child session snapshots keyed by the
+//! `agent_run_id`. The remaining S3/P3.4 gap is the byte-for-byte
+//! per-tool child transcript fixture; the parent side already writes
+//! `Spawned` plus a typed terminal event.
 //!
 //! [`DefaultSubAgentChildRunner`]: super::sub_agent::DefaultSubAgentChildRunner
 //! [`SubAgentChildRunner`]: super::sub_agent::SubAgentChildRunner
@@ -2889,6 +2889,52 @@ mod tests {
             .await
             .expect("isolated child run must complete against the fake provider");
         assert_eq!(result.agent_name, "patcher");
+
+        let agent_run_id = store
+            .load_events()
+            .expect("parent JSONL readable")
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known().cloned(),
+                _ => None,
+            })
+            .find_map(|event| match event {
+                AgentRunEvent::Spawned { agent_run_id, .. } => Some(agent_run_id),
+                _ => None,
+            })
+            .expect("dispatch must write a Spawned event with the child agent_run_id");
+        let agent_run_id_string = agent_run_id.0.to_string();
+        let child_state = store
+            .child(&agent_run_id_string)
+            .load_state()
+            .expect("child session JSONL readable")
+            .expect("default child runner must persist a child session snapshot");
+        assert_eq!(
+            child_state.messages.len(),
+            2,
+            "child session JSONL should retain the child prompt and final assistant reply",
+        );
+        assert_eq!(child_state.messages[0].role, "user");
+        assert_eq!(
+            child_state.messages[0].content,
+            "please apply the patch to target.txt"
+        );
+        assert_eq!(child_state.messages[1].role, "assistant");
+        assert!(
+            child_state.messages[1]
+                .content
+                .contains("patcher sub-agent done"),
+            "child assistant reply should be persisted, got {:?}",
+            child_state.messages[1].content,
+        );
+        assert_eq!(
+            child_state
+                .metadata
+                .get("agent_run_id")
+                .and_then(serde_json::Value::as_str),
+            Some(agent_run_id_string.as_str()),
+            "child session metadata must link back to the parent Spawned event",
+        );
 
         // The acceptance criterion: the MAIN worktree is byte-for-byte
         // unchanged after the mutating sub-agent run — the child's
