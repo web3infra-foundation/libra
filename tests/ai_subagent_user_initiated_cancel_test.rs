@@ -22,7 +22,8 @@
 //!   `tokio::select!` short-circuits the in-flight tool loop and
 //!   returns `Cancelled { ParentAbort }` before the fake fixture's
 //!   delay elapses; the dispatcher then writes `Spawned +
-//!   Cancelled { reason: UserRequested }` to the parent JSONL.
+//!   Cancelled { reason: UserRequested }` to the parent JSONL, and
+//!   the child JSONL reaches a terminal cancelled snapshot.
 //!   `mid_flight_cancel_during_child_run_writes_cancelled_event`
 //!   below.
 
@@ -403,4 +404,51 @@ async fn mid_flight_cancel_during_child_run_writes_cancelled_event() {
         }
         other => panic!("expected Cancelled terminal event, got: {other:?}"),
     }
+
+    let spawned_run_id_string = spawned_run_id.0.to_string();
+    let child_store = store.child(&spawned_run_id_string);
+    let child_events = child_store
+        .load_events()
+        .expect("child session JSONL must be readable after cancel");
+    let child_event_kinds: Vec<_> = child_events
+        .iter()
+        .map(libra::internal::ai::runtime::Event::event_kind)
+        .collect();
+    assert_eq!(
+        child_event_kinds,
+        vec!["session_snapshot", "session_snapshot"],
+        "mid-flight cancel must persist a child start snapshot and a terminal cancel snapshot",
+    );
+
+    let child_state = child_store
+        .load_state()
+        .expect("child session JSONL must replay after cancel")
+        .expect("mid-flight cancel must persist a child session snapshot");
+    assert_eq!(
+        child_state
+            .metadata
+            .get("agent_run_id")
+            .and_then(serde_json::Value::as_str),
+        Some(spawned_run_id_string.as_str()),
+        "child session metadata must link back to the parent Spawned event",
+    );
+    assert_eq!(
+        child_state
+            .metadata
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("cancelled"),
+        "child session must leave replay in a terminal cancelled state",
+    );
+    assert_eq!(
+        child_state.summary, "Sub-agent cancelled by parent abort",
+        "child replay summary must explain the cancellation source",
+    );
+    assert_eq!(
+        child_state.messages.len(),
+        1,
+        "cancelled child run should retain the prompt without inventing an assistant reply",
+    );
+    assert_eq!(child_state.messages[0].role, "user");
+    assert_eq!(child_state.messages[0].content, "slow request");
 }
