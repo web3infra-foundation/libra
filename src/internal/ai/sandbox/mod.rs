@@ -3311,6 +3311,31 @@ mod tests {
     }
 
     #[test]
+    fn requested_network_access_upgrade_detects_config_full_widening() {
+        let temp = tempfile::tempdir().expect("tempdir for full network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Denied,
+        };
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&policy),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(upgrade, Some(NetworkAccess::Full));
+    }
+
+    #[test]
     fn requested_network_access_upgrade_skips_non_network_bearing_policy() {
         let temp = tempfile::tempdir().expect("tempdir for read-only network config");
         let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
@@ -3421,6 +3446,100 @@ mod tests {
             .expect("network upgrade run task should not panic")
             .expect_err("denying network upgrade should stop execution");
         assert_eq!(error, "rejected by user");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_network_access_upgrade_reaches_command_environment() {
+        let temp = tempfile::tempdir().expect("tempdir for approved network test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn({
+            let cwd = cwd.clone();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-approved-network-upgrade".to_string(),
+                    command: "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+                        .to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::ExternalSandbox {
+                            network_access: NetworkAccess::Denied,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: Some(SandboxRuntimeConfig {
+                        enforcement: SandboxEnforcement::Required,
+                        ..SandboxRuntimeConfig::default()
+                    }),
+                    evidence_sink: None,
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("network upgrade approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(
+            request.command,
+            "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+        );
+        assert_eq!(request.sandbox_label, "external-sandbox");
+        assert_eq!(
+            request.network_access,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Approved)
+            .expect("approval receiver should be active");
+
+        let output = run
+            .await
+            .expect("approved network upgrade task should not panic")
+            .expect("approved network upgrade should run command");
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "stdout: {:?}", output.stdout);
+        assert!(lines[0].starts_with("http://127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], lines[0]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
