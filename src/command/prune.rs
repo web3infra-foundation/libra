@@ -5,49 +5,48 @@
 //! expiration.
 
 use std::{
-	collections::{HashSet, VecDeque},
-	fs, io,
+    collections::{HashSet, VecDeque},
+    fs, io,
     io::{Read, Seek},
-	path::{Path, PathBuf},
-	time::{Duration, SystemTime, UNIX_EPOCH},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use clap::Parser;
 use byteorder::{BigEndian, ReadBytesExt};
+use clap::Parser;
 use git_internal::{
-	hash::{ObjectHash, get_hash_kind},
-	internal::{
-		index::Index,
-		object::{commit::Commit, tree::Tree, types::ObjectType},
-	},
-	utils::read_sha,
+    hash::{ObjectHash, get_hash_kind},
+    internal::{
+        index::Index,
+        object::{commit::Commit, tree::Tree, types::ObjectType},
+    },
+    utils::read_sha,
 };
 use sea_orm::EntityTrait;
 use serde::Serialize;
 
 use crate::{
-	command::load_object,
-	internal::{
-		db,
-		head::Head,
-		log::date_parser::parse_date,
-		model::{reference, reflog},
-	},
-	utils::{
-		client_storage::ClientStorage,
-		error::{CliError, CliResult, StableErrorCode},
-		output::{OutputConfig, emit_json_data},
-		path,
-		util,
-	},
+    command::load_object,
+    internal::{
+        db,
+        head::Head,
+        log::date_parser::parse_date,
+        model::{reference, reflog},
+    },
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult, StableErrorCode},
+        output::{OutputConfig, emit_json_data},
+        path, util,
+    },
 };
 
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: u64 = 256 * 4;
 
 const PRUNE_LONG_ABOUT: &str =
-	"Prune unreachable loose objects from the repository.
-	
+    "Prune unreachable loose objects from the repository.
+    
 By default, objects reachable from refs (and any provided heads) and do not already exist in any packfile are kept.
 When --expire is provided, only loose objects older than the given time are removed.";
 
@@ -61,56 +60,56 @@ const PRUNE_AFTER_HELP: &str = "Examples:
 /// Prune unreachable loose objects.
 #[derive(Parser, Debug)]
 #[command(
-	about = "Prune unreachable loose objects",
-	long_about = PRUNE_LONG_ABOUT,
-	after_help = PRUNE_AFTER_HELP,
+    about = "Prune unreachable loose objects",
+    long_about = PRUNE_LONG_ABOUT,
+    after_help = PRUNE_AFTER_HELP,
 )]
 pub struct PruneArgs {
-	/// Do not remove anything; just report what would be removed.
-	#[arg(short = 'n', long)]
-	pub dry_run: bool,
+    /// Do not remove anything; just report what would be removed.
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
 
-	/// Report all removed objects.
-	#[arg(short, long)]
-	pub verbose: bool,
+    /// Report all removed objects.
+    #[arg(short, long)]
+    pub verbose: bool,
 
-	/// Only expire loose objects older than this time.
-	#[arg(long, value_name = "TIME")]
-	pub expire: Option<String>,
+    /// Only expire loose objects older than this time.
+    #[arg(long, value_name = "TIME")]
+    pub expire: Option<String>,
 
-	/// Additional heads to keep reachable objects from.
-	#[arg(value_name = "HEAD")]
-	pub heads: Vec<String>,
+    /// Additional heads to keep reachable objects from.
+    #[arg(value_name = "HEAD")]
+    pub heads: Vec<String>,
 }
 
 /// Summary of a prune plan.
 #[derive(Debug, Clone)]
 struct PrunePlan {
-	prunable: Vec<LooseObjectInfo>,
+    prunable: Vec<LooseObjectInfo>,
 }
 
 #[derive(Debug, Serialize)]
 struct PruneOutput {
-	prunable: Vec<String>,
-	expire: Option<String>,
-	heads: Vec<String>,
-	dry_run: bool,
-	verbose: bool,
+    prunable: Vec<String>,
+    expire: Option<String>,
+    heads: Vec<String>,
+    dry_run: bool,
+    verbose: bool,
 }
 
 /// Metadata for a loose object on disk.
 #[derive(Debug, Clone)]
 struct LooseObjectInfo {
-	hash: ObjectHash,
-	path: PathBuf,
-	modified: Option<SystemTime>,
+    hash: ObjectHash,
+    path: PathBuf,
+    modified: Option<SystemTime>,
 }
 
 /// Entry point for `libra prune`.
 pub async fn execute(args: PruneArgs) -> Result<(), String> {
-	execute_safe(args, &OutputConfig::default())
-		.await
-		.map_err(|err| err.render())
+    execute_safe(args, &OutputConfig::default())
+        .await
+        .map_err(|err| err.render())
 }
 
 /// Safe entry point returning structured errors.
@@ -125,71 +124,70 @@ pub async fn execute(args: PruneArgs) -> Result<(), String> {
 /// Returns `CliError` for invalid arguments, repository corruption, or IO
 /// failures while scanning or deleting objects.
 pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<()> {
-	util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
-	let storage = ClientStorage::init(path::objects());
-	let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
+    let storage = ClientStorage::init(path::objects());
+    let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
 
-	let reachable = collect_reachable_objects(&storage, &args.heads).await?;
-	let packed = collect_packed_objects(&storage).await?;
-	let loose_objects = list_loose_objects(&storage, expire_before.is_some())?;
-	let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
+    let reachable = collect_reachable_objects(&storage, &args.heads).await?;
+    let packed = collect_packed_objects(&storage).await?;
+    let loose_objects = list_loose_objects(&storage, expire_before.is_some())?;
+    let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
 
-	apply_prune_plan(
-		&plan,
-		&storage,
-		args.dry_run,
-		args.verbose || args.dry_run,
-	)?;
+    apply_prune_plan(&plan, &storage, args.dry_run, args.verbose || args.dry_run)?;
 
-	if output.is_json() {
-		let prune_output = PruneOutput {
-			prunable: plan.prunable.iter().map(|info| info.hash.to_string()).collect(),
-			expire: args.expire,
-			heads: args.heads,
-			dry_run: args.dry_run,
-			verbose: args.verbose,
-		};
-		emit_json_data("prune", &prune_output, output)?;
-	}
+    if output.is_json() {
+        let prune_output = PruneOutput {
+            prunable: plan
+                .prunable
+                .iter()
+                .map(|info| info.hash.to_string())
+                .collect(),
+            expire: args.expire,
+            heads: args.heads,
+            dry_run: args.dry_run,
+            verbose: args.verbose,
+        };
+        emit_json_data("prune", &prune_output, output)?;
+    }
 
-	Ok(())
+    Ok(())
 }
 
 /// Parse the `--expire` argument into a concrete cutoff time.
 fn parse_expire_cutoff(expire: Option<&str>) -> CliResult<Option<SystemTime>> {
-	let Some(value) = expire else {
-		return Ok(None);
-	};
+    let Some(value) = expire else {
+        return Ok(None);
+    };
 
-	let timestamp = parse_date(value).map_err(|error| {
-		CliError::command_usage(error.to_string())
-			.with_stable_code(StableErrorCode::CliInvalidArguments)
-			.with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
-	})?;
+    let timestamp = parse_date(value).map_err(|error| {
+        CliError::command_usage(error.to_string())
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+    })?;
 
-	if timestamp < 0 {
-		return Err(
-			CliError::command_usage(format!("expire time must be after 1970-01-01: {value}"))
-				.with_stable_code(StableErrorCode::CliInvalidArguments),
-		);
-	}
+    if timestamp < 0 {
+        return Err(CliError::command_usage(format!(
+            "expire time must be after 1970-01-01: {value}"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
 
-	Ok(Some(UNIX_EPOCH + Duration::from_secs(timestamp as u64)))
+    Ok(Some(UNIX_EPOCH + Duration::from_secs(timestamp as u64)))
 }
 
 /// Collect all objects reachable from refs, HEAD, and user-supplied heads.
 async fn collect_reachable_objects(
-	storage: &ClientStorage,
-	heads: &[String],
+    storage: &ClientStorage,
+    heads: &[String],
 ) -> CliResult<HashSet<ObjectHash>> {
-	let starting_points = collect_starting_points(storage, heads).await?;
-	Ok(bfs_mark_reachable(&starting_points, storage))
+    let starting_points = collect_starting_points(storage, heads).await?;
+    Ok(bfs_mark_reachable(&starting_points, storage))
 }
 
 // Collect duplicate objects already in packfiles.
 async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
-	let mut packed_objects = HashSet::new();
+    let mut packed_objects = HashSet::new();
     let pack_dir = storage.base_path().join("pack");
     if pack_dir.exists()
         && let Ok(entries) = fs::read_dir(&pack_dir)
@@ -199,7 +197,7 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
             if path.extension().is_some_and(|ext| ext == "idx")
                 && let Ok(packed) = list_idx_objects(&path)
             {
-				packed_objects.extend(packed);
+                packed_objects.extend(packed);
             }
         }
     }
@@ -209,95 +207,93 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
 
 // List all objects contained in a pack index file.
 fn list_idx_objects(idx_path: &Path) -> io::Result<Vec<ObjectHash>> {
-	let hash_size = get_hash_kind().size() as u64;
+    let hash_size = get_hash_kind().size() as u64;
     let mut idx_file = fs::File::open(idx_path)?;
     let mut magic = [0u8; 4];
     idx_file.read_exact(&mut magic)?;
-	if magic == IDX_MAGIC {
-		// Index v2
+    if magic == IDX_MAGIC {
+        // Index v2
         idx_file.seek(io::SeekFrom::Start(FANOUT_LEN + 8))?;
         let mut fanout_entry = [0u8; 4];
         idx_file.read_exact(&mut fanout_entry)?;
 
         let object_count = u32::from_be_bytes(fanout_entry) as usize;
-		let mut objs = Vec::with_capacity(object_count);
-		for _ in 0..object_count {
-			let hash = read_sha(&mut idx_file)?;
-			objs.push(hash);
-		}
-		Ok(objs)
-	} else {
-		// Index v1
-		if hash_size != 20 {
+        let mut objs = Vec::with_capacity(object_count);
+        for _ in 0..object_count {
+            let hash = read_sha(&mut idx_file)?;
+            objs.push(hash);
+        }
+        Ok(objs)
+    } else {
+        // Index v1
+        if hash_size != 20 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "pack index v1 only supports sha1",
             ));
-		}
-		idx_file.seek(io::SeekFrom::Start(FANOUT_LEN))?;
+        }
+        idx_file.seek(io::SeekFrom::Start(FANOUT_LEN))?;
         let mut fanout_entry = [0u8; 4];
         idx_file.read_exact(&mut fanout_entry)?;
         let object_count = u32::from_be_bytes(fanout_entry) as usize;
-		let mut objs = Vec::with_capacity(object_count);
-		for _ in 0..object_count {
+        let mut objs = Vec::with_capacity(object_count);
+        for _ in 0..object_count {
             let _offset = idx_file.read_u32::<BigEndian>()?;
             let hash = read_sha(&mut idx_file)?;
             objs.push(hash);
-		}
-		Ok(objs)
-	}
+        }
+        Ok(objs)
+    }
 }
 
 /// Gather starting points for reachability from references and explicit heads.
 async fn collect_starting_points(
-	storage: &ClientStorage,
-	heads: &[String],
+    storage: &ClientStorage,
+    heads: &[String],
 ) -> CliResult<HashSet<ObjectHash>> {
-	let mut starting_points = HashSet::new();
-	let db_conn = db::get_db_conn_instance().await;
+    let mut starting_points = HashSet::new();
+    let db_conn = db::get_db_conn_instance().await;
 
-	let refs = reference::Entity::find()
-		.all(&db_conn)
-		.await
-		.map_err(|error| {
-			CliError::fatal(format!("failed to load refs: {error}"))
-				.with_stable_code(StableErrorCode::RepoCorrupt)
-		})?;
+    let refs = reference::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load refs: {error}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
 
-	for ref_entry in refs {
-		let Some(commit_hash) = &ref_entry.commit else {
-			continue;
-		};
-		let Some(hash) = parse_object_hash(commit_hash) else {
-			let ref_name = ref_entry.name.as_deref().unwrap_or("<unknown>");
-			return Err(
-				CliError::fatal(format!("invalid ref oid '{commit_hash}' in '{ref_name}'"))
-					.with_stable_code(StableErrorCode::RepoCorrupt),
-			);
-		};
+    for ref_entry in refs {
+        let Some(commit_hash) = &ref_entry.commit else {
+            continue;
+        };
+        let Some(hash) = parse_object_hash(commit_hash) else {
+            let ref_name = ref_entry.name.as_deref().unwrap_or("<unknown>");
+            return Err(CliError::fatal(format!(
+                "invalid ref oid '{commit_hash}' in '{ref_name}'"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        };
 
-		if !storage.exist(&hash) {
-			let ref_name = ref_entry.name.as_deref().unwrap_or("<unknown>");
-			return Err(
-				CliError::fatal(format!(
-					"reference '{ref_name}' points to missing object {hash}"
-				))
-				.with_stable_code(StableErrorCode::RepoCorrupt),
-			);
-		}
-		starting_points.insert(hash);
-	}
+        if !storage.exist(&hash) {
+            let ref_name = ref_entry.name.as_deref().unwrap_or("<unknown>");
+            return Err(CliError::fatal(format!(
+                "reference '{ref_name}' points to missing object {hash}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        starting_points.insert(hash);
+    }
 
-	let reflogs = reflog::Entity::find()
-		.all(&db_conn)
-		.await
-		.map_err(|error| {
-			CliError::fatal(format!("failed to load reflogs: {error}"))
-				.with_stable_code(StableErrorCode::RepoCorrupt)
-		})?;
+    let reflogs = reflog::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load reflogs: {error}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
 
-	for reflog_entry in reflogs {
-		let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
+    for reflog_entry in reflogs {
+        let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
         if !is_null_oid(&reflog_entry.old_oid)
             && let Some(hash) = parse_object_hash(&reflog_entry.old_oid)
         {
@@ -308,365 +304,362 @@ async fn collect_starting_points(
         {
             starting_points.insert(hash);
         }
-	}
+    }
 
-	let index_path = path::index();
-	if index_path.exists()
-		&& let Ok(index) = Index::load(&index_path)
-	{
-		for entry in index.tracked_entries(0) {
-			starting_points.insert(entry.hash);
-		}
-	}
+    let index_path = path::index();
+    if index_path.exists()
+        && let Ok(index) = Index::load(&index_path)
+    {
+        for entry in index.tracked_entries(0) {
+            starting_points.insert(entry.hash);
+        }
+    }
 
-	let head = Head::current_result().await.map_err(|error| {
-		CliError::fatal(format!("failed to read HEAD: {error}"))
-			.with_stable_code(StableErrorCode::RepoCorrupt)
-	})?;
-	if let Head::Detached(hash) = head {
-		if !storage.exist(&hash) {
-			return Err(
-				CliError::fatal(format!("HEAD points to missing object {hash}"))
-					.with_stable_code(StableErrorCode::RepoCorrupt),
-			);
-		}
-		starting_points.insert(hash);
-	}
+    let head = Head::current_result().await.map_err(|error| {
+        CliError::fatal(format!("failed to read HEAD: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    if let Head::Detached(hash) = head {
+        if !storage.exist(&hash) {
+            return Err(
+                CliError::fatal(format!("HEAD points to missing object {hash}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt),
+            );
+        }
+        starting_points.insert(hash);
+    }
 
-	for head in heads {
-		let commit = resolve_head_commit(head).await?;
-		if !storage.exist(&commit) {
-			return Err(
-				CliError::fatal(format!("head '{head}' points to missing object {commit}"))
-					.with_stable_code(StableErrorCode::RepoCorrupt),
-			);
-		}
-		starting_points.insert(commit);
-	}
+    for head in heads {
+        let commit = resolve_head_commit(head).await?;
+        if !storage.exist(&commit) {
+            return Err(CliError::fatal(format!(
+                "head '{head}' points to missing object {commit}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        starting_points.insert(commit);
+    }
 
-	Ok(starting_points)
+    Ok(starting_points)
 }
 
 /// Resolve a user-provided head argument to a commit hash.
 async fn resolve_head_commit(head: &str) -> CliResult<ObjectHash> {
-	util::get_commit_base_typed(head)
-		.await
-		.map_err(|error| {
-			CliError::command_usage(format!("invalid head '{head}': {error}"))
-				.with_stable_code(StableErrorCode::CliInvalidTarget)
-				.with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash")
-		})
+    util::get_commit_base_typed(head).await.map_err(|error| {
+        CliError::command_usage(format!("invalid head '{head}': {error}"))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash")
+    })
 }
 
 /// Build a prune plan by filtering unreachable loose objects.
 fn build_prune_plan(
-	loose_objects: Vec<LooseObjectInfo>,
-	reachable: &HashSet<ObjectHash>,
-	packed: &HashSet<ObjectHash>,
-	expire_before: Option<SystemTime>,
+    loose_objects: Vec<LooseObjectInfo>,
+    reachable: &HashSet<ObjectHash>,
+    packed: &HashSet<ObjectHash>,
+    expire_before: Option<SystemTime>,
 ) -> PrunePlan {
-	let prunable = loose_objects
-		.into_iter()
-		.filter(|info| {
-			(reachable.contains(&info.hash) == packed.contains(&info.hash))
-				&& is_expired(info.modified, expire_before)
-		})
-		.collect();
+    let prunable = loose_objects
+        .into_iter()
+        .filter(|info| {
+            (reachable.contains(&info.hash) == packed.contains(&info.hash))
+                && is_expired(info.modified, expire_before)
+        })
+        .collect();
 
-	PrunePlan { prunable }
+    PrunePlan { prunable }
 }
 
 /// Apply the prune plan by removing loose objects (or reporting in dry-run mode).
 fn apply_prune_plan(
-	plan: &PrunePlan,
-	storage: &ClientStorage,
-	dry_run: bool,
-	report: bool,
+    plan: &PrunePlan,
+    storage: &ClientStorage,
+    dry_run: bool,
+    report: bool,
 ) -> CliResult<()> {
-	let objects_dir = storage.base_path();
-	for info in &plan.prunable {
-		if report {
-			if dry_run {
-				println!("would prune {}", info.hash);
-			} else {
-				println!("prune {}", info.hash);
-			}
-		}
+    let objects_dir = storage.base_path();
+    for info in &plan.prunable {
+        if report {
+            if dry_run {
+                println!("would prune {}", info.hash);
+            } else {
+                println!("prune {}", info.hash);
+            }
+        }
 
-		if dry_run {
-			continue;
-		}
+        if dry_run {
+            continue;
+        }
 
-		remove_loose_object(info, objects_dir)?;
-	}
+        remove_loose_object(info, objects_dir)?;
+    }
 
-	Ok(())
+    Ok(())
 }
 
 /// Remove a loose object file and prune empty parent directories.
 fn remove_loose_object(info: &LooseObjectInfo, objects_dir: &Path) -> CliResult<()> {
-	if !info.path.starts_with(objects_dir) {
-		return Err(
-			CliError::fatal(format!(
-				"refusing to prune object outside objects dir: {}",
-				info.path.display()
-			))
-			.with_stable_code(StableErrorCode::InternalInvariant),
-		);
-	}
+    if !info.path.starts_with(objects_dir) {
+        return Err(CliError::fatal(format!(
+            "refusing to prune object outside objects dir: {}",
+            info.path.display()
+        ))
+        .with_stable_code(StableErrorCode::InternalInvariant));
+    }
 
-	match fs::remove_file(&info.path) {
-		Ok(()) => {}
-		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-		Err(error) => {
-			return Err(
-				CliError::fatal(format!(
-					"failed to remove object '{}': {error}",
-					info.path.display()
-				))
-				.with_stable_code(StableErrorCode::IoWriteFailed),
-			);
-		}
-	}
+    match fs::remove_file(&info.path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to remove object '{}': {error}",
+                info.path.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed));
+        }
+    }
 
-	let Some(parent) = info.path.parent() else {
-		return Ok(());
-	};
+    let Some(parent) = info.path.parent() else {
+        return Ok(());
+    };
 
-	if should_prune_object_dir(parent, objects_dir) && is_dir_empty(parent)? {
-		fs::remove_dir(parent).map_err(|error| {
-			CliError::fatal(format!(
-				"failed to remove empty object directory '{}': {error}",
-				parent.display()
-			))
-			.with_stable_code(StableErrorCode::IoWriteFailed)
-		})?;
-	}
+    if should_prune_object_dir(parent, objects_dir) && is_dir_empty(parent)? {
+        fs::remove_dir(parent).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to remove empty object directory '{}': {error}",
+                parent.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    }
 
-	Ok(())
+    Ok(())
 }
 
 /// Determine whether a directory is a loose object prefix directory.
 fn should_prune_object_dir(dir: &Path, objects_dir: &Path) -> bool {
-	if !dir.starts_with(objects_dir) {
-		return false;
-	}
-	let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
-		return false;
-	};
-	name.len() == 2 && u8::from_str_radix(name, 16).is_ok()
+    if !dir.starts_with(objects_dir) {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.len() == 2 && u8::from_str_radix(name, 16).is_ok()
 }
 
 /// Check whether a directory is empty.
 fn is_dir_empty(dir: &Path) -> CliResult<bool> {
-	let mut entries = fs::read_dir(dir).map_err(|error| {
-		CliError::fatal(format!("failed to read directory '{}': {error}", dir.display()))
-			.with_stable_code(StableErrorCode::IoReadFailed)
-	})?;
-	Ok(entries.next().is_none())
+    let mut entries = fs::read_dir(dir).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read directory '{}': {error}",
+            dir.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(entries.next().is_none())
 }
 
 /// Check whether a loose object is expired relative to the cutoff time.
 fn is_expired(modified: Option<SystemTime>, expire_before: Option<SystemTime>) -> bool {
-	match expire_before {
-		None => true,
-		Some(cutoff) => modified.is_some_and(|mtime| mtime < cutoff),
-	}
+    match expire_before {
+        None => true,
+        Some(cutoff) => modified.is_some_and(|mtime| mtime < cutoff),
+    }
 }
 
 /// List all loose objects under `.libra/objects`.
 fn list_loose_objects(
-	storage: &ClientStorage,
-	needs_mtime: bool,
+    storage: &ClientStorage,
+    needs_mtime: bool,
 ) -> CliResult<Vec<LooseObjectInfo>> {
-	let objects_dir = storage.base_path();
-	if !objects_dir.exists() {
-		return Ok(Vec::new());
-	}
+    let objects_dir = storage.base_path();
+    if !objects_dir.exists() {
+        return Ok(Vec::new());
+    }
 
-	let mut objects = Vec::new();
-	for entry in fs::read_dir(objects_dir).map_err(|error| {
-		CliError::fatal(format!(
-			"failed to read objects directory '{}': {error}",
-			objects_dir.display()
-		))
-		.with_stable_code(StableErrorCode::IoReadFailed)
-	})? {
-		let entry = entry.map_err(|error| {
-			CliError::fatal(format!(
-				"failed to read objects directory entry in '{}': {error}",
-				objects_dir.display()
-			))
-			.with_stable_code(StableErrorCode::IoReadFailed)
-		})?;
-		let path = entry.path();
-		if !path.is_dir() {
-			continue;
-		}
+    let mut objects = Vec::new();
+    for entry in fs::read_dir(objects_dir).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read objects directory '{}': {error}",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        let entry = entry.map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read objects directory entry in '{}': {error}",
+                objects_dir.display()
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
 
-		let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-			continue;
-		};
-		if dir_name.len() != 2 || u8::from_str_radix(dir_name, 16).is_err() {
-			continue;
-		}
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if dir_name.len() != 2 || u8::from_str_radix(dir_name, 16).is_err() {
+            continue;
+        }
 
-		for sub_entry in fs::read_dir(&path).map_err(|error| {
-			CliError::fatal(format!(
-				"failed to read object subdirectory '{}': {error}",
-				path.display()
-			))
-			.with_stable_code(StableErrorCode::IoReadFailed)
-		})? {
-			let sub_entry = sub_entry.map_err(|error| {
-				CliError::fatal(format!(
-					"failed to read object entry in '{}': {error}",
-					path.display()
-				))
-				.with_stable_code(StableErrorCode::IoReadFailed)
-			})?;
-			let sub_path = sub_entry.path();
-			if !sub_path.is_file() {
-				continue;
-			}
+        for sub_entry in fs::read_dir(&path).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read object subdirectory '{}': {error}",
+                path.display()
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })? {
+            let sub_entry = sub_entry.map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to read object entry in '{}': {error}",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+            let sub_path = sub_entry.path();
+            if !sub_path.is_file() {
+                continue;
+            }
 
-			let Some(hash) = try_parse_loose_object(dir_name, &sub_path) else {
-				continue;
-			};
+            let Some(hash) = try_parse_loose_object(dir_name, &sub_path) else {
+                continue;
+            };
 
-			let modified = if needs_mtime {
-				let metadata = sub_entry.metadata().map_err(|error| {
-					CliError::fatal(format!(
-						"failed to read metadata for '{}': {error}",
-						sub_path.display()
-					))
-					.with_stable_code(StableErrorCode::IoReadFailed)
-				})?;
-				Some(metadata.modified().map_err(|error| {
-					CliError::fatal(format!(
-						"failed to read modified time for '{}': {error}",
-						sub_path.display()
-					))
-					.with_stable_code(StableErrorCode::IoReadFailed)
-				})?)
-			} else {
-				None
-			};
+            let modified = if needs_mtime {
+                let metadata = sub_entry.metadata().map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to read metadata for '{}': {error}",
+                        sub_path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                })?;
+                Some(metadata.modified().map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to read modified time for '{}': {error}",
+                        sub_path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                })?)
+            } else {
+                None
+            };
 
-			objects.push(LooseObjectInfo {
-				hash,
-				path: sub_path,
-				modified,
-			});
-		}
-	}
+            objects.push(LooseObjectInfo {
+                hash,
+                path: sub_path,
+                modified,
+            });
+        }
+    }
 
-	Ok(objects)
+    Ok(objects)
 }
 
 /// Parse a hex string into an `ObjectHash`.
 fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
-	let bytes = hex::decode(hex_str).ok()?;
-	if bytes.is_empty() {
-		return None;
-	}
-	ObjectHash::from_bytes(&bytes).ok()
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    ObjectHash::from_bytes(&bytes).ok()
 }
 
 /// Try to parse a loose object file path into an `ObjectHash`.
 fn try_parse_loose_object(dir_name: &str, sub_path: &Path) -> Option<ObjectHash> {
-	let file_name = sub_path.file_name().and_then(|n| n.to_str())?;
-	let full_hash = format!("{dir_name}{file_name}");
-	parse_object_hash(&full_hash)
+    let file_name = sub_path.file_name().and_then(|n| n.to_str())?;
+    let full_hash = format!("{dir_name}{file_name}");
+    parse_object_hash(&full_hash)
 }
 
 /// Walk object references: returns objects referenced by the given object.
 /// For commits: returns tree and parent commits. For trees: returns child blobs and subtrees.
 fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> Vec<ObjectHash> {
-	let mut refs = Vec::new();
+    let mut refs = Vec::new();
 
-	let Ok(obj_type) = storage.get_object_type(hash) else {
-		return refs;
-	};
+    let Ok(obj_type) = storage.get_object_type(hash) else {
+        return refs;
+    };
 
-	match obj_type {
-		ObjectType::Commit => {
-			if let Ok(commit) = load_object::<Commit>(hash) {
-				refs.push(commit.tree_id);
-				refs.extend(commit.parent_commit_ids.iter().copied());
-			}
-		}
-		ObjectType::Tree => {
-			if let Ok(tree) = load_object::<Tree>(hash) {
-				for item in &tree.tree_items {
-					refs.push(item.id);
-				}
-			}
-		}
-		_ => {}
-	}
+    match obj_type {
+        ObjectType::Commit => {
+            if let Ok(commit) = load_object::<Commit>(hash) {
+                refs.push(commit.tree_id);
+                refs.extend(commit.parent_commit_ids.iter().copied());
+            }
+        }
+        ObjectType::Tree => {
+            if let Ok(tree) = load_object::<Tree>(hash) {
+                for item in &tree.tree_items {
+                    refs.push(item.id);
+                }
+            }
+        }
+        _ => {}
+    }
 
-	refs
+    refs
 }
 
 /// BFS to mark all objects reachable from starting points.
 fn bfs_mark_reachable(
-	starting_points: &HashSet<ObjectHash>,
-	storage: &ClientStorage,
+    starting_points: &HashSet<ObjectHash>,
+    storage: &ClientStorage,
 ) -> HashSet<ObjectHash> {
-	let mut reachable = HashSet::new();
-	let mut queue: VecDeque<ObjectHash> = starting_points.iter().copied().collect();
+    let mut reachable = HashSet::new();
+    let mut queue: VecDeque<ObjectHash> = starting_points.iter().copied().collect();
 
-	while let Some(current) = queue.pop_front() {
-		if reachable.contains(&current) {
-			continue;
-		}
-		reachable.insert(current);
+    while let Some(current) = queue.pop_front() {
+        if reachable.contains(&current) {
+            continue;
+        }
+        reachable.insert(current);
 
-		let children = walk_object_refs(&current, storage);
-		for child in children {
-			if !reachable.contains(&child) {
-				queue.push_back(child);
-			}
-		}
-	}
+        let children = walk_object_refs(&current, storage);
+        for child in children {
+            if !reachable.contains(&child) {
+                queue.push_back(child);
+            }
+        }
+    }
 
-	reachable
+    reachable
 }
 
 #[cfg(test)]
 mod tests {
-	use std::io::Write;
+    use std::io::Write;
 
-	use git_internal::hash::{HashKind, set_hash_kind_for_test};
-	use tempfile::tempdir;
+    use git_internal::hash::{HashKind, set_hash_kind_for_test};
+    use tempfile::tempdir;
 
-	use super::*;
+    use super::*;
 
-	#[test]
-	fn list_idx_objects_reads_v2_hashes() {
-		let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
-		let temp = tempdir().expect("tempdir");
-		let idx_path = temp.path().join("pack-test.idx");
+    #[test]
+    fn list_idx_objects_reads_v2_hashes() {
+        let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+        let temp = tempdir().expect("tempdir");
+        let idx_path = temp.path().join("pack-test.idx");
 
-		let hashes = vec![
-			ObjectHash::from_bytes(&[0x11; 20]).expect("hash1"),
-			ObjectHash::from_bytes(&[0x22; 20]).expect("hash2"),
-		];
+        let hashes = vec![
+            ObjectHash::from_bytes(&[0x11; 20]).expect("hash1"),
+            ObjectHash::from_bytes(&[0x22; 20]).expect("hash2"),
+        ];
 
-		let mut bytes = Vec::new();
-		bytes.extend_from_slice(&IDX_MAGIC);
-		bytes.extend_from_slice(&2u32.to_be_bytes());
-		bytes.extend_from_slice(&vec![0u8; FANOUT_LEN as usize]);
-		bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
-		for hash in &hashes {
-			bytes.extend_from_slice(hash.as_ref());
-		}
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&IDX_MAGIC);
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&vec![0u8; FANOUT_LEN as usize]);
+        bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
+        for hash in &hashes {
+            bytes.extend_from_slice(hash.as_ref());
+        }
 
-		let mut file = fs::File::create(&idx_path).expect("create idx");
-		file.write_all(&bytes).expect("write idx");
+        let mut file = fs::File::create(&idx_path).expect("create idx");
+        file.write_all(&bytes).expect("write idx");
 
-		let read = list_idx_objects(&idx_path).expect("read idx objects");
-		assert_eq!(read, hashes);
-	}
+        let read = list_idx_objects(&idx_path).expect("read idx objects");
+        assert_eq!(read, hashes);
+    }
 }
