@@ -423,7 +423,7 @@ async fn process_hook_event_with_target(
 1. 默认查最近一个 `state='stopped'` session；`--all` 才扩大到所有 stopped session（v0.17.1115 已落地）。active session 永不清理，避免删掉仍在运行的外部 Agent 临时 checkpoint。
 2. 对选中 session，查 `agent_checkpoint WHERE session_id=? AND scope='temporary'`
 3. 删 `agent_checkpoint` 对应行（v0.17.1115 已加回归测试覆盖 default/`--all` 的 stopped-only 语义）
-4. **仍待落地**：重写 `refs/libra/agent-traces` orphan branch tip 跳过这些 commit
+4. v0.17.1117 已补齐 `refs/libra/agent-traces` orphan branch rewrite：clean 会按保留的 checkpoint catalog 重建可达 commit 链，跳过被删除的 temporary checkpoint；若仓库只有历史 DB 行且 ref 为空，则保持 SQLite-only cleanup。
 5. 不主动 `git gc`——交底层自然回收
 
 ### 7.5 与现有命令交互
@@ -676,7 +676,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 1. **Checkpoint commit 生成**：复用 `stash::build_tree_recursive`（排除 `protected_dirs`）构造 tree；构 metadata.json blob；transcript 经 `Redactor` → `RedactedBytes` → `write_git_object`；events.jsonl 同样作 blob；构 checkpoint tree；`HistoryManager::new_with_ref("refs/libra/agent-traces")` 追加 commit；commit message 含 `Libra-*` trailer
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
 3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
-4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；重写 `agent-traces` tip 移除对应 temporary commit 仍待补齐
+4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
 5. **Rewind dry-run**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径仅还原工作树并打印 transcript 不变更警告
 6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
 
