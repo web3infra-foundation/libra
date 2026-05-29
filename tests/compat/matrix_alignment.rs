@@ -83,3 +83,25 @@ fn web_build_job_checks_static_export_drift() {
         "web/out drift script must detect modified and untracked static export files"
     );
 }
+
+#[test]
+fn lfs_compatibility_docs_use_current_attributes_filename() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "COMPATIBILITY.md",
+        "docs/improvement/compatibility/declined.md",
+        "docs/improvement/compatibility/governance.md",
+    ] {
+        let body = std::fs::read_to_string(repo.join(path)).unwrap_or_else(|error| {
+            panic!("read {path}: {error}");
+        });
+        assert!(
+            body.contains(".libra_attributes"),
+            "{path} must mention the current Libra attributes filename"
+        );
+        assert!(
+            !body.contains(".libraattributes"),
+            "{path} must not mention the retired .libraattributes spelling"
+        );
+    }
+}

@@ -70,7 +70,7 @@ C1（Audit P0）
 | status | supported | |
 | clean | supported | |
 | stash | partial | push / pop / list / apply / drop / show / branch / clear supported; create / store unsupported (see [declined.md#d8-stash-create](../../improvement/compatibility/declined.md#d8) / [#d9-stash-store](../../improvement/compatibility/declined.md#d9)) |
-| lfs | partial | built-in Libra LFS command; uses `.libraattributes`, not Git LFS filters/hooks |
+| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks |
 | log | supported | |
 | shortlog | supported | |
 | show | supported | |
@@ -116,7 +116,7 @@ C1（Audit P0）
 - AI provider hooks: `intentionally-different` (see agent.md)
 
 ## LFS compatibility notes
-- `libra lfs`: `partial` command compatibility. Libra uses built-in pointer / lock management and `.libraattributes`.
+- `libra lfs`: `partial` command compatibility. Libra uses built-in pointer / lock management and `.libra_attributes`.
 - Git LFS filter bridge (`.gitattributes` smudge/clean filters + `git-lfs` hook install): `intentionally-different` (see compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge).
 - Repository asset storage policy: current committed binaries remain inline; optional future Git LFS rules are tracked below as a repository governance decision, not as the `libra lfs` command status.
 ```
