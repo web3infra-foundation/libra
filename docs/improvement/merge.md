@@ -52,4 +52,4 @@
 
 - 如需补全详细统计，新增兼容字段，不修改 `files_changed`。
 - 如需支持 octopus/custom strategy/squash，必须另开兼容计划并保持 `COMPATIBILITY.md` 的 `partial` 状态。
-- `rebase` 仍需拆成 `run_rebase()` / `render_rebase_output()` / `RebaseOutput` / `RebaseError`，并修复 legacy 路径中打印错误但可能不传递失败状态的问题。
+- `rebase` 的 run/render/output/error split、typed failure 传递与 mode-preserving replay 已在独立计划中收口；本文件不再把 rebase 作为 merge 后续工作。

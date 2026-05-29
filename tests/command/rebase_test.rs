@@ -291,6 +291,7 @@ fn create_cli_rebase_success_repo() -> tempfile::TempDir {
     init_repo_via_cli(repo_path);
     configure_identity_via_cli(repo_path);
 
+    commit_file_via_cli(repo_path, ".libraignore", "", "Track ignore file");
     commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
 
     let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
@@ -305,6 +306,80 @@ fn create_cli_rebase_success_repo() -> tempfile::TempDir {
     assert_cli_success(&output, "failed to switch to feature");
 
     repo
+}
+
+#[cfg(unix)]
+#[test]
+fn test_rebase_preserves_executable_mode_in_rewritten_commit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use git_internal::internal::object::{
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+    };
+    use libra::{command::load_object, internal::head::Head, utils::object_ext::TreeExt};
+
+    let repo = tempdir().expect("failed to create temp repo");
+    let repo_path = repo.path();
+    init_repo_via_cli(repo_path);
+    configure_identity_via_cli(repo_path);
+
+    commit_file_via_cli(repo_path, ".libraignore", "", "Track ignore file");
+    commit_file_via_cli(repo_path, "base.txt", "base\n", "Base");
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo_path);
+    assert_cli_success(&output, "failed to create feature branch");
+
+    let script_path = repo_path.join("script.sh");
+    fs::write(&script_path, "#!/bin/sh\necho feature\n").expect("write script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("chmod script executable");
+
+    let output = run_libra_command(&["add", "script.sh"], repo_path);
+    assert_cli_success(&output, "failed to stage executable script");
+    let output = run_libra_command(
+        &["commit", "-m", "Feature adds executable", "--no-verify"],
+        repo_path,
+    );
+    assert_cli_success(&output, "failed to commit executable script");
+
+    let output = run_libra_command(&["switch", "main"], repo_path);
+    assert_cli_success(&output, "failed to switch to main");
+    commit_file_via_cli(repo_path, "main.txt", "main\n", "Main adds file");
+
+    let output = run_libra_command(&["switch", "feature"], repo_path);
+    assert_cli_success(&output, "failed to switch to feature");
+    let output = run_libra_command(&["rebase", "main"], repo_path);
+    assert_cli_success(&output, "rebase should rewrite feature branch");
+
+    let _guard = ChangeDirGuard::new(repo_path);
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("rebased HEAD");
+    let commit: Commit = load_object(&head).expect("load rebased commit");
+    let tree: Tree = load_object(&commit.tree_id).expect("load rebased tree");
+    let script_mode = tree
+        .get_plain_items_with_mode()
+        .into_iter()
+        .find_map(|(path, _hash, mode)| (path == Path::new("script.sh")).then_some(mode))
+        .expect("rebased tree should contain script.sh");
+    assert_eq!(
+        script_mode,
+        TreeItemMode::BlobExecutable,
+        "rebased commit must preserve script.sh executable bit"
+    );
+
+    let status = run_libra_command(&["status", "--short"], repo_path);
+    assert_cli_success(&status, "status after rebase");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "mode loss should not leave the worktree dirty: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
 }
 
 fn create_cli_rebase_fast_forward_repo() -> tempfile::TempDir {
