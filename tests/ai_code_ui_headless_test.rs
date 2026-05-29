@@ -21,7 +21,7 @@ use libra::internal::ai::{
     tools::{
         ToolRegistryBuilder,
         context::{UserInputQuestion, UserInputRequest, UserInputResponse},
-        handlers::{PlanHandler, ReadFileHandler},
+        handlers::{PlanHandler, ReadFileHandler, SubmitPlanDraftHandler},
     },
     web::{
         code_ui::{
@@ -89,6 +89,7 @@ fn build_runtime_with_persistence(
             ))
             .register("read_file", Arc::new(ReadFileHandler))
             .register("update_plan", Arc::new(PlanHandler))
+            .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
             .build(),
     );
 
@@ -296,6 +297,53 @@ async fn update_plan_tool_call_projects_plan_into_snapshot() {
     let snapshot = runtime.snapshot().await;
     panic!(
         "update_plan call did not project a completed plan into snapshot: {:?}",
+        snapshot.plans
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_plan_draft_tool_call_projects_draft_plan_into_snapshot() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let (runtime, _, _) = build_runtime("plan_draft", workdir.path().to_path_buf());
+
+    runtime
+        .submit_message("please draft an execution plan".to_string())
+        .await
+        .expect("headless submit should accept a prompt that triggers submit_plan_draft");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if let Some(plan) = snapshot
+            .plans
+            .iter()
+            .find(|plan| plan.id == "call_submit_plan_draft_1")
+            && plan.status == "completed"
+        {
+            assert_eq!(
+                plan.summary.as_deref(),
+                Some("Draft from headless planning tool"),
+            );
+            assert_eq!(plan.title.as_deref(), Some("Draft execution plan"));
+            assert_eq!(plan.steps.len(), 2);
+            assert_eq!(
+                plan.steps[0].step,
+                "Inspect the current Code UI planning contract",
+            );
+            assert_eq!(plan.steps[0].status, "pending");
+            assert_eq!(
+                plan.steps[1].step,
+                "Expose planning draft projection in the browser",
+            );
+            assert_eq!(plan.steps[1].status, "pending");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let snapshot = runtime.snapshot().await;
+    panic!(
+        "submit_plan_draft call did not project a completed draft plan into snapshot: {:?}",
         snapshot.plans
     );
 }

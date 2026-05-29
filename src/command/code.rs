@@ -2074,8 +2074,9 @@ fn build_headless_tool_registry(
     // Headless web mode now reuses the same ToolRuntimeContext path as TUI:
     // shell/apply_patch route through sandbox + exec approval, web_search sees
     // the CLI network policy, and pending approvals surface through
-    // CodeUiInteractionRequest. Keep workflow-only tools such as `task` gated
-    // until their dispatcher and projection surfaces land.
+    // CodeUiInteractionRequest. `submit_plan_draft` is exposed because
+    // headless projects it into plans[]; workflow tools that require a
+    // session driver (`task`, `submit_intent_draft`) remain gated.
     let trace_id = uuid::Uuid::new_v4();
     let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
         .hardening(ToolBoundaryRuntime::system(
@@ -2090,6 +2091,7 @@ fn build_headless_tool_registry(
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
+        .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),
@@ -5229,7 +5231,13 @@ no_cache_unknown_network = true
         let registry = build_headless_tool_registry(tmp.path(), tx);
         let names = registry.tool_names();
 
-        for tool in ["web_search", "apply_patch", "shell", "update_plan"] {
+        for tool in [
+            "web_search",
+            "apply_patch",
+            "shell",
+            "update_plan",
+            "submit_plan_draft",
+        ] {
             assert!(
                 names.iter().any(|name| name == tool),
                 "headless registry must expose guarded tool `{tool}` after runtime context wiring; got {names:?}"

@@ -10,7 +10,7 @@
 - Wire contract 已固定在 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 与 [web/src/lib/code-ui/types.ts](../../web/src/lib/code-ui/types.ts)。Rust 结构字段使用 `camelCase`，枚举使用 `snake_case`；[tests/ai_code_ui_wire_test.rs](../../tests/ai_code_ui_wire_test.rs) 覆盖 snapshot、controller、capabilities、transcript kinds、interaction kinds、thread list 等 JSON 形态。
 - 前端生产路径已改走 [web/src/lib/code-ui/client.ts](../../web/src/lib/code-ui/client.ts)、[store.tsx](../../web/src/lib/code-ui/store.tsx)、[controller.tsx](../../web/src/lib/code-ui/controller.tsx) 和 [view-model.ts](../../web/src/lib/code-ui/view-model.ts)。`web/src/lib/mock/` 已不存在；`rg 'from "@/lib/mock' web/src` 应无结果。
 - 浏览器写控制已通过 `--browser-control <off|loopback>` 落地。TUI 默认 `off`；`--web-only --provider codex` 默认 `loopback`；非 Codex web-only 默认 `off`。浏览器只持有 `X-Code-Controller-Token` lease；automation 额外需要 `X-Libra-Control-Token`。
-- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、`update_plan`、request-user-input / approval interaction surface、plan/patchset snapshot projection、session persistence/resume；暂不支持完整 IntentSpec plan approval workflow。
+- `--web-only --provider <non-codex>` 已有 Phase 3 v1 的 [HeadlessCodeRuntime](../../src/internal/ai/web/headless.rs)：支持 browser submit、streaming assistant reply、cancel、只读本地工具、`web_search`、`apply_patch`、`shell`、`update_plan`、`submit_plan_draft`、request-user-input / approval interaction surface、plan/patchset snapshot projection、session persistence/resume；暂不支持完整 IntentSpec plan approval workflow。
 
 ## 目标与非目标
 
@@ -37,7 +37,7 @@
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 长 transcript、长 diff、长 tool output 已默认 collapse；旧 demo fixture 文案已从生产组件移除；loopback Web app + browser submit smoke 已纳入 scenario |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 五类 interaction 组件测试、lease retry/conflict、audit log scenario 已落地；lease 过期/多 tab 端到端 UI 行为仍可继续扩充 |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
-| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
+| Headless web-only | Ollama v1 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`、`planUpdates`、`patchsets`、`interactiveApprovals`、`structuredQuestions`、`providerSessionResume`；provider bootstrap 复用 `ProviderFactory`；`web_search`、`apply_patch`、`shell` 复用 TUI 的 `ToolRuntimeContext`、sandbox、approval、network policy；`update_plan` / `submit_plan_draft` 和 `apply_patch` 会投影到 `plans[]` / `patchsets[]`；`--resume <thread_id>` 可恢复 transcript/basic history | 缺完整 IntentSpec plan approval workflow |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
 ## API 边界
@@ -64,7 +64,7 @@
 - `CodeUiProvider` 在 SSE 错误后退避重连并重新拉 `GET /api/code/session`；server 端收到 `BroadcastStream::Lagged` 时已发送一次完整 `session_updated` snapshot，避免静默丢事件。
 - `controller.canWrite` 表示当前 controller state，不等价于 capability。UI 写控件必须同时检查 `capabilities.*`、session `status`、controller ownership 和 browser hook error。
 - `LocalTui` 与 `Fixed { Tui }` 语义不同：前者是可被 browser/automation lease 接管的可见 TUI owner，后者是只读观察时的永久阻断。
-- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task` 和完整 IntentSpec plan approval workflow 仍保持 gated。
+- Headless v1 注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具，以及 `web_search`、`apply_patch`、`shell`、`update_plan`、`submit_plan_draft`。这些工具必须继续通过 `ToolRuntimeContext` 注入的 sandbox / approval / network policy 执行；`task`、`submit_intent_draft` 和完整 IntentSpec plan approval workflow 仍保持 gated。
 - `web/out/` 是 Rust embed 输入。任何 UI source 变更都必须 `pnpm --dir web build`，否则二进制仍服务旧页面。
 
 ## 后续实施计划
@@ -123,7 +123,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - [x] 为 headless runtime 接入 `ToolRuntimeContext`、sandbox、approval store、network policy；`web_search`、`apply_patch`、`shell` 通过同一 runtime context 执行，mutating tools 必须通过 `CodeUiInteractionRequest` 显示 approval，不允许静默执行。
 - [x] 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
 - [x] 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
-- [x] 支持 plan/patchset 最小投影：headless observer 将 `update_plan` 投影到 `plans[]`，将 `apply_patch` diff metadata 投影到 `patchsets[]`，并打开 `planUpdates` / `patchsets` capability。
+- [x] 支持 plan/patchset 最小投影：headless observer 将 `update_plan` 与 `submit_plan_draft` 投影到 `plans[]`，将 `apply_patch` diff metadata 投影到 `patchsets[]`，并打开 `planUpdates` / `patchsets` capability。
 
 **验收：**
 
