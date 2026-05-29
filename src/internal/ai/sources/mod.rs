@@ -960,10 +960,16 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.session_id, "sess-1");
         assert_eq!(row.source_slug, "mcp:git-tools");
+        assert_eq!(row.tool_name, "git_log");
+        assert_eq!(row.registered_tool_name, "git_log");
         assert_eq!(row.tool_call_id, "call_abc");
+        assert_eq!(row.credential_ref, None);
         assert_eq!(row.latency_ms, Some(42));
         assert_eq!(row.input_bytes, 100);
         assert_eq!(row.output_bytes, 200);
+        assert_eq!(row.cost_estimate_micros, None);
+        assert_eq!(row.approval_decision.as_deref(), Some("auto"));
+        assert_eq!(row.state_namespace, "mcp:git-tools");
         assert_eq!(row.success, 1);
     }
 
