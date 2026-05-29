@@ -114,6 +114,22 @@ pub struct PushArgs {
     pub mirror: bool,
 }
 
+impl PushArgs {
+    /// Build a programmatic push invocation for wrappers that pin the remote
+    /// and exact refspecs instead of accepting the full `libra push` flag set.
+    pub(crate) fn for_refspecs(repository: String, refspecs: Vec<String>) -> Self {
+        Self {
+            repository: Some(repository),
+            refspecs,
+            set_upstream: false,
+            force: false,
+            dry_run: false,
+            tags: false,
+            mirror: false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Structured error types
 // ---------------------------------------------------------------------------
@@ -881,13 +897,7 @@ fn remote_ref_map(refs: &[crate::internal::protocol::DiscRef]) -> HashMap<String
 }
 
 fn validate_ref_name(refname: &str) -> bool {
-    if !(refname.starts_with("refs/heads/") || refname.starts_with("refs/tags/")) {
-        return false;
-    }
-    let Some(short) = refname
-        .strip_prefix("refs/heads/")
-        .or_else(|| refname.strip_prefix("refs/tags/"))
-    else {
+    let Some(short) = refname.strip_prefix("refs/") else {
         return false;
     };
     if short.is_empty()
@@ -2462,6 +2472,21 @@ mod test {
         assert!(parse_refspec("a:b:c").is_err());
         assert!(parse_refspec("a::b").is_err());
         assert!(parse_refspec(":a:b").is_err());
+    }
+
+    #[test]
+    fn test_normalize_destination_ref_accepts_private_refs_namespace() {
+        let remote_ref =
+            normalize_destination_ref("refs/libra/agent-traces", LocalRefKind::Branch).unwrap();
+        assert_eq!(remote_ref, "refs/libra/agent-traces");
+    }
+
+    #[test]
+    fn test_normalize_branch_ref_still_rejects_private_refs_source() {
+        assert!(matches!(
+            normalize_branch_ref("refs/libra/agent-traces"),
+            Err(PushError::InvalidRefspec(refspec)) if refspec == "refs/libra/agent-traces"
+        ));
     }
 
     #[test]

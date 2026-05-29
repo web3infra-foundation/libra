@@ -599,7 +599,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 10.3 推送独立 remote
 
-`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`，对应 `[remote "agent-traces"]` 配置写在 `.libra/config`。薄包装现 push 机器，无新 transport。
+`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`；默认 remote 为 `origin`，如需专用 remote 可传 `--remote agent-traces` 并在 `.libra/config` 配置 `[remote "agent-traces"]`。v0.17.1114 已落地为现有 push 机器的薄包装，无新 transport：本地 `agent-traces` tip 通过固定 refspec `agent-traces:refs/libra/agent-traces` 推送，且不会在远端创建 `refs/heads/agent-traces`。
 
 ---
 
@@ -675,7 +675,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 1. **Checkpoint commit 生成**：复用 `stash::build_tree_recursive`（排除 `protected_dirs`）构造 tree；构 metadata.json blob；transcript 经 `Redactor` → `RedactedBytes` → `write_git_object`；events.jsonl 同样作 blob；构 checkpoint tree；`HistoryManager::new_with_ref("refs/libra/agent-traces")` 追加 commit；commit message 含 `Libra-*` trailer
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
-3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`
+3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
 4. **清理**：`libra agent clean`：按 `state='stopped' AND scope='temporary'` 重写 `agent-traces` tip 移除对应 commit
 5. **Rewind dry-run**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径仅还原工作树并打印 transcript 不变更警告
 6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
@@ -750,6 +750,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | `src/command/reset.rs` | 同上 |
 | `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
+| `src/command/agent/push.rs` + `src/command/push.rs` | ✅ v0.17.1114：`libra agent push` 复用 push 传输并允许显式 `refs/libra/*` 远端目的 ref；回归测试确认只写 `refs/libra/agent-traces`，不创建 `refs/heads/agent-traces` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
 | `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部七个迁移版本（`2026050301..2026052301`，含 v0.17.800 source_call_log）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
