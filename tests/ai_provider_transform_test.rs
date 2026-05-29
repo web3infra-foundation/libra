@@ -272,6 +272,39 @@ fn variants_surface_reasoning_for_known_thinking_models() {
     }
 }
 
+/// The provider capability guide is the human-facing contract for adding
+/// reasoning-capable model ids. Keep it in lockstep with the transform table
+/// and the regression test operators should run after extending that table.
+#[test]
+fn provider_capability_update_guide_documents_reasoning_variant_workflow() {
+    let guide_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/agent/provider-capability-update-guide.md");
+    let guide = std::fs::read_to_string(&guide_path).unwrap_or_else(|err| {
+        panic!(
+            "provider capability update guide must exist at {}: {err}",
+            guide_path.display()
+        )
+    });
+
+    for expected in [
+        "src/internal/ai/providers/transform.rs",
+        "reasoning_ids",
+        "variants_surface_reasoning_for_known_thinking_models",
+        "cargo test --test ai_provider_transform_test variants_surface_reasoning_for_known_thinking_models",
+        "claude-opus-4",
+        "gpt-5",
+        "deepseek-reasoner",
+        "kimi-k2",
+        "gemini-2.5",
+        "glm-4.5",
+    ] {
+        assert!(
+            guide.contains(expected),
+            "guide must document `{expected}` for the reasoning variant workflow"
+        );
+    }
+}
+
 /// The Anthropic transform always advertises `cache_control` (every
 /// Claude model accepts the hint, regardless of whether reasoning is
 /// available). This is the one variant on Anthropic that is independent
