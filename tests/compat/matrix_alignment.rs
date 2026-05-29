@@ -105,3 +105,34 @@ fn lfs_compatibility_docs_use_current_attributes_filename() {
         );
     }
 }
+
+#[test]
+fn compatibility_governance_roadmap_marks_landed_c7_c9_surfaces() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let governance =
+        std::fs::read_to_string(repo.join("docs/improvement/compatibility/governance.md"))
+            .expect("read docs/improvement/compatibility/governance.md");
+
+    for row in [
+        "| merge | partial | C7 ✅ | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |",
+        "| pull | partial | C7 ✅ | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |",
+        "| push | partial | C8 ✅ | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |",
+        "| checkout | partial | C9 ✅ | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |",
+    ] {
+        assert!(
+            governance.contains(row),
+            "compatibility governance roadmap must retain completed row: {row}"
+        );
+    }
+
+    assert!(
+        governance.contains(
+            "| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |"
+        ),
+        "governance matrix skeleton must match the implemented checkout path-mode compatibility note"
+    );
+    assert!(
+        !governance.contains("C7-C9 后续补录"),
+        "governance roadmap heading must not describe completed C7-C9 work as a future supplement"
+    );
+}

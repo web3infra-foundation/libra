@@ -101,7 +101,7 @@ C1（Audit P0）
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | cat-file | supported | -e does not support JSON |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | visible branch compatibility surface; use `restore` for file restoration |
+| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |
 | bisect | partial | start / bad / good / reset / skip / log / run / view supported; replay / terms deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
@@ -121,9 +121,9 @@ C1（Audit P0）
 - Repository asset storage policy: current committed binaries remain inline; optional future Git LFS rules are tracked below as a repository governance decision, not as the `libra lfs` command status.
 ```
 
-### COMPATIBILITY.md 更新路线图（C4/C5 已部分落地；C7-C9 后续补录）
+### COMPATIBILITY.md 更新路线图（C4-C9 已落地批次状态）
 
-以下 roadmap 仅供维护者跟踪，**不应写入 C1 创建的 `COMPATIBILITY.md`**。各批次落地时按各自子文档的“COMPATIBILITY.md 行更新”指令修改事实表。2026-05-11 复核：C4 的 `bisect run/view` surface、C5 的 checkout 可见性和 worktree `--delete-dir` 已落地，表中对应行保留为事实索引。
+以下 roadmap 仅供维护者跟踪，**不应写入 C1 创建的 `COMPATIBILITY.md`**。各批次落地时按各自子文档的“COMPATIBILITY.md 行更新”指令修改事实表。2026-05-30 复核：C4-C9 的计划 surface 均已落地，表中对应行保留为事实索引；新的 compatibility surface gap 应新增批次，而不是复用已完成编号。
 
 | Command | 当前 Tier | 批次 | 落地后 Tier | 落地后 Notes |
 |---------|-----------|------|-------------|--------------|
@@ -137,8 +137,8 @@ C1（Audit P0）
 | sparse-checkout | — | C6 | unsupported | no public sparse checkout command |
 | merge | partial | C7 ✅ | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | pull | partial | C7 ✅ | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |
-| push | partial | C8 | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
-| checkout | partial | C9 | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |
+| push | partial | C8 ✅ | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
+| checkout | partial | C9 ✅ | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |
 
 ### 填充策略
 
