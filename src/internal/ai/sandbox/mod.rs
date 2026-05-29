@@ -2100,6 +2100,12 @@ fn requested_network_access_upgrade(
     Ok(None)
 }
 
+pub(crate) fn load_sandbox_config_network_access(
+    cwd: &Path,
+) -> Result<Option<NetworkAccess>, String> {
+    load_sandbox_config_file(cwd)?.network_access()
+}
+
 pub fn shell_approval_key(
     command: &str,
     cwd: &Path,

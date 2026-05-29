@@ -1,5 +1,6 @@
 use super::{
-    assert_cli_success, parse_json_stdout, run_libra_command, run_libra_command_with_stdin_and_env,
+    assert_cli_success, parse_cli_error_stderr, parse_json_stdout, run_libra_command,
+    run_libra_command_with_stdin_and_env,
 };
 
 #[test]
@@ -43,6 +44,35 @@ fn sandbox_status_reports_required_enforcement_from_env() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["enforcement"], "required");
     assert_eq!(json["data"]["effective_enforcement"], "required");
+}
+
+#[test]
+fn sandbox_status_rejects_invalid_project_network_config() {
+    let temp = tempfile::tempdir().expect("failed to create tempdir");
+    let libra_dir = temp.path().join(".libra");
+    std::fs::create_dir_all(&libra_dir).expect("failed to create .libra");
+    std::fs::write(
+        libra_dir.join("sandbox.toml"),
+        r#"
+[sandbox.network]
+mode = "allowlist"
+
+[[sandbox.network.services]]
+host = "*"
+ports = [443]
+"#,
+    )
+    .expect("failed to write sandbox config");
+
+    let output = run_libra_command(&["--json", "sandbox", "status"], temp.path());
+
+    assert_eq!(output.status.code(), Some(129));
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains(".libra/sandbox.toml") && report.message.contains("bare wildcard"),
+        "sandbox status should surface invalid sandbox config, report: {report:?}"
+    );
 }
 
 #[test]

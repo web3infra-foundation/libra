@@ -13,10 +13,10 @@ use crate::{
     internal::ai::sandbox::{
         NetworkAccess, NetworkAccessMode, NetworkProtocol, NetworkProxy, NetworkProxySelection,
         NetworkService, ProxyEnforcement, SandboxEnforcement, SandboxPolicy,
-        allowlist_proxy_from_policy, select_network_proxy,
+        allowlist_proxy_from_policy, load_sandbox_config_network_access, select_network_proxy,
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
     },
 };
@@ -100,7 +100,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
             "failed to inspect sandbox status from current directory: {error}"
         ))
     })?;
-    let policy = SandboxPolicy::default();
+    let policy = effective_status_policy(&cwd)?;
     let writable_roots = policy
         .get_writable_roots_with_cwd(&cwd)
         .into_iter()
@@ -215,6 +215,22 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
         },
         warnings,
     })
+}
+
+fn effective_status_policy(cwd: &Path) -> CliResult<SandboxPolicy> {
+    let policy = SandboxPolicy::default();
+    let config_network_access =
+        load_sandbox_config_network_access(cwd).map_err(sandbox_status_config_error)?;
+    let Some(config_network_access) = config_network_access else {
+        return Ok(policy);
+    };
+    Ok(policy.with_network_restriction(&config_network_access))
+}
+
+fn sandbox_status_config_error(error: String) -> CliError {
+    CliError::fatal(error)
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("fix .libra/sandbox.toml or remove the invalid [sandbox.network] section.")
 }
 
 fn render_status_human(report: &SandboxStatusOutput, output: &OutputConfig) -> CliResult<()> {
