@@ -722,6 +722,18 @@ impl ConfigKv {
         if Self::remote_config_with_conn(db, new).await?.is_some() {
             return Err(anyhow!("fatal: remote {new} already exists."));
         }
+        let ssh_old_prefix = format!("vault.ssh.{old}.");
+        let ssh_new_prefix = format!("vault.ssh.{new}.");
+        let existing_target_ssh_entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&ssh_new_prefix))
+            .all(db)
+            .await
+            .context("failed to query target SSH key entries for rename")?;
+        if !existing_target_ssh_entries.is_empty() {
+            return Err(anyhow!(
+                "fatal: SSH key namespace for remote '{new}' already exists"
+            ));
+        }
 
         // Rename remote.old.* → remote.new.*
         let old_prefix = format!("remote.{old}.");
@@ -763,8 +775,6 @@ impl ConfigKv {
         }
 
         // Cascade SSH key rename: vault.ssh.old.* → vault.ssh.new.*
-        let ssh_old_prefix = format!("vault.ssh.{old}.");
-        let ssh_new_prefix = format!("vault.ssh.{new}.");
         let ssh_entries = config_kv::Entity::find()
             .filter(config_kv::Column::Key.starts_with(&ssh_old_prefix))
             .all(db)

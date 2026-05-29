@@ -100,6 +100,50 @@ async fn test_remote_remove_deletes_entry() {
 
 #[tokio::test]
 #[serial]
+async fn test_remote_remove_deletes_vault_ssh_keys() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+    ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.origin.privkey", "origin-private", true)
+        .await
+        .unwrap();
+
+    remote::execute_safe(
+        RemoteCmds::Remove {
+            name: "origin".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("remote remove should succeed");
+
+    assert!(
+        ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .expect("query pubkey")
+            .is_none(),
+        "remote remove must delete the origin SSH public key"
+    );
+    assert!(
+        ConfigKv::get("vault.ssh.origin.privkey")
+            .await
+            .expect("query privkey")
+            .is_none(),
+        "remote remove must delete the origin SSH private key"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_remote_rename_updates_branch_tracking() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -152,6 +196,208 @@ async fn test_remote_rename_updates_branch_tracking() {
         branch_remote.as_deref(),
         Some("upstream"),
         "tracking branch should reference the new remote name"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_rename_cascades_vault_ssh_keys() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+    ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.origin.privkey", "origin-private", true)
+        .await
+        .unwrap();
+
+    remote::execute_safe(
+        RemoteCmds::Rename {
+            old: "origin".into(),
+            new: "upstream".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("remote rename should succeed");
+
+    assert!(
+        ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .expect("query old pubkey")
+            .is_none(),
+        "old SSH public key namespace must be removed"
+    );
+    assert!(
+        ConfigKv::get("vault.ssh.origin.privkey")
+            .await
+            .expect("query old privkey")
+            .is_none(),
+        "old SSH private key namespace must be removed"
+    );
+    assert_eq!(
+        ConfigKv::get("vault.ssh.upstream.pubkey")
+            .await
+            .expect("query new pubkey")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("ssh-rsa origin")
+    );
+    assert_eq!(
+        ConfigKv::get("vault.ssh.upstream.privkey")
+            .await
+            .expect("query new privkey")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("origin-private")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_rename_refuses_existing_target_vault_ssh_namespace() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+    ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.upstream.pubkey", "ssh-rsa stale-upstream", false)
+        .await
+        .unwrap();
+
+    let result = remote::execute_safe(
+        RemoteCmds::Rename {
+            old: "origin".into(),
+            new: "upstream".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "rename must refuse a target with existing vault SSH keys"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.stable_code(), StableErrorCode::ConflictOperationBlocked);
+    assert!(
+        err.render()
+            .contains("SSH key namespace for remote 'upstream' already exists"),
+        "error should explain the stale SSH key namespace: {}",
+        err.render()
+    );
+    assert!(
+        ConfigKv::remote_config("origin")
+            .await
+            .expect("query origin")
+            .is_some(),
+        "failed rename must keep the source remote"
+    );
+    assert!(
+        ConfigKv::remote_config("upstream")
+            .await
+            .expect("query upstream")
+            .is_none(),
+        "failed rename must not create the target remote"
+    );
+    assert_eq!(
+        ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .expect("query source ssh key")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("ssh-rsa origin")
+    );
+    assert_eq!(
+        ConfigKv::get("vault.ssh.upstream.pubkey")
+            .await
+            .expect("query target ssh key")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("ssh-rsa stale-upstream")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_configkv_rename_refuses_existing_target_vault_ssh_namespace_without_partial_mutation()
+{
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    ConfigKv::set("remote.origin.url", "https://example.com/repo.git", false)
+        .await
+        .unwrap();
+    ConfigKv::set("branch.main.remote", "origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.upstream.pubkey", "ssh-rsa stale-upstream", false)
+        .await
+        .unwrap();
+
+    let result = ConfigKv::rename_remote("origin", "upstream").await;
+
+    assert!(
+        result.is_err(),
+        "ConfigKv rename must refuse a pre-existing target SSH namespace"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("SSH key namespace for remote 'upstream' already exists")
+    );
+    assert_eq!(
+        ConfigKv::get("remote.origin.url")
+            .await
+            .expect("query origin remote")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("https://example.com/repo.git"),
+        "failed lower-level rename must keep the source remote"
+    );
+    assert!(
+        ConfigKv::get("remote.upstream.url")
+            .await
+            .expect("query target remote")
+            .is_none(),
+        "failed lower-level rename must not create the target remote"
+    );
+    assert_eq!(
+        ConfigKv::get("branch.main.remote")
+            .await
+            .expect("query branch remote")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("origin"),
+        "failed lower-level rename must not repoint branch tracking"
+    );
+    assert_eq!(
+        ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .expect("query source ssh")
+            .map(|entry| entry.value)
+            .as_deref(),
+        Some("ssh-rsa origin"),
+        "failed lower-level rename must keep source SSH keys"
     );
 }
 

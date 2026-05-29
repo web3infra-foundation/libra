@@ -159,6 +159,9 @@ enum RemoteError {
     #[error("remote '{name}' already exists")]
     AlreadyExists { name: String },
 
+    #[error("SSH key namespace for remote '{name}' already exists")]
+    SshKeyNamespaceExists { name: String },
+
     #[error("no such remote: {name}")]
     NotFound { name: String },
 
@@ -202,6 +205,13 @@ impl From<RemoteError> for CliError {
                     .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                     .with_hint("use 'libra remote -v' to inspect configured remotes")
             }
+            RemoteError::SshKeyNamespaceExists { name } => CliError::conflict(format!(
+                "SSH key namespace for remote '{name}' already exists"
+            ))
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint(format!(
+                "remove or rename vault.ssh.{name}.* config entries before renaming a remote to '{name}'"
+            )),
             RemoteError::NotFound { name } => CliError::fatal(format!("no such remote: {name}"))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("use 'libra remote -v' to inspect configured remotes"),
@@ -361,12 +371,21 @@ async fn run_rename_remote(old: String, new: String) -> Result<RemoteOutput, Rem
     if remote_exists(&new).await? {
         return Err(RemoteError::AlreadyExists { name: new });
     }
+    if ssh_key_namespace_exists(&new).await? {
+        return Err(RemoteError::SshKeyNamespaceExists { name: new });
+    }
 
-    ConfigKv::rename_remote(&old, &new)
-        .await
-        .map_err(|error| RemoteError::ConfigWrite {
-            detail: error.to_string(),
-        })?;
+    let new_for_error = new.clone();
+    ConfigKv::rename_remote(&old, &new).await.map_err(|error| {
+        let detail = error.to_string();
+        if detail.contains("SSH key namespace for remote") {
+            RemoteError::SshKeyNamespaceExists {
+                name: new_for_error,
+            }
+        } else {
+            RemoteError::ConfigWrite { detail }
+        }
+    })?;
     Ok(RemoteOutput::Rename {
         old_name: old,
         new_name: new,
@@ -655,6 +674,16 @@ async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
     }))
 }
 
+async fn ssh_key_namespace_exists(name: &str) -> Result<bool, RemoteError> {
+    let prefix = format!("vault.ssh.{name}.");
+    ConfigKv::get_by_prefix(&prefix)
+        .await
+        .map(|entries| !entries.is_empty())
+        .map_err(|error| RemoteError::ConfigRead {
+            detail: error.to_string(),
+        })
+}
+
 async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
     if remote_exists(name).await? {
         Ok(())
@@ -842,6 +871,13 @@ mod tests {
             }
             .to_string(),
             "remote 'origin' already exists",
+        );
+        assert_eq!(
+            RemoteError::SshKeyNamespaceExists {
+                name: "upstream".to_string(),
+            }
+            .to_string(),
+            "SSH key namespace for remote 'upstream' already exists",
         );
         assert_eq!(
             RemoteError::NotFound {
