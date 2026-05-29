@@ -1,4 +1,4 @@
-//! Wave 1B `TaskExecutor` adapter structs (schema-only landing).
+//! Wave 1B `TaskExecutor` adapter structs.
 //!
 //! The Code UI Phase Workflow's Wave 1B "Definition of Done #1" requires
 //! that **both** providers — Codex (`CodexTaskExecutor`) and any generic
@@ -7,31 +7,28 @@
 //! [`crate::internal::ai::runtime::contracts`] so the runtime can address
 //! all task executors through a single trait object.
 //!
-//! This module is the **schema-only landing** for those impl blocks: the
-//! struct shapes and the `impl TaskExecutor` blocks are present (so the
-//! Wave 1B blocker rows can flip from "缺失" to "schema 已落地"), but the
-//! `execute_task_attempt` bodies return a structured
-//! [`TaskExecutionError::Provider`] pointing at the substantive wiring
-//! work. The body fill-in is a follow-up patch that has to:
+//! This module landed the shared impl shapes first. The Codex executor
+//! remains schema-only and returns a structured [`TaskExecutionError::Provider`]
+//! pointing at the substantive wiring work. The generic completion executor
+//! now has a minimal single-shot body for no-tool tasks; it calls the provider,
+//! stitches assistant text into the task summary, and fails closed if the
+//! response asks for tool execution that this minimal adapter cannot mediate.
+//! The remaining body fill-in has to:
 //!
 //! - **Codex path**: take the existing Codex app-server WebSocket driver
 //!   (today living inside `src/internal/ai/codex/mod.rs::
 //!   CodexCodeUiAdapter`), extract the per-attempt slice into a free
 //!   function, and have `CodexTaskExecutor::execute_task_attempt`
 //!   delegate to it.
-//! - **Completion path**: take the existing
-//!   `orchestrator::executor::execute_task<M>` function, build a
-//!   `TaskSpec` from `TaskExecutionContext`, and route the completion
-//!   model + tool registry through it.
+//! - **Completion path**: take the existing tool-loop runtime, build a
+//!   tool-enabled task from `TaskExecutionContext`, and route the completion
+//!   model + tool registry through sandbox and approval mediation.
 //!
-//! Both bodies are non-trivial cross-cutting refactors; landing them in a
-//! single patch was the original Wave 1B plan, but stalling the rest of
-//! Wave 1B on that single patch is what the readiness matrix at
-//! [`docs/improvement/agent.md`](../../../../../docs/improvement/agent.md)
-//! line 173 calls out. Splitting impl-shape vs. impl-body into two patches
-//! unblocks downstream readiness rows (`agent.md:164` / `:165` flip to
-//! "schema 已落地") without misrepresenting the executor as production
-//! ready.
+//! The remaining Codex WebSocket adapter and full completion tool-loop are
+//! non-trivial cross-cutting refactors. Splitting impl-shape, no-tool
+//! completion execution, and full tool-enabled execution across patches keeps
+//! downstream readiness rows moving without misrepresenting either executor as
+//! production-ready for every task shape.
 
 use async_trait::async_trait;
 
@@ -83,15 +80,18 @@ impl TaskExecutor for CodexTaskExecutor {
 /// Minimal `TaskExecutor` adapter that calls a generic
 /// [`CompletionModel`] for a single task attempt.
 ///
-/// **State (v0.17.593):** Implementation now invokes the provider in a
+/// **State (v0.17.1106):** Implementation now invokes the provider in a
 /// **single-shot, tool-loop-less** mode — it builds a [`CompletionRequest`]
 /// from the [`TaskExecutionContext::prompt`], calls
 /// [`CompletionModel::completion`], stitches the assistant text into a
-/// summary, and returns a `Completed` [`TaskExecutionResult`]. This is
-/// the first real wiring on the `TaskExecutor` trait; it's deliberately
+/// summary, and returns a `Completed` [`TaskExecutionResult`] only when
+/// the response does not request tool execution. Tool-call responses fail
+/// closed with [`TaskExecutionError::ToolPolicy`] so this minimal adapter
+/// cannot silently mark an unmediated tool request as complete. This is the
+/// first real wiring on the `TaskExecutor` trait; it's deliberately
 /// minimal so the trait contract can be exercised end-to-end in tests
-/// without bringing the full `orchestrator::executor::execute_task<M>`
-/// tool-loop / sandbox / approval pipeline along.
+/// without bringing the full tool-loop / sandbox / approval pipeline
+/// along.
 ///
 /// The full wiring (tool-loop dispatch, sandbox guards, approval
 /// mediation) is a separate cross-cutting follow-up. The minimal body
@@ -167,12 +167,36 @@ impl<M: CompletionModel + Send + Sync + 'static> TaskExecutor for CompletionTask
             TaskExecutionError::Provider(format!("completion model error: {err}"))
         })?;
 
+        let tool_calls = response
+            .content
+            .iter()
+            .filter_map(|segment| match segment {
+                crate::internal::ai::completion::AssistantContent::ToolCall(tool_call) => {
+                    let name = if tool_call.function.name.is_empty() {
+                        tool_call.name.as_str()
+                    } else {
+                        tool_call.function.name.as_str()
+                    };
+                    Some(name)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !tool_calls.is_empty() {
+            return Err(TaskExecutionError::ToolPolicy(format!(
+                "completion task executor received tool call(s) [{}], but this minimal executor \
+                 cannot run tools; route this task through the full tool-loop executor or disable \
+                 tool calls for this executor",
+                tool_calls.join(", ")
+            )));
+        }
+
         // Stitch the assistant content into a summary. Only Text
-        // segments contribute; ToolCall segments are skipped because
-        // this minimal body doesn't dispatch tools. The summary stays
-        // None when no text segments came back so callers can
-        // distinguish "model ran but produced no text" from "model
-        // returned a non-empty response".
+        // segments contribute. ToolCall segments were rejected above so
+        // this minimal body cannot silently mark a tool-requesting task as
+        // completed. The summary stays None when no text segments came
+        // back so callers can distinguish "model ran but produced no
+        // text" from "model returned a non-empty response".
         let summary_text = response
             .content
             .iter()
@@ -276,6 +300,36 @@ mod tests {
             Err(CompletionError::ProviderError(
                 "scripted error: backend exploded".to_string(),
             ))
+        }
+    }
+
+    /// Test fixture: returns a tool call. The minimal completion executor
+    /// must reject this because it does not run the tool-loop / approval
+    /// mediation path.
+    #[derive(Clone)]
+    struct ToolCallingCompletionModel;
+
+    impl CompletionModel for ToolCallingCompletionModel {
+        type Response = ScriptedResponse;
+
+        async fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            use crate::internal::ai::completion::{AssistantContent, Function, ToolCall};
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "run_shell".to_string(),
+                    function: Function {
+                        name: "run_shell".to_string(),
+                        arguments: serde_json::json!({ "cmd": "pwd" }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: ScriptedResponse,
+            })
         }
     }
 
@@ -425,6 +479,31 @@ mod tests {
         let request = captured.as_ref().expect("model must have been invoked");
         assert_eq!(request.preamble, None);
         assert!(request.chat_history.is_empty());
+    }
+
+    /// The minimal completion executor is not allowed to silently drop
+    /// provider tool calls and report `Completed`. Until the full tool-loop
+    /// integration lands, tool-call responses must fail closed at the task
+    /// boundary with a message that tells callers which executor to use.
+    #[tokio::test]
+    async fn completion_task_executor_rejects_tool_calls_without_tool_loop() {
+        let executor = CompletionTaskExecutor::new(ToolCallingCompletionModel);
+        let error = executor
+            .execute_task_attempt(dummy_context())
+            .await
+            .expect_err("tool calls are unsupported in the minimal executor");
+        let TaskExecutionError::ToolPolicy(message) = error else {
+            panic!("expected TaskExecutionError::ToolPolicy, got: {error:?}");
+        };
+
+        assert!(
+            message.contains("run_shell"),
+            "tool name should be included for diagnostics (got {message:?})"
+        );
+        assert!(
+            message.contains("full tool-loop executor"),
+            "message should direct callers to the supported tool path (got {message:?})"
+        );
     }
 
     /// A model error must be mapped to
