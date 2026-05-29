@@ -32,6 +32,7 @@ pub struct ThreadBundle {
 pub struct ThreadQueryIndexes {
     pub thread_id: ThreadId,
     pub freshness: ProjectionFreshness,
+    pub diagnostics: Vec<QueryIndexDiagnostic>,
     pub intent_plan_index: Vec<IntentPlanIndexRow>,
     pub intent_task_index: Vec<IntentTaskIndexRow>,
     pub plan_step_task_index: Vec<PlanStepTaskIndexRow>,
@@ -39,6 +40,14 @@ pub struct ThreadQueryIndexes {
     pub run_event_index: Vec<RunEventIndexRow>,
     pub run_patchset_index: Vec<RunPatchSetIndexRow>,
     pub intent_context_frame_index: Vec<IntentContextFrameIndexRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryIndexDiagnostic {
+    pub code: String,
+    pub index_name: String,
+    pub subject_id: Uuid,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,10 +155,9 @@ impl ProjectionResolver {
         rebuilder: &ProjectionRebuilder<'_>,
     ) -> Result<Option<ThreadQueryIndexes>> {
         let existing = self.load_query_indexes(thread_id).await?;
-        if existing
-            .as_ref()
-            .is_some_and(|indexes| indexes.freshness == ProjectionFreshness::Fresh)
-        {
+        if existing.as_ref().is_some_and(|indexes| {
+            indexes.freshness == ProjectionFreshness::Fresh && indexes.diagnostics.is_empty()
+        }) {
             return Ok(existing);
         }
 
@@ -159,6 +167,14 @@ impl ProjectionResolver {
             Err(error) => {
                 if let Some(mut indexes) = existing {
                     indexes.freshness = ProjectionFreshness::Unavailable;
+                    indexes.diagnostics.push(query_index_diagnostic(
+                        "query_index_rebuild_failed",
+                        "all",
+                        thread_id,
+                        format!(
+                            "Targeted query-index rebuild failed for thread {thread_id}: {error:#}"
+                        ),
+                    ));
                     Ok(Some(indexes))
                 } else {
                     Err(error.context(format!(
@@ -338,9 +354,18 @@ impl ProjectionResolver {
                 .collect::<Result<Vec<_>>>()?
         };
 
+        let diagnostics = query_index_diagnostics(
+            bundle,
+            &intent_plan_index,
+            &intent_task_index,
+            &plan_step_task_index,
+            &task_run_index,
+        );
+
         Ok(ThreadQueryIndexes {
             thread_id,
             freshness: bundle.freshness,
+            diagnostics,
             intent_plan_index,
             intent_task_index,
             plan_step_task_index,
@@ -402,6 +427,94 @@ fn thread_intent_ids(bundle: &ThreadBundle) -> BTreeSet<Uuid> {
     ids.extend(bundle.thread.current_intent_id);
     ids.extend(bundle.thread.latest_intent_id);
     ids
+}
+
+fn query_index_diagnostics(
+    bundle: &ThreadBundle,
+    intent_plan_index: &[IntentPlanIndexRow],
+    intent_task_index: &[IntentTaskIndexRow],
+    plan_step_task_index: &[PlanStepTaskIndexRow],
+    task_run_index: &[TaskRunIndexRow],
+) -> Vec<QueryIndexDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let intent_ids = thread_intent_ids(bundle);
+    let plan_ids = scheduler_plan_ids(&bundle.scheduler);
+
+    if !intent_ids.is_empty() {
+        for plan_id in plan_ids {
+            let indexed = intent_plan_index
+                .iter()
+                .any(|row| row.plan_id == plan_id && intent_ids.contains(&row.intent_id));
+            if !indexed {
+                diagnostics.push(query_index_diagnostic(
+                    "missing_intent_plan_index",
+                    "ai_index_intent_plan",
+                    plan_id,
+                    format!(
+                        "Scheduler references plan {plan_id}, but no intent-plan query index row links it to thread {}",
+                        bundle.thread.thread_id
+                    ),
+                ));
+            }
+        }
+    }
+
+    if let Some(active_task_id) = bundle.scheduler.active_task_id {
+        let indexed = intent_task_index
+            .iter()
+            .any(|row| row.task_id == active_task_id)
+            || plan_step_task_index
+                .iter()
+                .any(|row| row.task_id == active_task_id);
+        if !indexed {
+            diagnostics.push(query_index_diagnostic(
+                "missing_active_task_index",
+                "ai_index_intent_task",
+                active_task_id,
+                format!(
+                    "Scheduler active task {active_task_id} is not reachable from intent-task or plan-step-task query indexes"
+                ),
+            ));
+        }
+    }
+
+    if let Some(active_run_id) = bundle.scheduler.active_run_id {
+        let indexed = task_run_index.iter().any(|row| row.run_id == active_run_id);
+        if !indexed {
+            diagnostics.push(query_index_diagnostic(
+                "missing_active_run_index",
+                "ai_index_task_run",
+                active_run_id,
+                format!(
+                    "Scheduler active run {active_run_id} is not reachable from task-run query indexes"
+                ),
+            ));
+        }
+    }
+
+    diagnostics
+}
+
+fn scheduler_plan_ids(scheduler: &SchedulerState) -> BTreeSet<Uuid> {
+    let mut plan_ids = BTreeSet::new();
+    plan_ids.extend(scheduler.selected_plan_id);
+    plan_ids.extend(scheduler.selected_plan_ids.iter().map(|plan| plan.plan_id));
+    plan_ids.extend(scheduler.current_plan_heads.iter().map(|plan| plan.plan_id));
+    plan_ids
+}
+
+fn query_index_diagnostic(
+    code: &'static str,
+    index_name: &'static str,
+    subject_id: Uuid,
+    message: String,
+) -> QueryIndexDiagnostic {
+    QueryIndexDiagnostic {
+        code: code.to_string(),
+        index_name: index_name.to_string(),
+        subject_id,
+        message,
+    }
 }
 
 fn strings(ids: &BTreeSet<Uuid>) -> Vec<String> {

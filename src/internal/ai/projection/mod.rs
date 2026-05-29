@@ -18,7 +18,8 @@ pub use index::{
 };
 pub use rebuild::{MaterializedProjection, ProjectionRebuilder};
 pub use resolver::{
-    ProjectionResolver, ResumeAction, ResumeBundle, ResumeReason, ThreadBundle, ThreadQueryIndexes,
+    ProjectionResolver, QueryIndexDiagnostic, ResumeAction, ResumeBundle, ResumeReason,
+    ThreadBundle, ThreadQueryIndexes,
 };
 pub use scheduler::{
     LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,

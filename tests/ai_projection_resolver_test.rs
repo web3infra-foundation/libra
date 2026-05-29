@@ -263,6 +263,54 @@ async fn projection_resolver_returns_stale_read_only_query_indexes_when_schedule
     assert!(indexes.intent_task_index.is_empty());
 }
 
+/// Scenario: query-index reads must diagnose when the scheduler references
+/// plans/tasks/runs that the denormalized indexes cannot resolve. Without this,
+/// a resume or diagnostics surface can look "fresh" while silently losing the
+/// links needed to rebuild the ready queue.
+#[tokio::test]
+async fn projection_resolver_query_indexes_diagnose_missing_scheduler_links() {
+    let db = setup_db().await;
+    let thread_id = id("acacacac-acac-4aca-8aca-acacacacacac");
+    let active_task_id = id("adadadad-adad-4ada-8ada-adadadadadad");
+    let active_run_id = id("aeaeaeae-aeae-4aea-8aea-aeaeaeaeaeae");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(active_task_id);
+    scheduler.active_run_id = Some(active_run_id);
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    let codes = indexes
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"missing_intent_plan_index"),
+        "expected missing plan index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+    assert!(
+        codes.contains(&"missing_active_task_index"),
+        "expected missing task index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+    assert!(
+        codes.contains(&"missing_active_run_index"),
+        "expected missing run index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+}
+
 /// Scenario: when neither projection nor scheduler rows exist but the underlying
 /// history has Intent + Task objects, `load_or_rebuild_thread_bundle` reconstructs a
 /// `Fresh` bundle from the AI history. Confirms the rebuild path is reachable end to
