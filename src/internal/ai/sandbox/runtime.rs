@@ -1483,17 +1483,21 @@ mod tests {
     #[test]
     fn create_bwrap_command_args_masks_sensitive_read_paths_with_tmpfs() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
-        let secret = PathBuf::from("/home/tester/.ssh");
+        let ssh = PathBuf::from("/home/tester/.ssh");
+        let npmrc = PathBuf::from("/home/tester/.npmrc");
+        let deny_read_paths = vec![ssh.clone(), npmrc.clone()];
 
         let args = create_bwrap_command_args(
             command(),
             network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
             &SandboxPolicy::ReadOnly,
             cwd,
-            &[secret],
+            &deny_read_paths,
         );
 
+        assert_option_value(&args, "--tmpfs", "/tmp");
         assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
+        assert_option_value(&args, "--tmpfs", "/home/tester/.npmrc");
     }
 
     /// `create_bwrap_command_args_with_seccomp` appends

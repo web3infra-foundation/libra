@@ -74,21 +74,21 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **阶段 3 部分落地**：`ExecEnv::into_command()` 在 Unix 平台对实际启用的 Libra 内部 sandbox 命令调用 `setsid()`，让 macOS Seatbelt / Linux helper 子进程脱离调用方 session。
 - **生效范围**：仅当 `effective_sandbox` 为 `MacosSeatbelt` 或 `LinuxSeccomp` 时启用；显式 escalated、`DangerFullAccess`、`ExternalSandbox` 和默认 fallback `SandboxType::None` 不会被这个路径隐式改写。
 - **回归覆盖**：`exec_env_new_session_runs_child_as_session_leader` 在 Unix 上验证 `setsid()` 后 child PID 与 session ID 一致；fallback / escalated transform 继续断言不会设置 `new_session`。
-- **仍待收口**：v0.17.724 内建 bwrap 真实执行落地后，阶段 2 的 `--new-session` 参数覆盖（在 `create_bwrap_command_args` 中已包含）现在进入生效路径；Seatbelt 读权限收紧也仍在阶段 4。
+- **后续状态**：v0.17.724 内建 bwrap 真实执行落地后，阶段 2 的 `--new-session` 参数覆盖已进入生效路径；Seatbelt 读权限收紧也已在阶段 4 落地。
 
 ## 0.17.46 增量收口（2026-05-12）
 
 - **阶段 4 macOS 基线已落地**：`sensitive_read_paths()` 定义默认敏感读取清单，覆盖 HOME 下的 `.ssh`、`.aws`、`.gnupg`、`.netrc`、`.config/gcloud`、`.kube`、`.config/libra/vault` 以及 `/etc/shadow`。
 - **Seatbelt 拒读已接线**：`create_seatbelt_command_args()` 在 `(allow file-read*)` 后追加参数化 `(deny file-read* (subpath ...))`，保持项目文件可读，同时默认挡住常见 credential 目录。
 - **回归覆盖**：策略层测试验证默认清单；macOS runtime 测试验证 Seatbelt deny policy 与参数表包含 HOME credential 路径和 `/etc/shadow`。
-- **当时仍待收口**：Linux bwrap `--tmpfs` 遮蔽仍是阶段 4 后续工作；更广泛的浏览器/token 默认路径清单已在 0.17.76 扩展。
+- **后续状态**：Linux bwrap `--tmpfs` 遮蔽已由 `create_bwrap_command_args()` 对 `/tmp` 和 `deny_read` 路径接入，并由 `create_bwrap_command_args_masks_sensitive_read_paths_with_tmpfs` 固定；更广泛的浏览器/token 默认路径清单已在 0.17.76 扩展。
 
 ## 0.17.76 增量收口（2026-05-13）
 
 - **阶段 4 macOS 默认拒读清单继续扩展**：`sensitive_read_paths()` 除 SSH/AWS/GPG/netrc/gcloud/kube/Libra vault 外，新增常见 token 与浏览器 profile 路径，包括 `.azure`、`.docker`、`.npmrc`、`.pypirc`、Cargo/Gem credentials、GitHub/Hub config、Firefox/Chrome/Chromium/Brave profile、Flatpak Firefox profile 和 macOS `Library/Cookies`。
 - **Seatbelt 自动继承**：macOS Seatbelt policy 继续通过同一个 `sensitive_read_paths()` 入口生成参数化 `(deny file-read* ...)`，不需要额外配置即可挡住这些默认路径。
 - **回归覆盖**：`sensitive_read_paths_include_home_credentials_and_system_shadow` 扩展断言 token 与浏览器路径。
-- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
+- **后续状态**：Linux bwrap 的 `--tmpfs` 遮蔽已随阶段 2/4 合并进入参数构造层；网络三态后续已在阶段 7 收口。
 
 ## 0.17.47 增量收口（2026-05-12）
 
@@ -96,7 +96,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **路径解析契约**：`deny_read` 支持绝对路径、相对 sandbox cwd 的路径，以及 `~/...` HOME 展开；runtime-provided `SandboxRuntimeConfig::deny_read_paths` 会追加到同一清单并去重。
 - **Seatbelt 接线**：macOS Seatbelt policy 会把默认敏感路径和自定义 `deny_read` 路径合并后生成参数化 `(deny file-read* (subpath ...))`。
 - **回归覆盖**：新增测试覆盖缺失配置 no-op、相对/绝对路径解析、runtime config 追加和 TOML parse error；macOS policy 测试覆盖自定义 deny 路径进入参数表。
-- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
+- **后续状态**：Linux bwrap 的 `--tmpfs` 遮蔽已覆盖默认 `/tmp` 与用户/runtime `deny_read` 路径；网络三态后续已在阶段 7 收口。
 
 ## 0.17.48 增量收口（2026-05-12）
 
