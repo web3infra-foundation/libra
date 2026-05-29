@@ -1,20 +1,44 @@
 //! Read-side projection resolver for code runtime resume and diagnostics.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result};
-use sea_orm::DatabaseConnection;
+use chrono::{DateTime, TimeZone, Utc};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    ProjectionRebuilder, SchedulerState, SchedulerStateRepository, ThreadId, ThreadProjection,
+    IntentContextFrameIndexRow, IntentPlanIndexRow, IntentTaskIndexRow, PlanStepTaskIndexRow,
+    ProjectionRebuilder, RunEventIndexRow, RunPatchSetIndexRow, SchedulerState,
+    SchedulerStateRepository, TaskRunIndexRow, ThreadId, ThreadProjection,
 };
-use crate::internal::ai::runtime::contracts::{ProjectionFreshness, WorkflowPhase};
+use crate::internal::{
+    ai::runtime::contracts::{ProjectionFreshness, WorkflowPhase},
+    model::{
+        ai_index_intent_context_frame, ai_index_intent_plan, ai_index_intent_task,
+        ai_index_plan_step_task, ai_index_run_event, ai_index_run_patchset, ai_index_task_run,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadBundle {
     pub thread: ThreadProjection,
     pub scheduler: SchedulerState,
     pub freshness: ProjectionFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadQueryIndexes {
+    pub thread_id: ThreadId,
+    pub freshness: ProjectionFreshness,
+    pub intent_plan_index: Vec<IntentPlanIndexRow>,
+    pub intent_task_index: Vec<IntentTaskIndexRow>,
+    pub plan_step_task_index: Vec<PlanStepTaskIndexRow>,
+    pub task_run_index: Vec<TaskRunIndexRow>,
+    pub run_event_index: Vec<RunEventIndexRow>,
+    pub run_patchset_index: Vec<RunPatchSetIndexRow>,
+    pub intent_context_frame_index: Vec<IntentContextFrameIndexRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +129,228 @@ impl ProjectionResolver {
         }))
     }
 
+    pub async fn load_query_indexes(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<ThreadQueryIndexes>> {
+        let Some(bundle) = self.load_thread_bundle(thread_id).await? else {
+            return Ok(None);
+        };
+
+        self.load_query_indexes_for_bundle(&bundle).await.map(Some)
+    }
+
+    pub async fn load_or_rebuild_query_indexes(
+        &self,
+        thread_id: ThreadId,
+        rebuilder: &ProjectionRebuilder<'_>,
+    ) -> Result<Option<ThreadQueryIndexes>> {
+        let existing = self.load_query_indexes(thread_id).await?;
+        if existing
+            .as_ref()
+            .is_some_and(|indexes| indexes.freshness == ProjectionFreshness::Fresh)
+        {
+            return Ok(existing);
+        }
+
+        match rebuilder.materialize_thread(&self.db, thread_id).await {
+            Ok(Some(_)) => self.load_query_indexes(thread_id).await,
+            Ok(None) => Ok(existing),
+            Err(error) => {
+                if let Some(mut indexes) = existing {
+                    indexes.freshness = ProjectionFreshness::Unavailable;
+                    Ok(Some(indexes))
+                } else {
+                    Err(error.context(format!(
+                        "Failed to rebuild missing query indexes for thread {thread_id}"
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn load_query_indexes_for_bundle(
+        &self,
+        bundle: &ThreadBundle,
+    ) -> Result<ThreadQueryIndexes> {
+        let thread_id = bundle.thread.thread_id;
+        let intent_ids = thread_intent_ids(bundle);
+
+        let intent_plan_index = if intent_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_intent_plan::Entity::find()
+                .filter(ai_index_intent_plan::Column::IntentId.is_in(strings(&intent_ids)))
+                .order_by_asc(ai_index_intent_plan::Column::IntentId)
+                .order_by_asc(ai_index_intent_plan::Column::PlanId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load intent-plan query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| intent_plan_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let intent_task_index = if intent_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_intent_task::Entity::find()
+                .filter(ai_index_intent_task::Column::IntentId.is_in(strings(&intent_ids)))
+                .order_by_asc(ai_index_intent_task::Column::IntentId)
+                .order_by_asc(ai_index_intent_task::Column::TaskId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load intent-task query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| intent_task_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let mut plan_ids = intent_plan_index
+            .iter()
+            .map(|row| row.plan_id)
+            .collect::<BTreeSet<_>>();
+        plan_ids.extend(bundle.scheduler.selected_plan_id);
+        plan_ids.extend(
+            bundle
+                .scheduler
+                .selected_plan_ids
+                .iter()
+                .map(|plan| plan.plan_id),
+        );
+        plan_ids.extend(
+            bundle
+                .scheduler
+                .current_plan_heads
+                .iter()
+                .map(|plan| plan.plan_id),
+        );
+
+        let plan_step_task_index = if plan_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_plan_step_task::Entity::find()
+                .filter(ai_index_plan_step_task::Column::PlanId.is_in(strings(&plan_ids)))
+                .order_by_asc(ai_index_plan_step_task::Column::PlanId)
+                .order_by_asc(ai_index_plan_step_task::Column::StepId)
+                .order_by_asc(ai_index_plan_step_task::Column::TaskId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load plan-step-task query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| plan_step_task_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let mut task_ids = intent_task_index
+            .iter()
+            .map(|row| row.task_id)
+            .collect::<BTreeSet<_>>();
+        task_ids.extend(plan_step_task_index.iter().map(|row| row.task_id));
+        task_ids.extend(bundle.scheduler.active_task_id);
+        if intent_ids.is_empty() {
+            task_ids.insert(thread_id);
+        }
+
+        let task_run_index = if task_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_task_run::Entity::find()
+                .filter(ai_index_task_run::Column::TaskId.is_in(strings(&task_ids)))
+                .order_by_asc(ai_index_task_run::Column::TaskId)
+                .order_by_asc(ai_index_task_run::Column::RunId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load task-run query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| task_run_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let mut run_ids = task_run_index
+            .iter()
+            .map(|row| row.run_id)
+            .collect::<BTreeSet<_>>();
+        run_ids.extend(bundle.scheduler.active_run_id);
+
+        let run_event_index = if run_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_run_event::Entity::find()
+                .filter(ai_index_run_event::Column::RunId.is_in(strings(&run_ids)))
+                .order_by_asc(ai_index_run_event::Column::RunId)
+                .order_by_asc(ai_index_run_event::Column::EventId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load run-event query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| run_event_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let run_patchset_index = if run_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_run_patchset::Entity::find()
+                .filter(ai_index_run_patchset::Column::RunId.is_in(strings(&run_ids)))
+                .order_by_asc(ai_index_run_patchset::Column::RunId)
+                .order_by_asc(ai_index_run_patchset::Column::Sequence)
+                .order_by_asc(ai_index_run_patchset::Column::PatchsetId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!("Failed to load run-patchset query index rows for thread {thread_id}")
+                })?
+                .into_iter()
+                .map(|row| run_patchset_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let intent_context_frame_index = if intent_ids.is_empty() {
+            Vec::new()
+        } else {
+            ai_index_intent_context_frame::Entity::find()
+                .filter(
+                    ai_index_intent_context_frame::Column::IntentId.is_in(strings(&intent_ids)),
+                )
+                .order_by_asc(ai_index_intent_context_frame::Column::IntentId)
+                .order_by_asc(ai_index_intent_context_frame::Column::RelationKind)
+                .order_by_asc(ai_index_intent_context_frame::Column::ContextFrameId)
+                .all(&self.db)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to load intent-context-frame query index rows for thread {thread_id}"
+                    )
+                })?
+                .into_iter()
+                .map(|row| intent_context_frame_index_from_model(row, thread_id))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        Ok(ThreadQueryIndexes {
+            thread_id,
+            freshness: bundle.freshness,
+            intent_plan_index,
+            intent_task_index,
+            plan_step_task_index,
+            task_run_index,
+            run_event_index,
+            run_patchset_index,
+            intent_context_frame_index,
+        })
+    }
+
     pub async fn load_or_rebuild_thread_bundle(
         &self,
         thread_id: ThreadId,
@@ -144,6 +390,149 @@ impl ProjectionResolver {
             .await?
             .map(ResumeBundle::from_thread_bundle))
     }
+}
+
+fn thread_intent_ids(bundle: &ThreadBundle) -> BTreeSet<Uuid> {
+    let mut ids = bundle
+        .thread
+        .intents
+        .iter()
+        .map(|intent| intent.intent_id)
+        .collect::<BTreeSet<_>>();
+    ids.extend(bundle.thread.current_intent_id);
+    ids.extend(bundle.thread.latest_intent_id);
+    ids
+}
+
+fn strings(ids: &BTreeSet<Uuid>) -> Vec<String> {
+    ids.iter().map(Uuid::to_string).collect()
+}
+
+fn parse_uuid_field(raw: &str, thread_id: ThreadId, field: &str) -> Result<Uuid> {
+    Uuid::parse_str(raw).with_context(|| {
+        format!("Invalid {field} UUID in query index rows for thread {thread_id}: {raw}")
+    })
+}
+
+fn parse_optional_uuid_field(
+    raw: Option<&str>,
+    thread_id: ThreadId,
+    field: &str,
+) -> Result<Option<Uuid>> {
+    raw.map(|value| parse_uuid_field(value, thread_id, field))
+        .transpose()
+}
+
+fn timestamp_from_index_row(raw: i64, thread_id: ThreadId, field: &str) -> Result<DateTime<Utc>> {
+    Utc.timestamp_opt(raw, 0).single().with_context(|| {
+        format!("Invalid {field} timestamp in query index rows for thread {thread_id}: {raw}")
+    })
+}
+
+fn intent_plan_index_from_model(
+    row: ai_index_intent_plan::Model,
+    thread_id: ThreadId,
+) -> Result<IntentPlanIndexRow> {
+    Ok(IntentPlanIndexRow {
+        intent_id: parse_uuid_field(&row.intent_id, thread_id, "intent_plan.intent_id")?,
+        plan_id: parse_uuid_field(&row.plan_id, thread_id, "intent_plan.plan_id")?,
+        created_at: timestamp_from_index_row(row.created_at, thread_id, "intent_plan.created_at")?,
+    })
+}
+
+fn intent_task_index_from_model(
+    row: ai_index_intent_task::Model,
+    thread_id: ThreadId,
+) -> Result<IntentTaskIndexRow> {
+    Ok(IntentTaskIndexRow {
+        intent_id: parse_uuid_field(&row.intent_id, thread_id, "intent_task.intent_id")?,
+        task_id: parse_uuid_field(&row.task_id, thread_id, "intent_task.task_id")?,
+        parent_task_id: parse_optional_uuid_field(
+            row.parent_task_id.as_deref(),
+            thread_id,
+            "intent_task.parent_task_id",
+        )?,
+        origin_step_id: parse_optional_uuid_field(
+            row.origin_step_id.as_deref(),
+            thread_id,
+            "intent_task.origin_step_id",
+        )?,
+        created_at: timestamp_from_index_row(row.created_at, thread_id, "intent_task.created_at")?,
+    })
+}
+
+fn plan_step_task_index_from_model(
+    row: ai_index_plan_step_task::Model,
+    thread_id: ThreadId,
+) -> Result<PlanStepTaskIndexRow> {
+    Ok(PlanStepTaskIndexRow {
+        plan_id: parse_uuid_field(&row.plan_id, thread_id, "plan_step_task.plan_id")?,
+        step_id: parse_uuid_field(&row.step_id, thread_id, "plan_step_task.step_id")?,
+        task_id: parse_uuid_field(&row.task_id, thread_id, "plan_step_task.task_id")?,
+        created_at: timestamp_from_index_row(
+            row.created_at,
+            thread_id,
+            "plan_step_task.created_at",
+        )?,
+    })
+}
+
+fn task_run_index_from_model(
+    row: ai_index_task_run::Model,
+    thread_id: ThreadId,
+) -> Result<TaskRunIndexRow> {
+    Ok(TaskRunIndexRow {
+        task_id: parse_uuid_field(&row.task_id, thread_id, "task_run.task_id")?,
+        run_id: parse_uuid_field(&row.run_id, thread_id, "task_run.run_id")?,
+        is_latest: row.is_latest,
+        created_at: timestamp_from_index_row(row.created_at, thread_id, "task_run.created_at")?,
+    })
+}
+
+fn run_event_index_from_model(
+    row: ai_index_run_event::Model,
+    thread_id: ThreadId,
+) -> Result<RunEventIndexRow> {
+    Ok(RunEventIndexRow {
+        run_id: parse_uuid_field(&row.run_id, thread_id, "run_event.run_id")?,
+        event_id: parse_uuid_field(&row.event_id, thread_id, "run_event.event_id")?,
+        event_kind: row.event_kind,
+        is_latest: row.is_latest,
+        created_at: timestamp_from_index_row(row.created_at, thread_id, "run_event.created_at")?,
+    })
+}
+
+fn run_patchset_index_from_model(
+    row: ai_index_run_patchset::Model,
+    thread_id: ThreadId,
+) -> Result<RunPatchSetIndexRow> {
+    Ok(RunPatchSetIndexRow {
+        run_id: parse_uuid_field(&row.run_id, thread_id, "run_patchset.run_id")?,
+        patchset_id: parse_uuid_field(&row.patchset_id, thread_id, "run_patchset.patchset_id")?,
+        sequence: row.sequence,
+        is_latest: row.is_latest,
+        created_at: timestamp_from_index_row(row.created_at, thread_id, "run_patchset.created_at")?,
+    })
+}
+
+fn intent_context_frame_index_from_model(
+    row: ai_index_intent_context_frame::Model,
+    thread_id: ThreadId,
+) -> Result<IntentContextFrameIndexRow> {
+    Ok(IntentContextFrameIndexRow {
+        intent_id: parse_uuid_field(&row.intent_id, thread_id, "intent_context_frame.intent_id")?,
+        context_frame_id: parse_uuid_field(
+            &row.context_frame_id,
+            thread_id,
+            "intent_context_frame.context_frame_id",
+        )?,
+        relation_kind: row.relation_kind,
+        created_at: timestamp_from_index_row(
+            row.created_at,
+            thread_id,
+            "intent_context_frame.created_at",
+        )?,
+    })
 }
 
 fn infer_resume_phase(thread: &ThreadProjection, scheduler: &SchedulerState) -> WorkflowPhase {

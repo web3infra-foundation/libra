@@ -240,6 +240,29 @@ async fn projection_resolver_returns_stale_read_only_when_scheduler_row_is_missi
     assert!(bundle.scheduler.selected_plan_ids.is_empty());
 }
 
+/// Scenario: the query-index read contract must degrade the same way as the
+/// thread bundle. If the thread projection exists but the scheduler row is
+/// missing, index reads are allowed for diagnostics/UI display but must be
+/// marked `StaleReadOnly` so callers do not advance runtime state from them.
+#[tokio::test]
+async fn projection_resolver_returns_stale_read_only_query_indexes_when_scheduler_row_is_missing() {
+    let db = setup_db().await;
+    let thread_id = id("abababab-abab-4aba-8aba-abababababab");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.thread_id, thread_id);
+    assert_eq!(indexes.freshness, ProjectionFreshness::StaleReadOnly);
+    assert!(indexes.intent_plan_index.is_empty());
+    assert!(indexes.intent_task_index.is_empty());
+}
+
 /// Scenario: when neither projection nor scheduler rows exist but the underlying
 /// history has Intent + Task objects, `load_or_rebuild_thread_bundle` reconstructs a
 /// `Fresh` bundle from the AI history. Confirms the rebuild path is reachable end to
@@ -278,6 +301,60 @@ async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {
     assert_eq!(bundle.thread.thread_id, intent.header().object_id());
     assert_eq!(bundle.thread.intents.len(), 1);
     assert_eq!(bundle.scheduler.thread_id, intent.header().object_id());
+}
+
+/// Scenario: when query-index projections are missing but the immutable history
+/// contains an Intent + Task pair, the resolver must run the same targeted rebuild
+/// path before exposing the denormalized rows. This is the read-side contract for
+/// consumers that need cheap `intent -> task` lookups without treating stale rows as
+/// writable runtime state.
+#[tokio::test]
+#[serial]
+async fn projection_resolver_rebuilds_and_loads_thread_query_indexes() {
+    let (_dir, storage, history, db_conn) = setup_projection_history().await;
+    let actor = ActorRef::human("projection-query-index").unwrap();
+    let intent = Intent::new(actor.clone(), "Rebuild query indexes").unwrap();
+    storage.put_tracked(&intent, &history).await.unwrap();
+    let mut task = Task::new(actor, "Indexed task", None).unwrap();
+    task.set_intent(Some(intent.header().object_id()));
+    let task_id = task.header().object_id();
+    storage.put_tracked(&task, &history).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db_conn.as_ref().clone());
+    assert!(
+        resolver
+            .load_query_indexes(intent.header().object_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let indexes = resolver
+        .load_or_rebuild_query_indexes(intent.header().object_id(), &rebuilder)
+        .await
+        .unwrap()
+        .expect("rebuilt query indexes");
+
+    assert_eq!(indexes.thread_id, intent.header().object_id());
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    assert!(indexes.intent_plan_index.is_empty());
+    assert_eq!(indexes.intent_task_index.len(), 1);
+    assert!(indexes.plan_step_task_index.is_empty());
+    assert!(indexes.task_run_index.is_empty());
+    assert!(indexes.run_event_index.is_empty());
+    assert!(indexes.run_patchset_index.is_empty());
+    assert!(indexes.intent_context_frame_index.is_empty());
+    let intent_task = &indexes.intent_task_index[0];
+    assert_eq!(intent_task.intent_id, intent.header().object_id());
+    assert_eq!(intent_task.task_id, task_id);
+
+    let direct = resolver
+        .load_query_indexes(intent.header().object_id())
+        .await
+        .unwrap()
+        .expect("materialized query indexes");
+    assert_eq!(direct, indexes);
 }
 
 /// Scenario: the resume entrypoint must do the rebuild/freshness step before
