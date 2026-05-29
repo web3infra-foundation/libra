@@ -119,7 +119,7 @@
 | 模块 | 关键交付 | 状态 |
 |------|---------|------|
 | Part B Implementation Phase 0 | Contract Stabilization | 已完成：`RuntimeConfig` (`src/internal/ai/runtime/mod.rs:40`) + `Runtime` (`src/internal/ai/runtime/mod.rs:53`)、`TaskExecutor` trait (`contracts.rs:547`)、`PromptPackage` / `WorkflowPhase` 已导出 |
-| Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（`Cargo.toml:77`）、`runtime/` 模块完整 |
+| Part B Implementation Phase 1 / Wave 1A | 共享 Runtime + TaskExecutor + dagrs 0.8.1 接入 | **已完成**：`dagrs = "0.8.1"`（见 `Cargo.toml` dependency table）、`runtime/` 模块完整 |
 | Part B Implementation Phase 1 / Wave 1B | Codex `CodexTaskExecutor` + `CompletionTaskExecutor<M>` 收敛 | **trait + impl schema 已落地（v0.17.579，2026-05-19）**：`pub trait TaskExecutor` 在 `runtime/contracts.rs:547` 定义；`impl TaskExecutor for CodexTaskExecutor` 和 `impl<M: CompletionModel + Send + Sync + 'static> TaskExecutor for CompletionTaskExecutor<M>` 在 `runtime/task_executors.rs` 落地。Codex path 仍返回自识别 stub error 指向后续 wiring 工作；Completion path 已有 no-tool single-shot body（prompt → `CompletionRequest` → provider → assistant text summary），且当 provider 返回 tool call 时以 `TaskExecutionError::ToolPolicy` fail-closed，避免把未执行工具的 attempt 误报为 `Completed`。Wave 1B "Definition of Done" 第 1 条 schema 部分已达成；Phase 2 主循环仍待 follow-up patch 接入真实 attempt loop（Codex WebSocket / completion-model + tool-loop）才能完整通过 `TaskExecutor` 驱动 |
 | Part B Implementation Phase 1 / Wave 1C | claudecode 硬删除 | **已完成**：`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示（`src/cli.rs:683`） |
 | Part B Implementation Phase 2 | Thread ID Unification + Projection Resolver | 部分完成：`projection/` 模块存在；canonical thread_id 收敛仍在进行 |
@@ -2437,7 +2437,7 @@ Step 2 出口标准**不**要求 Step 3 候选完成，但要求：
 
 > **来源**：原 `docs/improvement/code.md`（2026-05-02 合入本文档）。本节描述 `libra code` 的 Phase Workflow 状态机、Snapshot/Event/Projection 对象模型、Implementation Phase 0-5 的重构交付顺序，以及 Wave 1A/1B/1C 的 claudecode 清退路径。
 >
-> **代码基线（2026-05-02）**：claudecode 已删除（`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示，详见 `src/cli.rs:683`），dagrs 已升级到 0.8.1（`Cargo.toml:77`），`Runtime` / `RuntimeConfig` / `TaskExecutor` / `Event` / `Snapshot` / `AuditSink` traits 全部已落地（`src/internal/ai/runtime/{mod,contracts,event,snapshot,hardening}.rs`）。Phase 3/4 已有专用模块 `phase3.rs` / `phase4.rs`。
+> **代码基线（2026-05-02）**：claudecode 已删除（`src/internal/ai/claudecode/` 不存在；CLI 仅保留 `removed_code_claudecode_hints` 给老用户的迁移提示，详见 `src/cli.rs:683`），dagrs 已升级到 0.8.1（见 `Cargo.toml` dependency table），`Runtime` / `RuntimeConfig` / `TaskExecutor` / `Event` / `Snapshot` / `AuditSink` traits 全部已落地（`src/internal/ai/runtime/{mod,contracts,event,snapshot,hardening}.rs`）。Phase 3/4 已有专用模块 `phase3.rs` / `phase4.rs`。
 
 # Code 命令改进详细计划
 
@@ -4280,7 +4280,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | 局部 MCP 跟踪 | 当前已写入 prompt 提交和 post-plan 选择对应的 `ContextFrame` |
 | 交互桥接雏形 | `request_user_input` 与 sandbox approval 已能进入统一 `CodeUiInteraction` / TUI 交互链路 |
 | Shared Code UI runtime 雏形 | 已有 `CodeUiSession`、`CodeUiProviderAdapter`、`CodeUiRuntimeHandle` 与 browser controller lease 机制 |
-| DAG 执行底座 | `Orchestrator<M>` 已接入 `dagrs`，当前 `Cargo.toml` 版本为 `0.6.0` |
+| DAG 执行底座 | `Orchestrator<M>` 已接入 `dagrs`，当前 `Cargo.toml` 版本为 `0.8.1`，并由 `tests/ai_dagrs_081_spike_test.rs` 固定 `Graph::add_node` / `Graph::add_edge` / `Graph::async_start()` / `GraphEvent::ExecutionTerminated` API 假设 |
 | 隔离 task worktree + 变更回写 | 执行器已可为 task 准备 isolated `Worktree`，并在成功后把变更串行同步回当前 `main worktree` / `working directory` |
 | ThreadProjection / SchedulerState | Projection 类型已完整定义（`projection/thread.rs`、`projection/scheduler.rs`） |
 | Projection rebuild / materialization 雏形 | 已有 `ProjectionRebuilder`，可从 formal objects 重建并 materialize latest-thread projection |
@@ -4313,7 +4313,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | **Phase 3/4 formal pipeline 未落地** | 高 | 系统验证仍主要依赖 planner / gate task 与现有 Orchestrator 路径，`ArtifactLedger`、`ValidatorEngine`、`DecisionProposal` 尚未形成可重放、可恢复、可供 UI/MCP 直接消费的正式闭环 |
 | **`--resume` / phase-aware recovery 合同未落地** | 高 | 还没有围绕 canonical `thread_id` 的 `load_for_resume()`、phase 判定、interrupted run 恢复、degraded read 与恢复审计轨迹，恢复行为仍缺正式 contract |
 | **Query Index / Rebuild 合同未落地** | 高 | 对象模型要求明确，但 targeted rebuild 的显式触发条件、降级读路径、projection freshness 与 rebuild failure 行为仍未正式定义 |
-| **Phase 2 的 DAG runtime 版本与合同未收敛** | 高 | 当前实现虽然已接入 `dagrs`，但依赖仍为 `0.6.0`，且 graph build / event / report / retry 语义尚未收敛到 `dagrs 0.8.1` contract |
+| **Phase 2 的 DAG runtime 合同未完全收敛** | 高 | `dagrs` 依赖与 spike 已收敛到 `0.8.1`，但 Phase 2 graph build / event / report / retry / resume 语义仍需正式提升为共享 Runtime contract |
 | **Code UI 尚未收敛到共享 read model / interaction state / controller lease** | 高 | TUI / Web 仍各自维护 session snapshot 与交互状态，`pending_post_plan`、`pending_plan_revision`、approval、`request_user_input` 等还未进入共享 schema |
 | **安全 / 审批 / tool boundary 仍未由 Runtime 接管** | 高 | `approvalPolicy`、readonly tool 边界、鉴权、secret redaction 与 durable audit 仍以 provider-specific / ad hoc 方式存在，尚未形成共享执行边界 |
 | **prompt assembly 仍是 Codex / generic 双入口** | 中 | Intent / Planning / Task prompt 组装尚未统一到共享 `PromptPackage` / `IntentPromptBuilder` / `PlanningPromptBuilder` / `TaskPromptBuilder`，Phase 语义容易继续漂移 |
@@ -4338,7 +4338,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 3. `SessionState.id`、`CodeUiSessionSnapshot.session_id`、`provider_session_resume`、Codex `threadId` 仍在混用，当前恢复模型还没有收敛到 canonical `thread_id`。
 4. `ExecutionAuditSession` 已经是共享写入层前身；目标不是凭空发明新抽象，而是把现有持久化与 formal writes 收敛成 `Runtime` facade。
 5. Phase 3 系统验证当前仍被 planner 注入为 gate task；目标态必须把它提升为独立的 `ValidatorEngine`，而不是继续塞在 Phase 2 DAG 内。
-6. 当前代码已经接入 `dagrs`，但依赖仍是 `0.6.0`；目标态要把 Phase 2 明确收敛到 `dagrs 0.8.1` 语义，并同步更新 error / event / report 合同。
+6. 当前代码已经接入 `dagrs 0.8.1`，并有 spike 测试固定 graph build / report / termination event API；目标态仍要把 Phase 2 error / event / report / retry / resume 语义正式收敛到共享 Runtime contract。
 7. 当前 `orchestrator/workspace.rs` 和 `sandbox/*` 已经提供 task worktree、变更回写与 sandbox 基础能力；目标态需要把它们正式提升为 Libra 统一的 Phase 2 执行环境层，而不是 executor 内部实现细节。
 
 ### Core Contracts
