@@ -1656,9 +1656,11 @@ async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()>
 
 async fn handle_generate_ssh_key(
     remote: &str,
-    _scope: ConfigScope,
+    scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_global_key_generation(scope, "generate-ssh-key")?;
+
     // Validate remote name. config.md "generate-ssh-key" spec classifies
     // this as a CLI usage error (`error: invalid remote name '<name>': only
     // [a-zA-Z0-9_-] allowed`), so we must surface it via
@@ -1771,9 +1773,11 @@ async fn handle_generate_gpg_key(
     name: Option<&str>,
     email: Option<&str>,
     usage: Option<&str>,
-    _scope: ConfigScope,
+    scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_global_key_generation(scope, "generate-gpg-key")?;
+
     let usage = match usage.unwrap_or("signing") {
         "signing" => "signing",
         "encrypt" => "encrypt",
@@ -1862,6 +1866,17 @@ async fn handle_generate_gpg_key(
         }
     }
     Ok(())
+}
+
+fn reject_global_key_generation(scope: ConfigScope, command: &str) -> CliResult<()> {
+    if scope == ConfigScope::Local {
+        return Ok(());
+    }
+
+    Err(CliError::command_usage(format!(
+        "{command} only supports local scope; --global key generation is not supported yet"
+    ))
+    .with_hint("run without --global to generate a repository-local key"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

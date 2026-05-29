@@ -950,6 +950,68 @@ async fn test_config_generate_ssh_key_replaces_vault_generate_ssh_key_flow() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_generate_global_ssh_key_is_rejected_without_local_side_effects() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
+
+    libra::internal::config::ConfigKv::unset_all("vault.ssh.origin.pubkey")
+        .await
+        .unwrap();
+    libra::internal::config::ConfigKv::unset_all("vault.ssh.origin.privkey")
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "--global",
+            "generate-ssh-key",
+            "--remote",
+            "origin",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("generate-ssh-key only supports local scope"),
+        "stderr should explain unsupported global SSH key generation, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run without --global"),
+        "stderr should tell users how to run the supported form, got: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "global generate-ssh-key should be a command usage error, got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-ssh-key must not write a local public key"
+    );
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.ssh.origin.privkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-ssh-key must not write a local private key"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1051,6 +1113,64 @@ async fn test_config_generate_gpg_key_replaces_vault_generate_gpg_key_flow() {
     assert!(
         stdout.contains("BEGIN PGP PUBLIC KEY BLOCK"),
         "stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_global_gpg_key_is_rejected_without_local_side_effects() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::config::ConfigKv::unset_all("vault.gpg.pubkey")
+        .await
+        .unwrap();
+    libra::internal::config::ConfigKv::unset_all("vault.signing")
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "--global",
+            "generate-gpg-key",
+            "--name",
+            "Global User",
+            "--email",
+            "global@example.com",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("generate-gpg-key only supports local scope"),
+        "stderr should explain unsupported global GPG key generation, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run without --global"),
+        "stderr should tell users how to run the supported form, got: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "global generate-gpg-key should be a command usage error, got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.gpg.pubkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-gpg-key must not write a local GPG public key"
+    );
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.signing")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-gpg-key must not enable local vault signing"
     );
 }
 
