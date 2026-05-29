@@ -8960,7 +8960,7 @@ mod tests {
                 context::{PlanDraftStep, SubmitPlanDraftArgs},
                 spec::ToolSpec,
             },
-            usage::{UsageDisplaySnapshot, UsageGrouping},
+            usage::{UsageDisplaySnapshot, UsageGrouping, format_usage_badge},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -9063,6 +9063,10 @@ mod tests {
         assert_eq!(estimate_streamed_output_tokens("abcdefgh"), 2);
         assert_eq!(snapshot.completion_tokens, 12);
         assert_eq!(pending, 2);
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 12 tok · 0.0s"
+        );
 
         apply_final_usage_update(
             &mut snapshot,
@@ -9083,6 +9087,10 @@ mod tests {
         assert_eq!(snapshot.completion_tokens, 17);
         assert_eq!(snapshot.wall_clock_ms, 1500);
         assert_eq!(snapshot.cost_usd, Some(0.01));
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 22 tok · 1.5s · $0.0100"
+        );
     }
 
     #[test]
