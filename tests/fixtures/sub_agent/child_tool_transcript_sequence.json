@@ -1,0 +1,49 @@
+{
+  "parent": [
+    "agent_run.spawned",
+    "agent_run.completed"
+  ],
+  "child": [
+    {
+      "kind": "session_snapshot",
+      "roles": [
+        "user"
+      ]
+    },
+    {
+      "kind": "tool_call",
+      "call_id": "call_apply_patch_1",
+      "tool_name": "apply_patch"
+    },
+    {
+      "kind": "session_snapshot",
+      "roles": [
+        "user",
+        "tool_call"
+      ]
+    },
+    {
+      "kind": "tool_result",
+      "call_id": "call_apply_patch_1",
+      "tool_name": "apply_patch",
+      "status": "success"
+    },
+    {
+      "kind": "session_snapshot",
+      "roles": [
+        "user",
+        "tool_call",
+        "tool_result"
+      ]
+    },
+    {
+      "kind": "session_snapshot",
+      "roles": [
+        "user",
+        "tool_call",
+        "tool_result",
+        "assistant"
+      ]
+    }
+  ]
+}

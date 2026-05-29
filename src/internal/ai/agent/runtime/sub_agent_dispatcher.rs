@@ -2945,6 +2945,70 @@ mod tests {
         assert_eq!(child_tool_result.tool_name, "apply_patch");
         assert_eq!(child_tool_result.call_id, "call_apply_patch_1");
         assert_eq!(child_tool_result.status, "success");
+        let parent_transcript: Vec<_> = store
+            .load_events()
+            .expect("parent JSONL readable")
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEvent::AgentRun(envelope) => envelope.known().cloned(),
+                _ => None,
+            })
+            .map(|event| match event {
+                AgentRunEvent::Spawned { .. } => "agent_run.spawned",
+                AgentRunEvent::Completed { .. } => "agent_run.completed",
+                other => panic!("unexpected parent agent-run event in S3 fixture: {other:?}"),
+            })
+            .collect();
+        let child_transcript: Vec<_> = child_events
+            .iter()
+            .map(|event| match event {
+                SessionEvent::SessionSnapshot(snapshot) => {
+                    let roles: Vec<_> = snapshot
+                        .state
+                        .messages
+                        .iter()
+                        .map(|message| message.role.as_str())
+                        .collect();
+                    serde_json::json!({
+                        "kind": "session_snapshot",
+                        "roles": roles,
+                    })
+                }
+                SessionEvent::ToolCall(tool_call) => serde_json::json!({
+                    "kind": "tool_call",
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.tool_name,
+                }),
+                SessionEvent::ToolResult(tool_result) => serde_json::json!({
+                    "kind": "tool_result",
+                    "call_id": tool_result.call_id,
+                    "tool_name": tool_result.tool_name,
+                    "status": tool_result.status,
+                }),
+                other => panic!("unexpected child transcript event in S3 fixture: {other:?}"),
+            })
+            .collect();
+        let normalized_transcript = serde_json::json!({
+            "parent": parent_transcript,
+            "child": child_transcript,
+        });
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sub_agent/child_tool_transcript_sequence.json");
+        let expected_transcript = std::fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
+            panic!(
+                "S3 normalized transcript fixture must exist at {}: {error}",
+                fixture_path.display()
+            )
+        });
+        let actual_transcript = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&normalized_transcript)
+                .expect("S3 normalized transcript must serialize as JSON"),
+        );
+        assert_eq!(
+            actual_transcript, expected_transcript,
+            "parent/child transcript sequence must match the S3 fixture byte-for-byte",
+        );
         let child_state = store
             .child(&agent_run_id_string)
             .load_state()
