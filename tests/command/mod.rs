@@ -300,6 +300,7 @@ mod mv_test;
 mod open_test;
 mod output_flags_test;
 mod publish_test;
+mod prune_test;
 mod pull_json_test;
 mod pull_test;
 mod push_error_test;

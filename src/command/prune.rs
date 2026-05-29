@@ -347,8 +347,7 @@ fn build_prune_plan(
 	let prunable = loose_objects
 		.into_iter()
 		.filter(|info| {
-			(!reachable.contains(&info.hash)
-				|| packed.contains(&info.hash))
+			(reachable.contains(&info.hash) == packed.contains(&info.hash))
 				&& is_expired(info.modified, expire_before)
 		})
 		.collect();
