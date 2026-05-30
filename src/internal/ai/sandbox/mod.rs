@@ -1777,13 +1777,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
 
     #[cfg(target_os = "linux")]
     {
-        if candidate
-            .as_ref()
-            .is_some_and(|path| is_executable_file(path))
-        {
-            return candidate;
-        }
-        return None;
+        candidate.filter(|path| is_executable_file(path))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -3033,7 +3027,7 @@ mod tests {
 
         let sink = Arc::new(InMemorySandboxEvidenceSink::new());
         let sandbox_runtime = SandboxRuntimeConfig {
-            enforcement: runtime::SandboxEnforcement::Required,
+            enforcement: SandboxEnforcement::Required,
             evidence_sink: Some(sink.clone()),
             ..SandboxRuntimeConfig::default()
         };
