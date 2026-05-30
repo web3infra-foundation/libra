@@ -5728,6 +5728,27 @@ mod tests {
             );
         }
         let db = history.database_connection();
+        let intent_id =
+            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
+        let derived = persisted
+            .derived_records
+            .as_ref()
+            .expect("validation decision derived records");
+        let latest_proposal = DecisionProposalStore::new(db.clone())
+            .load_latest_proposal(intent_id)
+            .await
+            .unwrap()
+            .expect("latest decision proposal");
+        assert_eq!(latest_proposal.proposal_id, derived.decision_proposal_id);
+        assert_eq!(
+            latest_proposal.summary.route,
+            DecisionProposalRoute::AutoAccept
+        );
+        assert_eq!(
+            latest_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(!latest_proposal.summary.requires_human_review);
         assert!(
             !ai_scheduler_selected_plan::Entity::find()
                 .all(&db)
@@ -5803,8 +5824,6 @@ mod tests {
             1
         );
         assert_eq!(history.list_objects("run_usage").await.unwrap().len(), 1);
-        let intent_id =
-            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
         let mut saw_terminal_intent_event = false;
         for (_, hash) in history.list_objects("intent_event").await.unwrap() {
             let event = storage.get_json::<IntentEvent>(&hash).await.unwrap();
