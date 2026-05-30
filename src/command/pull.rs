@@ -22,14 +22,16 @@ const PULL_EXAMPLES: &str = "\
 EXAMPLES:
     libra pull                             Pull from tracking remote
     libra pull origin main                 Pull specific branch from origin
+    libra pull --ff-only                   Refuse to create a merge commit
     libra pull --rebase                    Rebase the current branch onto the upstream
     libra pull --json                      Structured JSON output for agents
     libra pull --quiet                     Suppress progress output
 
 NOTES:
     By default pull uses the same merge engine as `libra merge`, including
-    clean three-way merges and merge-state conflicts. Use --rebase to replay
-    local-only commits onto the upstream tip instead of creating a merge commit.";
+    clean three-way merges and merge-state conflicts. Use --ff-only to reject
+    divergent histories instead of creating a merge commit. Use --rebase to
+    replay local-only commits onto the upstream tip instead.";
 
 /// Fetch from a remote and integrate changes into the current branch.
 // EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
@@ -48,6 +50,10 @@ pub struct PullArgs {
     /// Rebase the current branch onto the upstream after fetching instead of merging
     #[clap(long, short = 'r')]
     rebase: bool,
+
+    /// Refuse to merge unless the upstream can be fast-forwarded
+    #[clap(long = "ff-only", conflicts_with = "rebase")]
+    ff_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +172,7 @@ impl PullArgs {
             repository,
             refspec,
             rebase: false,
+            ff_only: false,
         }
     }
 }
@@ -259,10 +266,16 @@ pub(crate) async fn run_pull(
         });
     }
 
-    let merge_result =
-        merge::run_merge_for_pull(&target.merge_target, &target.upstream, &child_output)
-            .await
-            .map_err(PullError::Merge)?;
+    let merge_result = merge::run_merge_for_pull_with_options(
+        &target.merge_target,
+        &target.upstream,
+        &child_output,
+        merge::PullMergeOptions {
+            ff_only: args.ff_only,
+        },
+    )
+    .await
+    .map_err(PullError::Merge)?;
 
     Ok(PullOutput {
         branch: target.branch,
@@ -603,6 +616,10 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::UnrelatedHistories => {
             CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
+        merge::PullMergeError::NonFastForward { .. } => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
+            .with_hint("or run 'libra pull --rebase' to replay local commits"),
         merge::PullMergeError::Conflicts { .. }
         | merge::PullMergeError::DirtyWorktree
         | merge::PullMergeError::UntrackedOverwrite { .. }

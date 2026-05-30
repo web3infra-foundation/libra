@@ -143,6 +143,23 @@ fn test_pull_cli_remote_not_found_returns_cli_exit_code() {
     assert!(stderr.contains("remote 'origin' not found"));
 }
 
+#[test]
+fn test_pull_ff_only_conflicts_with_rebase_at_parse_time() {
+    let repo = tempdir().expect("failed to create local repo");
+
+    let output = run_libra_command(&["pull", "--ff-only", "--rebase"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("cannot be used with")
+            && stderr.contains("--ff-only")
+            && stderr.contains("--rebase"),
+        "pull should reject conflicting integration modes before repo preflight: {stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_pull_fast_forward_updates_head_from_tracking_remote() {
@@ -165,6 +182,40 @@ async fn test_pull_fast_forward_updates_head_from_tracking_remote() {
     assert!(
         local_repo.path().join("README.md").exists(),
         "pull should restore the fetched worktree"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_pull_ff_only_fast_forward_updates_head_from_tracking_remote() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+    let new_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    let output = run_libra_command(&["pull", "--ff-only"], local_repo.path());
+    assert_cli_success(&output, "pull --ff-only fast-forward");
+
+    let _guard = ChangeDirGuard::new(local_repo.path());
+    let head = Head::current_commit()
+        .await
+        .expect("pull --ff-only should update HEAD to the fetched commit");
+    assert_eq!(head.to_string(), new_head);
+    assert!(
+        local_repo.path().join("remote.txt").exists(),
+        "pull --ff-only should restore the fetched worktree"
     );
 }
 
@@ -218,6 +269,89 @@ async fn test_pull_diverged_remote_creates_three_way_merge() {
     );
     assert!(local_repo.path().join("remote.txt").exists());
     assert!(local_repo.path().join("local.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_pull_ff_only_diverged_remote_rejects_without_changing_head_or_worktree() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let _remote_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    fs::write(local_repo.path().join("local.txt"), "local change\n").expect("write local change");
+    let add = run_libra_command(&["add", "local.txt"], local_repo.path());
+    assert_cli_success(&add, "stage local change");
+    let commit = run_libra_command(
+        &["commit", "-m", "local update", "--no-verify"],
+        local_repo.path(),
+    );
+    assert_cli_success(&commit, "commit local change");
+
+    let guard = ChangeDirGuard::new(local_repo.path());
+    let local_head = Head::current_commit()
+        .await
+        .expect("local commit should leave HEAD");
+    drop(guard);
+
+    let output = run_libra_command(&["--json", "pull", "--ff-only"], local_repo.path());
+    let report = parse_json_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert_eq!(report["details"]["phase"], "merge");
+    assert!(
+        report["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("non-fast-forward")),
+        "pull --ff-only should explain the rejected merge: {report}"
+    );
+    assert!(
+        report["hints"]
+            .as_array()
+            .expect("hints")
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .is_some_and(|text| text.contains("without --ff-only"))),
+        "pull --ff-only should hint how to allow a merge commit: {report}"
+    );
+
+    let _guard = ChangeDirGuard::new(local_repo.path());
+    let head_after = Head::current_commit()
+        .await
+        .expect("failed pull --ff-only should leave HEAD unchanged");
+    assert_eq!(head_after, local_head);
+    assert!(
+        local_repo.path().join("local.txt").exists(),
+        "local worktree file must remain"
+    );
+    assert!(
+        !local_repo.path().join("remote.txt").exists(),
+        "ff-only rejection must not apply remote worktree changes"
+    );
+    assert!(
+        !local_repo
+            .path()
+            .join(".libra")
+            .join("merge-state.json")
+            .exists(),
+        "ff-only rejection must not create merge state"
+    );
 }
 
 #[tokio::test]

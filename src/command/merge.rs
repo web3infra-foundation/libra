@@ -98,6 +98,11 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PullMergeOptions {
+    pub ff_only: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MergeState {
     pub head_name: String,
@@ -182,6 +187,8 @@ pub(crate) enum PullMergeError {
     DirtyWorktree,
     #[error("untracked working tree file would be overwritten by merge: {path}")]
     UntrackedOverwrite { path: String },
+    #[error("non-fast-forward merge refused (current {current}, target {target})")]
+    NonFastForward { current: String, target: String },
     #[error("failed to load merge state: {0}")]
     StateLoad(String),
     #[error("failed to save merge state: {0}")]
@@ -230,6 +237,10 @@ impl From<PullMergeError> for CliError {
             }
             PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
+            PullMergeError::NonFastForward { .. } => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
+                .with_hint("or run 'libra pull --rebase' to replay local commits"),
             PullMergeError::Conflicts { .. }
             | PullMergeError::DirtyWorktree
             | PullMergeError::UntrackedOverwrite { .. }
@@ -337,6 +348,15 @@ pub(crate) async fn run_merge_for_pull(
     upstream: &str,
     output: &OutputConfig,
 ) -> Result<PullMergeSummary, PullMergeError> {
+    run_merge_for_pull_with_options(target_ref, upstream, output, PullMergeOptions::default()).await
+}
+
+pub(crate) async fn run_merge_for_pull_with_options(
+    target_ref: &str,
+    upstream: &str,
+    output: &OutputConfig,
+    options: PullMergeOptions,
+) -> Result<PullMergeSummary, PullMergeError> {
     if MergeState::load_optional_sync()
         .map_err(PullMergeError::StateLoad)?
         .is_some()
@@ -407,6 +427,13 @@ pub(crate) async fn run_merge_for_pull(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+        });
+    }
+
+    if options.ff_only {
+        return Err(PullMergeError::NonFastForward {
+            current: current_commit.id.to_string(),
+            target: target_commit.id.to_string(),
         });
     }
 
@@ -1446,6 +1473,14 @@ mod tests {
         assert_eq!(
             PullMergeError::UnrelatedHistories.to_string(),
             "refusing to merge unrelated histories",
+        );
+        assert_eq!(
+            PullMergeError::NonFastForward {
+                current: "1111111".to_string(),
+                target: "2222222".to_string(),
+            }
+            .to_string(),
+            "non-fast-forward merge refused (current 1111111, target 2222222)",
         );
         assert_eq!(
             PullMergeError::TreeLoad {

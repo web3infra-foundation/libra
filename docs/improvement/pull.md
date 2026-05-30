@@ -1,6 +1,6 @@
 ## Pull 命令改进详细计划
 
-> **实施状态：✅ 已落地** — `PullError`、`PullOutput`、`run_pull()` / `render_pull_output()`、JSON / machine 聚合输出、fetch/merge phase detail 和显式错误码映射均已在当前代码库完成。
+> **实施状态：✅ 已落地** — `PullError`、`PullOutput`、`run_pull()` / `render_pull_output()`、JSON / machine 聚合输出、fetch/merge phase detail、显式错误码映射和 `--ff-only` 非快进拒绝均已在当前代码库完成。
 
 > 最后编写时间：2026-03-27
 
@@ -20,15 +20,16 @@
 - Pull 已从薄包装层改为 `run_pull()` + `render_pull_output()` 的聚合命令
 - 远程/refspec 自动检测已实现：从 `branch.<name>.remote` + `branch.<name>.merge` 推导
 - pull 复用 fetch / merge 的 typed helper，而不是调用子命令 `execute_safe()` 后解析文本
-- 当前 `merge` 仅稳定支持 `Already up to date.` 和 fast-forward；非 fast-forward / three-way merge 仍返回错误，而不是生成 merge commit 或冲突状态
+- 当前 `merge` 稳定支持 `Already up to date.`、fast-forward、single-head three-way merge 和冲突状态；`pull --ff-only` 在分叉历史进入 three-way 前拒绝并保持 HEAD/worktree 不变
 
 **基于当前代码的 Review 结论（2026-05-11 复核）：**
 
-- `PullOutput` 已聚合 fetch 和 merge 结果，`--json` / `--machine` 输出单一 `pull` envelope。
+- `PullOutput` 已聚合 fetch 和 merge/rebase 结果，`--json` / `--machine` 输出单一 `pull` envelope。
 - `PullError → CliError` 已显式映射；fetch / merge 失败会保留根因并追加 `phase=fetch|merge` detail。
 - `run_pull()` 复用 fetch / merge typed helper，结构化输出不解析子命令 stdout/stderr。
 - human 成功路径已有 pull 级摘要；结构化模式抑制子级装饰输出。
-- `--rebase` 仍按非目标保留给 rebase 专项；three-way merge / 冲突结构化已由 C7 merge 专项补齐，并被 pull 复用。
+- `--rebase` 已复用 rebase 专项结果；three-way merge / 冲突结构化已由 C7 merge 专项补齐，并被 pull 复用。
+- `--ff-only` 已作为 C7 后续增量落地：fetch 正常执行，merge 阶段在非 fast-forward 时返回 `LBR-CONFLICT-002` 且带 `details.phase == "merge"`，不创建 merge state。
 
 ### 目标与非目标
 
@@ -47,11 +48,11 @@
 - 补齐 `--help` EXAMPLES 段
 
 **本批非目标：**
-- **不引入 `--rebase`**。`pull --rebase` 需要 rebase 命令的配合，留后续批次
-- **本批初版未实现 three-way merge；C7 已补齐**。当前 `pull` 在 non-fast-forward 时复用 `merge` 的 single-head three-way / 冲突 lifecycle，仍不实现 `--rebase`、`--squash` 或自定义策略
+- **`--rebase` 已由 rebase 专项补齐**。当前 pull 可用 `--rebase` 重放 local-only commits，且与 `--ff-only` 互斥
+- **本批初版未实现 three-way merge；C7 已补齐**。当前 `pull` 在 non-fast-forward 时复用 `merge` 的 single-head three-way / 冲突 lifecycle，仍不实现 `--squash` 或自定义策略
 - **不通过解析子命令 stdout/stderr 实现结构化 pull**。pull 只接受内部 typed helper / 纯执行入口，不接受“先打印再反解析”的过渡实现
 - **不改变 fetch/merge 的核心算法**。本批只做 pull 作为组合命令的执行层/渲染层拆分，以及必要的内部 helper 暴露
-- **不引入 `--ff-only` / `--no-ff`**。merge 策略选项留 merge 命令改进时一并处理
+- **`--ff-only` 已作为 C7 后续增量补齐；`--no-ff` 仍非目标**。当前 pull 支持 fast-forward-only 拒绝语义，但不强制生成 merge commit
 
 ### 设计原则
 

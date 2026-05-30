@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--rebase] [<repository> [<refspec>]]
+libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -14,11 +14,13 @@ libra pull [--rebase] [<repository> [<refspec>]]
 
 With `--rebase` (`-r`), the integration step instead replays local-only commits on top of the fetched upstream tip. This is equivalent to `libra fetch` followed by `libra rebase <upstream>`.
 
+With `--ff-only`, pull fetches the upstream but refuses to create a merge commit when local and remote histories have diverged. Fast-forward and already-up-to-date pulls still succeed. `--ff-only` conflicts with `--rebase`.
+
 When invoked with no arguments, the command reads the current branch tracking configuration (`branch.<name>.remote` and `branch.<name>.merge`). When `<repository>` is given alone, the current branch name is used as the remote branch. When both `<repository>` and `<refspec>` are given, the specified remote branch is fetched and merged.
 
 Pull supports already-up-to-date, fast-forward, and single-head three-way merge results. If the local and remote branches conflict, pull returns the merge-owned `LBR-CONFLICT-002` error with `phase: "merge"` and leaves the same merge state that `libra merge` uses. Resolve conflicts with `libra add <path>` and `libra merge --continue`, or run `libra merge --abort`.
 
-`pull` does not implement `--ff-only`, `--squash`, custom merge strategies, or pull-specific strategy flags.
+`pull` does not implement `--squash`, `--no-ff`, custom merge strategies, or pull-specific strategy flags beyond `--ff-only` and `--rebase`.
 
 ## Options
 
@@ -26,6 +28,7 @@ Pull supports already-up-to-date, fast-forward, and single-head three-way merge 
 |-----------------|-------------|---------|
 | `<repository>` | Remote name to pull from. When omitted, uses the current branch's configured upstream. | `libra pull origin` |
 | `<refspec>` | Branch name on the remote. Requires `<repository>`. When omitted, uses the current branch name. | `libra pull origin main` |
+| `--ff-only` | Refuse to create a merge commit; succeeds only for fast-forward or already-up-to-date pulls. Conflicts with `--rebase`. | `libra pull --ff-only` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra pull --machine` |
@@ -155,6 +158,7 @@ Rebase output omits `merge` and includes `rebase`:
 | Basic pull | `libra pull` | `git pull` | N/A (jj uses `jj git fetch` + working copy) |
 | Pull from specific remote | `libra pull origin main` | `git pull origin main` | N/A |
 | Fast-forward integration | Supported | Supported | N/A |
+| Fast-forward-only pull | `libra pull --ff-only` | `git pull --ff-only` | N/A |
 | Three-way integration | Supported through merge engine | Supported | N/A |
 | Rebase on pull | `libra pull --rebase` | `git pull --rebase` | N/A |
 | Force merge commit | Not supported | `git pull --no-ff` | N/A |
@@ -175,6 +179,7 @@ Every `PullError` variant maps to an explicit `StableErrorCode`. Fetch, merge, a
 | Fetch: authentication failed | `LBR-AUTH-001` | 128 | "check SSH key or HTTP credentials" |
 | Fetch: protocol error | `LBR-NET-002` | 128 | "the remote did not respond correctly" |
 | Merge: conflicts, dirty worktree, or untracked overwrite | `LBR-CONFLICT-002` | 128 | "resolve conflicts, then run 'libra merge --continue'" |
+| Merge: non-fast-forward rejected by `--ff-only` | `LBR-CONFLICT-002` | 128 | "run 'libra pull' without --ff-only to allow a merge commit" |
 | Rebase: conflict during replay | `LBR-CONFLICT-001` | 128 | "resolve conflicts, stage them, then run 'libra rebase --continue'" |
 | Rebase: dirty worktree | `LBR-REPO-003` | 128 | "commit or stash your changes before rebasing" |
 | Merge: invalid target | `LBR-CLI-003` | 129 | "verify the upstream ref and try again" |
