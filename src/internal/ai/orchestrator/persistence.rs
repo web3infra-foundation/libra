@@ -71,10 +71,11 @@ use crate::{
             ValidatorEngine, aggregate_risk_score, build_decision_proposal,
             contracts::{EvidenceKind, FinalDecisionVerdict},
         },
+        session::{SessionStore, jsonl::SessionJsonlStore},
         tools::ToolOutput,
         workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
     },
-    utils::storage_ext::StorageExt,
+    utils::{storage_ext::StorageExt, util::try_get_storage_path},
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
@@ -3666,24 +3667,36 @@ async fn persist_validation_decision_derivatives(
     align_decision_proposal_with_outcome(&mut proposal, decision);
 
     let db = history.database_connection();
-    ValidationReportStore::new(db.clone())
-        .write_latest(&report)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist validation report {} for thread {}: {error}",
-                report.report_id, report.thread_id
-            ))
-        })?;
-    DecisionProposalStore::new(db)
-        .write_latest(&risk, &proposal)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist decision proposal {} for thread {}: {error}",
-                proposal.proposal_id, proposal.thread_id
-            ))
-        })?;
+    let session_mirror = session_jsonl_store_for_thread(mcp_server, thread_id);
+    let validation_store = ValidationReportStore::new(db.clone());
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        validation_store
+            .write_latest_with_session_mirror(&report, session_mirror)
+            .await
+    } else {
+        validation_store.write_latest(&report).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist validation report {} for thread {}: {error}",
+            report.report_id, report.thread_id
+        ))
+    })?;
+
+    let decision_store = DecisionProposalStore::new(db);
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        decision_store
+            .write_latest_with_session_mirror(&risk, &proposal, session_mirror)
+            .await
+    } else {
+        decision_store.write_latest(&risk, &proposal).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist decision proposal {} for thread {}: {error}",
+            proposal.proposal_id, proposal.thread_id
+        ))
+    })?;
 
     Ok(PersistedDerivedRecords {
         validation_report_id: report.report_id,
@@ -3715,6 +3728,40 @@ fn align_decision_proposal_with_outcome(
                 &mut proposal.summary.rationale,
                 "orchestrator decision abandoned execution",
             );
+        }
+    }
+}
+
+fn session_jsonl_store_for_thread(
+    mcp_server: &Arc<LibraMcpServer>,
+    thread_id: Uuid,
+) -> Option<SessionJsonlStore> {
+    let working_dir = mcp_server.working_dir.as_ref()?;
+    let storage_root = try_get_storage_path(Some(working_dir.clone()))
+        .unwrap_or_else(|_| working_dir.join(".libra"));
+    let session_store = SessionStore::from_storage_path(&storage_root);
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+
+    match session_store.load_for_thread_id(&thread_id.to_string(), &working_dir_str) {
+        Ok(Some(session)) => Some(SessionJsonlStore::new(
+            session_store.session_root(&session.id),
+        )),
+        Ok(None) => {
+            tracing::debug!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                "skipping Phase 3/4 session artifact mirror because no matching Code session was found"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                error = %error,
+                "skipping Phase 3/4 session artifact mirror because the Code session could not be loaded"
+            );
+            None
         }
     }
 }
@@ -4372,6 +4419,7 @@ mod tests {
                         TaskSpec, ToolDiffRecord,
                     },
                 },
+                session::SessionState,
             },
             db,
             model::{
@@ -4613,6 +4661,34 @@ mod tests {
                 .rationale
                 .iter()
                 .any(|reason| reason.contains("abandoned execution"))
+        );
+    }
+
+    #[test]
+    fn session_jsonl_store_for_thread_loads_matching_code_session() {
+        let temp_dir = tempdir().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let storage_root = working_dir.join(".libra");
+        let session_store = SessionStore::from_storage_path(&storage_root);
+        let thread_id = Uuid::new_v4();
+        let mut session = SessionState::new(&working_dir.to_string_lossy());
+        session.id = "session-jsonl-mirror-test".to_string();
+        session
+            .metadata
+            .insert("thread_id".to_string(), json!(thread_id.to_string()));
+        session_store.save(&session).unwrap();
+
+        let server = Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir,
+        ));
+
+        let mirror = session_jsonl_store_for_thread(&server, thread_id)
+            .expect("matching session mirror store");
+        assert_eq!(
+            mirror.events_path(),
+            session_store.session_root(&session.id).join("events.jsonl")
         );
     }
 
