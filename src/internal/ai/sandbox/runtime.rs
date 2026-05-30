@@ -580,8 +580,8 @@ impl SandboxManager {
             });
         }
 
-        let (command, arg0, effective_sandbox) = match sandbox {
-            SandboxType::None => (command, None, SandboxType::None),
+        let (command, arg0, effective_sandbox, seccomp_policy_path_for_exec) = match sandbox {
+            SandboxType::None => (command, None, SandboxType::None, None),
             SandboxType::MacosSeatbelt => {
                 #[cfg(target_os = "macos")]
                 {
@@ -596,7 +596,7 @@ impl SandboxManager {
                     let mut full = Vec::with_capacity(1 + seatbelt_args.len());
                     full.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                     full.append(&mut seatbelt_args);
-                    (full, None, SandboxType::MacosSeatbelt)
+                    (full, None, SandboxType::MacosSeatbelt, None)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -621,6 +621,7 @@ impl SandboxManager {
                             full,
                             Some("libra-linux-sandbox".to_string()),
                             SandboxType::LinuxSeccomp,
+                            None,
                         )
                     } else if let Some(bwrap_path) = locate_bwrap_binary() {
                         // OC-Phase 7 P0 #2 + #3: built-in bwrap
@@ -637,6 +638,11 @@ impl SandboxManager {
                         // the doc contract.
                         let seccomp_fd = if seccomp_policy_path_for_transform.is_some() {
                             Some(SECCOMP_POLICY_FD)
+                        } else {
+                            None
+                        };
+                        let seccomp_policy_path_for_exec = if seccomp_fd.is_some() {
+                            seccomp_policy_path_for_transform.clone()
                         } else {
                             None
                         };
@@ -660,6 +666,7 @@ impl SandboxManager {
                             full,
                             Some("libra-linux-sandbox-bwrap".to_string()),
                             SandboxType::LinuxSeccomp,
+                            seccomp_policy_path_for_exec,
                         )
                     } else {
                         if enforcement.requires_effective_sandbox() {
@@ -670,7 +677,7 @@ impl SandboxManager {
                         tracing::warn!(
                             "linux sandbox executable not configured and bwrap not on PATH; running command without linux sandbox"
                         );
-                        (command, None, SandboxType::None)
+                        (command, None, SandboxType::None, None)
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -704,7 +711,7 @@ impl SandboxManager {
                 SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
             ),
             allowlist_proxy_services,
-            seccomp_policy_path: seccomp_policy_path_for_transform,
+            seccomp_policy_path: seccomp_policy_path_for_exec,
         })
     }
 }
@@ -873,8 +880,10 @@ pub fn create_bwrap_command_args_with_seccomp(
 /// `which`-style discovery is cheap (one stat per PATH entry,
 /// typically <10 lookups) and a stale cache would mislead a user
 /// that just installed bubblewrap mid-session. Tests that need a
-/// deterministic answer can set `LIBRA_BWRAP_BINARY` to bypass
-/// the PATH walk entirely.
+/// deterministic answer must set `LIBRA_BWRAP_BINARY` to bypass
+/// the PATH walk entirely; test builds do not scan the ambient
+/// PATH so CI images with an unusable host `bwrap` cannot change
+/// unrelated test behavior.
 ///
 /// Returns `None` on non-Linux platforms (the built-in bwrap
 /// path is Linux-only) or when no `bwrap` is reachable. Callers
@@ -889,7 +898,7 @@ fn locate_bwrap_binary() -> Option<PathBuf> {
         }
         return None;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(test)))]
     {
         let path_env = std::env::var_os("PATH")?;
         for dir in std::env::split_paths(&path_env) {

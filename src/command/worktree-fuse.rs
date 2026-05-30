@@ -4,11 +4,14 @@
 //! worktree management remains in `command::worktree`. Worktree-fuse command tests
 //! cover argument parsing and unsupported-platform behavior.
 
+#[cfg(target_os = "macos")]
+use std::env;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
-    env, fs, io,
+    fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -361,10 +364,12 @@ fn fuse_data_root() -> PathBuf {
     util::storage_path().join("worktrees-fuse")
 }
 
+#[cfg(target_os = "macos")]
 struct DirGuard {
     old_dir: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl DirGuard {
     fn change_to(new_dir: &Path) -> io::Result<Self> {
         let old_dir = env::current_dir()?;
@@ -373,6 +378,7 @@ impl DirGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for DirGuard {
     fn drop(&mut self) {
         let _ = env::set_current_dir(&self.old_dir);
@@ -685,6 +691,7 @@ async fn add_fuse_worktree(
     let id = Uuid::new_v4().simple().to_string();
     let data_dir = fuse_data_root().join(id);
     let upper_dir = data_dir.join("upper");
+    #[cfg(target_os = "macos")]
     let lower_dir = data_dir.join("lower");
     fs::create_dir_all(&upper_dir)?;
 

@@ -12,14 +12,11 @@
 //! output (`tree <hash>`, tree entries `mode blob <hash>\t<name>`); these
 //! parsers must therefore stay in sync with the cat-file pretty-printer.
 
-use std::{
-    io::{Read, Write},
-    process::Command,
-};
+use std::io::{Read, Write};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
-use super::{loose_object_path, parse_cli_error_stderr, parse_json_stdout};
+use super::{libra_command, loose_object_path, parse_cli_error_stderr, parse_json_stdout};
 
 /// Spawn `libra init` in a fresh tempdir and return the `TempDir` (kept
 /// alive by the caller for RAII cleanup).
@@ -27,8 +24,7 @@ fn init_temp_repo() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["init"])
         .output()
         .expect("Failed to execute libra binary");
@@ -46,15 +42,13 @@ fn init_temp_repo() -> tempfile::TempDir {
 /// Configure `user.name` / `user.email` through the CLI so subsequent
 /// commits can be authored. Required before `create_commit()`.
 fn configure_user_identity(temp_path: &std::path::Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["config", "user.name", "Test User"])
         .output()
         .expect("Failed to configure user.name");
     assert!(output.status.success(), "Failed to configure user.name");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["config", "user.email", "test@example.com"])
         .output()
         .expect("Failed to configure user.email");
@@ -67,8 +61,7 @@ fn configure_user_identity(temp_path: &std::path::Path) {
 fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, message: &str) {
     std::fs::write(temp_path.join(filename), content).expect("Failed to create file");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["add", filename])
         .output()
         .expect("Failed to add file");
@@ -78,8 +71,7 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["commit", "-m", message, "--no-verify"])
         .output()
         .expect("Failed to commit");
@@ -100,8 +92,7 @@ async fn test_cat_file_type_commit() {
     configure_user_identity(temp_path);
     create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -131,8 +122,7 @@ async fn test_cat_file_size_commit() {
     configure_user_identity(temp_path);
     create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-s", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -158,8 +148,7 @@ async fn test_cat_file_type_json_output() {
     configure_user_identity(temp_path);
     create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", "HEAD", "--json"])
         .output()
         .expect("Failed to execute cat-file");
@@ -189,8 +178,7 @@ async fn test_cat_file_pretty_commit() {
     configure_user_identity(temp_path);
     create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -237,8 +225,7 @@ async fn test_cat_file_pretty_tree() {
     create_commit(temp_path, "file.txt", "content\n", "add file");
 
     // Get the tree hash from the commit
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -253,8 +240,7 @@ async fn test_cat_file_pretty_tree() {
         .trim();
 
     // Now cat-file -p the tree
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", tree_hash])
         .output()
         .expect("Failed to execute cat-file on tree");
@@ -277,8 +263,7 @@ async fn test_cat_file_pretty_tree() {
     );
 
     // cat-file -t the tree should return "tree"
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", tree_hash])
         .output()
         .expect("Failed to execute cat-file -t on tree");
@@ -302,8 +287,7 @@ async fn test_cat_file_pretty_blob() {
     create_commit(temp_path, "readme.txt", "Hello, Libra!\n", "init readme");
 
     // Get tree hash, then blob hash from tree
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", "HEAD"])
         .output()
         .unwrap();
@@ -316,8 +300,7 @@ async fn test_cat_file_pretty_blob() {
         .unwrap()
         .trim();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", tree_hash])
         .output()
         .unwrap();
@@ -337,8 +320,7 @@ async fn test_cat_file_pretty_blob() {
         .unwrap();
 
     // cat-file -p the blob
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", blob_hash])
         .output()
         .unwrap();
@@ -351,8 +333,7 @@ async fn test_cat_file_pretty_blob() {
     assert_eq!(stdout, "Hello, Libra!\n", "Blob content should match");
 
     // cat-file -t the blob should return "blob"
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", blob_hash])
         .output()
         .unwrap();
@@ -360,8 +341,7 @@ async fn test_cat_file_pretty_blob() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "blob");
 
     // cat-file -s the blob should be 14 bytes ("Hello, Libra!\n" = 14)
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-s", blob_hash])
         .output()
         .unwrap();
@@ -380,8 +360,7 @@ async fn test_cat_file_panic_handling() {
 
     // Test that the command reports a structured invalid-target error rather than panicking
     // when accessing a non-existent object in a valid repository.
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", "0000000000000000000000000000000000000000"])
         .output()
         .expect("Failed to execute cat-file");
@@ -398,8 +377,7 @@ async fn test_cat_file_json_invalid_object_returns_cli_003() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args([
             "cat-file",
             "-p",
@@ -428,8 +406,7 @@ async fn test_cat_file_exist_check() {
     create_commit(temp_path, "f.txt", "data", "commit");
 
     // HEAD exists
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-e", "HEAD"])
         .output()
         .expect("Failed to execute cat-file -e");
@@ -444,8 +421,7 @@ async fn test_cat_file_exist_check() {
     );
 
     // Non-existent hash
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-e", "0000000000000000000000000000000000000000"])
         .output()
         .expect("Failed to execute cat-file -e");
@@ -464,8 +440,7 @@ async fn test_cat_file_mutual_exclusion() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", "-s", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -488,23 +463,20 @@ async fn test_cat_file_tree_multiple_files() {
     std::fs::write(temp_path.join("a.txt"), "aaa\n").unwrap();
     std::fs::write(temp_path.join("b.txt"), "bbb\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["add", "."])
         .output()
         .unwrap();
     assert!(output.status.success());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["commit", "-m", "two files", "--no-verify"])
         .output()
         .unwrap();
     assert!(output.status.success());
 
     // Get tree hash
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", "HEAD"])
         .output()
         .unwrap();
@@ -518,8 +490,7 @@ async fn test_cat_file_tree_multiple_files() {
         .trim();
 
     // Pretty-print tree
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", tree_hash])
         .output()
         .unwrap();
@@ -539,8 +510,7 @@ async fn test_cat_file_nonexistent_ref() {
     configure_user_identity(temp_path);
     create_commit(temp_path, "f.txt", "data", "commit");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-t", "nonexistent-branch"])
         .output()
         .expect("Failed to execute cat-file");
@@ -561,8 +531,7 @@ async fn test_cat_file_ai_list_types_empty() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai-list-types"])
         .output()
         .expect("Failed to execute cat-file --ai-list-types");
@@ -587,8 +556,7 @@ async fn test_cat_file_ai_list_empty_type() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai-list", "intent"])
         .output()
         .expect("Failed to execute cat-file --ai-list");
@@ -612,8 +580,7 @@ async fn test_cat_file_ai_list_invalid_type() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai-list", "foobar"])
         .output()
         .expect("Failed to execute cat-file --ai-list");
@@ -635,8 +602,7 @@ async fn test_cat_file_ai_list_invalid_type_json_returns_cli_003() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai-list", "foobar", "--json"])
         .output()
         .expect("Failed to execute cat-file");
@@ -654,8 +620,7 @@ async fn test_cat_file_json_pretty_print_io_read_failed_when_object_body_corrupt
     configure_user_identity(temp_path);
     create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
 
-    let head_output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let head_output = libra_command(temp_path)
         .args(["rev-parse", "HEAD"])
         .output()
         .expect("Failed to execute rev-parse");
@@ -693,8 +658,7 @@ async fn test_cat_file_json_pretty_print_io_read_failed_when_object_body_corrupt
         .expect("Failed to finish corrupted commit object encoding");
     std::fs::write(&object_path, encoded).expect("Failed to write corrupted commit object");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "-p", &head, "--json"])
         .output()
         .expect("Failed to execute cat-file");
@@ -710,8 +674,7 @@ async fn test_cat_file_ai_nonexistent_uuid() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai", "00000000-0000-0000-0000-000000000000"])
         .output()
         .expect("Failed to execute cat-file --ai");
@@ -734,8 +697,7 @@ async fn test_cat_file_ai_type_nonexistent() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args([
             "cat-file",
             "--ai-type",
@@ -756,8 +718,7 @@ async fn test_cat_file_ai_git_mutual_exclusion() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let output = libra_command(temp_path)
         .args(["cat-file", "--ai-list-types", "-t", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
@@ -773,8 +734,7 @@ async fn test_cat_file_ai_git_mutual_exclusion() {
 fn test_cat_file_cli_outside_repository_returns_fatal_128() {
     let temp = tempfile::tempdir().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
+    let output = libra_command(temp.path())
         .args(["cat-file", "-t", "HEAD"])
         .output()
         .expect("Failed to execute cat-file");
