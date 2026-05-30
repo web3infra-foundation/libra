@@ -11,12 +11,13 @@
 //!
 //! **Layer:** L1 — uses in-memory SQLite, no external dependencies.
 
+use chrono::Utc;
 use libra::internal::{
     ai::{
         runtime::{
-            DecisionPolicy, DecisionProposalRoute, DecisionProposalStore, ValidationOutcome,
-            ValidationReportStore, ValidationStage, ValidationStageResult, ValidatorEngine,
-            aggregate_risk_score, build_decision_proposal,
+            DecisionPolicy, DecisionProposalRoute, DecisionProposalStore, FinalDecision,
+            FinalDecisionStore, ValidationOutcome, ValidationReportStore, ValidationStage,
+            ValidationStageResult, ValidatorEngine, aggregate_risk_score, build_decision_proposal,
             contracts::{EvidenceKind, FinalDecisionVerdict},
             phase3::ValidationStatus,
         },
@@ -303,4 +304,61 @@ async fn validation_and_decision_writes_emit_ai_artifact_jsonl_mirror() {
             .and_then(serde_json::Value::as_str),
         Some("auto_accept")
     );
+}
+
+/// Phase 4 completion: an AutoAccept proposal finalises into a persisted
+/// `ai_final_decision` row recording the resolved verdict, and `load_latest`
+/// round-trips it (verdict + linkage + latest flag). `write_latest`'s
+/// `ensure_runtime_thread` creates the thread anchor on demand, so no manual
+/// `ai_thread` insert is needed.
+#[tokio::test]
+async fn final_decision_store_round_trips_auto_accept_verdict() {
+    let db = setup_db().await;
+    let thread_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+
+    let validator = ValidatorEngine::default_policy();
+    let report = validator.build_report(
+        thread_id,
+        Some(run_id),
+        vec![
+            ValidationStageResult {
+                stage: ValidationStage::Integration,
+                outcome: ValidationOutcome::Passed,
+                evidence: vec![EvidenceKind::Test],
+                summary: Some("cargo test passed".to_string()),
+            },
+            ValidationStageResult {
+                stage: ValidationStage::Release,
+                outcome: ValidationOutcome::Passed,
+                evidence: vec![EvidenceKind::Build],
+                summary: Some("release checks passed".to_string()),
+            },
+        ],
+    );
+    let policy = DecisionPolicy::default();
+    let risk = aggregate_risk_score(&report, &policy);
+    let proposal = build_decision_proposal(&report, &risk, &policy);
+    assert_eq!(proposal.summary.route, DecisionProposalRoute::AutoAccept);
+
+    let decision = FinalDecision::finalize_auto_accept(&proposal, Utc::now())
+        .expect("an AutoAccept proposal must finalise into a Decision");
+    let store = FinalDecisionStore::new(db.clone());
+    store
+        .write_latest(&decision)
+        .await
+        .expect("final decision write_latest must succeed");
+
+    let loaded = store
+        .load_latest(thread_id)
+        .await
+        .expect("load_latest query must succeed")
+        .expect("a final decision row must exist for the thread");
+    assert_eq!(loaded.decision_id, decision.decision_id);
+    assert_eq!(loaded.verdict, FinalDecisionVerdict::Accepted);
+    assert_eq!(loaded.decision_proposal_id, Some(proposal.proposal_id));
+    assert_eq!(loaded.validation_report_id, proposal.validation_report_id);
+    assert!(loaded.is_latest);
+    assert!(!loaded.stale);
+    assert_eq!(loaded.summary.route, DecisionProposalRoute::AutoAccept);
 }

@@ -616,6 +616,19 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026052301_source_call_log_down.sql"
             )),
         },
+        // Phase 4 completion: the formal final `Decision` artifact table,
+        // closing the ValidationReport -> RiskScoreBreakdown ->
+        // DecisionProposal -> Decision chain. Mirrors `ai_decision_proposal`
+        // (per-thread latest pointer). See docs/improvement/agent.md
+        // Implementation Phase 4.
+        Migration {
+            version: 2026053101,
+            name: "ai_final_decision",
+            up: include_str!("../../../sql/migrations/2026053101_ai_final_decision.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026053101_ai_final_decision_down.sql"
+            )),
+        },
     ]
 }
 
@@ -730,9 +743,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 7);
+        assert_eq!(runner.len(), 8);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026052301));
+        assert_eq!(runner.max_registered_version(), Some(2026053101));
     }
 
     #[test]

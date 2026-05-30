@@ -1429,10 +1429,9 @@ mod tests {
 
         let base_url = format!("http://{addr}/");
         let client = test_lfs_client(&base_url);
-        let err = client
-            .push_object(test_oid, &file_path)
-            .await
-            .expect_err("an error object in the batch response should surface a typed LfsPushError");
+        let err = client.push_object(test_oid, &file_path).await.expect_err(
+            "an error object in the batch response should surface a typed LfsPushError",
+        );
         assert!(
             err.detail.contains("remote reported error 422")
                 && err.detail.contains("object is invalid"),

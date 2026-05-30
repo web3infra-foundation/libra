@@ -745,9 +745,9 @@ async fn write_committed_checkpoint(
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::internal::ai::history::{CheckpointCommitParams, CheckpointScope, HistoryManager};
-    use crate::internal::ai::observed_agents::{
-        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
+    use crate::internal::ai::{
+        history::{CheckpointCommitParams, CheckpointScope, HistoryManager},
+        observed_agents::{AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for},
     };
 
     // Capture the agent's full on-disk transcript for the checkpoint blob.
