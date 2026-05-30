@@ -18,6 +18,7 @@ use url::Url;
 
 use super::{
     NetworkDecision, NetworkProtocol, NetworkProxy, NetworkRequest, NetworkService,
+    evidence::{SandboxEvidenceEvent, SandboxEvidenceSink, TracingSandboxEvidenceSink},
     proxy::AllowlistProxy,
 };
 
@@ -61,6 +62,13 @@ impl Drop for RunningAllowlistProxy {
 pub async fn spawn_allowlist_http_proxy(
     services: Vec<NetworkService>,
 ) -> Result<RunningAllowlistProxy, String> {
+    spawn_allowlist_http_proxy_with_evidence(services, None).await
+}
+
+pub async fn spawn_allowlist_http_proxy_with_evidence(
+    services: Vec<NetworkService>,
+    evidence_sink: Option<Arc<dyn SandboxEvidenceSink>>,
+) -> Result<RunningAllowlistProxy, String> {
     let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
         .await
         .map_err(|error| format!("failed to bind sandbox allowlist proxy: {error}"))?;
@@ -69,7 +77,7 @@ pub async fn spawn_allowlist_http_proxy(
         .map_err(|error| format!("failed to inspect sandbox allowlist proxy address: {error}"))?;
     let proxy = Arc::new(AllowlistProxy::new(&services));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(run_proxy(listener, proxy, shutdown_rx));
+    let task = tokio::spawn(run_proxy(listener, proxy, evidence_sink, shutdown_rx));
 
     Ok(RunningAllowlistProxy {
         listen_addr,
@@ -81,6 +89,7 @@ pub async fn spawn_allowlist_http_proxy(
 async fn run_proxy(
     listener: TcpListener,
     proxy: Arc<AllowlistProxy>,
+    evidence_sink: Option<Arc<dyn SandboxEvidenceSink>>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
@@ -98,8 +107,9 @@ async fn run_proxy(
         };
 
         let proxy = Arc::clone(&proxy);
+        let evidence_sink = evidence_sink.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, proxy).await {
+            if let Err(error) = handle_connection(stream, proxy, evidence_sink).await {
                 tracing::debug!(error = %error, "sandbox allowlist proxy connection failed");
             }
         });
@@ -109,6 +119,7 @@ async fn run_proxy(
 async fn handle_connection(
     mut client: TcpStream,
     proxy: Arc<AllowlistProxy>,
+    evidence_sink: Option<Arc<dyn SandboxEvidenceSink>>,
 ) -> Result<(), String> {
     let (request, buffered_request) = read_proxy_request(&mut client).await?;
     let decision = proxy.evaluate(&NetworkRequest {
@@ -118,6 +129,12 @@ async fn handle_connection(
     });
 
     if let NetworkDecision::Deny(reason) = decision {
+        record_denied_request(
+            evidence_sink.as_deref(),
+            proxy.backend_name(),
+            &request,
+            &reason,
+        );
         write_response(
             &mut client,
             403,
@@ -157,6 +174,26 @@ async fn handle_connection(
         .await
         .map_err(|error| format!("proxy forwarding failed: {error}"))?;
     Ok(())
+}
+
+fn record_denied_request(
+    evidence_sink: Option<&dyn SandboxEvidenceSink>,
+    proxy_backend: &str,
+    request: &ParsedProxyRequest,
+    reason: &str,
+) {
+    let event = SandboxEvidenceEvent::NetworkRequestDenied {
+        proxy_backend: proxy_backend.to_string(),
+        host: request.host.clone(),
+        port: request.port,
+        protocol: NetworkProtocol::Tcp,
+        reason: reason.to_string(),
+    };
+    if let Some(sink) = evidence_sink {
+        sink.record(event);
+    } else {
+        TracingSandboxEvidenceSink.record(event);
+    }
 }
 
 async fn read_proxy_request(
@@ -329,12 +366,17 @@ async fn write_response(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
     };
 
     use super::*;
+    use crate::internal::ai::sandbox::evidence::{
+        InMemorySandboxEvidenceSink, SandboxEvidenceEvent,
+    };
 
     #[test]
     fn parse_connect_target_extracts_host_port() {
@@ -396,6 +438,60 @@ mod tests {
         let response = String::from_utf8_lossy(&response[..read]);
         assert!(response.contains("403 Forbidden"), "{response}");
         assert!(response.contains("sandbox network deny"), "{response}");
+
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn allowlist_proxy_runtime_records_evidence_on_denied_connect_target() {
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        let proxy = spawn_allowlist_http_proxy_with_evidence(
+            vec![NetworkService {
+                host: "allowed.example".to_string(),
+                ports: vec![443],
+                protocol: Some(NetworkProtocol::Tcp),
+            }],
+            Some(sink.clone()),
+        )
+        .await
+        .expect("proxy should start");
+
+        let proxy_url = proxy.local_http_proxy_url();
+        let proxy_addr = proxy_url
+            .strip_prefix("http://")
+            .expect("local proxy URL should be http")
+            .to_string();
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("connect to local proxy");
+        client
+            .write_all(b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+            .await
+            .expect("write CONNECT request");
+
+        let mut response = vec![0_u8; 512];
+        let read = client.read(&mut response).await.expect("read proxy denial");
+        let response = String::from_utf8_lossy(&response[..read]);
+        assert!(response.contains("403 Forbidden"), "{response}");
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SandboxEvidenceEvent::NetworkRequestDenied {
+                proxy_backend,
+                host,
+                port,
+                protocol,
+                reason,
+            } => {
+                assert_eq!(proxy_backend, "allowlist");
+                assert_eq!(host, "denied.example");
+                assert_eq!(*port, 443);
+                assert_eq!(*protocol, NetworkProtocol::Tcp);
+                assert!(reason.contains("not in allowlist"), "{reason}");
+            }
+            other => panic!("expected network request denial evidence, got {other:?}"),
+        }
 
         proxy.shutdown().await;
     }

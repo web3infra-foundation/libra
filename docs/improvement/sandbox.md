@@ -118,6 +118,11 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **失败语义**：无效配置会以 `LBR-CLI-002` fail closed，并提示修复或移除无效 `[sandbox.network]`；诊断命令不再在项目 sandbox 配置错误时继续输出默认策略。
 - **回归覆盖**：`sandbox_status_rejects_invalid_project_network_config` 固定 `--json sandbox status` 对非法网络配置的退出码、稳定错误码和用户可读错误信息。
 
+## 0.17.1137 增量收口（2026-05-30）
+
+- **allowlist proxy 单请求拒绝已写入 Evidence sink**：`AllowlistProxy` 在 HTTP/CONNECT 请求被拒绝时会记录 `network_request_denied` 事件，包含 `proxy_backend`、host、port、protocol 和拒绝原因；shell 工具的 fanout sink 可把该事件带入 `sandbox_evidence` metadata。
+- **回归覆盖**：`allowlist_proxy_runtime_records_evidence_on_denied_connect_target` 固定 denied CONNECT 既返回 `403 Forbidden`，也写入结构化 Evidence；`SandboxEvidenceEvent` metadata 测试固定 `network_request_denied` 的 JSON 字段。
+
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线

@@ -1150,7 +1150,7 @@ pub async fn run_shell_command_with_approval(
         first_attempt_sandbox,
         sandbox_runtime.as_ref(),
         approved_network_access_upgrade,
-        evidence_sink.as_deref(),
+        evidence_sink.clone(),
     )
     .await?;
 
@@ -1196,7 +1196,7 @@ pub async fn run_shell_command_with_approval(
         None,
         sandbox_runtime.as_ref(),
         None,
-        evidence_sink.as_deref(),
+        evidence_sink,
     )
     .await
 }
@@ -1207,7 +1207,7 @@ pub async fn run_command_spec(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
-    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
     let command_tmpdir = create_command_tmpdir()?;
     inject_command_tmp_env(&mut spec, &command_tmpdir);
@@ -1218,11 +1218,14 @@ pub async fn run_command_spec(
         sandbox,
         sandbox_runtime,
         network_access_override,
-        evidence_sink,
+        evidence_sink.clone(),
     )
     .await;
-    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.as_deref());
-    cleanup_command_tmpdir(&command_tmpdir, evidence_sink.or(runtime_evidence_sink)).await;
+    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
+    let cleanup_sink = evidence_sink
+        .as_deref()
+        .or(runtime_evidence_sink.as_deref());
+    cleanup_command_tmpdir(&command_tmpdir, cleanup_sink).await;
     output
 }
 
@@ -1232,17 +1235,24 @@ async fn run_command_spec_inner(
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
     network_access_override: Option<NetworkAccess>,
-    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
     let mut built = build_command_from_spec(
         spec,
         sandbox.as_ref(),
         sandbox_runtime,
         network_access_override,
-        evidence_sink,
+        evidence_sink.as_deref(),
     )?;
-    let allowlist_proxy =
-        start_allowlist_proxy_if_needed(&mut built.command, built.allowlist_proxy_services).await?;
+    let proxy_evidence_sink = evidence_sink
+        .clone()
+        .or_else(|| sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone()));
+    let allowlist_proxy = start_allowlist_proxy_if_needed(
+        &mut built.command,
+        built.allowlist_proxy_services,
+        proxy_evidence_sink,
+    )
+    .await?;
     let timeout_override = built.timeout_ms;
     let mut cmd = built.command;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1506,11 +1516,16 @@ struct BuiltCommand {
 async fn start_allowlist_proxy_if_needed(
     command: &mut tokio::process::Command,
     services: Option<Vec<NetworkService>>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<Option<proxy_runtime::RunningAllowlistProxy>, String> {
     let Some(services) = services else {
         return Ok(None);
     };
-    let proxy = proxy_runtime::spawn_allowlist_http_proxy(services).await?;
+    let proxy = if evidence_sink.is_some() {
+        proxy_runtime::spawn_allowlist_http_proxy_with_evidence(services, evidence_sink).await?
+    } else {
+        proxy_runtime::spawn_allowlist_http_proxy(services).await?
+    };
     inject_allowlist_proxy_env(command, &proxy);
     Ok(Some(proxy))
 }
