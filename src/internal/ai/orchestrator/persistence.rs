@@ -61,6 +61,7 @@ use crate::{
                 CreatePatchSetParams, CreatePlanParams, CreatePlanStepEventParams,
                 CreateProvenanceParams, CreateRunParams, CreateRunUsageParams, CreateTaskParams,
                 CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
+                UpdateIntentParams,
             },
             server::LibraMcpServer,
         },
@@ -1069,6 +1070,7 @@ impl ExecutionAuditSession {
             })
             .await?,
         );
+        record_terminal_intent_event(&self.mcp_server, &thread_id, request.decision).await?;
         let derived_records = Some(
             persist_validation_decision_derivatives(
                 &self.mcp_server,
@@ -2835,6 +2837,7 @@ pub async fn persist_execution(
         })
         .await?,
     );
+    record_terminal_intent_event(request.mcp_server, &intent_id, request.decision).await?;
     let derived_records = Some(
         persist_validation_decision_derivatives(
             request.mcp_server,
@@ -4009,6 +4012,33 @@ async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, Or
     parse_created_id("decision", &result)
 }
 
+async fn record_terminal_intent_event(
+    mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    decision: &DecisionOutcome,
+) -> Result<(), OrchestratorError> {
+    let (status, reason) = match decision {
+        DecisionOutcome::Commit => ("completed", "orchestrator committed execution result"),
+        DecisionOutcome::HumanReviewRequired => {
+            ("completed", "orchestrator checkpointed for human review")
+        }
+        DecisionOutcome::Abandon => ("cancelled", "orchestrator abandoned execution result"),
+    };
+    mcp_server
+        .update_intent_impl(UpdateIntentParams {
+            intent_id: intent_id.to_string(),
+            status: Some(status.to_string()),
+            commit_sha: None,
+            reason: Some(reason.to_string()),
+            next_intent_id: None,
+        })
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!("MCP update_intent failed: {error:?}"))
+        })?;
+    Ok(())
+}
+
 async fn persist_validation_decision_derivatives(
     mcp_server: &Arc<LibraMcpServer>,
     thread_id: &str,
@@ -4784,6 +4814,7 @@ mod tests {
     use std::{collections::BTreeMap, path::Path, sync::Arc};
 
     use git_internal::internal::object::{
+        intent_event::{IntentEvent, IntentEventKind},
         plan::Plan as GitPlan,
         plan_step_event::{PlanStepEvent, PlanStepStatus},
         task::Task as GitTask,
@@ -5289,6 +5320,18 @@ mod tests {
         assert_eq!(history.list_objects("snapshot").await.unwrap().len(), 2);
 
         let storage = server.storage.as_ref().unwrap();
+        let intent_id =
+            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
+        let mut saw_terminal_intent_event = false;
+        for (_, hash) in history.list_objects("intent_event").await.unwrap() {
+            let event = storage.get_json::<IntentEvent>(&hash).await.unwrap();
+            if event.intent_id() == intent_id && event.kind() == &IntentEventKind::Completed {
+                saw_terminal_intent_event = true;
+                break;
+            }
+        }
+        assert!(saw_terminal_intent_event);
+
         let mut persisted_step_ids = std::collections::BTreeSet::new();
         for plan_id in &persisted.plan_ids {
             let plan_hash = history
@@ -5478,6 +5521,7 @@ mod tests {
         assert!(!persisted.run_id.is_empty());
         assert!(persisted.provenance_id.is_some());
         assert!(persisted.run_usage_id.is_some());
+        assert!(persisted.decision_id.is_some());
         assert!(persisted.derived_records.is_some());
         assert_eq!(persisted.tasks.len(), 1);
         let task_artifacts = &persisted.tasks[0];
@@ -5487,10 +5531,12 @@ mod tests {
         assert!(task_artifacts.patchset_id.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        let storage = server.storage.as_ref().unwrap();
         for (object_type, object_id) in [
             ("run", persisted.run_id.as_str()),
             ("provenance", persisted.provenance_id.as_deref().unwrap()),
             ("run_usage", persisted.run_usage_id.as_deref().unwrap()),
+            ("decision", persisted.decision_id.as_deref().unwrap()),
             ("patchset", task_artifacts.patchset_id.as_deref().unwrap()),
             ("invocation", task_artifacts.tool_invocation_ids[0].as_str()),
         ] {
@@ -5582,6 +5628,17 @@ mod tests {
             1
         );
         assert_eq!(history.list_objects("run_usage").await.unwrap().len(), 1);
+        let intent_id =
+            parse_object_id(persisted.thread_id.as_deref().expect("persisted thread id")).unwrap();
+        let mut saw_terminal_intent_event = false;
+        for (_, hash) in history.list_objects("intent_event").await.unwrap() {
+            let event = storage.get_json::<IntentEvent>(&hash).await.unwrap();
+            if event.intent_id() == intent_id && event.kind() == &IntentEventKind::Completed {
+                saw_terminal_intent_event = true;
+                break;
+            }
+        }
+        assert!(saw_terminal_intent_event);
         assert!(
             !history
                 .list_objects("context_frame")
@@ -5590,7 +5647,6 @@ mod tests {
                 .is_empty()
         );
         let context_frames = history.list_objects("context_frame").await.unwrap();
-        let storage = server.storage.as_ref().unwrap();
         let persisted_plan = load_persisted_plan(&server, &persisted.plan_ids[0])
             .await
             .unwrap();
