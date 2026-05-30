@@ -13,6 +13,11 @@
   bit 0 = object corruption, bit 1 = broken refs, bit 2 = index corruption.
 - **`docs/commands/fsck.md`**: Comprehensive documentation for the `fsck` command
   including parameter comparison with Git, design rationale, and CI/CD examples.
+- **`libra prune`**: Prunes unreachable loose objects from repository. Supports `-dry-run` 
+  for dry-run mode, `--verbose` for verbose report, `--expire` for expiration specification, 
+  and user-specified heads as additional reachability start points.
+- **`docs/commands/prune.md`**: Comprehensive documentation for the `prune` command
+  including synopsis, CLI flags, human/JSON output examples and error handling reference.
 
 ## [0.1.6]
 
