@@ -106,7 +106,7 @@ pub enum NotesOutput {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NotesListEntry {
-    pub note_hash: String,
+    pub note_hash: Option<String>,
     pub annotated_object: String,
 }
 
@@ -261,11 +261,14 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
             notes,
         } => {
             for entry in notes {
-                println!(
-                    "{} {}",
-                    short_display_hash(&entry.note_hash),
-                    short_display_hash(&entry.annotated_object)
-                );
+                match &entry.note_hash {
+                    Some(hash) => println!(
+                        "{} {}",
+                        short_display_hash(hash),
+                        short_display_hash(&entry.annotated_object)
+                    ),
+                    None => println!("(none) {}", short_display_hash(&entry.annotated_object)),
+                }
             }
         }
         NotesOutput::Show { text, .. } => {

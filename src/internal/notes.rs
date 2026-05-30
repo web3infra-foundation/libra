@@ -32,9 +32,11 @@ pub struct AddNoteResult {
 }
 
 /// A note entry returned from listing.
+///
+/// When listing by a specific object that has no note, `note_hash` is `None`.
 #[derive(Debug, Clone)]
 pub struct NoteEntry {
-    pub note_hash: String,
+    pub note_hash: Option<String>,
     pub annotated_object: String,
 }
 
@@ -186,15 +188,15 @@ pub async fn list(notes_ref: &str, object: Option<&str>) -> Result<Vec<NoteEntry
             ))
             .await?;
         if rows.is_empty() {
-            return Err(NotesError::NotFound {
-                notes_ref: notes_ref.to_string(),
-                object: obj_str,
-            });
+            return Ok(vec![NoteEntry {
+                note_hash: None,
+                annotated_object: obj_str,
+            }]);
         }
         Ok(rows
             .iter()
             .map(|row| NoteEntry {
-                note_hash: row.try_get::<String>("", "blob").unwrap_or_default(),
+                note_hash: Some(row.try_get::<String>("", "blob").unwrap_or_default()),
                 annotated_object: row.try_get::<String>("", "object").unwrap_or_default(),
             })
             .collect())
@@ -209,7 +211,7 @@ pub async fn list(notes_ref: &str, object: Option<&str>) -> Result<Vec<NoteEntry
         Ok(rows
             .iter()
             .map(|row| NoteEntry {
-                note_hash: row.try_get::<String>("", "blob").unwrap_or_default(),
+                note_hash: Some(row.try_get::<String>("", "blob").unwrap_or_default()),
                 annotated_object: row.try_get::<String>("", "object").unwrap_or_default(),
             })
             .collect())
@@ -247,6 +249,11 @@ pub async fn show(
 
 /// Remove notes for one or more objects.
 ///
+/// Resolves and verifies every object before deleting any row so that a
+/// partial-delete on mixed valid/invalid input is impossible: either all
+/// targets are valid and the entire removal succeeds, or nothing is deleted
+/// and the caller gets the first error.
+///
 /// Returns the list of (object, note_hash) that were removed.
 pub async fn remove(
     notes_ref: &str,
@@ -255,32 +262,31 @@ pub async fn remove(
     validate_notes_ref(notes_ref)?;
     let db = get_db_conn_instance().await;
 
-    let mut removed = Vec::new();
-
+    // Phase 1: resolve and verify every target first.
+    let mut to_delete: Vec<(String, String)> = Vec::new();
     for obj in objects {
         let resolved = resolve_object(Some(obj)).await?;
         let obj_str = resolved.to_string();
-
-        // Find the note first
         let blob_hash = find_note_blob(&db, notes_ref, &obj_str)
             .await?
             .ok_or_else(|| NotesError::NotFound {
                 notes_ref: notes_ref.to_string(),
                 object: obj_str.clone(),
             })?;
+        to_delete.push((obj_str, blob_hash));
+    }
 
-        // Delete the row
+    // Phase 2: delete all verified rows.
+    for (obj_str, _blob_hash) in &to_delete {
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
             "DELETE FROM notes WHERE notes_ref = ? AND object = ?",
             [notes_ref.into(), obj_str.clone().into()],
         ))
         .await?;
-
-        removed.push((obj_str, blob_hash));
     }
 
-    Ok(removed)
+    Ok(to_delete)
 }
 
 /// Find the blob hash for a note, if it exists.

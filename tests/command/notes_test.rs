@@ -603,6 +603,34 @@ fn boundary_remove_multiple_objects() {
 }
 
 #[test]
+fn boundary_remove_atomic_on_mixed_valid_invalid() {
+    let repo = create_committed_repo_via_cli();
+
+    // Add a note to HEAD
+    run_libra_command(&["notes", "add", "-m", "Keep me"], repo.path());
+
+    // Try to remove HEAD (has a note) + a non-existent object
+    let output = run_libra_command(
+        &[
+            "notes",
+            "remove",
+            "HEAD",
+            "deadbeef00000000000000000000000000000000",
+        ],
+        repo.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "should fail because deadbeef does not exist"
+    );
+
+    // The note on HEAD must still exist — the remove was not partially applied
+    let show = run_libra_command(&["notes", "show", "HEAD"], repo.path());
+    assert_cli_success(&show, "HEAD note must survive atomic remove failure");
+    assert_eq!(String::from_utf8_lossy(&show.stdout).trim(), "Keep me");
+}
+
+#[test]
 fn boundary_cross_ref_isolation() {
     let repo = create_committed_repo_via_cli();
 
@@ -1095,7 +1123,7 @@ fn error_remove_json_not_found() {
 }
 
 #[test]
-fn error_list_by_object_not_found() {
+fn boundary_list_by_object_returns_null_hash_when_no_note() {
     let repo = create_committed_repo_via_cli();
 
     // Create a second commit that has no note
@@ -1106,25 +1134,28 @@ fn error_list_by_object_not_found() {
         repo.path(),
     );
 
+    // JSON: success with note_hash: null
     let output = run_libra_command(&["--json", "notes", "list", "HEAD"], repo.path());
-    let report: serde_json::Value =
-        serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
-
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report["error_code"], "LBR-CLI-003");
+    assert_cli_success(&output, "list HEAD with no note (JSON)");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["action"], "list");
+    let notes = json["data"]["notes"]
+        .as_array()
+        .expect("expected notes array");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["note_hash"], serde_json::Value::Null);
+    assert!(notes[0]["annotated_object"].as_str().is_some());
 }
 
 #[test]
-fn error_list_by_object_not_found_human() {
+fn boundary_list_by_object_prints_none_when_no_note() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["notes", "list", "HEAD"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_cli_success(&output, "list HEAD with no note (human)");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("no note found"),
-        "unexpected stderr: {stderr}"
+        stdout.contains("(none)"),
+        "expected (none) placeholder, got: {stdout}"
     );
 }
 
