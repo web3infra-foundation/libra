@@ -26,7 +26,10 @@ fn basic_add_with_message() {
     let output = run_libra_command(&["notes", "add", "-m", "Reviewed-by: Alice"], repo.path());
     assert_cli_success(&output, "notes add -m");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added note to"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Added note to"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -41,7 +44,10 @@ fn basic_add_json_output() {
     assert_eq!(json["command"], "notes");
     assert_eq!(json["data"]["action"], "add");
     assert!(
-        json["data"]["ref"].as_str().unwrap().contains("refs/notes/commits"),
+        json["data"]["ref"]
+            .as_str()
+            .unwrap()
+            .contains("refs/notes/commits"),
         "expected notes ref, got: {json}"
     );
     assert!(json["data"]["object"].as_str().is_some());
@@ -55,7 +61,10 @@ fn basic_add_with_file() {
     let output = run_libra_command(&["notes", "add", "-F", "msg.txt"], repo.path());
     assert_cli_success(&output, "notes add -F");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added note to"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Added note to"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -68,7 +77,10 @@ fn basic_add_with_stdin() {
     );
     assert_cli_success(&output, "notes add -F -");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added note to"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Added note to"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -80,7 +92,10 @@ fn basic_add_with_multiple_messages() {
     );
     assert_cli_success(&output, "notes add multiple -m");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added note to"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Added note to"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -92,7 +107,10 @@ fn basic_add_force_overwrite() {
     let output = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&output, "notes show");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Second note"), "expected updated note, got: {stdout}");
+    assert!(
+        stdout.contains("Second note"),
+        "expected updated note, got: {stdout}"
+    );
 }
 
 #[test]
@@ -106,7 +124,13 @@ fn basic_add_to_specific_object() {
         .to_string();
 
     let output = run_libra_command(
-        &["notes", "add", "-m", "Note on specific commit", &commit_hash],
+        &[
+            "notes",
+            "add",
+            "-m",
+            "Note on specific commit",
+            &commit_hash,
+        ],
         repo.path(),
     );
     assert_cli_success(&output, "notes add on specific object");
@@ -130,7 +154,10 @@ fn basic_list_empty() {
     let output = run_libra_command(&["notes", "list"], repo.path());
     assert_cli_success(&output, "notes list empty");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.trim().is_empty(), "expected empty output, got: {stdout}");
+    assert!(
+        stdout.trim().is_empty(),
+        "expected empty output, got: {stdout}"
+    );
 }
 
 #[test]
@@ -142,8 +169,15 @@ fn basic_list_json() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["command"], "notes");
     assert_eq!(json["data"]["action"], "list");
-    assert!(json["data"]["ref"].as_str().unwrap().contains("refs/notes/commits"));
-    let notes = json["data"]["notes"].as_array().expect("expected notes array");
+    assert!(
+        json["data"]["ref"]
+            .as_str()
+            .unwrap()
+            .contains("refs/notes/commits")
+    );
+    let notes = json["data"]["notes"]
+        .as_array()
+        .expect("expected notes array");
     assert_eq!(notes.len(), 1);
     assert!(notes[0]["note_hash"].as_str().is_some());
     assert!(notes[0]["annotated_object"].as_str().is_some());
@@ -157,7 +191,9 @@ fn basic_list_json_empty_returns_empty_array() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["command"], "notes");
     assert_eq!(json["data"]["action"], "list");
-    let notes = json["data"]["notes"].as_array().expect("expected notes array");
+    let notes = json["data"]["notes"]
+        .as_array()
+        .expect("expected notes array");
     assert!(notes.is_empty(), "expected empty notes array, got: {json}");
 }
 
@@ -179,7 +215,9 @@ fn basic_list_json_by_object() {
     assert_cli_success(&output, "notes list HEAD --json");
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["action"], "list");
-    let notes = json["data"]["notes"].as_array().expect("expected notes array");
+    let notes = json["data"]["notes"]
+        .as_array()
+        .expect("expected notes array");
     assert_eq!(notes.len(), 1);
 }
 
@@ -198,7 +236,10 @@ fn basic_show() {
 #[test]
 fn basic_show_multiline() {
     let repo = create_committed_repo_via_cli();
-    run_libra_command(&["notes", "add", "-m", "Line 1\nLine 2\nLine 3"], repo.path());
+    run_libra_command(
+        &["notes", "add", "-m", "Line 1\nLine 2\nLine 3"],
+        repo.path(),
+    );
     let output = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&output, "notes show multiline");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -216,7 +257,12 @@ fn basic_show_json() {
     assert_eq!(json["command"], "notes");
     assert_eq!(json["data"]["action"], "show");
     assert_eq!(json["data"]["text"], "JSON show test");
-    assert!(json["data"]["ref"].as_str().unwrap().contains("refs/notes/commits"));
+    assert!(
+        json["data"]["ref"]
+            .as_str()
+            .unwrap()
+            .contains("refs/notes/commits")
+    );
     assert!(json["data"]["object"].as_str().is_some());
     assert!(json["data"]["note_hash"].as_str().is_some());
 }
@@ -240,11 +286,17 @@ fn basic_remove_single() {
     let output = run_libra_command(&["notes", "remove", "HEAD"], repo.path());
     assert_cli_success(&output, "notes remove HEAD");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Removed note from"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Removed note from"),
+        "unexpected stdout: {stdout}"
+    );
 
     // Verify it's gone
     let show_output = run_libra_command(&["notes", "show"], repo.path());
-    assert!(!show_output.status.success(), "show should fail after remove");
+    assert!(
+        !show_output.status.success(),
+        "show should fail after remove"
+    );
 }
 
 #[test]
@@ -254,7 +306,10 @@ fn basic_remove_default_head() {
     let output = run_libra_command(&["notes", "remove"], repo.path());
     assert_cli_success(&output, "notes remove default");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Removed note from"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Removed note from"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -266,8 +321,15 @@ fn basic_remove_json() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["command"], "notes");
     assert_eq!(json["data"]["action"], "remove");
-    assert!(json["data"]["ref"].as_str().unwrap().contains("refs/notes/commits"));
-    let removed = json["data"]["removed"].as_array().expect("expected removed array");
+    assert!(
+        json["data"]["ref"]
+            .as_str()
+            .unwrap()
+            .contains("refs/notes/commits")
+    );
+    let removed = json["data"]["removed"]
+        .as_array()
+        .expect("expected removed array");
     assert_eq!(removed.len(), 1);
     assert!(removed[0]["object"].as_str().is_some());
     assert!(removed[0]["note_hash"].as_str().is_some());
@@ -279,27 +341,40 @@ fn basic_remove_json() {
 fn basic_custom_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "--ref", "refs/notes/qa", "add", "-m", "QA reviewed"],
+        &[
+            "notes",
+            "--ref",
+            "refs/notes/qa",
+            "add",
+            "-m",
+            "QA reviewed",
+        ],
         repo.path(),
     );
     assert_cli_success(&output, "notes add --ref refs/notes/qa");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("refs/notes/qa"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("refs/notes/qa"),
+        "unexpected stdout: {stdout}"
+    );
 
     // List from custom ref
-    let list_output = run_libra_command(
-        &["notes", "--ref", "refs/notes/qa", "list"],
-        repo.path(),
-    );
+    let list_output = run_libra_command(&["notes", "--ref", "refs/notes/qa", "list"], repo.path());
     assert_cli_success(&list_output, "notes list --ref refs/notes/qa");
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    assert!(!list_stdout.trim().is_empty(), "expected list output for qa ref");
+    assert!(
+        !list_stdout.trim().is_empty(),
+        "expected list output for qa ref"
+    );
 
     // Default ref should be empty (no notes there)
     let default_list = run_libra_command(&["notes", "list"], repo.path());
     assert_cli_success(&default_list, "notes list default ref");
     let default_stdout = String::from_utf8_lossy(&default_list.stdout);
-    assert!(default_stdout.trim().is_empty(), "default ref should be empty, got: {default_stdout}");
+    assert!(
+        default_stdout.trim().is_empty(),
+        "default ref should be empty, got: {default_stdout}"
+    );
 }
 
 #[test]
@@ -320,10 +395,7 @@ fn basic_custom_ref_show_and_remove() {
     assert!(String::from_utf8_lossy(&show_out.stdout).contains("Audit trail"));
 
     // remove
-    let remove_out = run_libra_command(
-        &["notes", ref_arg, ref_val, "remove", "HEAD"],
-        repo.path(),
-    );
+    let remove_out = run_libra_command(&["notes", ref_arg, ref_val, "remove", "HEAD"], repo.path());
     assert_cli_success(&remove_out, "remove on custom ref");
 
     // verify gone
@@ -337,9 +409,15 @@ fn basic_custom_ref_show_and_remove() {
 #[test]
 fn basic_quiet_suppresses_stdout() {
     let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(&["--quiet", "notes", "add", "-m", "Quiet note"], repo.path());
+    let output = run_libra_command(
+        &["--quiet", "notes", "add", "-m", "Quiet note"],
+        repo.path(),
+    );
     assert_cli_success(&output, "quiet notes add");
-    assert!(output.stdout.is_empty(), "quiet mode should keep stdout empty");
+    assert!(
+        output.stdout.is_empty(),
+        "quiet mode should keep stdout empty"
+    );
 }
 
 // ── default subcommand (defaults to list) ─────────────────────────────
@@ -360,7 +438,10 @@ fn basic_default_subcommand_empty() {
     let output = run_libra_command(&["notes"], repo.path());
     assert_cli_success(&output, "notes without subcommand (empty)");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.trim().is_empty(), "expected empty output, got: {stdout}");
+    assert!(
+        stdout.trim().is_empty(),
+        "expected empty output, got: {stdout}"
+    );
 }
 
 // ===========================================================================
@@ -378,8 +459,10 @@ fn boundary_add_empty_message() {
     let show = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&show, "show empty note");
     let stdout = String::from_utf8_lossy(&show.stdout);
-    assert!(stdout.is_empty() || stdout == "\n" || stdout == "\r\n",
-        "expected empty or near-empty note content, got: '{stdout}'");
+    assert!(
+        stdout.is_empty() || stdout == "\n" || stdout == "\r\n",
+        "expected empty or near-empty note content, got: '{stdout}'"
+    );
 }
 
 #[test]
@@ -390,7 +473,10 @@ fn boundary_add_unicode_content() {
     let output = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&output, "show unicode note");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("审查通过"), "expected CJK content, got: {stdout}");
+    assert!(
+        stdout.contains("审查通过"),
+        "expected CJK content, got: {stdout}"
+    );
     assert!(stdout.contains("🚀"), "expected emoji, got: {stdout}");
 }
 
@@ -404,8 +490,13 @@ fn boundary_add_very_long_message() {
     let show = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&show, "show long note");
     let stdout = String::from_utf8_lossy(&show.stdout);
-    assert_eq!(stdout.trim().len(), 10_000, "expected {} chars, got {}",
-        10_000, stdout.trim().len());
+    assert_eq!(
+        stdout.trim().len(),
+        10_000,
+        "expected {} chars, got {}",
+        10_000,
+        stdout.trim().len()
+    );
 }
 
 #[test]
@@ -416,7 +507,10 @@ fn boundary_add_special_chars() {
     let output = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&output, "show special chars note");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("backslash:"), "expected backslash content, got: {stdout}");
+    assert!(
+        stdout.contains("backslash:"),
+        "expected backslash content, got: {stdout}"
+    );
 }
 
 #[test]
@@ -434,8 +528,14 @@ fn boundary_add_combined_message_and_file() {
     let show = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&show, "show combined note");
     let stdout = String::from_utf8_lossy(&show.stdout);
-    assert!(stdout.contains("from -m"), "expected -m content, got: {stdout}");
-    assert!(stdout.contains("from file"), "expected -F content, got: {stdout}");
+    assert!(
+        stdout.contains("from -m"),
+        "expected -m content, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("from file"),
+        "expected -F content, got: {stdout}"
+    );
 }
 
 // ── multi-object / multi-ref ───────────────────────────────────────────
@@ -447,17 +547,25 @@ fn boundary_multiple_notes_same_ref() {
     // Create a second commit
     std::fs::write(repo.path().join("f2.txt"), "content2\n").unwrap();
     run_libra_command(&["add", "f2.txt"], repo.path());
-    run_libra_command(&["commit", "-m", "Second commit", "--no-verify"], repo.path());
+    run_libra_command(
+        &["commit", "-m", "Second commit", "--no-verify"],
+        repo.path(),
+    );
 
     // Add notes to both commits
-    run_libra_command(&["notes", "add", "-m", "Note on HEAD~1", "HEAD~1"], repo.path());
+    run_libra_command(
+        &["notes", "add", "-m", "Note on HEAD~1", "HEAD~1"],
+        repo.path(),
+    );
     run_libra_command(&["notes", "add", "-m", "Note on HEAD", "HEAD"], repo.path());
 
     // List should now have 2 entries
     let output = run_libra_command(&["--json", "notes", "list"], repo.path());
     assert_cli_success(&output, "list multiple notes --json");
     let json = parse_json_stdout(&output);
-    let notes = json["data"]["notes"].as_array().expect("expected notes array");
+    let notes = json["data"]["notes"]
+        .as_array()
+        .expect("expected notes array");
     assert_eq!(notes.len(), 2, "expected 2 notes, got: {json}");
 }
 
@@ -467,26 +575,31 @@ fn boundary_remove_multiple_objects() {
 
     std::fs::write(repo.path().join("f2.txt"), "content2\n").unwrap();
     run_libra_command(&["add", "f2.txt"], repo.path());
-    run_libra_command(&["commit", "-m", "Second commit", "--no-verify"], repo.path());
+    run_libra_command(
+        &["commit", "-m", "Second commit", "--no-verify"],
+        repo.path(),
+    );
 
     run_libra_command(&["notes", "add", "-m", "Note 1", "HEAD~1"], repo.path());
     run_libra_command(&["notes", "add", "-m", "Note 2", "HEAD"], repo.path());
 
     // Remove both notes at once
-    let output = run_libra_command(
-        &["notes", "remove", "HEAD~1", "HEAD"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["notes", "remove", "HEAD~1", "HEAD"], repo.path());
     assert_cli_success(&output, "remove multiple objects");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Removed note from"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("Removed note from"),
+        "unexpected stdout: {stdout}"
+    );
 
     // Verify both are gone
     let list = run_libra_command(&["notes", "list"], repo.path());
     assert_cli_success(&list, "list after removing all");
-    assert!(String::from_utf8_lossy(&list.stdout).trim().is_empty(),
-        "expected empty list after removing all notes");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).trim().is_empty(),
+        "expected empty list after removing all notes"
+    );
 }
 
 #[test]
@@ -499,15 +612,28 @@ fn boundary_cross_ref_isolation() {
         repo.path(),
     );
     run_libra_command(
-        &["notes", "--ref", "refs/notes/review", "add", "-m", "Review note"],
+        &[
+            "notes",
+            "--ref",
+            "refs/notes/review",
+            "add",
+            "-m",
+            "Review note",
+        ],
         repo.path(),
     );
 
     // qa ref: 1 note
-    let qa = run_libra_command(&["--json", "notes", "--ref", "refs/notes/qa", "list"], repo.path());
+    let qa = run_libra_command(
+        &["--json", "notes", "--ref", "refs/notes/qa", "list"],
+        repo.path(),
+    );
     assert_cli_success(&qa, "list qa --json");
     assert_eq!(
-        parse_json_stdout(&qa)["data"]["notes"].as_array().unwrap().len(),
+        parse_json_stdout(&qa)["data"]["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
 
@@ -518,7 +644,10 @@ fn boundary_cross_ref_isolation() {
     );
     assert_cli_success(&review, "list review --json");
     assert_eq!(
-        parse_json_stdout(&review)["data"]["notes"].as_array().unwrap().len(),
+        parse_json_stdout(&review)["data"]["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
 
@@ -526,7 +655,10 @@ fn boundary_cross_ref_isolation() {
     let default = run_libra_command(&["--json", "notes", "list"], repo.path());
     assert_cli_success(&default, "list default --json");
     assert_eq!(
-        parse_json_stdout(&default)["data"]["notes"].as_array().unwrap().len(),
+        parse_json_stdout(&default)["data"]["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
         0
     );
 }
@@ -537,21 +669,39 @@ fn boundary_force_update_preserves_object_hash() {
 
     let first = run_libra_command(&["--json", "notes", "add", "-m", "First"], repo.path());
     assert_cli_success(&first, "first add");
-    let first_obj = parse_json_stdout(&first)["data"]["object"].as_str().unwrap().to_string();
+    let first_obj = parse_json_stdout(&first)["data"]["object"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let second = run_libra_command(
         &["--json", "notes", "add", "-m", "Second", "-f"],
         repo.path(),
     );
     assert_cli_success(&second, "force add");
-    let second_obj = parse_json_stdout(&second)["data"]["object"].as_str().unwrap().to_string();
+    let second_obj = parse_json_stdout(&second)["data"]["object"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Object hash should stay the same (same commit)
-    assert_eq!(first_obj, second_obj, "object hash changed after force update");
+    assert_eq!(
+        first_obj, second_obj,
+        "object hash changed after force update"
+    );
     // Note hash should differ (different content)
-    let first_hash = parse_json_stdout(&first)["data"]["note_hash"].as_str().unwrap().to_string();
-    let second_hash = parse_json_stdout(&second)["data"]["note_hash"].as_str().unwrap().to_string();
-    assert_ne!(first_hash, second_hash, "note hash should change after force update");
+    let first_hash = parse_json_stdout(&first)["data"]["note_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_hash = parse_json_stdout(&second)["data"]["note_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        first_hash, second_hash,
+        "note hash should change after force update"
+    );
 }
 
 #[test]
@@ -574,10 +724,7 @@ fn boundary_json_list_multiple_entries() {
 
     // Each ref lists 1 note
     for ref_name in &["refs/notes/a", "refs/notes/b", "refs/notes/c"] {
-        let out = run_libra_command(
-            &["--json", "notes", "--ref", ref_name, "list"],
-            repo.path(),
-        );
+        let out = run_libra_command(&["--json", "notes", "--ref", ref_name, "list"], repo.path());
         assert_cli_success(&out, &format!("list {ref_name}"));
         let json = parse_json_stdout(&out);
         let notes = json["data"]["notes"]
@@ -617,7 +764,10 @@ fn error_add_without_message_or_file() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(stderr.contains("provide a message"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("provide a message"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -628,7 +778,10 @@ fn error_add_json_without_message() {
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
     assert_eq!(output.status.code(), Some(129));
-    assert!(output.stdout.is_empty(), "json error should keep stdout empty");
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty"
+    );
     assert_eq!(report["error_code"], "LBR-CLI-002");
 }
 
@@ -637,27 +790,42 @@ fn error_add_nonexistent_file() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["notes", "add", "-F", "no_such_file.txt"], repo.path());
 
-    assert!(!output.status.success(), "expected failure for nonexistent file");
+    assert!(
+        !output.status.success(),
+        "expected failure for nonexistent file"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no_such_file") || stderr.contains("failed to read"),
-        "expected file-not-found message, got: {stderr}");
+    assert!(
+        stderr.contains("no_such_file") || stderr.contains("failed to read"),
+        "expected file-not-found message, got: {stderr}"
+    );
 }
 
 #[test]
 fn error_add_invalid_object() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "add", "-m", "Test", "deadbeef00000000000000000000000000000000"],
+        &[
+            "notes",
+            "add",
+            "-m",
+            "Test",
+            "deadbeef00000000000000000000000000000000",
+        ],
         repo.path(),
     );
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(stderr.contains("invalid object"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("invalid object"),
+        "unexpected stderr: {stderr}"
+    );
     assert!(
         report.hints.iter().any(|h| h.contains("libra log")),
-        "expected hint about libra log, got: {:?}", report.hints
+        "expected hint about libra log, got: {:?}",
+        report.hints
     );
 }
 
@@ -665,7 +833,14 @@ fn error_add_invalid_object() {
 fn error_add_json_invalid_object() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["--json", "notes", "add", "-m", "Test", "deadbeef00000000000000000000000000000000"],
+        &[
+            "--json",
+            "notes",
+            "add",
+            "-m",
+            "Test",
+            "deadbeef00000000000000000000000000000000",
+        ],
         repo.path(),
     );
     let report: serde_json::Value =
@@ -688,9 +863,15 @@ fn error_add_duplicate_without_force() {
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-CONFLICT-002");
-    assert!(stderr.contains("note already exists"), "unexpected stderr: {stderr}");
-    assert!(report.hints.iter().any(|h| h.contains("-f")),
-        "expected hint about -f, got: {:?}", report.hints);
+    assert!(
+        stderr.contains("note already exists"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        report.hints.iter().any(|h| h.contains("-f")),
+        "expected hint about -f, got: {:?}",
+        report.hints
+    );
     assert!(output.stdout.is_empty(), "error should keep stdout empty");
 }
 
@@ -704,7 +885,10 @@ fn error_add_json_duplicate_without_force() {
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
     assert_eq!(output.status.code(), Some(128));
-    assert!(output.stdout.is_empty(), "json error should keep stdout empty");
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty"
+    );
     assert_eq!(report["error_code"], "LBR-CONFLICT-002");
 }
 
@@ -721,9 +905,15 @@ fn error_add_unborn_head() {
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-003");
     assert_eq!(report.category, "repo");
-    assert!(stderr.contains("HEAD does not point to a commit"), "unexpected stderr: {stderr}");
-    assert!(report.hints.iter().any(|h| h.contains("create a commit")),
-        "expected hint about creating a commit, got: {:?}", report.hints);
+    assert!(
+        stderr.contains("HEAD does not point to a commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        report.hints.iter().any(|h| h.contains("create a commit")),
+        "expected hint about creating a commit, got: {:?}",
+        report.hints
+    );
 }
 
 #[test]
@@ -736,7 +926,10 @@ fn error_show_unborn_head() {
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-003");
-    assert!(stderr.contains("HEAD does not point to a commit"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("HEAD does not point to a commit"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -749,7 +942,10 @@ fn error_remove_unborn_head() {
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-003");
-    assert!(stderr.contains("HEAD does not point to a commit"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("HEAD does not point to a commit"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -791,34 +987,35 @@ fn error_add_invalid_ref() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(stderr.contains("must start with 'refs/notes/'"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("must start with 'refs/notes/'"),
+        "unexpected stderr: {stderr}"
+    );
     assert!(
         report.hints.iter().any(|h| h.contains("refs/notes/")),
-        "expected hint about refs/notes/, got: {:?}", report.hints
+        "expected hint about refs/notes/, got: {:?}",
+        report.hints
     );
 }
 
 #[test]
 fn error_list_invalid_ref() {
     let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(
-        &["notes", "--ref", "refs/tags/bad", "list"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["notes", "--ref", "refs/tags/bad", "list"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
-    assert!(stderr.contains("must start with 'refs/notes/'"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("must start with 'refs/notes/'"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
 fn error_show_invalid_ref() {
     let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(
-        &["notes", "--ref", "refs/heads/main", "show"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["notes", "--ref", "refs/heads/main", "show"], repo.path());
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
@@ -848,10 +1045,14 @@ fn error_show_not_found() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("no note found"),
+        "unexpected stderr: {stderr}"
+    );
     assert!(
         report.hints.iter().any(|h| h.contains("notes list")),
-        "expected hint about notes list, got: {:?}", report.hints
+        "expected hint about notes list, got: {:?}",
+        report.hints
     );
 }
 
@@ -875,7 +1076,10 @@ fn error_remove_not_found() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("no note found"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -897,7 +1101,10 @@ fn error_list_by_object_not_found() {
     // Create a second commit that has no note
     std::fs::write(repo.path().join("new.txt"), "new content\n").unwrap();
     run_libra_command(&["add", "new.txt"], repo.path());
-    run_libra_command(&["commit", "-m", "Second commit", "--no-verify"], repo.path());
+    run_libra_command(
+        &["commit", "-m", "Second commit", "--no-verify"],
+        repo.path(),
+    );
 
     let output = run_libra_command(&["--json", "notes", "list", "HEAD"], repo.path());
     let report: serde_json::Value =
@@ -915,16 +1122,16 @@ fn error_list_by_object_not_found_human() {
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("no note found"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
 fn error_show_invalid_object() {
     let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(
-        &["notes", "show", "this-ref-does-not-exist"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["notes", "show", "this-ref-does-not-exist"], repo.path());
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
@@ -934,15 +1141,15 @@ fn error_show_invalid_object() {
 #[test]
 fn error_remove_with_invalid_object() {
     let repo = create_committed_repo_via_cli();
-    let output = run_libra_command(
-        &["notes", "remove", "nonexistent-ref-9999"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["notes", "remove", "nonexistent-ref-9999"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
-    assert!(stderr.contains("invalid object"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("invalid object"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 // ── JSON error output structure ────────────────────────────────────────
@@ -971,11 +1178,21 @@ fn error_json_show_not_found_on_clean_repo() {
     assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty());
     assert_eq!(report["error_code"], "LBR-CLI-003");
-    assert!(report["message"].as_str().unwrap().contains("no note found for object"),
-        "expected message to contain 'no note found for object', got: {report}");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("no note found for object"),
+        "expected message to contain 'no note found for object', got: {report}"
+    );
     assert_eq!(report["category"], "cli");
     assert!(
-        report["hints"].as_array().unwrap().iter().any(|h| h.as_str().unwrap().contains("notes list")),
-        "expected hint about notes list, got: {:?}", report["hints"]
+        report["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h.as_str().unwrap().contains("notes list")),
+        "expected hint about notes list, got: {:?}",
+        report["hints"]
     );
 }

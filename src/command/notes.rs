@@ -127,9 +127,9 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
     let notes_ref = &args.ref_;
     notes::validate_notes_ref(notes_ref).map_err(|e| CliError::from(NotesCliError::from(e)))?;
 
-    let subcommand = args.subcommand.unwrap_or(NotesSubcommand::List {
-        object: None,
-    });
+    let subcommand = args
+        .subcommand
+        .unwrap_or(NotesSubcommand::List { object: None });
 
     match subcommand {
         NotesSubcommand::Add {
@@ -139,9 +139,14 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
             force,
         } => {
             let content = build_note_content(&message, &file)?;
-            let result = notes::add(notes_ref, object.as_deref().unwrap_or("HEAD"), &content, force)
-                .await
-                .map_err(NotesCliError::from)?;
+            let result = notes::add(
+                notes_ref,
+                object.as_deref().unwrap_or("HEAD"),
+                &content,
+                force,
+            )
+            .await
+            .map_err(NotesCliError::from)?;
             let out = NotesOutput::Add {
                 notes_ref: result.notes_ref,
                 object: result.object,
@@ -166,7 +171,9 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
             render_output(&out, output)?;
         }
         NotesSubcommand::Show { object } => {
-            let (obj_hash, note_hash, text) = notes::show(notes_ref, object.as_deref()).await.map_err(NotesCliError::from)?;
+            let (obj_hash, note_hash, text) = notes::show(notes_ref, object.as_deref())
+                .await
+                .map_err(NotesCliError::from)?;
             let out = NotesOutput::Show {
                 notes_ref: notes_ref.to_string(),
                 object: obj_hash,
@@ -219,10 +226,10 @@ fn build_note_content(messages: &[String], files: &[String]) -> CliResult<String
     }
 
     if parts.is_empty() {
-        return Err(CliError::command_usage(
-            "provide a message with '-m <msg>' or '-F <file>'.",
-        )
-        .with_stable_code(StableErrorCode::CliInvalidArguments));
+        return Err(
+            CliError::command_usage("provide a message with '-m <msg>' or '-F <file>'.")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
 
     Ok(parts.join("\n\n"))
@@ -264,10 +271,7 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
         NotesOutput::Show { text, .. } => {
             print!("{text}");
         }
-        NotesOutput::Remove {
-            notes_ref,
-            removed,
-        } => {
+        NotesOutput::Remove { notes_ref, removed } => {
             for entry in removed {
                 println!(
                     "Removed note from {} in {}",
@@ -294,31 +298,23 @@ impl From<NotesCliError> for CliError {
         let message = error.to_string();
         match &error {
             NotesCliError::Notes(inner) => match inner {
-                notes::NotesError::InvalidNotesRef(_) => {
-                    CliError::fatal(message)
-                        .with_stable_code(StableErrorCode::CliInvalidArguments)
-                        .with_hint("notes refs must start with 'refs/notes/'; e.g. 'refs/notes/commits'.")
-                }
-                notes::NotesError::AlreadyExists { .. } => {
-                    CliError::fatal(message)
-                        .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-                        .with_hint("use '-f' to overwrite the existing note.")
-                }
-                notes::NotesError::NotFound { .. } => {
-                    CliError::fatal(message)
-                        .with_stable_code(StableErrorCode::CliInvalidTarget)
-                        .with_hint("use 'libra notes list' to see which objects have notes.")
-                }
-                notes::NotesError::InvalidObject(_, _) => {
-                    CliError::fatal(message)
-                        .with_stable_code(StableErrorCode::CliInvalidTarget)
-                        .with_hint("use 'libra log' to find valid commit references.")
-                }
-                notes::NotesError::HeadUnborn => {
-                    CliError::fatal(message)
-                        .with_stable_code(StableErrorCode::RepoStateInvalid)
-                        .with_hint("create a commit first before adding notes.")
-                }
+                notes::NotesError::InvalidNotesRef(_) => CliError::fatal(message)
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint(
+                        "notes refs must start with 'refs/notes/'; e.g. 'refs/notes/commits'.",
+                    ),
+                notes::NotesError::AlreadyExists { .. } => CliError::fatal(message)
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("use '-f' to overwrite the existing note."),
+                notes::NotesError::NotFound { .. } => CliError::fatal(message)
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra notes list' to see which objects have notes."),
+                notes::NotesError::InvalidObject(_, _) => CliError::fatal(message)
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra log' to find valid commit references."),
+                notes::NotesError::HeadUnborn => CliError::fatal(message)
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_hint("create a commit first before adding notes."),
                 notes::NotesError::QueryFailed(_) => {
                     CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
                 }

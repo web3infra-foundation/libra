@@ -4,10 +4,10 @@
 //! SQLite `notes` table. Each row maps a (`notes_ref`, `object`) pair to a blob
 //! hash. The default notes ref is `refs/notes/commits`.
 
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::ObjectTrait;
-use sea_orm::{ConnectionTrait, DbErr, Statement};
 use std::str::FromStr;
+
+use git_internal::{hash::ObjectHash, internal::object::ObjectTrait};
+use sea_orm::{ConnectionTrait, DbErr, Statement};
 
 use crate::{internal::db::get_db_conn_instance, utils::util};
 
@@ -92,12 +92,7 @@ async fn resolve_ref(s: &str) -> Result<ObjectHash, NotesError> {
         match crate::internal::head::Head::current_commit_result().await {
             Ok(Some(hash)) => return Ok(hash),
             Ok(None) => return Err(NotesError::HeadUnborn),
-            Err(e) => {
-                return Err(NotesError::InvalidObject(
-                    "HEAD".to_string(),
-                    e.to_string(),
-                ))
-            }
+            Err(e) => return Err(NotesError::InvalidObject("HEAD".to_string(), e.to_string())),
         }
     }
     util::get_commit_base(s)
@@ -144,7 +139,11 @@ pub async fn add(
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
             "UPDATE notes SET blob = ? WHERE notes_ref = ? AND object = ?",
-            [note_hash.clone().into(), notes_ref.into(), object_str.clone().into()],
+            [
+                note_hash.clone().into(),
+                notes_ref.into(),
+                object_str.clone().into(),
+            ],
         ))
         .await?;
     } else {
@@ -152,7 +151,11 @@ pub async fn add(
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
             "INSERT INTO notes (notes_ref, object, blob) VALUES (?, ?, ?)",
-            [notes_ref.into(), object_str.clone().into(), note_hash.clone().into()],
+            [
+                notes_ref.into(),
+                object_str.clone().into(),
+                note_hash.clone().into(),
+            ],
         ))
         .await?;
     }
@@ -168,10 +171,7 @@ pub async fn add(
 ///
 /// When `object` is `Some`, returns only the note (if any) for that object.
 /// When `None`, returns all notes in the given notes ref.
-pub async fn list(
-    notes_ref: &str,
-    object: Option<&str>,
-) -> Result<Vec<NoteEntry>, NotesError> {
+pub async fn list(notes_ref: &str, object: Option<&str>) -> Result<Vec<NoteEntry>, NotesError> {
     validate_notes_ref(notes_ref)?;
     let db = get_db_conn_instance().await;
 
@@ -234,8 +234,8 @@ pub async fn show(
         })?;
 
     // Load the blob to get the text
-    let blob_hash_parsed =
-        ObjectHash::from_str(&blob_hash).map_err(|e| NotesError::InvalidObject(blob_hash.clone(), e))?;
+    let blob_hash_parsed = ObjectHash::from_str(&blob_hash)
+        .map_err(|e| NotesError::InvalidObject(blob_hash.clone(), e))?;
     let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
     let data = storage.get(&blob_hash_parsed).map_err(|e| {
         NotesError::InvalidObject(blob_hash.clone(), format!("failed to read blob: {e}"))
