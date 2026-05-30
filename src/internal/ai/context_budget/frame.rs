@@ -161,6 +161,48 @@ impl ContextFrameEvent {
             .filter_map(|segment| segment.attachment.clone())
             .collect()
     }
+
+    /// Materialise this frame's segments into a `Vec<Message>` the
+    /// child sub-agent's tool loop can consume as
+    /// pre-populated history before its own user prompt lands.
+    ///
+    /// This is OC-Phase 4 P4.4's "minimum-viable handoff" — the
+    /// compaction-agent SUMMARY step lands as a follow-up that
+    /// replaces the raw segment dump with a parser-validated
+    /// 8-section template via `ContextHandoffBuilder` (v0.17.740).
+    /// Until that lands, the child sees the parent's working
+    /// context as User messages, each prefixed with a
+    /// `[<segment_kind>:<source_kind>:<source_label>]` header so
+    /// the model can attribute the content.
+    ///
+    /// Filter rule: only segments with `content = Some` are
+    /// surfaced. Attachment-only segments (where the content was
+    /// externalised to a sidecar file) are skipped because the
+    /// child cannot meaningfully act on a path it has not yet
+    /// read — the `attachment_refs` array on the handoff carries
+    /// the references separately, and a future tool call from
+    /// the child resolves them. Empty-content segments produce no
+    /// message.
+    pub fn to_handoff_messages(&self) -> Vec<crate::internal::ai::completion::Message> {
+        use crate::internal::ai::completion::Message;
+        self.segments
+            .iter()
+            .filter_map(|segment| {
+                let content = segment.content.as_deref()?;
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let header = format!(
+                    "[{}:{:?}:{}]",
+                    segment.segment.as_str(),
+                    segment.source.kind,
+                    segment.source.label,
+                );
+                Some(Message::user(format!("{header}\n{trimmed}")))
+            })
+            .collect()
+    }
 }
 
 impl Event for ContextFrameEvent {
@@ -463,4 +505,243 @@ fn count_lines(content: &str) -> usize {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(digest(&SHA256, bytes).as_ref())
+}
+
+#[cfg(test)]
+mod handoff_message_tests {
+    use super::*;
+    use crate::internal::ai::completion::{Message, UserContent};
+
+    fn segment(
+        id: &str,
+        kind: ContextSegmentKind,
+        source_kind: ContextFrameSourceKind,
+        label: &str,
+        content: Option<&str>,
+    ) -> ContextFrameSegment {
+        ContextFrameSegment {
+            id: id.to_string(),
+            segment: kind,
+            source: ContextFrameSource {
+                kind: source_kind,
+                label: label.to_string(),
+                detail: None,
+            },
+            trust: ContextTrustLevel::Trusted,
+            token_estimate: 0,
+            content: content.map(|s| s.to_string()),
+            summary: None,
+            attachment: None,
+            non_compressible: false,
+        }
+    }
+
+    fn frame_with_segments(segments: Vec<ContextFrameSegment>) -> ContextFrameEvent {
+        ContextFrameEvent {
+            event_id: Uuid::new_v4(),
+            recorded_at: Utc::now(),
+            frame_id: Uuid::new_v4(),
+            kind: ContextFrameKind::ToolResult,
+            prompt_id: None,
+            segments,
+            omissions: Vec::new(),
+            total_candidate_tokens: 0,
+            total_selected_tokens: 0,
+            budget_exceeded_by: 0,
+        }
+    }
+
+    /// CEX-13c / Step 1.9 freeze the `ContextFrameEvent` wire contract
+    /// (`#[serde(deny_unknown_fields)]`) — append-only prompt context
+    /// frames persisted to session JSONL, replayed, and fed into the
+    /// sub-agent handoff. Pin the EXACT required key set, the `prompt_id`
+    /// skip-when-None, that `segments` / `omissions` always serialize
+    /// (Vec, no skip) and `budget_exceeded_by` is always present
+    /// (`#[serde(default)]`, no skip), the `deny_unknown_fields`
+    /// rejection, and a full round-trip — so a rename / added field /
+    /// dropped-skip silently breaking replay trips here.
+    #[test]
+    fn context_frame_event_wire_contract_is_frozen() {
+        let base = frame_with_segments(Vec::new());
+        let base_json = serde_json::to_value(&base).expect("serialize ContextFrameEvent");
+        let base_keys: std::collections::BTreeSet<&str> = base_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "event_id",
+            "recorded_at",
+            "frame_id",
+            "kind",
+            "segments",
+            "omissions",
+            "total_candidate_tokens",
+            "total_selected_tokens",
+            "budget_exceeded_by",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            base_keys, required,
+            "ContextFrameEvent (None prompt_id) must serialize EXACTLY the required key set, \
+             got: {base_json}",
+        );
+        assert_eq!(
+            base_json["segments"],
+            serde_json::json!([]),
+            "empty segments must serialize as [], not be omitted",
+        );
+        assert_eq!(base_json["omissions"], serde_json::json!([]));
+
+        let full = ContextFrameEvent {
+            prompt_id: Some("prompt-7".to_string()),
+            ..base.clone()
+        };
+        let full_json = serde_json::to_value(&full).expect("serialize ContextFrameEvent");
+        let full_keys: std::collections::BTreeSet<&str> = full_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut full_expected = required.clone();
+        full_expected.insert("prompt_id");
+        assert_eq!(
+            full_keys, full_expected,
+            "a ContextFrameEvent with prompt_id must add EXACTLY prompt_id, got: {full_json}",
+        );
+
+        // `#[serde(default)]` on budget_exceeded_by: an omitted value
+        // reads back 0 (read-side compatibility for older records that
+        // predate the field).
+        let mut without_budget = full_json.as_object().expect("object").clone();
+        without_budget.remove("budget_exceeded_by");
+        let defaulted: ContextFrameEvent =
+            serde_json::from_value(serde_json::Value::Object(without_budget))
+                .expect("deserialize without budget_exceeded_by");
+        assert_eq!(
+            defaulted.budget_exceeded_by, 0,
+            "an omitted #[serde(default)] budget_exceeded_by must default to 0",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = full_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<ContextFrameEvent>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: ContextFrameEvent =
+            serde_json::from_value(full_json.clone()).expect("deserialize ContextFrameEvent");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            full_json,
+            "ContextFrameEvent must round-trip its wire shape",
+        );
+    }
+
+    /// Each segment with non-empty content becomes one User message
+    /// whose body starts with a `[kind:source:label]` header line.
+    /// The header lets the model attribute the content while
+    /// reading the handoff.
+    #[test]
+    fn to_handoff_messages_wraps_each_content_segment_with_header() {
+        let frame = frame_with_segments(vec![
+            segment(
+                "seg-1",
+                ContextSegmentKind::RecentMessages,
+                ContextFrameSourceKind::Runtime,
+                "transcript",
+                Some("hello from the parent"),
+            ),
+            segment(
+                "seg-2",
+                ContextSegmentKind::ToolResults,
+                ContextFrameSourceKind::Tool,
+                "shell",
+                Some("$ ls\nfile.txt"),
+            ),
+        ]);
+
+        let messages = frame.to_handoff_messages();
+        assert_eq!(messages.len(), 2);
+
+        let texts: Vec<String> = messages
+            .iter()
+            .map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => panic!("handoff must produce User messages, got: {m:?}"),
+            })
+            .collect();
+
+        assert!(
+            texts[0].starts_with("[recent_messages:Runtime:transcript]\n"),
+            "first message must carry the segment header, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[0].contains("hello from the parent"),
+            "first message must include the trimmed segment content, got: {}",
+            texts[0],
+        );
+        assert!(
+            texts[1].starts_with("[tool_results:Tool:shell]\n"),
+            "second message header must reflect its segment kind/source, got: {}",
+            texts[1],
+        );
+    }
+
+    /// Segments with `content = None` (externalised to attachment)
+    /// AND segments whose content is whitespace-only do NOT produce
+    /// messages. The attachment_refs path carries the externalised
+    /// data separately; an empty user message would just waste the
+    /// child's token budget without adding signal.
+    #[test]
+    fn to_handoff_messages_skips_attachment_only_and_empty_content_segments() {
+        let frame = frame_with_segments(vec![
+            // Attachment-only: content = None
+            segment(
+                "seg-attach",
+                ContextSegmentKind::ToolResults,
+                ContextFrameSourceKind::Tool,
+                "build",
+                None,
+            ),
+            // Whitespace-only content
+            segment(
+                "seg-blank",
+                ContextSegmentKind::RecentMessages,
+                ContextFrameSourceKind::Runtime,
+                "user",
+                Some("   \n\t  "),
+            ),
+            // Real content survives
+            segment(
+                "seg-real",
+                ContextSegmentKind::SystemRules,
+                ContextFrameSourceKind::Runtime,
+                "preamble",
+                Some("system rule"),
+            ),
+        ]);
+
+        let messages = frame.to_handoff_messages();
+        assert_eq!(
+            messages.len(),
+            1,
+            "only the real-content segment should produce a message; got {messages:?}",
+        );
+    }
 }

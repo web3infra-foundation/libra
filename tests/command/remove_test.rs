@@ -913,3 +913,38 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
     remove::execute(args).await;
     assert!(!file1.exists(), "file1.txt should be removed");
 }
+
+/// `libra rm --help` surfaces the EXAMPLES banner so users see the
+/// single-file, recursive, `--cached`, force, dry-run, pathspec-from-file,
+/// and JSON forms before they hit one of `rm`'s strict
+/// conflicting-state safety errors. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_rm_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for rm --help");
+    let output = run_libra_command(&["rm", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "rm --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rm --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra rm stale.txt",
+        "libra rm -r logs/",
+        "libra rm --cached secrets.env",
+        "libra rm -f conflicted.txt",
+        "libra rm --dry-run",
+        "libra rm --pathspec-from-file",
+        "libra rm --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "rm --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

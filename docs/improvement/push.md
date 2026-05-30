@@ -1,6 +1,6 @@
 ## Push 命令改进详细计划
 
-> 最后编写时间：2026-03-28（已根据代码实现同步）
+> 最后编写时间：2026-05-29（已根据代码实现同步）
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
 
@@ -23,6 +23,7 @@
 - Remote tracking branch 更新已实现（数据库事务内）
 - `--set-upstream` / `--force` / `--dry-run` 标志已实现
 - Force push 检测与 warning 已实现
+- 多 refspec、删除 refspec（`:dst`）、`--tags`、`--mirror` 已作为兼容扩展落地
 
 ### 实施状态
 
@@ -42,6 +43,7 @@
 - ✅ 进度输出经过 `ProgressReporter` + `OutputConfig` 管控；`--json` / `--machine` 成功路径 stderr 干净
 - ✅ 执行层 warning 收集（`diff_tree_objs` 不再直接 `emit_warning`，而是收集到 `PushOutput.warnings`）
 - ✅ `--dry-run` 输出结构化预览
+- ✅ 兼容扩展：多 refspec、删除 refspec、`--tags` 与 `--mirror` 支持 refs/heads 和 refs/tags 更新/删除
 - ✅ 补齐 `--help` EXAMPLES 段
 - ✅ 完善 hint 体系，覆盖常见失败场景
 - ✅ Cross-Cutting F：remote 名 fuzzy match（Levenshtein 距离 ≤ 2 时提示 `did you mean`）
@@ -52,7 +54,7 @@
 - **不改变 pack 增量/delta 压缩算法**。性能优化留后续批次
 - **不引入 In-process SSH Client**。这是全局改进项 H，留后续批次
 - **不改变 reflog 记录格式**。`ReflogAction::Push` 保持不变
-- **不引入 push mirror/tags/delete 语义**。这些是新特性，不在本批范围
+- **不支持本地 `file://` remote push**。这是已登记的 intentional difference，见 `COMPATIBILITY.md`
 - **不在本批承诺 push 的 NDJSON progress 契约**。本批先保证 human 进度和结构化 success envelope 不互相污染；若后续需要结构化进度事件，再与 transport/fetch 批次统一设计
 
 > **注：** 原计划中"不改变 SSH/HTTP 传输核心逻辑"已调整——为落地空闲超时契约，实际在 `ssh_client.rs` 和 `https_client.rs` 中做了超时包装改造，但未改变协议逻辑本身。
@@ -62,7 +64,7 @@
 1. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_push()` 收集结构化结果，再根据 `OutputConfig` 渲染 human/JSON/machine
 2. **typed error enum 取代散射的 `CliError::fatal()`**：每个失败场景有确定的 `PushError` 变体
 3. **StableErrorCode 显式映射**：消除对 `infer_stable_error_code()` 的依赖
-4. **refspec 语义必须先收敛再实现**：本批只支持三种输入形态：省略（推当前分支）、`<name>`（同名分支）、`<src>:<dst>`（显式映射）；多冒号形态（如 `a:b:c`）和空段（如 `:dst`、`src:`）显式报 `InvalidRefspec`
+4. **refspec 语义必须先收敛再实现**：当前支持省略（推当前分支）、`<name>`（同名分支/同名 tag）、`<src>:<dst>`（显式映射）、`:dst`（删除远端 ref）、多 refspec、`--tags`、`--mirror`；多冒号形态（如 `a:b:c`）和空 dst（如 `src:`）显式报 `InvalidRefspec`
 5. **超时是空闲超时，不是总时长硬截止**：HTTPS 使用 `reqwest::Client` 的 `connect_timeout(60s)` + `read_timeout(60s)`（socket 级无数据到达即触发）；SSH 使用 `tokio::time::timeout(60s)` 包裹每次 `read_exact` / `write_all` / `wait_with_output`（有数据流就续命）；discovery 阶段额外包裹 `tokio::time::timeout(60s)` 作为整体保险
 6. **结构化模式默认保持 stderr 干净**：`--json` / `--machine` 成功路径只输出一个 envelope；执行层 warning（如 submodule 不支持）收集到 `PushOutput.warnings` 而非直接 `emit_warning`，由渲染层根据模式决定输出方式
 7. **`--dry-run` 可被 Agent 消费**：JSON 模式下返回结构化预览（将推送的 ref 和对象数）
@@ -213,12 +215,25 @@ libra push origin main
 
 libra push origin local_branch:release
   -> 本地 refs/heads/local_branch 推送到远端 refs/heads/release
+
+libra push origin v1.0:release
+  -> 本地 refs/tags/v1.0 推送到远端 refs/tags/release
+
+libra push origin :old-branch
+  -> 删除远端 refs/heads/old-branch
+
+libra push --tags origin
+  -> 推送本地 refs/tags/* 到远端 refs/tags/*
+
+libra push --mirror origin
+  -> 同步本地 refs/heads/* 和 refs/tags/*，并删除远端多余 heads/tags
 ```
 
 约束：
-- 不支持空 src / 空 dst / 删除语法（如 `:dst`、`src:`）
+- 删除语法只支持空 src + 非空 dst（`:dst`）；空 dst（`src:`）拒绝
 - 不支持多冒号形态（如 `a:b:c`、`a::b`）→ 显式报 `InvalidRefspec`
-- 不支持一次推送多个 refspec
+- 支持一次推送多个 refspec；同一远端目标重复出现会报 `InvalidRefspec`
+- `--mirror` 不能与显式 refspec、`--tags`、`--set-upstream` 组合
 - 非法形态统一返回 `PushError::InvalidRefspec`
 
 **超时策略（已落地）：**
@@ -547,7 +562,7 @@ EXAMPLES:
 | `test_push_json_error_detached_head` | detached HEAD + `--json push` → stderr JSON LBR-REPO-003 |
 | `test_push_machine_error_is_single_line_json` | `--machine push` → stderr 可解析为 JSON, ok=false |
 
-#### `tests/command/push_test.rs`（集成测试，11 个）
+#### `tests/command/push_test.rs`（集成测试，17 个）
 
 | 测试名称 | 覆盖内容 |
 |---------|---------|
@@ -559,11 +574,17 @@ EXAMPLES:
 | `test_push_ssh_remote_via_fake_ssh` | fake SSH → 推送成功 + 输出含 ref update 摘要 |
 | `test_push_ssh_host_key_failure_is_reported` | SSH host key 验证失败 → 错误透传 |
 | `test_push_explicit_refspec_uses_destination_branch_name` | `local:release` → 远端 refs/heads/release 更新 |
+| `test_push_merge_commit_to_git_remote_succeeds` | merge commit 可推送到真实 bare Git remote |
+| `test_push_multi_refspec_delete_tags_and_mirror_dry_run` | 多 refspec、删除 refspec、`--tags` 与 `--mirror --dry-run` JSON contract |
+| `test_push_explicit_tag_refspec_uses_tag_namespace` | `v1.0:release` → 远端 refs/tags/release 更新，且不创建同名 branch |
+| `test_push_mirror_non_dry_run_deletes_remote_only_ref` | `--mirror` 非 dry-run 会删除远端多余 refs/heads/* |
 | `test_push_json_with_set_upstream_keeps_structured_output_clean` | `--json -u push` → JSON ok=true, upstream_set 非 null, stderr 干净 |
+| `test_push_set_upstream_when_remote_is_already_up_to_date` | up-to-date push 仍可设置 upstream |
 | `test_push_machine_success_is_single_json_line` | `--machine push` → stdout 恰好 1 行 JSON, stderr 干净 |
 | `test_push_quiet_force_still_emits_warning_and_warning_exit_code` | `--quiet --force push` → stderr 含 warning, `--exit-code-on-warning` → exit 9 |
+| `test_push_help_lists_examples_banner` | `push --help` 展示 EXAMPLES |
 
-**测试总计：46 个**（23 单元 + 7 错误码 + 5 JSON + 11 集成）
+**测试总计：52 个**（23 单元 + 7 错误码 + 5 JSON + 17 集成）
 
 ### 质量验收
 
@@ -581,7 +602,7 @@ EXAMPLES:
 | `src/command/push.rs` | **重构** | 新增 `PushError` typed enum（20 变体）；新增 `PushOutput` / `PushRefUpdate` / `IncrementalObjsResult` 结构体；新增 `run_push()` 纯执行入口 + `render_push_output()` 渲染层；`parse_refspec()` 含多冒号拒绝；`suggest_remote_name()` fuzzy match + `levenshtein()`；`classify_transport_error()` 超时分类；`diff_tree_objs()` warning 收集；移除生产路径 `panic!` 和裸 stdout/stderr；`PushError → CliError` 显式 `StableErrorCode` 映射；进度输出改用 `ProgressReporter`；补齐 `--help` EXAMPLES |
 | `src/internal/protocol/https_client.rs` | **超时改造** | `reqwest::Client::builder()` 新增 `connect_timeout(60s)` + `read_timeout(60s)`（空闲超时：无数据到达即触发） |
 | `src/internal/protocol/ssh_client.rs` | **超时改造** | 新增 `SSH_IDLE_TIMEOUT` 常量；`read_advertisement()` 每次 `read_exact` 包裹 `tokio::time::timeout`；`send_pack()` 的 `write_all` / `shutdown` / `wait_with_output` 分别包裹 `tokio::time::timeout` |
-| `tests/command/push_test.rs` | **重大扩展** | 新增 explicit refspec、JSON+set-upstream、machine 输出、quiet+force warning 等 11 个集成测试 |
+| `tests/command/push_test.rs` | **重大扩展** | 新增 explicit branch/tag refspec、delete refspec、`--tags`、`--mirror` dry-run/非 dry-run、merge commit 推送、up-to-date upstream 设置、JSON+set-upstream、machine 输出、quiet+force warning 等 17 个集成测试 |
 | `tests/command/push_json_test.rs` | **新增** | JSON/machine 模式错误输出 schema 验证，5 个测试 |
 | `tests/command/push_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode、fuzzy match），7 个测试 |
 | `tests/command/mod.rs` | **修改** | 注册 `push_error_test` 和 `push_json_test` 模块 |

@@ -14,12 +14,21 @@ use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
 use super::sensitive_read_paths;
-use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
+use super::{
+    NetworkAccessMode, NetworkProxy, NetworkProxySelection, NetworkService, ProxyEnforcement,
+    SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
+    allowlist_proxy_from_policy, select_network_proxy,
+};
 #[cfg(unix)]
 use crate::utils::fuse;
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
+const CARGO_HOME_ENV_VAR: &str = "CARGO_HOME";
+const HOME_ENV_VAR: &str = "HOME";
+const LIBRA_LOG_FILE_ENV_VAR: &str = "LIBRA_LOG_FILE";
+const XDG_CACHE_HOME_ENV_VAR: &str = "XDG_CACHE_HOME";
+const XDG_CONFIG_HOME_ENV_VAR: &str = "XDG_CONFIG_HOME";
 #[cfg(target_os = "macos")]
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
@@ -75,6 +84,7 @@ impl CommandSpec {
     ) -> Self {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let mut env = HashMap::new();
+        apply_task_worktree_env_overrides(&cwd, &mut env);
         apply_fuse_workspace_env_overrides(&cwd, &mut env, ambient_cargo_target_dir_is_set);
         Self {
             program: shell,
@@ -85,6 +95,78 @@ impl CommandSpec {
             sandbox_permissions,
             justification,
         }
+    }
+}
+
+fn apply_task_worktree_env_overrides(cwd: &Path, env: &mut HashMap<String, String>) {
+    let Some(worktree_root) = enclosing_task_worktree_root(cwd) else {
+        return;
+    };
+
+    insert_path_env(env, HOME_ENV_VAR, worktree_root.join("home"));
+    insert_path_env(
+        env,
+        XDG_CONFIG_HOME_ENV_VAR,
+        worktree_root.join("xdg-config"),
+    );
+    insert_path_env(env, XDG_CACHE_HOME_ENV_VAR, worktree_root.join("xdg-cache"));
+    insert_path_env(env, CARGO_HOME_ENV_VAR, worktree_root.join("cargo-home"));
+    insert_path_env(
+        env,
+        LIBRA_LOG_FILE_ENV_VAR,
+        worktree_root.join("logs").join("libra.log"),
+    );
+}
+
+fn insert_path_env(env: &mut HashMap<String, String>, key: &str, path: PathBuf) {
+    env.insert(key.to_string(), path.to_string_lossy().into_owned());
+}
+
+fn enclosing_task_worktree_root(path: &Path) -> Option<PathBuf> {
+    let normalized = path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_abs_path(path));
+    for ancestor in normalized.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) != Some("workspace") {
+            continue;
+        }
+        let parent = ancestor.parent()?;
+        if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("libra-task-worktree-"))
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
+fn normalize_abs_path(path: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        fuse::normalize_abs_path(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::path::Component;
+
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+                Component::RootDir => out.push(Path::new(comp.as_os_str())),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
+                }
+                Component::Normal(part) => out.push(part),
+            }
+        }
+        out
     }
 }
 
@@ -136,7 +218,23 @@ pub struct ExecEnv {
     pub justification: Option<String>,
     pub arg0: Option<String>,
     pub new_session: bool,
+    pub allowlist_proxy_services: Option<Vec<NetworkService>>,
+    /// Optional seccomp BPF policy file. When `Some`, the
+    /// command's `pre_exec` hook opens this file inside the child
+    /// (just before exec) and dups it to [`SECCOMP_POLICY_FD`].
+    /// The bwrap arg vector includes `--seccomp <fd>` pointing at
+    /// the same FD number so bwrap finds the policy after exec.
+    /// See `docs/improvement/sandbox.md` line 19 ("seccomp 注入")
+    /// for the doc contract this satisfies.
+    pub seccomp_policy_path: Option<PathBuf>,
 }
+
+/// Fixed file-descriptor number used to hand a seccomp BPF policy
+/// to a bwrap child. Stable across runs so the bwrap arg vector
+/// can include `--seccomp 200` literally. 200 is well above the
+/// stdin/stdout/stderr (0/1/2) range and any rust-stdlib-internal
+/// FDs.
+pub const SECCOMP_POLICY_FD: i32 = 200;
 
 impl ExecEnv {
     pub fn into_command(self) -> Result<(Command, Option<u64>), String> {
@@ -147,13 +245,87 @@ impl ExecEnv {
 
         let mut command = Command::new(program);
         command.args(args);
-        command.current_dir(self.cwd);
+        let canonical_cwd = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        command.current_dir(canonical_cwd);
         command.envs(self.env);
         if self.new_session {
             configure_new_session(&mut command);
         }
+        if let Some(path) = self.seccomp_policy_path {
+            install_seccomp_policy_pre_exec(&mut command, path);
+        }
         Ok((command, self.timeout_ms))
     }
+}
+
+/// Install a `pre_exec` hook that opens the seccomp BPF policy
+/// file inside the child (between fork and exec) and dups it to
+/// [`SECCOMP_POLICY_FD`]. The FD is opened without `O_CLOEXEC` so
+/// it survives the exec, and bwrap picks it up via the
+/// `--seccomp <fd>` argument the parent already baked into the
+/// command vector.
+///
+/// On non-unix platforms this is a no-op: the seccomp wire-up is
+/// a Linux-only feature and the bwrap path itself never selects
+/// on non-Linux. The function is compiled but inert so the
+/// `into_command` call site doesn't need to platform-gate.
+#[cfg(unix)]
+fn install_seccomp_policy_pre_exec(command: &mut Command, policy_path: PathBuf) {
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: `pre_exec` runs in the child after fork and before
+    // exec. The closure performs only async-signal-safe libc
+    // calls (`open`, `dup2`, `close`, `fcntl`) and converts errno
+    // into owned `std::io::Error` values. No allocator calls in
+    // the hot path beyond the `CString` constructed in the
+    // parent before fork.
+    let path_bytes = policy_path.as_os_str().as_bytes().to_vec();
+    let path_cstr = match std::ffi::CString::new(path_bytes) {
+        Ok(c) => c,
+        Err(_) => {
+            tracing::warn!(
+                path = %policy_path.display(),
+                "seccomp policy path contains interior NUL; ignoring pre_exec hook"
+            );
+            return;
+        }
+    };
+    unsafe {
+        command.pre_exec(move || {
+            let raw = libc::open(path_cstr.as_ptr(), libc::O_RDONLY);
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if raw != SECCOMP_POLICY_FD {
+                if libc::dup2(raw, SECCOMP_POLICY_FD) < 0 {
+                    let err = std::io::Error::last_os_error();
+                    libc::close(raw);
+                    return Err(err);
+                }
+                libc::close(raw);
+            }
+            // Ensure the FD survives exec by stripping CLOEXEC.
+            // `dup2` already returns a CLOEXEC-cleared FD per
+            // POSIX, but be explicit so the contract is robust
+            // against future kernel changes.
+            let flags = libc::fcntl(SECCOMP_POLICY_FD, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(SECCOMP_POLICY_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn install_seccomp_policy_pre_exec(_command: &mut Command, _policy_path: PathBuf) {
+    // Seccomp is a Linux feature; non-unix platforms never set
+    // `seccomp_policy_path`, so this branch is unreachable in
+    // practice. The stub exists so callers don't need
+    // platform-gating.
 }
 
 #[cfg(unix)]
@@ -183,6 +355,15 @@ pub struct SandboxTransformRequest<'a> {
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
     pub deny_read_paths: &'a [PathBuf],
+    /// Optional seccomp BPF policy file path. When set on Linux
+    /// and the built-in bwrap path is selected,
+    /// [`create_bwrap_command_args_with_seccomp`] adds
+    /// `--seccomp <fd>` to the bwrap args and
+    /// [`install_seccomp_policy_pre_exec`] opens the file in the
+    /// child to populate that FD. Ignored on non-Linux and when
+    /// the external helper path is taken (the helper has its own
+    /// seccomp story).
+    pub seccomp_policy_path: Option<&'a Path>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -199,6 +380,20 @@ pub enum SandboxTransformError {
     UnsupportedPlatform,
     #[error("sandbox enforcement failed: {reason}")]
     EnforcementFailed { reason: String },
+    /// `NetworkAccess::Allowlist` was requested but the
+    /// per-allowlist proxy is unavailable, and
+    /// [`SandboxEnforcement::Required`] forbids degrading to
+    /// `Denied`. Surfaced ahead of Phase 7's full proxy wire-up so
+    /// the runtime has a stable error shape to fail closed with — see
+    /// `docs/improvement/sandbox.md` §7.4 line 341.
+    ///
+    /// `reason` carries an actionable hint (which proxy backend was
+    /// expected, why it didn't start, etc.) so users can recover
+    /// without having to re-derive the failure from the surrounding
+    /// transform context. Audit consumers may surface this verbatim
+    /// in the `ToolInvocation[E]` evidence record.
+    #[error("network enforcement failed: {reason}")]
+    NetworkEnforcementFailed { reason: String },
     #[error(transparent)]
     InvalidPolicy(#[from] SandboxPolicyError),
 }
@@ -261,7 +456,9 @@ impl SandboxManager {
             use_linux_sandbox_bwrap,
             enforcement,
             deny_read_paths,
+            seccomp_policy_path,
         } = request;
+        let seccomp_policy_path_for_transform = seccomp_policy_path.map(|p| p.to_path_buf());
 
         #[cfg(not(target_os = "linux"))]
         let _ = use_linux_sandbox_bwrap;
@@ -282,8 +479,83 @@ impl SandboxManager {
             policy.validate_writable_roots_with_cwd(sandbox_policy_cwd)?;
         }
 
+        let network_access_mode = match policy {
+            Some(policy) => network_access_mode_for_policy(policy),
+            None => NetworkAccessMode::Full,
+        };
+        let (allowlist_proxy, allowlist_proxy_error) = match policy {
+            Some(policy) => match allowlist_proxy_from_policy(policy) {
+                Ok(proxy) => (proxy, None),
+                Err(reason) => (None, Some(reason)),
+            },
+            None => (None, None),
+        };
+
+        let network_proxy_selection = match network_access_mode {
+            NetworkAccessMode::Allowlist => {
+                if let Some(reason) = allowlist_proxy_error {
+                    match proxy_enforcement_from_sandbox(enforcement) {
+                        ProxyEnforcement::Required => NetworkProxySelection::Reject {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but the per-allowlist proxy is unavailable: {reason}; SandboxEnforcement::Required forbids degrading to Denied",
+                            ),
+                        },
+                        ProxyEnforcement::PreferStrict => NetworkProxySelection::DegradeToDenied {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; degrading to Denied under SandboxEnforcement::PreferStrict",
+                            ),
+                        },
+                        ProxyEnforcement::BestEffort => NetworkProxySelection::DegradeToDenied {
+                            reason: format!(
+                                "NetworkAccess::Allowlist requested but proxy unavailable: {reason}; silently degrading to Denied under SandboxEnforcement::BestEffort",
+                            ),
+                        },
+                    }
+                } else {
+                    select_network_proxy(
+                        network_access_mode,
+                        allowlist_proxy
+                            .as_ref()
+                            .map(|proxy| proxy as &dyn NetworkProxy),
+                        proxy_enforcement_from_sandbox(enforcement),
+                    )
+                }
+            }
+            _ => select_network_proxy(
+                network_access_mode,
+                allowlist_proxy
+                    .as_ref()
+                    .map(|proxy| proxy as &dyn NetworkProxy),
+                proxy_enforcement_from_sandbox(enforcement),
+            ),
+        };
+
+        let enable_allowlist_proxy =
+            matches!(network_proxy_selection, NetworkProxySelection::Proxy(_))
+                && network_access_mode == NetworkAccessMode::Allowlist;
+        let allowlist_proxy_services = if enable_allowlist_proxy {
+            allowlist_proxy
+                .as_ref()
+                .map(|proxy| proxy.services().to_vec())
+        } else {
+            None
+        };
+
+        let disable_network = match network_proxy_selection {
+            NetworkProxySelection::Reject { reason } => {
+                return Err(SandboxTransformError::NetworkEnforcementFailed { reason });
+            }
+            NetworkProxySelection::DegradeToDenied { reason } => {
+                tracing::warn!(reason = %reason, "degraded allowlist network to denied");
+                true
+            }
+            NetworkProxySelection::Proxy(_) => {
+                matches!(network_access_mode, NetworkAccessMode::Denied)
+            }
+        };
+
         let mut env = spec.env;
-        if policy.is_some_and(|sandbox_policy| !sandbox_policy.has_full_network_access()) {
+        if disable_network {
             env.insert(
                 LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR.to_string(),
                 "1".to_string(),
@@ -312,6 +584,7 @@ impl SandboxManager {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
                     let mut seatbelt_args = create_seatbelt_command_args(
                         command,
+                        network_access_mode,
                         policy,
                         sandbox_policy_cwd,
                         deny_read_paths,
@@ -345,14 +618,53 @@ impl SandboxManager {
                             Some("libra-linux-sandbox".to_string()),
                             SandboxType::LinuxSeccomp,
                         )
+                    } else if let Some(bwrap_path) = locate_bwrap_binary() {
+                        // OC-Phase 7 P0 #2 + #3: built-in bwrap
+                        // real-execution path with optional seccomp
+                        // BPF policy injection. The bwrap command is
+                        // constructed via
+                        // `create_bwrap_command_args_with_seccomp` so
+                        // `--seccomp <SECCOMP_POLICY_FD>` is appended
+                        // when a policy file is configured. The
+                        // matching `pre_exec` hook in
+                        // `ExecEnv::into_command` opens the file in
+                        // the child to populate the FD. See
+                        // `docs/improvement/sandbox.md` line 19 for
+                        // the doc contract.
+                        let seccomp_fd = if seccomp_policy_path_for_transform.is_some() {
+                            Some(SECCOMP_POLICY_FD)
+                        } else {
+                            None
+                        };
+                        let mut bwrap_args = create_bwrap_command_args_with_seccomp(
+                            command,
+                            network_access_mode,
+                            policy,
+                            sandbox_policy_cwd,
+                            deny_read_paths,
+                            seccomp_fd,
+                        );
+                        let mut full = Vec::with_capacity(1 + bwrap_args.len());
+                        full.push(bwrap_path.to_string_lossy().into_owned());
+                        full.append(&mut bwrap_args);
+                        tracing::info!(
+                            bwrap = %bwrap_path.display(),
+                            seccomp = ?seccomp_policy_path_for_transform.as_deref(),
+                            "using built-in bwrap sandbox (LIBRA_LINUX_SANDBOX_EXE unset; helper-less path)",
+                        );
+                        (
+                            full,
+                            Some("libra-linux-sandbox-bwrap".to_string()),
+                            SandboxType::LinuxSeccomp,
+                        )
                     } else {
                         if enforcement.requires_effective_sandbox() {
                             return Err(SandboxTransformError::EnforcementFailed {
-                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and the built-in bwrap sandbox is not available yet".to_string(),
+                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and `bwrap` was not found on PATH; install bubblewrap (apt install bubblewrap / dnf install bubblewrap) or set LIBRA_LINUX_SANDBOX_EXE to the helper path".to_string(),
                             });
                         }
                         tracing::warn!(
-                            "linux sandbox executable not configured; running command without linux sandbox"
+                            "linux sandbox executable not configured and bwrap not on PATH; running command without linux sandbox"
                         );
                         (command, None, SandboxType::None)
                     }
@@ -387,6 +699,8 @@ impl SandboxManager {
                 effective_sandbox,
                 SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
             ),
+            allowlist_proxy_services,
+            seccomp_policy_path: seccomp_policy_path_for_transform,
         })
     }
 }
@@ -403,6 +717,39 @@ fn internal_sandbox_required(
         policy,
         Some(SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. })
     )
+}
+
+fn network_access_mode_for_policy(policy: &SandboxPolicy) -> NetworkAccessMode {
+    match policy {
+        SandboxPolicy::DangerFullAccess => NetworkAccessMode::Full,
+        SandboxPolicy::ReadOnly => NetworkAccessMode::Denied,
+        SandboxPolicy::ExternalSandbox { network_access, .. } => {
+            if network_access.is_full() {
+                NetworkAccessMode::Full
+            } else if network_access.is_allowlist() {
+                NetworkAccessMode::Allowlist
+            } else {
+                NetworkAccessMode::Denied
+            }
+        }
+        SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+            if network_access.is_full() {
+                NetworkAccessMode::Full
+            } else if network_access.is_allowlist() {
+                NetworkAccessMode::Allowlist
+            } else {
+                NetworkAccessMode::Denied
+            }
+        }
+    }
+}
+
+fn proxy_enforcement_from_sandbox(enforcement: SandboxEnforcement) -> ProxyEnforcement {
+    match enforcement {
+        SandboxEnforcement::Required => ProxyEnforcement::Required,
+        SandboxEnforcement::PreferStrict => ProxyEnforcement::PreferStrict,
+        SandboxEnforcement::BestEffort => ProxyEnforcement::BestEffort,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -428,16 +775,48 @@ fn create_linux_sandbox_command_args(
 
 pub fn create_bwrap_command_args(
     command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
+) -> Vec<String> {
+    create_bwrap_command_args_with_seccomp(
+        command,
+        network_access_mode,
+        sandbox_policy,
+        sandbox_policy_cwd,
+        deny_read_paths,
+        None,
+    )
+}
+
+/// `create_bwrap_command_args` plus optional `--seccomp <fd>`
+/// wiring. When `seccomp_fd` is `Some(fd)`, the argument vector
+/// includes `--seccomp <fd>` so bwrap loads the BPF policy from
+/// the inherited file descriptor. The caller is responsible for
+/// keeping the FD open across exec — see
+/// [`install_seccomp_policy_pre_exec`].
+pub fn create_bwrap_command_args_with_seccomp(
+    command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
+    sandbox_policy: &SandboxPolicy,
+    sandbox_policy_cwd: &Path,
+    deny_read_paths: &[PathBuf],
+    seccomp_fd: Option<i32>,
 ) -> Vec<String> {
     let mut args = vec![
         "--unshare-all".to_string(),
         "--die-with-parent".to_string(),
         "--new-session".to_string(),
     ];
-    if sandbox_policy.has_full_network_access() {
+    if let Some(fd) = seccomp_fd {
+        args.push("--seccomp".to_string());
+        args.push(fd.to_string());
+    }
+    if matches!(
+        network_access_mode,
+        NetworkAccessMode::Full | NetworkAccessMode::Allowlist
+    ) {
         args.push("--share-net".to_string());
     } else {
         args.push("--unshare-net".to_string());
@@ -478,6 +857,72 @@ pub fn create_bwrap_command_args(
     args
 }
 
+/// Locate `bwrap` on the host PATH and return the resolved
+/// absolute path. Used by the built-in (helper-less) Linux
+/// sandbox path in [`SandboxManager::transform`] — when
+/// `LIBRA_LINUX_SANDBOX_EXE` is unset, the runtime falls back to
+/// constructing a `bwrap …` command directly via
+/// [`create_bwrap_command_args`].
+///
+/// The first non-empty `PATH` entry that contains an executable
+/// `bwrap` file wins. The probe is intentionally **not** cached:
+/// `which`-style discovery is cheap (one stat per PATH entry,
+/// typically <10 lookups) and a stale cache would mislead a user
+/// that just installed bubblewrap mid-session. Tests that need a
+/// deterministic answer can set `LIBRA_BWRAP_BINARY` to bypass
+/// the PATH walk entirely.
+///
+/// Returns `None` on non-Linux platforms (the built-in bwrap
+/// path is Linux-only) or when no `bwrap` is reachable. Callers
+/// must handle the `None` case before deciding whether to fail
+/// closed or fall back to the unsandboxed path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn locate_bwrap_binary() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("LIBRA_BWRAP_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.is_absolute() && path.exists() {
+            return Some(path);
+        }
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("bwrap");
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// `true` when `path` exists, is a regular file, and the
+/// owner/group/world execute bit is set. Used by
+/// [`locate_bwrap_binary`] to filter PATH entries that exist as
+/// names but are not invocable (a hand-edited symlink, a stale
+/// init artifact, etc.).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 fn bwrap_read_only_host_paths() -> Vec<PathBuf> {
     [
         "/bin",
@@ -505,6 +950,7 @@ fn push_bwrap_mount(args: &mut Vec<String>, flag: &str, path: &Path) {
 #[cfg(target_os = "macos")]
 fn create_seatbelt_command_args(
     command: Vec<String>,
+    network_access_mode: NetworkAccessMode,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     deny_read_paths: &[PathBuf],
@@ -518,10 +964,16 @@ fn create_seatbelt_command_args(
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (sensitive_read_policy, sensitive_read_params) =
         build_macos_sensitive_read_policy(home.as_deref(), deny_read_paths);
-    let network_policy = if sandbox_policy.has_full_network_access() {
-        SEATBELT_NETWORK_POLICY
-    } else {
-        ""
+    let network_policy = match network_access_mode {
+        NetworkAccessMode::Full => SEATBELT_NETWORK_POLICY,
+        NetworkAccessMode::Allowlist => {
+            r#"
+; allow sandboxed tools to reach Libra's loopback allowlist proxy only.
+(allow network-outbound (remote ip "127.0.0.1:*"))
+(allow network-outbound (remote ip "::1:*"))
+"#
+        }
+        NetworkAccessMode::Denied => "",
     };
     let full_policy = format!(
         "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{sensitive_read_policy}{file_write_policy}\n{network_policy}"
@@ -644,14 +1096,14 @@ fn macos_dir_params() -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::NetworkAccess, *};
 
     #[test]
     fn select_initial_uses_none_for_escalated_permissions() {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -666,7 +1118,7 @@ mod tests {
     fn select_initial_uses_none_for_external_sandbox() {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::ExternalSandbox {
-            network_access: super::super::NetworkAccess::Restricted,
+            network_access: super::super::NetworkAccess::Denied,
         };
         assert_eq!(
             manager.select_initial(Some(&policy), SandboxPermissions::UseDefault),
@@ -680,7 +1132,7 @@ mod tests {
         let manager = SandboxManager::new();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -705,7 +1157,7 @@ mod tests {
             ),
             policy: Some(&SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![],
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             }),
@@ -714,6 +1166,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let transformed = manager
@@ -739,7 +1192,7 @@ mod tests {
             ),
             policy: Some(&SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![],
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
             }),
@@ -748,6 +1201,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let error = manager
@@ -762,16 +1216,173 @@ mod tests {
     }
 
     #[test]
+    fn transform_allowlist_network_required_fails_when_proxy_unavailable() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: Vec::new(),
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("allowlist required should fail when proxy unavailable");
+        let error = error.to_string();
+        assert!(error.contains("network enforcement failed:"));
+        assert!(error.contains(
+            "NetworkAccess::Allowlist requested but the per-allowlist proxy is unavailable"
+        ));
+        assert!(error.contains("NetworkAccess::Allowlist has no services configured"));
+    }
+
+    #[test]
+    fn transform_allowlist_network_required_fails_with_invalid_service_details() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![crate::internal::ai::sandbox::NetworkService {
+                        host: String::new(),
+                        ports: vec![443],
+                        protocol: None,
+                    }],
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("invalid allowlist service should fail before tool launch");
+        let error = error.to_string();
+        assert!(error.contains("network enforcement failed:"));
+        assert!(error.contains("allowlist service '' is invalid"));
+    }
+
+    #[test]
+    fn transform_allowlist_network_best_effort_degrades_to_disabled() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: Vec::new(),
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("best effort allowlist should degrade to denied when proxy unavailable");
+        assert_eq!(transformed.sandbox, SandboxType::None);
+        assert_eq!(
+            transformed.env.get(LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn transform_allowlist_network_required_uses_proxy_when_services_present() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![crate::internal::ai::sandbox::NetworkService {
+                        host: "registry.npmjs.org".to_string(),
+                        ports: vec![443],
+                        protocol: None,
+                    }],
+                },
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("allowlist with explicit services should use the allowlist proxy");
+        assert_eq!(
+            transformed.env.get(LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR),
+            None,
+        );
+        let services = transformed
+            .allowlist_proxy_services
+            .expect("allowlist transform should carry proxy services");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].host, "registry.npmjs.org");
+    }
+
+    #[test]
     fn create_bwrap_command_args_denies_network_by_default_with_unshare_net() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--unshare-all".to_string()));
         assert!(args.contains(&"--unshare-net".to_string()));
@@ -784,12 +1395,46 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: true,
+            network_access: NetworkAccess::Full,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
+
+        assert!(args.contains(&"--share-net".to_string()));
+        assert!(!args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn create_bwrap_command_args_allowlist_uses_shared_network_for_local_proxy() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Allowlist {
+                services: vec![crate::internal::ai::sandbox::NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            },
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--share-net".to_string()));
         assert!(!args.contains(&"--unshare-net".to_string()));
@@ -799,7 +1444,13 @@ mod tests {
     fn create_bwrap_command_args_includes_new_session_and_die_with_parent() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
 
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &[],
+        );
 
         assert!(args.contains(&"--new-session".to_string()));
         assert!(args.contains(&"--die-with-parent".to_string()));
@@ -810,13 +1461,19 @@ mod tests {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
         let writable_root = cwd.join("src");
 
-        let args = create_bwrap_command_args(command(), &policy, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+        );
 
         assert_mount(&args, "--bind", &writable_root);
         assert_mount(&args, "--ro-bind", &writable_root.join(".git"));
@@ -826,17 +1483,319 @@ mod tests {
     #[test]
     fn create_bwrap_command_args_masks_sensitive_read_paths_with_tmpfs() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
-        let secret = PathBuf::from("/home/tester/.ssh");
+        let ssh = PathBuf::from("/home/tester/.ssh");
+        let npmrc = PathBuf::from("/home/tester/.npmrc");
+        let deny_read_paths = vec![ssh.clone(), npmrc.clone()];
 
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[secret]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &deny_read_paths,
+        );
 
+        assert_option_value(&args, "--tmpfs", "/tmp");
         assert_option_value(&args, "--tmpfs", "/home/tester/.ssh");
+        assert_option_value(&args, "--tmpfs", "/home/tester/.npmrc");
+    }
+
+    /// `create_bwrap_command_args_with_seccomp` appends
+    /// `--seccomp <fd>` when a seccomp FD is supplied, and omits
+    /// the arg when `None`. Pin the contract that the seccomp arg
+    /// pair is contiguous and ordered (so a future refactor that
+    /// splits them across other flags trips loud) and that it
+    /// appears before the command delimiter `--`.
+    #[test]
+    fn create_bwrap_command_args_with_seccomp_appends_fd_arg_when_supplied() {
+        let cwd = Path::new("/tmp/libra-sandbox-workspace");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let with_seccomp = create_bwrap_command_args_with_seccomp(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+            Some(SECCOMP_POLICY_FD),
+        );
+        let seccomp_idx = with_seccomp
+            .iter()
+            .position(|arg| arg == "--seccomp")
+            .expect("--seccomp must be present when fd supplied");
+        assert_eq!(
+            with_seccomp.get(seccomp_idx + 1),
+            Some(&SECCOMP_POLICY_FD.to_string()),
+        );
+        let delim_idx = with_seccomp
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("command delimiter must be present");
+        assert!(
+            seccomp_idx < delim_idx,
+            "--seccomp must precede the command delimiter; got seccomp={seccomp_idx} delim={delim_idx}",
+        );
+
+        let without_seccomp = create_bwrap_command_args_with_seccomp(
+            command(),
+            network_access_mode_for_policy(&policy),
+            &policy,
+            cwd,
+            &[],
+            None,
+        );
+        assert!(
+            !without_seccomp.iter().any(|arg| arg == "--seccomp"),
+            "--seccomp must be absent when fd is None",
+        );
+    }
+
+    /// `transform` propagates the configured seccomp policy path
+    /// into the returned [`ExecEnv`] so the matching `pre_exec`
+    /// hook can open the file in the child. Linux-only because the
+    /// built-in bwrap path is gated to that platform.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_threads_seccomp_policy_into_exec_env_on_linux_bwrap_path() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for seccomp threading test");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+        let policy_file = tmpdir.path().join("seccomp.bpf");
+        std::fs::write(&policy_file, b"\x00").unwrap();
+
+        let prior_bwrap = std::env::var_os("LIBRA_BWRAP_BINARY");
+        // SAFETY: test-only env mutation; restored below.
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Denied,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: Some(policy_file.as_path()),
+        };
+
+        let result = manager.transform(request);
+        unsafe {
+            if let Some(value) = prior_bwrap {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        let env = result.expect("built-in bwrap with seccomp policy must succeed");
+        assert_eq!(
+            env.seccomp_policy_path.as_deref(),
+            Some(policy_file.as_path())
+        );
+        let seccomp_idx = env
+            .command
+            .iter()
+            .position(|arg| arg == "--seccomp")
+            .expect("--seccomp must be threaded into the built-in bwrap command");
+        assert_eq!(
+            env.command.get(seccomp_idx + 1),
+            Some(&SECCOMP_POLICY_FD.to_string()),
+        );
+    }
+
+    /// `locate_bwrap_binary` honours the `LIBRA_BWRAP_BINARY`
+    /// override env var: an absolute path that exists is returned
+    /// verbatim; a non-existent override returns None even when
+    /// `bwrap` is on PATH. Pins the test escape hatch so a CI
+    /// matrix can run the built-in bwrap path without relying on
+    /// host-installed bubblewrap.
+    #[test]
+    fn locate_bwrap_binary_honours_override_env_var() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for override probe");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").expect("write fake bwrap");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+        }
+
+        // SAFETY: test-only env mutation; restored after the
+        // probe so other tests in the suite remain isolated.
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+        let found = locate_bwrap_binary();
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        assert_eq!(found.as_deref(), Some(fake_bwrap.as_path()));
+
+        // Non-existent override: probe returns None even though
+        // bwrap might be on PATH (we explicitly opt out of PATH
+        // walking when the override is set).
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", "/does/not/exist/bwrap");
+        }
+        let found = locate_bwrap_binary();
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+        assert!(found.is_none());
+    }
+
+    /// `is_executable_file` returns true only for regular files
+    /// with the execute bit set; rejects directories and
+    /// permission-less files. Pin the predicate so the probe's
+    /// PATH walk doesn't accidentally accept a `bwrap` directory
+    /// or a non-executable shim.
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_file_filters_directories_and_non_exec() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tempdir for exec probe");
+
+        // Directory: not executable in the sense `which` uses
+        // (it's not a regular file).
+        let dir = tmpdir.path().join("bwrap-dir");
+        std::fs::create_dir(&dir).expect("create bwrap-dir");
+        assert!(!is_executable_file(&dir));
+
+        // Regular file without execute bit.
+        let no_exec = tmpdir.path().join("bwrap-noexec");
+        std::fs::write(&no_exec, b"not exec").unwrap();
+        let mut perms = std::fs::metadata(&no_exec).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&no_exec, perms).unwrap();
+        assert!(!is_executable_file(&no_exec));
+
+        // Regular file with execute bit.
+        let exec = tmpdir.path().join("bwrap-exec");
+        std::fs::write(&exec, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&exec).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exec, perms).unwrap();
+        assert!(is_executable_file(&exec));
+    }
+
+    /// Pin the built-in bwrap real-execution path: when
+    /// `LIBRA_LINUX_SANDBOX_EXE` is unset and the override probe
+    /// finds a `bwrap` binary, `transform` constructs the bwrap
+    /// command directly (no external helper) and returns
+    /// `SandboxType::LinuxSeccomp` with the bwrap path as the
+    /// program. Linux-only because the bwrap fallback branch is
+    /// gated behind `#[cfg(target_os = "linux")]`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_uses_built_in_bwrap_when_helper_is_missing_but_bwrap_is_available() {
+        let tmpdir = tempfile::tempdir().expect("tempdir for built-in bwrap test");
+        let fake_bwrap = tmpdir.path().join("bwrap");
+        std::fs::write(&fake_bwrap, b"#!/bin/sh\nexit 0\n").expect("write fake bwrap");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_bwrap).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bwrap, perms).unwrap();
+
+        let prior = std::env::var_os("LIBRA_BWRAP_BINARY");
+        // SAFETY: test-only env mutation; restored below.
+        unsafe {
+            std::env::set_var("LIBRA_BWRAP_BINARY", &fake_bwrap);
+        }
+
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: NetworkAccess::Denied,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
+            seccomp_policy_path: None,
+        };
+
+        let result = manager.transform(request);
+
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var("LIBRA_BWRAP_BINARY", value);
+            } else {
+                std::env::remove_var("LIBRA_BWRAP_BINARY");
+            }
+        }
+
+        let env = result.expect("built-in bwrap path must succeed");
+        assert_eq!(env.sandbox, SandboxType::LinuxSeccomp);
+        let program = env
+            .command
+            .first()
+            .cloned()
+            .expect("transform must yield a non-empty command vector");
+        assert_eq!(program, fake_bwrap.to_string_lossy());
+        assert!(
+            env.command.iter().any(|arg| arg == "--unshare-all"),
+            "built-in bwrap command must include --unshare-all",
+        );
     }
 
     #[test]
     fn create_bwrap_command_args_appends_command_after_delimiter() {
         let cwd = Path::new("/tmp/libra-sandbox-workspace");
-        let args = create_bwrap_command_args(command(), &SandboxPolicy::ReadOnly, cwd, &[]);
+        let args = create_bwrap_command_args(
+            command(),
+            network_access_mode_for_policy(&SandboxPolicy::ReadOnly),
+            &SandboxPolicy::ReadOnly,
+            cwd,
+            &[],
+        );
         let delimiter = args
             .iter()
             .position(|arg| arg == "--")
@@ -884,7 +1843,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -902,6 +1861,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let error = manager
@@ -920,7 +1880,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -938,6 +1898,7 @@ mod tests {
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
             deny_read_paths: &[],
+            seccomp_policy_path: None,
         };
 
         let transformed = manager
@@ -964,6 +1925,8 @@ mod tests {
             justification: None,
             arg0: None,
             new_session: true,
+            allowlist_proxy_services: None,
+            seccomp_policy_path: None,
         };
         let (mut command, _) = env.into_command().expect("exec env should build");
         let mut child = command.spawn().expect("child should spawn");
@@ -1042,6 +2005,61 @@ mod tests {
         let mut env = HashMap::new();
         apply_fuse_workspace_env_overrides(Path::new("/repo/src"), &mut env, false);
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn shell_command_spec_uses_task_local_home_cargo_and_log_paths() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e/workspace/src");
+        let spec = CommandSpec::shell_inner(
+            "libra status && cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        let root = "/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e";
+        let home = format!("{root}/home");
+        let cargo_home = format!("{root}/cargo-home");
+        let log_file = format!("{root}/logs/libra.log");
+        let xdg_config_home = format!("{root}/xdg-config");
+        let xdg_cache_home = format!("{root}/xdg-cache");
+        assert_eq!(
+            spec.env.get(HOME_ENV_VAR).map(String::as_str),
+            Some(home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(CARGO_HOME_ENV_VAR).map(String::as_str),
+            Some(cargo_home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(LIBRA_LOG_FILE_ENV_VAR).map(String::as_str),
+            Some(log_file.as_str())
+        );
+        assert_eq!(
+            spec.env.get(XDG_CONFIG_HOME_ENV_VAR).map(String::as_str),
+            Some(xdg_config_home.as_str())
+        );
+        assert_eq!(
+            spec.env.get(XDG_CACHE_HOME_ENV_VAR).map(String::as_str),
+            Some(xdg_cache_home.as_str())
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_does_not_inject_task_local_env_outside_task_worktree() {
+        let spec = CommandSpec::shell_inner(
+            "echo ok",
+            PathBuf::from("/repo/src"),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        assert!(!spec.env.contains_key(HOME_ENV_VAR));
+        assert!(!spec.env.contains_key(CARGO_HOME_ENV_VAR));
+        assert!(!spec.env.contains_key(LIBRA_LOG_FILE_ENV_VAR));
     }
 
     #[test]
@@ -1164,6 +2182,31 @@ mod tests {
             }
             .to_string(),
             "sandbox enforcement failed: process spawn refused",
+        );
+        // v0.17.683: NetworkEnforcementFailed is the network-side
+        // sibling of EnforcementFailed. Pin its Display so a future
+        // change to the message template doesn't silently shift the
+        // audit-record substring downstream consumers grep for.
+        assert_eq!(
+            SandboxTransformError::NetworkEnforcementFailed {
+                reason: "allowlist proxy unavailable in Required mode".to_string(),
+            }
+            .to_string(),
+            "network enforcement failed: allowlist proxy unavailable in Required mode",
+        );
+    }
+
+    #[test]
+    fn seatbelt_base_policy_denies_iottyclient_user_client() {
+        const SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
+
+        assert!(
+            SEATBELT_BASE_POLICY.contains("(deny iokit-open"),
+            "Seatbelt policy must carry an explicit iokit-open deny block"
+        );
+        assert!(
+            SEATBELT_BASE_POLICY.contains("(iokit-user-client-class \"IOTTYClient\")"),
+            "Seatbelt policy must deny IOTTYClient terminal user clients"
         );
     }
 }

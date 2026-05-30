@@ -268,7 +268,7 @@ fn clone_cloud_configured_domain_requires_d1_api_token_before_site_lookup() {
     );
     assert_eq!(
         report.details.get("missing_keys").and_then(Value::as_str),
-        Some("LIBRA_D1_API_TOKEN (env or vault)")
+        Some("vault.env.LIBRA_D1_API_TOKEN or LIBRA_D1_API_TOKEN")
     );
     assert!(
         !dest.exists(),

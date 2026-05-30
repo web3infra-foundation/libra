@@ -54,10 +54,14 @@
 pub mod agent;
 // Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
 pub mod automation;
-// Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold).
-// Gated behind `subagent-scaffold` Cargo feature; off by default. See module
-// docs for CP-4 gate-violation note.
-#[cfg(feature = "subagent-scaffold")]
+// Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold) plus the
+// runtime extensions that landed with the OC orchestration runtime
+// (`feat(code): land opencode orchestration runtime`). Originally
+// gated behind the `subagent-scaffold` Cargo feature, but the
+// runtime entrypoints (`agent_run::AgentRunId`, `AgentRunEvent`,
+// `AgentRunEventEnvelope`) are now referenced ungated by
+// `agent/runtime/sub_agent.rs` and `session/jsonl.rs`, so the module
+// is unconditionally available.
 pub mod agent_run;
 // Generic LLM client helpers shared across providers.
 pub mod client;

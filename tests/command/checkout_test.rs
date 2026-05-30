@@ -648,6 +648,111 @@ fn test_checkout_json_create_branch() {
 }
 
 #[test]
+fn test_checkout_separator_path_restores_worktree_from_index() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "tracked.txt"], repo.path());
+    assert_cli_success(&branch, "branch tracked.txt");
+
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(&["checkout", "--", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "checkout -- tracked.txt");
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+
+    let branch = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_cli_success(&branch, "branch --show-current");
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
+}
+
+#[test]
+fn test_checkout_plain_name_stays_branch_mode_when_file_matches_branch() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let branch = run_libra_command(&["branch", "tracked.txt"], repo.path());
+    assert_cli_success(&branch, "branch tracked.txt");
+
+    let output = run_libra_command(&["checkout", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "checkout tracked.txt");
+
+    let branch = run_libra_command(&["branch", "--show-current"], repo.path());
+    assert_cli_success(&branch, "branch --show-current");
+    assert_eq!(
+        String::from_utf8_lossy(&branch.stdout).trim(),
+        "tracked.txt"
+    );
+}
+
+#[test]
+fn test_checkout_json_treeish_separator_path_restores_index_and_worktree() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_json_stdout, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "staged edit\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add, "add staged edit");
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(
+        &["--json", "checkout", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "json checkout HEAD -- tracked.txt");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "restore-paths");
+    assert_eq!(json["data"]["switched"], false);
+    assert_eq!(json["data"]["restore"]["source"], "HEAD");
+    assert_eq!(json["data"]["restore"]["worktree"], true);
+    assert_eq!(json["data"]["restore"]["staged"], true);
+    assert_eq!(json["data"]["restore"]["restored_files"][0], "tracked.txt");
+    assert!(output.stderr.is_empty());
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+
+    let status = run_libra_command(&["status", "--porcelain"], repo.path());
+    assert_cli_success(&status, "status --porcelain");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "checkout HEAD -- path should leave index and worktree clean, got: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn test_checkout_machine_separator_path_outputs_single_json_line() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "worktree edit\n").unwrap();
+
+    let output = run_libra_command(&["--machine", "checkout", "--", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "machine checkout -- tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "expected one JSON line, got: {stdout}"
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("expected JSON");
+    assert_eq!(json["command"], "checkout");
+    assert_eq!(json["data"]["action"], "restore-paths");
+    assert_eq!(json["data"]["restore"]["source"], serde_json::Value::Null);
+    assert_eq!(json["data"]["restore"]["worktree"], true);
+    assert_eq!(json["data"]["restore"]["staged"], false);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn test_checkout_machine_outputs_single_json_line() {
     use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
 
@@ -703,4 +808,52 @@ fn test_checkout_json_reserved_branch_reports_invalid_target() {
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(report.message.contains("checking out 'intent' branch"));
+}
+
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `checkout` refuse to route user work onto `agent-traces`, the same
+/// way it already refuses `intent`. The branch is reserved for the
+/// external-agent capture subsystem (CEX-EntireIO) and any user-driven
+/// checkout that lands on it would let `restore` / `reset` rewind
+/// working state to AI-managed commits.
+#[test]
+fn test_checkout_agent_traces_branch_reports_invalid_target() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "agent-traces"], repo.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report.message.contains("'agent-traces'"),
+        "error message must name the agent-traces branch verbatim, got: {}",
+        report.message,
+    );
+}
+
+/// Counterpart that exercises the create-new-branch path: `checkout -b
+/// agent-traces` must fail, otherwise a user (or stray AI agent) could
+/// clobber the reserved capture ref by creating a same-named local
+/// branch and pushing it.
+#[test]
+fn test_checkout_create_agent_traces_branch_is_blocked() {
+    use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "checkout", "-b", "agent-traces"], repo.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report.message.contains("'agent-traces'"),
+        "error message must name the agent-traces branch verbatim, got: {}",
+        report.message,
+    );
 }

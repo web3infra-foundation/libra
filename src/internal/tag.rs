@@ -391,13 +391,47 @@ mod tests {
         // Source-chained variants: only assert the surface prefix; the
         // `{0}` portion forwards to the source error's Display, which
         // is owned by the upstream crate or by another pinned test
-        // (BranchStoreError in v0.17.272).
+        // (BranchStoreError in v0.17.272). Pin every source-chained
+        // variant so the test honours the "each variant" name — a
+        // future patch that drops the trailing space or rewrites the
+        // prefix on any variant trips this guard regardless of which
+        // source error variant the caller happened to construct.
         let resolve = CreateTagError::ResolveHead(BranchStoreError::NotFound("main".to_string()));
         assert!(
             resolve
                 .to_string()
                 .starts_with("failed to resolve HEAD commit: "),
             "unexpected: {resolve}",
+        );
+        let check_existing = CreateTagError::CheckExisting(DbErr::Custom("ignored".to_string()));
+        assert!(
+            check_existing
+                .to_string()
+                .starts_with("failed to query existing tag refs: "),
+            "unexpected: {check_existing}",
+        );
+        let serialize =
+            CreateTagError::SerializeTag(GitError::ConversionError("ignored".to_string()));
+        assert!(
+            serialize
+                .to_string()
+                .starts_with("failed to serialize annotated tag object: "),
+            "unexpected: {serialize}",
+        );
+        let store =
+            CreateTagError::StoreObject(io::Error::new(io::ErrorKind::PermissionDenied, "ignored"));
+        assert!(
+            store
+                .to_string()
+                .starts_with("failed to store annotated tag object: "),
+            "unexpected: {store}",
+        );
+        let persist = CreateTagError::PersistReference(DbErr::Custom("ignored".to_string()));
+        assert!(
+            persist
+                .to_string()
+                .starts_with("failed to persist tag reference: "),
+            "unexpected: {persist}",
         );
     }
 }

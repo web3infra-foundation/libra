@@ -36,14 +36,19 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
 Output Examples:
-  libra --json status
-  libra --json branch
+  libra --json status                  Pretty JSON envelope on stdout
+  libra --json=ndjson log              One-line-per-event newline-delimited JSON
+  libra --machine status               Compact JSON; suppresses progress/decoration
+  libra --quiet --exit-code-on-warning Silent run; non-zero exit (9) if warnings occurred
+  libra --color=never log              Force-disable colors (also via NO_COLOR=1)
+
+For per-command flags, see `libra <cmd> --help`.
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -299,7 +304,11 @@ enum Commands {
         after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
-    #[command(subcommand, about = "Large File Storage")]
+    #[command(
+        subcommand,
+        about = "Large File Storage",
+        after_help = command::lfs::LFS_EXAMPLES
+    )]
     Lfs(command::lfs::LfsCmds),
     #[command(
         about = "Manage multiple working trees attached to this repository",
@@ -310,7 +319,7 @@ enum Commands {
 
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
-    #[command(about = "Summarize 'git log' output", alias = "slog")]
+    #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
@@ -386,7 +395,11 @@ enum Commands {
     )]
     Bisect(Bisect),
 
-    #[command(subcommand, about = "Manage set of tracked repositories")]
+    #[command(
+        subcommand,
+        about = "Manage set of tracked repositories",
+        after_help = command::remote::REMOTE_EXAMPLES
+    )]
     Remote(command::remote::RemoteCmds),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
@@ -1300,6 +1313,42 @@ mod tests {
         assert!(preflight.storage.is_some());
         assert!(!preflight.check_schema);
         assert!(preflight.set_hash_kind);
+    }
+
+    /// Scenario: every visible command in [`Commands`] must appear in the
+    /// `Command Groups:` section of `ROOT_AFTER_HELP`. Hidden commands
+    /// (e.g. `index-pack`, `hooks`) are intentionally excluded. This
+    /// guards against new visible commands being added without an
+    /// accompanying group entry, which would make them invisible in
+    /// scenario-grouped `libra --help` output even though they remain
+    /// callable.
+    #[test]
+    fn root_after_help_lists_every_visible_command() {
+        use clap::CommandFactory;
+
+        // Curated allowlist of hidden commands (mirrors `hide = true`
+        // attributes on `Commands::*` variants in this file).
+        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks"];
+
+        let cli = Cli::command();
+        for subcommand in cli.get_subcommands() {
+            let name = subcommand.get_name();
+            if HIDDEN_COMMANDS.contains(&name) || subcommand.is_hide_set() {
+                continue;
+            }
+            // `--help` is registered as an alias; skip it.
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                ROOT_AFTER_HELP.contains(name),
+                "ROOT_AFTER_HELP must list every visible command in some \
+                 'Command Groups:' row; missing: `{name}`. Either add it to \
+                 the appropriate group in src/cli.rs:ROOT_AFTER_HELP or, if \
+                 it should be hidden, mark it `hide = true` and add it to \
+                 HIDDEN_COMMANDS in this test."
+            );
+        }
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

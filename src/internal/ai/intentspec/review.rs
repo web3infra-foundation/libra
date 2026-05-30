@@ -281,6 +281,132 @@ mod tests {
         assert!(!review.contains("Execution plan ready"));
     }
 
+    /// `intent_id = None` must render as `not-persisted` in the
+    /// Intent ID row — the explicit sentinel for un-persisted specs.
+    /// Pins the surface so audit consumers can detect "no Intent
+    /// object yet exists" by exact text match.
+    #[test]
+    fn review_renders_not_persisted_marker_when_intent_id_is_none() {
+        let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
+        let review = build_intentspec_review(&spec, None, &[]);
+        assert!(
+            review.contains("| Intent ID | not-persisted |"),
+            "review must render the not-persisted sentinel for absent intent_id; got:\n{review}",
+        );
+    }
+
+    /// Non-empty `warnings` must render under a `### Warnings`
+    /// heading. Each warning must appear as a `- ` list item.
+    #[test]
+    fn review_renders_warnings_section_when_non_empty() {
+        let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
+        let warnings = vec![
+            "stale linter config".to_string(),
+            "missing changelog entry".to_string(),
+        ];
+        let review = build_intentspec_review(&spec, Some("intent-1"), &warnings);
+        assert!(
+            review.contains("### Warnings"),
+            "Warnings heading must render; got:\n{review}",
+        );
+        assert!(review.contains("- stale linter config"));
+        assert!(review.contains("- missing changelog entry"));
+    }
+
+    /// Empty `warnings` must omit the `Warnings` heading entirely —
+    /// no "- none" placeholder, no empty section. This is the inverse
+    /// of `push_list`'s behaviour because the warnings rendering
+    /// guards on `!warnings.is_empty()`.
+    #[test]
+    fn review_omits_warnings_section_when_empty() {
+        let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
+        let review = build_intentspec_review(&spec, Some("intent-1"), &[]);
+        assert!(
+            !review.contains("### Warnings"),
+            "Warnings heading must NOT render for empty warnings; got:\n{review}",
+        );
+    }
+
+    /// `push_list` must render `- none` when the iterator is empty.
+    /// Exercised via the `Out Of Scope` section which is empty in the
+    /// minimal spec.
+    #[test]
+    fn review_renders_none_placeholder_for_empty_lists() {
+        let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
+        let review = build_intentspec_review(&spec, Some("intent-1"), &[]);
+        assert!(
+            review.contains("### Out Of Scope\n\n- none\n"),
+            "empty list must render '- none' placeholder; got:\n{review}",
+        );
+    }
+
+    /// `scope_grants_repository_root` must accept both `.` and `./`
+    /// after trimming, and reject any other scope value (including
+    /// `src` and `src/`).
+    #[test]
+    fn scope_grants_repo_root_accepts_dot_or_dot_slash() {
+        assert!(scope_grants_repository_root(&[".".to_string()]));
+        assert!(scope_grants_repository_root(&["./".to_string()]));
+        assert!(scope_grants_repository_root(&["  .  ".to_string()]));
+        assert!(scope_grants_repository_root(&[
+            "src".to_string(),
+            ".".to_string()
+        ]));
+
+        assert!(!scope_grants_repository_root(&[]));
+        assert!(!scope_grants_repository_root(&["src".to_string()]));
+        assert!(!scope_grants_repository_root(&["src/".to_string()]));
+        assert!(!scope_grants_repository_root(&["..".to_string()]));
+    }
+
+    /// `escape_table` must convert `|` → `\|` and replace newlines with
+    /// spaces so a value containing markdown table metacharacters
+    /// doesn't break the rendered table row.
+    #[test]
+    fn escape_table_quotes_pipe_and_newline() {
+        assert_eq!(escape_table("a|b|c"), "a\\|b\\|c");
+        assert_eq!(escape_table("line1\nline2"), "line1 line2");
+        assert_eq!(escape_table("a|b\nc"), "a\\|b c");
+        assert_eq!(escape_table("plain"), "plain");
+    }
+
+    fn minimal_spec_with_scope(in_scope: Vec<String>, risk: RiskLevel) -> IntentSpec {
+        resolve_intentspec(
+            IntentDraft {
+                intent: DraftIntent {
+                    summary: "summary".to_string(),
+                    problem_statement: "problem".to_string(),
+                    change_type: ChangeType::Chore,
+                    objectives: vec![Objective {
+                        title: "obj".to_string(),
+                        kind: ObjectiveKind::Implementation,
+                    }],
+                    in_scope,
+                    out_of_scope: vec![],
+                    touch_hints: None,
+                },
+                acceptance: DraftAcceptance {
+                    success_criteria: vec!["ok".to_string()],
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                risk: DraftRisk {
+                    rationale: "rationale".to_string(),
+                    factors: vec![],
+                    level: Some(risk.clone()),
+                },
+            },
+            risk,
+            ResolveContext {
+                working_dir: "/tmp/repo".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        )
+    }
+
     #[test]
     fn review_warns_when_scope_grants_repository_root() {
         let spec = resolve_intentspec(

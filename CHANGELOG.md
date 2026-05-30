@@ -4,6 +4,46 @@
 
 ### Added
 
+- **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
+  v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
+  its `--help` output with an `EXAMPLES:` section listing the canonical
+  invocations. Twenty-five commands grew a `pub const <CMD>_EXAMPLES`
+  banner and `#[command(after_help = …)]` wiring: commit, push, merge,
+  rebase, reflog, remote, mv, rm, cloud, lfs, usage, publish, grep,
+  sandbox, graph, rev-parse, rev-list, symbolic-ref, db, automation,
+  code, code-control, hooks, show-ref, agent. Closes
+  `docs/improvement/README.md` cross-cutting item B.
+- **`compat_help_examples_banner` regression guard (v0.17.841)**: spawns
+  the libra binary, runs `<cmd> --help` for every visible command,
+  and asserts the output contains an `EXAMPLES:` or `Examples:`
+  section. Catches future commands that ship without an EXAMPLES
+  banner.
+- **`compat_command_docs_examples_section` regression guard (v0.17.851)**:
+  walks every `docs/commands/<name>.md` page and asserts the body
+  contains either an `## Examples` heading or a `## Common Commands`
+  heading, keeping the doc surface and the runtime `--help` surface
+  in sync.
+- **`compat_error_codes_doc_sync` regression guard (v0.17.842)**:
+  parses every `LBR-*-NNN` literal out of `src/utils/error.rs` and
+  asserts each one appears in `docs/error-codes.md`. Three previously
+  undocumented codes (`LBR-ADD-001`, `LBR-AGENT-001`,
+  `LBR-UNSUPPORTED-001`) were added in the same patch.
+- **`cli::tests::root_after_help_lists_every_visible_command`
+  (v0.17.840)**: unit-level guard asserting every non-hidden command
+  appears in some Command Groups row of `libra --help`. Closes the
+  drift that left `fsck` and `hash-object` ungrouped.
+- **`docs/commands/hooks.md` (v0.17.838)** and `docs/commands/README.md`
+  Low-Level & Inspection index entry (v0.17.839): completes the
+  hidden-plumbing doc coverage (every other hidden command already
+  had a page).
+- **Documentation Examples sections (v0.17.844..v0.17.850)**: added
+  to `docs/commands/automation.md`, `docs/commands/usage.md`,
+  `docs/commands/db.md`, `docs/commands/sandbox.md`,
+  `docs/commands/publish.md`, `docs/commands/ls-remote.md`, and
+  `docs/commands/agent.md` so every per-command doc carries an
+  invocation section (enforced by
+  `compat_command_docs_examples_section`).
+
 - **`libra fsck`**: Repository integrity checker analogous to `git fsck`. Verifies
   object hash integrity (SHA1/SHA256), object format validity, ref consistency,
   index integrity, and cross-reference validation (including object type mismatch
@@ -18,6 +58,24 @@
   and user-specified heads as additional reachability start points.
 - **`docs/commands/prune.md`**: Comprehensive documentation for the `prune` command
   including synopsis, CLI flags, human/JSON output examples and error handling reference.
+
+### Documentation
+
+- **AI provider env constructor policy (v0.17.1048)**: provider
+  Rustdocs now define `Client::from_env()` as a source-compatible
+  legacy helper for the 0.17 line and `Client::from_resolved_env(...)`
+  as the preferred runtime bootstrap for repository/global
+  vault-aware config. The v0.18 migration note is explicit:
+  `from_env()` will be deprecated but retained for compatibility,
+  while new runtime call sites should use `from_resolved_env` with a
+  `LocalIdentityTarget`.
+- **Root help command groups (v0.17.840)**: `fsck` and `hash-object`
+  added to the `Maintenance And Plumbing` row of `libra --help`'s
+  Command Groups section. Both commands were callable and documented
+  but absent from the scenario-grouped index.
+- **Stale src/ file-count claim refreshed (v0.17.843)**: bumped
+  410 → 427 in `docs/improvement/README.md`'s
+  `compat_all_production_unwrap_guard` description.
 
 ## [0.1.6]
 

@@ -31,7 +31,24 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra reflog --help` output.
+///
+/// reflog exposes three sub-commands (`show`, `delete`, `exists`); the
+/// banner pins one example per sub-command plus a filtered `show` and a
+/// JSON variant so users can map their intent to the right invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const REFLOG_EXAMPLES: &str = "\
+EXAMPLES:
+    libra reflog show                          Show HEAD reflog entries
+    libra reflog show main --number 20         Show the last 20 entries for refs/heads/main
+    libra reflog show --grep 'commit (amend)'  Filter HEAD reflog by message pattern
+    libra reflog exists refs/heads/feature-x   Probe whether a ref has reflog entries
+    libra reflog delete HEAD@{2}               Remove a single reflog selector
+    libra reflog --json show HEAD              Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = REFLOG_EXAMPLES)]
 pub struct ReflogArgs {
     #[clap(subcommand)]
     command: Subcommands,

@@ -128,14 +128,37 @@ pub(crate) fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<Worksp
     }
 }
 
-fn ignored_workspace_entry(path: &Path, _is_dir: bool) -> bool {
-    protected_workspace_entry(path) || generated_artifacts::is_generated_build_dir_path(path)
+fn ignored_workspace_entry(path: &Path, is_dir: bool) -> bool {
+    protected_workspace_entry(path)
+        || generated_artifacts::is_generated_build_dir_path(path)
+        || workspace_cache_entry(path, is_dir)
 }
 
 fn protected_workspace_entry(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| matches!(name, ".git" | ".libra" | ".codex" | ".agents"))
+}
+
+fn workspace_cache_entry(path: &Path, is_dir: bool) -> bool {
+    is_dir && (is_cargo_cache_path(path) || path.join("CACHEDIR.TAG").is_file())
+}
+
+pub(crate) fn is_cargo_cache_path(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(|component| component.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    components.windows(2).any(|window| {
+        matches!(
+            window,
+            [home, registry]
+                if matches!(home.as_str(), "cargo-home" | ".cargo")
+                    && registry == "registry"
+        )
+    })
 }
 
 fn snapshot_entry(
@@ -289,6 +312,27 @@ mod tests {
                 .contains_key(Path::new("target/.rustc_info.json"))
         );
         assert!(!snapshot.entries.contains_key(Path::new("target/debug/app")));
+    }
+
+    #[test]
+    fn snapshot_skips_workspace_cargo_cache_dirs_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("cargo-home/registry/src/index/dep-1.0.0")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+        fs::write(
+            root.join("cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"),
+            "[package]\nname = \"dep\"\n",
+        )
+        .unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("src/lib.rs")));
+        assert!(!snapshot.entries.contains_key(Path::new(
+            "cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"
+        )));
     }
 
     #[cfg(unix)]

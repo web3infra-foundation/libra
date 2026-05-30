@@ -107,17 +107,30 @@ Tests S3 protocol features (PUT/GET/DELETE, multipart, list, tiered storage). Us
 
 ### Gating tests that require network or credentials
 
-Use the `require_env!` macro. If the variable is unset the test prints "skipped" and returns — it does **not** fail.
+Define a small `env_var_is_set` helper (or reuse one from the test
+file you are extending — see `tests/cloud_storage_backup_test.rs:30`)
+and pair it with an early `eprintln!("skipped (set ...)")` return so
+missing vars print a skip notice and do **not** fail the test.
 
 ```rust
-use super::require_env;
+fn env_var_is_set(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty())
+}
 
 #[tokio::test]
 async fn test_something_with_s3() {
-    require_env!("LIBRA_STORAGE_ENDPOINT");
+    if !env_var_is_set("LIBRA_STORAGE_ENDPOINT") {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_STORAGE_*)");
+        return;
+    }
     // test logic ...
 }
 ```
+
+The skip notice should name both the Cargo feature flag (e.g.
+`--features test-live-cloud`) and the env-var prefix (e.g.
+`LIBRA_STORAGE_*`) so contributors landing on a CI log can tell at
+a glance what is missing.
 
 ### Test isolation
 
@@ -126,11 +139,37 @@ async fn test_something_with_s3() {
 - CLI-level tests should use `run_libra_command()` or a local `libra_command()` helper that sets `HOME` / `XDG_CONFIG_HOME` to a temp path.
 - Mark tests that mutate shared state with `#[serial]`.
 
+### Compatibility-surface tests (`tests/compat/`)
+
+The `tests/compat/` directory holds **cross-cutting** regression guards
+that pin contracts spanning multiple commands or doc artefacts (see
+[`tests/compat/README.md`](../tests/compat/README.md) for the file
+inventory and per-file ownership).
+
+Two operational rules differ from the rest of the suite:
+
+1. **Cargo registration is mandatory.** Cargo's default `tests/*.rs`
+   discovery only walks files directly under `tests/`. Files placed
+   under `tests/compat/` are reachable **only** when registered as a
+   `[[test]]` entry in `Cargo.toml` with an explicit `path =
+   "tests/compat/<name>.rs"`. A new file that compiles but is missing
+   the entry will silently never run.
+2. **Membership reflects an intent, not just a category.** Most compat
+   guards exist because a specific failure mode previously hit
+   production or a Codex review caught it before it did. When adding
+   a new compat guard, also add a one-line entry to the inventory
+   table in `tests/compat/README.md` so future readers can map the
+   guard to its owning batch / version.
+
+All `tests/compat/*` files run in CI under the same `compat-offline-core`
+job that runs L1.
+
 ### CI
 
 | Workflow | Layers | Trigger |
 |----------|--------|---------|
-| `base.yml` (PR gate) | L1 only | Every push / PR |
-| `live-tests.yml` (nightly) | L1 + L2 + L3 | Cron schedule + manual dispatch |
+| `base.yml` (PR gate) | L1 + `tests/compat/*` (`compat-offline-core` job); a single L2 file — `tests/network_remotes_test.rs` — via the `compat-network-remotes` job under `--features test-network` | Every push / PR |
+| `model-generation-nightly.yml` (nightly) | One L3 file — `tests/code_ui_remote_model_generation_matrix.rs` — under `LIBRA_RUN_LIVE=1` + `DEEPSEEK_API_KEY` | Daily 03:00 UTC + manual dispatch |
+| `live-compat.yml` (nightly / manual) | L3 live AI (`ai_agent_test`, `ai_chat_agent_test`) and live Cloudflare (`cloud_storage_backup_test`, `publish_live_test`, `storage_r2_test`) under `test-live-ai` / `test-live-cloud`; jobs skip with warnings when required secrets are missing | Daily 04:30 UTC + manual dispatch |
 
-Nightly CI injects credentials via GitHub Actions secrets.
+Other L2 / L3 surfaces that need local infrastructure or maintainer-only setup, such as full GitHub-namespace tests and local Ollama gates, are still manual; run them locally by sourcing `.env.test` and invoking `cargo test --all` with the corresponding feature flag.

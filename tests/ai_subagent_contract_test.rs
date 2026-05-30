@@ -20,7 +20,8 @@ use libra::internal::ai::agent_run::{
     AgentRunId, AgentTaskId, AgentType, AnchorScope, BudgetDimension, Confidence, EventId,
     EvidenceId, HookFailureReason, HookInvocationPayload, HookKind, HookPhase, MergeCandidate,
     MergeCandidateId, MergeDecision, MergeDecisionPayloadV0, PackageId, PostToolReason,
-    ReviewState, RunUsage, Sha256, ToolCallId, WorkspaceMaterialized, WorkspaceStrategy,
+    ReviewState, RunUsage, Sha256, SourceCallId, ToolCallId, WorkspaceMaterialized,
+    WorkspaceStrategy,
 };
 use serde_json::json;
 
@@ -292,6 +293,104 @@ fn agent_evidence_carries_raw_fact_chain_fields() {
     assert!(
         json.get("kind").is_none(),
         "kind must not be duplicated from snapshot"
+    );
+}
+
+/// CEX-S2-18 criterion (4) — `AgentEvidence` wire-contract freeze. The
+/// Step 3.D distillation consumer depends on this schema's stability, so
+/// a renamed/removed field must trip this guard (exact key-set +
+/// lossless round-trip). Forward-compat — an *old* reader skipping a
+/// *future* field — is handled one level up at
+/// `AgentRunEventEnvelope::Unknown`, not here: `AgentEvidence` is
+/// `deny_unknown_fields`, so an unknown key is rejected, which this test
+/// also pins.
+#[test]
+fn agent_evidence_wire_contract_is_frozen() {
+    use std::collections::BTreeSet;
+
+    let full = AgentEvidence {
+        id: EvidenceId::new(),
+        agent_run_id: AgentRunId::new(),
+        source_agent_type: AgentType::Reviewer,
+        source_event_id: EventId::new(),
+        tool_call_id: Some(ToolCallId::new()),
+        source_call_id: Some(SourceCallId::new()),
+        confidence: Confidence::new(0.5),
+        applies_to_scope: AnchorScope::Project,
+        distillable: true,
+        evidence_snapshot_id: uuid::Uuid::new_v4(),
+    };
+
+    // Exact serialized key-set: adding or removing a field trips this.
+    let value = serde_json::to_value(&full).unwrap();
+    let keys: BTreeSet<&str> = value
+        .as_object()
+        .expect("AgentEvidence serializes to a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let expected: BTreeSet<&str> = [
+        "id",
+        "agent_run_id",
+        "source_agent_type",
+        "source_event_id",
+        "tool_call_id",
+        "source_call_id",
+        "confidence",
+        "applies_to_scope",
+        "distillable",
+        "evidence_snapshot_id",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        keys, expected,
+        "AgentEvidence wire key-set is frozen (S2-INV-12 / Step 3.D)",
+    );
+
+    // Round-trip is lossless (no PartialEq derive → compare re-serialized).
+    let back: AgentEvidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&back).unwrap(), value);
+
+    // Optional ids are omitted when `None` (skip_serializing_if).
+    let minimal = AgentEvidence {
+        tool_call_id: None,
+        source_call_id: None,
+        ..full.clone()
+    };
+    let minimal_value = serde_json::to_value(&minimal).unwrap();
+    let minimal_obj = minimal_value.as_object().unwrap();
+    assert!(
+        !minimal_obj.contains_key("tool_call_id"),
+        "None tool_call_id must be skipped",
+    );
+    assert!(
+        !minimal_obj.contains_key("source_call_id"),
+        "None source_call_id must be skipped",
+    );
+
+    // `distillable` reads back as `false` when absent (serde default).
+    let mut without_distillable = minimal_value.clone();
+    without_distillable
+        .as_object_mut()
+        .unwrap()
+        .remove("distillable");
+    let defaulted: AgentEvidence = serde_json::from_value(without_distillable).unwrap();
+    assert!(
+        !defaulted.distillable,
+        "absent distillable must default to false",
+    );
+
+    // `deny_unknown_fields` rejects an unexpected key (the struct-level
+    // half of the field-stability contract).
+    let mut with_unknown = value.clone();
+    with_unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("bogus_future_field".to_string(), json!(1));
+    assert!(
+        serde_json::from_value::<AgentEvidence>(with_unknown).is_err(),
+        "deny_unknown_fields must reject an unknown key",
     );
 }
 

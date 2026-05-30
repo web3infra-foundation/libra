@@ -49,7 +49,7 @@ lazy_static! {
 /// - absolute path
 ///
 /// Returns `false` on any internal failure (malformed pattern, non-UTF-8 path,
-/// gitignore build error) so a corrupt `.libraattributes` cannot crash `libra add`
+/// gitignore build error) so a corrupt `.libra_attributes` cannot crash `libra add`
 /// or other LFS-aware flows. Errors are logged via `tracing::warn!`.
 pub fn is_lfs_tracked<P>(path: P) -> bool
 where
@@ -330,8 +330,16 @@ pub fn parse_pointer_data(data: &[u8]) -> Option<(String, u64)> {
         && data.len() > LFS_OID_LEN
         && data[LFS_OID_LEN] == b'\n'
     {
-        // check `oid` length and that it is valid UTF-8 (LFS oids are hex ASCII).
+        // Check `oid` length and that it is valid UTF-8 (LFS oids are hex ASCII).
         let oid = String::from_utf8(data[..LFS_OID_LEN].to_vec()).ok()?;
+        // Per the LFS pointer spec the sha256 oid is lowercase hex; reject
+        // anything else so corrupt pointers fail at parse time instead of
+        // propagating garbage into `LfsFileOutput`, batch-protocol object
+        // ids, or server-side requests that would surface as an opaque
+        // 4xx much later.
+        if !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         if let Some(data) = data.strip_prefix(format!("{oid}\nsize ").as_bytes()) {
             let data = String::from_utf8(data.to_vec()).ok()?;
             if let Ok(size) = data.trim_end().parse::<u64>() {
@@ -515,5 +523,35 @@ size 10
     fn parse_pointer_data_oversized_returns_none() {
         let data = vec![b'a'; LFS_POINTER_MAX_SIZE + 1];
         assert!(parse_pointer_data(&data).is_none());
+    }
+
+    /// The LFS pointer spec requires the sha256 oid to be lowercase
+    /// hex. Pointer-shaped bytes whose oid region is valid UTF-8 but
+    /// contains non-hex characters (e.g., a corrupted pointer with 'g'
+    /// repeated 64 times) must return `None`, so garbage oids never
+    /// reach `LfsFileOutput` or the LFS batch / lock server calls.
+    #[test]
+    fn parse_pointer_data_non_hex_oid_returns_none() {
+        let mut data = b"version https://git-lfs.github.com/spec/v1\noid sha256:".to_vec();
+        // 64 ASCII 'g' chars — valid UTF-8, definitely not hex.
+        data.extend(std::iter::repeat_n(b'g', LFS_OID_LEN));
+        data.push(b'\n');
+        data.extend_from_slice(b"size 10\n");
+        assert!(
+            parse_pointer_data(&data).is_none(),
+            "non-hex but valid-UTF-8 oid should yield None"
+        );
+
+        // Happy-path control: replacing 'g' with 'a' (which IS hex)
+        // restores acceptance, proving we did not over-reject on
+        // structurally identical input.
+        let mut ok = b"version https://git-lfs.github.com/spec/v1\noid sha256:".to_vec();
+        ok.extend(std::iter::repeat_n(b'a', LFS_OID_LEN));
+        ok.push(b'\n');
+        ok.extend_from_slice(b"size 10\n");
+        let (oid, size) =
+            parse_pointer_data(&ok).expect("all-hex 'a' oid should parse as a valid pointer");
+        assert_eq!(oid.len(), LFS_OID_LEN);
+        assert_eq!(size, 10);
     }
 }

@@ -1141,6 +1141,176 @@ struct FetchStreamData {
     unshallow: Vec<String>,
 }
 
+/// Tracks packfile boundaries so fetch can finish once the pack checksum is
+/// present, even if the SSH transport stays open after `git-upload-pack` is done.
+#[derive(Default)]
+struct PackCompletionTracker {
+    object_count: Option<usize>,
+    objects_seen: usize,
+    offset: usize,
+    current_object: Option<PackObjectInflate>,
+    complete: bool,
+}
+
+struct PackObjectInflate {
+    start: usize,
+    inflater: flate2::Decompress,
+}
+
+impl PackCompletionTracker {
+    fn observe(&mut self, pack_data: &[u8]) -> bool {
+        if self.complete {
+            return true;
+        }
+
+        if self.object_count.is_none() && !self.read_header(pack_data) {
+            return false;
+        }
+
+        let Some(object_count) = self.object_count else {
+            return false;
+        };
+
+        while self.objects_seen < object_count {
+            if !self.advance_object(pack_data) {
+                return false;
+            }
+        }
+
+        self.complete = self.has_valid_trailing_checksum(pack_data);
+        self.complete
+    }
+
+    fn read_header(&mut self, pack_data: &[u8]) -> bool {
+        if pack_data.len() < 12 || &pack_data[..4] != b"PACK" {
+            return false;
+        }
+        let Some(version) = read_be_u32(pack_data, 4) else {
+            return false;
+        };
+        if version != 2 && version != 3 {
+            return false;
+        }
+        let Some(object_count) = read_be_u32(pack_data, 8) else {
+            return false;
+        };
+        self.object_count = Some(object_count as usize);
+        self.offset = 12;
+        true
+    }
+
+    fn advance_object(&mut self, pack_data: &[u8]) -> bool {
+        if self.current_object.is_none() {
+            let Some(data_offset) =
+                parse_pack_entry_data_offset(pack_data, self.offset, get_hash_kind().size())
+            else {
+                return false;
+            };
+            self.current_object = Some(PackObjectInflate {
+                start: data_offset,
+                inflater: flate2::Decompress::new(true),
+            });
+        }
+
+        let complete_offset = {
+            let Some(current) = self.current_object.as_mut() else {
+                return false;
+            };
+            let mut output = [0_u8; 8192];
+            loop {
+                let consumed = current.inflater.total_in() as usize;
+                let Some(input_offset) = current.start.checked_add(consumed) else {
+                    return false;
+                };
+                let Some(input) = pack_data.get(input_offset..) else {
+                    return false;
+                };
+                if input.is_empty() {
+                    return false;
+                }
+
+                let before_in = current.inflater.total_in();
+                let before_out = current.inflater.total_out();
+                let status = match current.inflater.decompress(
+                    input,
+                    &mut output,
+                    flate2::FlushDecompress::None,
+                ) {
+                    Ok(status) => status,
+                    Err(_) => return false,
+                };
+                if matches!(status, flate2::Status::StreamEnd) {
+                    break current
+                        .start
+                        .checked_add(current.inflater.total_in() as usize);
+                }
+                if before_in == current.inflater.total_in()
+                    && before_out == current.inflater.total_out()
+                {
+                    return false;
+                }
+            }
+        };
+
+        let Some(complete_offset) = complete_offset else {
+            return false;
+        };
+        self.offset = complete_offset;
+        self.current_object = None;
+        self.objects_seen += 1;
+        true
+    }
+
+    fn has_valid_trailing_checksum(&self, pack_data: &[u8]) -> bool {
+        let hash_len = get_hash_kind().size();
+        let Some(end) = self.offset.checked_add(hash_len) else {
+            return false;
+        };
+        if pack_data.len() != end {
+            return false;
+        }
+        let expected = ObjectHash::new(&pack_data[..self.offset]);
+        ObjectHash::from_bytes(&pack_data[self.offset..end]).is_ok_and(|actual| actual == expected)
+    }
+}
+
+fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn parse_pack_entry_data_offset(
+    pack_data: &[u8],
+    mut offset: usize,
+    hash_len: usize,
+) -> Option<usize> {
+    let first = *pack_data.get(offset)?;
+    offset += 1;
+    let object_type = (first >> 4) & 0b111;
+    let mut byte = first;
+    while byte & 0x80 != 0 {
+        byte = *pack_data.get(offset)?;
+        offset += 1;
+    }
+
+    match object_type {
+        1..=4 => Some(offset),
+        6 => {
+            byte = *pack_data.get(offset)?;
+            offset += 1;
+            while byte & 0x80 != 0 {
+                byte = *pack_data.get(offset)?;
+                offset += 1;
+            }
+            Some(offset)
+        }
+        7 => offset
+            .checked_add(hash_len)
+            .filter(|end| *end <= pack_data.len()),
+        _ => None,
+    }
+}
+
 async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
@@ -1148,18 +1318,22 @@ async fn read_fetch_stream(
 ) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut data_out = FetchStreamData::default();
+    let mut pack_completion = PackCompletionTracker::default();
     let mut reach_pack = false;
     let mut saw_shallow_response = false;
     let render_progress = matches!(output.progress, ProgressMode::Text);
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
     let progress = json_progress.then(|| ProgressReporter::new(task, None, output));
+    let mut remote_progress = RemoteProgressBuffer::default();
     let time = Instant::now();
 
     loop {
-        let (len, data) = read_pkt_line(&mut reader)
-            .await
-            .map_err(|source| FetchError::PacketRead { source })?;
+        let (len, data) = match read_pkt_line(&mut reader).await {
+            Ok(packet) => packet,
+            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof && reach_pack => break,
+            Err(source) => return Err(FetchError::PacketRead { source }),
+        };
         if len == 0 {
             if !reach_pack && saw_shallow_response {
                 saw_shallow_response = false;
@@ -1184,6 +1358,9 @@ async fn read_fetch_stream(
                 if let Some(progress) = &progress {
                     progress.tick(data_out.pack_data.len() as u64);
                 }
+                if pack_completion.observe(&data_out.pack_data) {
+                    break;
+                }
                 continue;
             }
         }
@@ -1207,9 +1384,18 @@ async fn read_fetch_stream(
                         if let Some(progress) = &progress {
                             progress.tick(data_out.pack_data.len() as u64);
                         }
+                        if pack_completion.observe(&data_out.pack_data) {
+                            break;
+                        }
                     }
-                    2 => print_remote_progress(payload, render_progress, bar.as_ref()),
+                    2 => handle_remote_progress(
+                        payload,
+                        render_progress,
+                        bar.as_ref(),
+                        &mut remote_progress,
+                    ),
                     3 => {
+                        flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                         if let Some(bar) = &bar {
                             bar.finish_and_clear();
                         }
@@ -1229,8 +1415,14 @@ async fn read_fetch_stream(
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
-                2 => print_remote_progress(payload, render_progress, bar.as_ref()),
+                2 => handle_remote_progress(
+                    payload,
+                    render_progress,
+                    bar.as_ref(),
+                    &mut remote_progress,
+                ),
                 3 => {
+                    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
                     if let Some(bar) = &bar {
                         bar.finish_and_clear();
                     }
@@ -1247,6 +1439,7 @@ async fn read_fetch_stream(
             }
         }
     }
+    flush_remote_progress(render_progress, bar.as_ref(), &mut remote_progress);
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
@@ -1263,32 +1456,119 @@ fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
-    emit_remote_progress(payload, render_progress, bar, |text| {
-        eprint!("{text}");
-        let _ = io::stderr().flush();
-    });
+/// Line-buffers raw sideband progress bytes so the indicatif spinner and the
+/// remote's `\r`-overwriting progress text do not stomp on each other.
+///
+/// Git's smart protocol delivers human-readable progress on side-band 2 in
+/// arbitrarily small chunks that may split mid-word. The remote uses `\r` for
+/// in-place updates (e.g. `Counting objects:  5%\rCounting objects: 10%\r…`)
+/// and `\n` to commit a line (e.g. `Counting objects: 100% (38/38), done.\n`).
+/// Forwarding raw bytes straight to `eprint!` while the local spinner is also
+/// being redrawn produces interleaved fragments separated by spinner ticks.
+#[derive(Default)]
+struct RemoteProgressBuffer {
+    buf: String,
 }
 
-fn emit_remote_progress<F>(
+impl RemoteProgressBuffer {
+    /// Append `payload` and dispatch any complete lines.
+    ///
+    /// - `\n`-terminated (and `\r\n`-terminated) lines are emitted to
+    ///   `on_permanent` so the caller can promote them to a log line above
+    ///   the bar.
+    /// - `\r`-terminated lines are emitted to `on_transient`, which typically
+    ///   maps to `bar.set_message` so the latest progress replaces the prior.
+    /// - Any trailing partial content stays in the buffer for the next call.
+    fn push<P, T>(&mut self, payload: &[u8], mut on_permanent: P, mut on_transient: T)
+    where
+        P: FnMut(&str),
+        T: FnMut(&str),
+    {
+        if payload.is_empty() {
+            return;
+        }
+        self.buf.push_str(&String::from_utf8_lossy(payload));
+        while let Some(pos) = self.buf.find(['\r', '\n']) {
+            // ASCII terminators are always at char boundaries, so split_off is safe.
+            let terminator = self.buf.as_bytes()[pos];
+            let line: String = self.buf.drain(..pos).collect();
+            self.buf.drain(..1);
+
+            // Treat CRLF as a single newline so we don't emit an extra empty transient.
+            let is_permanent =
+                terminator == b'\n' || (terminator == b'\r' && self.buf.starts_with('\n'));
+            if terminator == b'\r' && self.buf.starts_with('\n') {
+                self.buf.drain(..1);
+            }
+            if is_permanent {
+                on_permanent(&line);
+            } else {
+                on_transient(&line);
+            }
+        }
+    }
+
+    /// Emit any unterminated trailing bytes as a permanent line.
+    ///
+    /// Called once the sideband stream has ended so we never silently drop
+    /// the last fragment when the remote closed without a final newline.
+    fn flush_remaining<P>(&mut self, mut on_permanent: P)
+    where
+        P: FnMut(&str),
+    {
+        if !self.buf.is_empty() {
+            let line = std::mem::take(&mut self.buf);
+            on_permanent(&line);
+        }
+    }
+}
+
+fn handle_remote_progress(
     payload: &[u8],
     render_progress: bool,
     bar: Option<&ProgressBar>,
-    emit: F,
-) where
-    F: FnOnce(&str),
-{
-    if render_progress {
-        let text = String::from_utf8_lossy(payload);
-        let emit_text = || emit(text.as_ref());
-        // Remote side-band progress writes raw terminal control characters.
-        // Hide the local receiving spinner while printing it so the two
-        // streams do not leave stale or shifted lines in an interactive TTY.
-        if let Some(bar) = bar {
-            bar.suspend(emit_text);
-        } else {
-            emit_text();
-        }
+    buffer: &mut RemoteProgressBuffer,
+) {
+    if !render_progress {
+        return;
+    }
+    buffer.push(
+        payload,
+        |line| emit_permanent_progress_line(line, bar),
+        |line| emit_transient_progress_line(line, bar),
+    );
+}
+
+fn flush_remote_progress(
+    render_progress: bool,
+    bar: Option<&ProgressBar>,
+    buffer: &mut RemoteProgressBuffer,
+) {
+    if !render_progress {
+        return;
+    }
+    buffer.flush_remaining(|line| emit_permanent_progress_line(line, bar));
+}
+
+fn emit_permanent_progress_line(line: &str, bar: Option<&ProgressBar>) {
+    if let Some(bar) = bar {
+        // `println` clears the bar, prints the line, then redraws the bar
+        // below — the canonical way to interleave logs with an indicatif spinner.
+        bar.println(line);
+    } else {
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(stderr, "{line}");
+    }
+}
+
+fn emit_transient_progress_line(line: &str, bar: Option<&ProgressBar>) {
+    if let Some(bar) = bar {
+        bar.set_message(line.to_owned());
+        bar.tick();
+    } else {
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r{line}");
+        let _ = stderr.flush();
     }
 }
 
@@ -1706,15 +1986,21 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
-    use indicatif::ProgressBar;
+    use bytes::{Bytes, BytesMut};
+    use futures_util::{StreamExt, stream};
+    use git_internal::hash::ObjectHash;
     use tempfile::tempdir;
 
     use super::{
-        FetchError, RemoteSpecErrorKind, SSH_KEY_TEMP_FILE_MAX_AGE,
-        cleanup_expired_vault_ssh_temp_files_in, emit_remote_progress, ensure_vault_ssh_tmp_dir,
+        FetchError, PackCompletionTracker, RemoteProgressBuffer, RemoteSpecErrorKind,
+        SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
+        ensure_vault_ssh_tmp_dir, parse_pack_entry_data_offset, read_be_u32, read_fetch_stream,
         redact_url_credentials,
     };
-    use crate::utils::test::ScopedEnvVar;
+    use crate::{
+        internal::protocol::FetchStream,
+        utils::{output::OutputConfig, test::ScopedEnvVar},
+    };
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`FetchError`]. These strings are used as the
@@ -1788,39 +2074,191 @@ mod tests {
         );
     }
 
-    fn capture_remote_progress(
+    fn append_pkt_line(buf: &mut BytesMut, payload: &[u8]) {
+        let len = payload.len() + 4;
+        buf.extend_from_slice(format!("{len:04x}").as_bytes());
+        buf.extend_from_slice(payload);
+    }
+
+    fn empty_pack_bytes() -> Vec<u8> {
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2_u32.to_be_bytes());
+        pack.extend_from_slice(&0_u32.to_be_bytes());
+        let checksum = ObjectHash::new(&pack);
+        pack.extend_from_slice(checksum.as_ref());
+        pack
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_accepts_eof_after_complete_pack_without_flush() {
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
+        let output = OutputConfig::default();
+
+        let data = read_fetch_stream(&mut stream, &output, "fetch origin")
+            .await
+            .expect("EOF after a complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_finishes_complete_pack_when_transport_stays_open() {
+        let pack = empty_pack_bytes();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())])
+                .chain(stream::pending())
+                .boxed();
+        let output = OutputConfig::default();
+
+        let data = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_fetch_stream(&mut stream, &output, "fetch origin"),
+        )
+        .await
+        .expect("complete pack should not wait for transport EOF or flush")
+        .expect("complete pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_finishes_non_empty_pack_when_transport_stays_open() {
+        let pack = include_bytes!("../../tests/data/packs/small-sha1.pack").to_vec();
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+
+        let mut sideband = Vec::with_capacity(pack.len() + 1);
+        sideband.push(1);
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())])
+                .chain(stream::pending())
+                .boxed();
+        let output = OutputConfig::default();
+
+        let data = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_fetch_stream(&mut stream, &output, "fetch origin"),
+        )
+        .await
+        .expect("complete non-empty pack should not wait for transport EOF or flush")
+        .expect("complete non-empty pack should finish the fetch stream");
+
+        assert_eq!(data.pack_data, pack);
+    }
+
+    /// Drive `RemoteProgressBuffer` with `payload` and return
+    /// `(permanent_lines, transient_lines)` in dispatch order.
+    fn collect_buffered_progress(
+        buffer: &mut RemoteProgressBuffer,
         payload: &[u8],
-        render_progress: bool,
-        bar: Option<&ProgressBar>,
-    ) -> String {
-        let mut captured = String::new();
-        emit_remote_progress(payload, render_progress, bar, |text| {
-            captured.push_str(text);
-        });
-        captured
+    ) -> (Vec<String>, Vec<String>) {
+        let mut perm = Vec::new();
+        let mut trans = Vec::new();
+        buffer.push(
+            payload,
+            |line| perm.push(line.to_string()),
+            |line| trans.push(line.to_string()),
+        );
+        (perm, trans)
     }
 
+    /// `\n`-terminated chunks are promoted to permanent log lines so the
+    /// remote's `Counting objects: 100% (38/38), done.` survives above the bar.
     #[test]
-    fn print_remote_progress_writes_payload_without_spinner() {
-        let captured = capture_remote_progress(b"\rReceiving objects: 42%", true, None);
+    fn remote_progress_buffer_promotes_newline_terminated_lines() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) =
+            collect_buffered_progress(&mut buffer, b"Counting objects: 100% (38/38), done.\n");
 
-        assert_eq!(captured, "\rReceiving objects: 42%");
+        assert_eq!(perm, vec!["Counting objects: 100% (38/38), done."]);
+        assert!(trans.is_empty());
     }
 
+    /// `\r`-terminated chunks update the bar message in place so successive
+    /// `Counting objects:  5%\rCounting objects: 10%\r…` updates replace each
+    /// other instead of stacking as separate lines.
     #[test]
-    fn print_remote_progress_writes_payload_while_spinner_is_suspended() {
-        let bar = ProgressBar::hidden();
+    fn remote_progress_buffer_routes_carriage_returns_to_transient() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(
+            &mut buffer,
+            b"Counting objects:  5%\rCounting objects: 10%\r",
+        );
 
-        let captured = capture_remote_progress(b"\rReceiving objects: 100%", true, Some(&bar));
-
-        assert_eq!(captured, "\rReceiving objects: 100%");
+        assert!(perm.is_empty());
+        assert_eq!(
+            trans,
+            vec!["Counting objects:  5%", "Counting objects: 10%"]
+        );
     }
 
+    /// Side-band chunks may split mid-word; partial bytes must survive until
+    /// the next push delivers the terminator.
     #[test]
-    fn print_remote_progress_is_silent_when_rendering_is_disabled() {
-        let captured = capture_remote_progress(b"\rReceiving objects: 42%", false, None);
+    fn remote_progress_buffer_holds_partial_bytes_across_pushes() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm1, trans1) = collect_buffered_progress(&mut buffer, b"Counting");
+        assert!(perm1.is_empty());
+        assert!(trans1.is_empty());
 
-        assert!(captured.is_empty());
+        let (perm2, trans2) = collect_buffered_progress(&mut buffer, b" objects: 100%, done.\n");
+        assert_eq!(perm2, vec!["Counting objects: 100%, done."]);
+        assert!(trans2.is_empty());
+    }
+
+    /// CRLF must collapse to a single permanent line so we don't emit a
+    /// spurious empty transient followed by an empty permanent.
+    #[test]
+    fn remote_progress_buffer_treats_crlf_as_single_newline() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(&mut buffer, b"Compressing done.\r\n");
+
+        assert_eq!(perm, vec!["Compressing done."]);
+        assert!(trans.is_empty());
+    }
+
+    /// At end of stream any unterminated tail must be flushed so a remote
+    /// that closes mid-line still surfaces the partial message.
+    #[test]
+    fn remote_progress_buffer_flush_remaining_emits_trailing_partial() {
+        let mut buffer = RemoteProgressBuffer::default();
+        collect_buffered_progress(&mut buffer, b"Resolving deltas: 99%");
+        let mut tail = Vec::new();
+        buffer.flush_remaining(|line| tail.push(line.to_string()));
+
+        assert_eq!(tail, vec!["Resolving deltas: 99%"]);
+    }
+
+    /// Empty payloads (e.g. a bare side-band code with no body) must not push
+    /// anything through the line splitter.
+    #[test]
+    fn remote_progress_buffer_ignores_empty_payload() {
+        let mut buffer = RemoteProgressBuffer::default();
+        let (perm, trans) = collect_buffered_progress(&mut buffer, b"");
+        assert!(perm.is_empty());
+        assert!(trans.is_empty());
     }
 
     #[test]
@@ -1898,5 +2336,107 @@ mod tests {
                 .contains("stored branch reference 'refs/remotes/origin/main' is corrupt"),
             "unexpected fetch error: {error}"
         );
+    }
+
+    /// `read_be_u32` returns `None` for any range that would overflow
+    /// the input slice; it must not panic. Pins the `offset + 4 > len`
+    /// short-circuit added with `PackCompletionTracker` in v0.17.1060.
+    #[test]
+    fn read_be_u32_decodes_big_endian_and_short_circuits_on_overflow() {
+        // Happy path: 4 BE bytes at offset 0.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00, 0x05], 0), Some(5));
+        assert_eq!(read_be_u32(&[0xDE, 0xAD, 0xBE, 0xEF], 0), Some(0xDEAD_BEEF));
+        // Happy path: 4 BE bytes at a non-zero offset.
+        assert_eq!(read_be_u32(&[0xAA, 0x00, 0x00, 0x00, 0x07], 1), Some(7));
+        // Short input: only 3 bytes available at offset 0.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00], 0), None);
+        // Offset past end.
+        assert_eq!(read_be_u32(&[0x00, 0x00, 0x00, 0x00], 4), None);
+        // Empty input.
+        assert_eq!(read_be_u32(&[], 0), None);
+    }
+
+    /// `PackCompletionTracker::read_header` accepts well-formed PACK v2
+    /// and v3 headers and rejects everything else without panicking.
+    /// The state mutations (`object_count`, `offset`) are part of the
+    /// public contract that `observe` relies on, so pin them here.
+    #[test]
+    fn pack_completion_tracker_read_header_validates_magic_version_and_state() {
+        // Reject: empty input.
+        let mut tracker = PackCompletionTracker::default();
+        assert!(!tracker.read_header(&[]));
+        assert_eq!(tracker.object_count, None);
+
+        // Reject: less than 12 bytes (header is exactly 12).
+        let mut tracker = PackCompletionTracker::default();
+        let short = [b'P', b'A', b'C', b'K', 0, 0, 0, 2, 0, 0, 0];
+        assert!(!tracker.read_header(&short));
+        assert_eq!(tracker.object_count, None);
+
+        // Reject: wrong magic bytes.
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_magic = b"PACX".to_vec();
+        bad_magic.extend_from_slice(&2_u32.to_be_bytes());
+        bad_magic.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_magic));
+
+        // Reject: unsupported version (1 — packs predate widespread use).
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_version = b"PACK".to_vec();
+        bad_version.extend_from_slice(&1_u32.to_be_bytes());
+        bad_version.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_version));
+
+        // Reject: unsupported version (4).
+        let mut tracker = PackCompletionTracker::default();
+        let mut bad_version = b"PACK".to_vec();
+        bad_version.extend_from_slice(&4_u32.to_be_bytes());
+        bad_version.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(!tracker.read_header(&bad_version));
+
+        // Accept: PACK v2 with 0 objects; `offset` advances to 12.
+        let mut tracker = PackCompletionTracker::default();
+        let mut empty_v2 = b"PACK".to_vec();
+        empty_v2.extend_from_slice(&2_u32.to_be_bytes());
+        empty_v2.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(tracker.read_header(&empty_v2));
+        assert_eq!(tracker.object_count, Some(0));
+        assert_eq!(tracker.offset, 12);
+
+        // Accept: PACK v3 with 7 objects.
+        let mut tracker = PackCompletionTracker::default();
+        let mut seven_v3 = b"PACK".to_vec();
+        seven_v3.extend_from_slice(&3_u32.to_be_bytes());
+        seven_v3.extend_from_slice(&7_u32.to_be_bytes());
+        assert!(tracker.read_header(&seven_v3));
+        assert_eq!(tracker.object_count, Some(7));
+        assert_eq!(tracker.offset, 12);
+    }
+
+    /// `parse_pack_entry_data_offset` returns `None` when the entry
+    /// header runs past the end of the slice and `Some(offset)`
+    /// pointing past the variable-length size header for the
+    /// happy-path object types (1..=4 = commit/tree/blob/tag).
+    #[test]
+    fn parse_pack_entry_data_offset_returns_data_start_for_simple_object() {
+        // Single byte header: type=3 (blob = 0b011), size <= 15, no
+        // continuation bit. First byte: 0b0_011_0000 = 0x30 (size 0).
+        // `data_offset` should equal `offset + 1`.
+        let entry = [0x30_u8, 0x78, 0x9C]; // 0x78 0x9C = zlib stream begin
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), Some(1));
+
+        // Two-byte size header: first byte has continuation bit set
+        // (0b1_011_0000 = 0xB0), second byte is the last size chunk
+        // (0b0_0000001 = 0x01). data_offset = 2.
+        let entry = [0xB0_u8, 0x01, 0x78, 0x9C];
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), Some(2));
+
+        // Reject: header truncated mid-continuation.
+        let entry = [0xB0_u8]; // says "continue" but nothing follows
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), None);
+
+        // Reject: unknown object type (5 is reserved, not 1..=4 / 6 / 7).
+        let entry = [0x50_u8]; // 0b0_101_0000 = type 5
+        assert_eq!(parse_pack_entry_data_offset(&entry, 0, 20), None);
     }
 }

@@ -352,6 +352,16 @@ pub struct CodeUiAckResponse {
     pub accepted: bool,
 }
 
+/// `POST /api/code/task/dispatch` body. This is the Code Control
+/// equivalent of `/task <agent> <prompt>` and enters the dispatcher as
+/// `UserInitiated { bypass_permission_ask: true }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiTaskDispatchRequest {
+    pub agent: String,
+    pub prompt: String,
+}
+
 /// `POST /api/code/goal/start` body. The objective is validated
 /// at the App layer against the same `GoalSpec::new` shape rules
 /// (non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire
@@ -491,6 +501,41 @@ impl CodeUiSession {
     pub async fn set_status(&self, status: CodeUiSessionStatus) {
         self.mutate("status_changed", |snapshot| {
             snapshot.status = status;
+        })
+        .await;
+    }
+
+    pub async fn cancel_active_turn(&self, message: impl Into<String>) {
+        let message = message.into();
+        self.mutate("session_updated", move |snapshot| {
+            let now = Utc::now();
+            snapshot.status = CodeUiSessionStatus::Idle;
+            for tool_call in &mut snapshot.tool_calls {
+                if matches!(tool_call.status.as_str(), "preview" | "running") {
+                    tool_call.status = "failed".to_string();
+                    tool_call.details = Some(message.clone());
+                    tool_call.updated_at = now;
+                }
+            }
+            for entry in &mut snapshot.transcript {
+                match entry.kind {
+                    CodeUiTranscriptEntryKind::AssistantMessage if entry.streaming => {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("cancelled".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    CodeUiTranscriptEntryKind::ToolCall
+                        if matches!(entry.status.as_deref(), Some("preview" | "running")) =>
+                    {
+                        entry.content = Some(message.clone());
+                        entry.status = Some("failed".to_string());
+                        entry.streaming = false;
+                        entry.updated_at = now;
+                    }
+                    _ => {}
+                }
+            }
         })
         .await;
     }
@@ -648,6 +693,15 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         Err(anyhow!(
             "This libra code session does not support turn cancel"
+        ))
+    }
+
+    /// `task.dispatch` — explicitly run a sub-agent from automation.
+    /// Default implementation returns "not supported" for adapters
+    /// that do not expose the local TUI sub-agent runtime.
+    async fn task_dispatch(&self, _agent: String, _prompt: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support task.dispatch"
         ))
     }
 
@@ -1096,6 +1150,22 @@ impl CodeUiRuntimeHandle {
             .map_err(CodeUiApiError::unsupported_from_error)
     }
 
+    /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
+    /// dispatch. Requires controller write-access because it mutates
+    /// the session transcript and may run tools.
+    pub async fn task_dispatch(
+        &self,
+        token: Option<&str>,
+        agent: String,
+        prompt: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .task_dispatch(agent, prompt)
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
     /// `goal.start { objective }` — open an active Goal in this
     /// session. Requires controller write-access (a controller
     /// token validated against the active lease) because creating
@@ -1487,7 +1557,10 @@ pub fn apply_thread_bundle_to_snapshot(
     } else {
         CodeUiSessionStatus::Idle
     };
-    snapshot.plans = code_ui_plan_snapshots(&bundle.scheduler.selected_plan_ids);
+    snapshot.plans = code_ui_plan_snapshots(
+        &bundle.scheduler.selected_plan_ids,
+        bundle.scheduler.updated_at,
+    );
     snapshot.tasks = bundle
         .scheduler
         .active_task_id
@@ -1503,7 +1576,20 @@ pub fn apply_thread_bundle_to_snapshot(
     snapshot.updated_at = bundle.thread.updated_at.max(bundle.scheduler.updated_at);
 }
 
-fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot> {
+/// Build the [`CodeUiPlanSnapshot`] list for a snapshot from the
+/// scheduler's selected-plan heads.
+///
+/// `scheduler_updated_at` is the upstream `SchedulerState::updated_at`
+/// — *not* `Utc::now()` — so every plan entry surfaces the same
+/// projection revision timestamp as the rest of the snapshot. Using
+/// `Utc::now()` here would make every render emit a different
+/// `updatedAt` even when the underlying projection is unchanged, which
+/// breaks browser change-detection heuristics and makes contract
+/// snapshot tests non-deterministic.
+fn code_ui_plan_snapshots(
+    plan_heads: &[PlanHeadRef],
+    scheduler_updated_at: DateTime<Utc>,
+) -> Vec<CodeUiPlanSnapshot> {
     plan_heads
         .iter()
         .map(|plan| CodeUiPlanSnapshot {
@@ -1512,7 +1598,7 @@ fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot>
             summary: Some(format!("Selected plan ordinal {}", plan.ordinal)),
             status: "selected".to_string(),
             steps: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: scheduler_updated_at,
         })
         .collect()
 }

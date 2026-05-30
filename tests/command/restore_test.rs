@@ -3,7 +3,9 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use libra::{
-    internal::{db::get_db_conn_instance, head::Head, model::reference},
+    internal::{
+        branch::AGENT_TRACES_BRANCH, db::get_db_conn_instance, head::Head, model::reference,
+    },
     utils::test::ChangeDirGuard,
 };
 use sea_orm::{ActiveModelTrait, Set};
@@ -317,4 +319,34 @@ fn test_restore_source_refuses_locked_branch_with_revision_suffix() {
         "unexpected stderr: {human}"
     );
     assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_restore_worktree_refuses_ai_managed_current_branch() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Head::update_result(Head::Branch(AGENT_TRACES_BRANCH.to_string()), None)
+            .await
+            .expect("point HEAD at agent-traces");
+    }
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+
+    let output = run_libra_command(&["restore", "tracked.txt"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(
+        human.contains("refusing to restore worktree while on locked branch 'agent-traces'"),
+        "unexpected stderr: {human}"
+    );
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read tracked file");
+    assert_eq!(
+        content, "modified\n",
+        "locked-current-branch guard must not modify the worktree"
+    );
 }

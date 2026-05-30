@@ -104,11 +104,11 @@ jobs:
     name: security-codeql-${{ matrix.language }}
 ```
 
-可选 / 手动触发的 live 矩阵（保留现有 feature gate，新文件 `compat-live.yml` 可后续追加；本批仅占位）：
+可选 / 手动触发的 live 矩阵已落地在 [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml)，保留现有 feature gate，且不进入 base required checks：
 
 ```yaml
-# Future: compat-live-ai (workflow_dispatch + scheduled)
-# Future: compat-live-cloud (workflow_dispatch + scheduled)
+# compat-live-ai (workflow_dispatch + scheduled, skips when DEEPSEEK_API_KEY is absent)
+# compat-live-cloud (workflow_dispatch + scheduled, skips when D1/R2 secrets are absent)
 ```
 
 ### `tests/compat/` 目录约定
@@ -140,8 +140,8 @@ tests/compat/
 | `compat-network-remotes` | `test-network` | ✅ | PR / push |
 | `security-codeql-actions` | 无 | ✅ | PR / push / scheduled |
 | `security-codeql-rust` | 无 | ✅ | PR / push / scheduled |
-| `compat-live-ai`（占位） | `test-live-ai` | ❌ | workflow_dispatch / scheduled |
-| `compat-live-cloud`（占位） | `test-live-cloud` | ❌ | workflow_dispatch / scheduled |
+| `compat-live-ai` | `test-live-ai` | ✅（非 required，缺 secret 时显式 skip） | workflow_dispatch / scheduled |
+| `compat-live-cloud` | `test-live-cloud` | ✅（非 required，缺 secret 时显式 skip） | workflow_dispatch / scheduled |
 
 ### required-checks 平台切换 runbook（由维护者在 GitHub UI 执行）
 
@@ -158,6 +158,7 @@ tests/compat/
 |-----|-----|-----|
 | [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) | 修改 | 现有质量门重命名为 `compat-*`；普通测试与 network/live 测试拆清 |
 | [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) | 修改 | matrix job 重命名为 `security-codeql-actions` / `security-codeql-rust` |
+| [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) | 新建 | `compat-live-ai` / `compat-live-cloud` nightly + manual gates；缺少 secrets 时 no-op skip |
 | [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) | 新建 | `src/cli.rs::Commands` ↔ `COMPATIBILITY.md` 顶层命令漂移检测 |
 | [`tests/compat/README.md`](../../../tests/compat/README.md) | 新建 | 目录用途说明 + 文件命名约定 |
 | [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) | 新建 | 通过 Cargo test 运行矩阵漂移检测脚本 |
@@ -167,12 +168,14 @@ tests/compat/
 ## 测试与验收
 
 - [x] [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) 出现 `compat-rustfmt` / `compat-clippy` / `compat-web-check` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` 唯一 display name。
+- [x] [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) 出现 `compat-live-ai` / `compat-live-cloud`，仅 `workflow_dispatch` / `schedule` 触发，缺少 secrets 时显式 skip；[`tests/compat/live_compat_workflow.rs`](../../../tests/compat/live_compat_workflow.rs) 防止 optional live gate 漂回 `base.yml`。
 - [x] [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 CodeQL matrix 使用 `security-codeql-${{ matrix.language }}`，即 `security-codeql-actions` / `security-codeql-rust`。
 - [x] `compat-clippy` 使用 `cargo clippy --all-targets --all-features -- -D warnings`。
 - [x] [`tests/compat/README.md`](../../../tests/compat/README.md) 已说明该目录由 `compat-offline-core` 覆盖，并列出现有兼容性测试文件。
 - [x] [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast。
 - [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 已通过 Cargo `[[test]]` 接入 `cargo test --all`。
 - [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
+- [x] [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) 已提供 `compat-live-ai` / `compat-live-cloud` 非 required L3 gate，支持 nightly 和 manual dispatch，缺少 secret 时输出 warning 并 skip。
 - 外部平台确认：GitHub UI branch protection 完成 required-checks 切换后，经 PR 页面验证新名称会阻塞失败检查。该项不能由代码提交自动完成，不计入本仓库代码验收 checkbox。
 
 ## 风险与缓解

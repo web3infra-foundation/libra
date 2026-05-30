@@ -356,10 +356,27 @@ impl Event for MemoryAnchorEvent {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryAnchorReplay {
     anchors: BTreeMap<Uuid, MemoryAnchor>,
+    last_recorded_at: BTreeMap<Uuid, DateTime<Utc>>,
 }
 
 impl MemoryAnchorReplay {
+    /// Apply one append-only event to the projection.
+    ///
+    /// **Monotonicity guard**: events are persisted append-only with a
+    /// `recorded_at` wall-clock timestamp. JSONL replay or partial-load paths
+    /// can deliver them out of order, and prior to this guard a stale event
+    /// silently rolled the anchor's state back (e.g. `Confirmed → Drafted`).
+    /// Skip any event whose `recorded_at` is strictly older than the most
+    /// recent event already applied to the same `anchor_id`; equal timestamps
+    /// are accepted so idempotent replays stay deterministic.
     pub fn apply_event(&mut self, event: MemoryAnchorEvent) {
+        if let Some(prev) = self.last_recorded_at.get(&event.anchor_id)
+            && event.recorded_at < *prev
+        {
+            return;
+        }
+        self.last_recorded_at
+            .insert(event.anchor_id, event.recorded_at);
         self.anchors
             .insert(event.anchor_id, MemoryAnchor::from_event(&event));
     }
@@ -469,7 +486,7 @@ pub fn build_memory_anchor_prompt_section(
 
 #[cfg(test)]
 mod tests {
-    use super::MemoryAnchorLookupError;
+    use super::*;
 
     #[test]
     fn memory_anchor_lookup_error_display_pins_each_variant() {
@@ -484,6 +501,94 @@ mod tests {
         assert_eq!(
             MemoryAnchorLookupError::Ambiguous("ab".to_string()).to_string(),
             "memory anchor prefix `ab` is ambiguous",
+        );
+    }
+
+    /// CEX-13c freezes the `MemoryAnchorEvent` wire contract
+    /// (`#[serde(deny_unknown_fields)]`) — it is persisted append-only to
+    /// session JSONL and replayed. Pin the EXACT required key set, the
+    /// four skip-when-None optionals (`source_event_id` / `expires_at` /
+    /// `superseded_by` / `reason`), the `deny_unknown_fields` rejection,
+    /// and a full round-trip, so a rename / added field / dropped-skip
+    /// silently breaking replay trips here.
+    #[test]
+    fn memory_anchor_event_wire_contract_is_frozen() {
+        // A fresh draft carries all four optionals as None -> omitted.
+        let base = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+            "keep responses concise",
+            "user",
+        ));
+        let base_json = serde_json::to_value(&base).expect("serialize MemoryAnchorEvent");
+        let base_keys: std::collections::BTreeSet<&str> = base_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: std::collections::BTreeSet<&str> = [
+            "event_id",
+            "recorded_at",
+            "anchor_id",
+            "action",
+            "kind",
+            "content",
+            "confidence",
+            "scope",
+            "created_by",
+            "created_at",
+            "updated_at",
+            "review_state",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            base_keys, required,
+            "a draft MemoryAnchorEvent must serialize EXACTLY the required key set \
+             (None optionals omitted by skip_serializing_if), got: {base_json}",
+        );
+
+        // A synthetic all-optionals-present event (field shape only — the
+        // action/superseded_by combo is not semantically meaningful here).
+        let full = MemoryAnchorEvent {
+            source_event_id: Some(uuid::Uuid::new_v4()),
+            expires_at: Some(chrono::Utc::now()),
+            superseded_by: Some(uuid::Uuid::new_v4()),
+            reason: Some("superseded by a newer constraint".to_string()),
+            ..base.clone()
+        };
+        let full_json = serde_json::to_value(&full).expect("serialize MemoryAnchorEvent");
+        let full_keys: std::collections::BTreeSet<&str> = full_json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut full_expected = required.clone();
+        for key in ["source_event_id", "expires_at", "superseded_by", "reason"] {
+            full_expected.insert(key);
+        }
+        assert_eq!(
+            full_keys, full_expected,
+            "a fully-populated MemoryAnchorEvent must add EXACTLY the four optionals, \
+             got: {full_json}",
+        );
+
+        // deny_unknown_fields: an unknown field is rejected on read.
+        let mut with_extra = full_json.as_object().expect("object").clone();
+        with_extra.insert("bogus".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<MemoryAnchorEvent>(serde_json::Value::Object(with_extra))
+                .is_err(),
+            "deny_unknown_fields must reject an unknown field",
+        );
+
+        // Round-trip: the wire shape deserializes and re-serializes intact.
+        let back: MemoryAnchorEvent =
+            serde_json::from_value(full_json.clone()).expect("deserialize MemoryAnchorEvent");
+        assert_eq!(
+            serde_json::to_value(&back).expect("re-serialize"),
+            full_json,
+            "MemoryAnchorEvent must round-trip its wire shape",
         );
     }
 }

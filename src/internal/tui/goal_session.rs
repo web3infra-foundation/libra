@@ -16,12 +16,11 @@
 //! * The state is mutated only through the [`apply`] path (schema
 //!   floor), so any consumer reading `state` sees a verifier-safe
 //!   projection.
-//! * Exactly one envelope is appended per public mutation method
-//!   (`create`, `cancel`); the supervisor (P6.3) integration ships
-//!   later and will append the in-flight envelopes (`Created` is
-//!   appended *here* by `create`, but `CompletionClaimed`,
-//!   `Completed`, `CompletionRejected`, `Blocked`, `ProgressRecorded`
-//!   ride on the supervisor's path once `run_tool_loop` integrates).
+//! * Exactly one envelope is appended by `create` and `cancel`; the
+//!   Goal supervisor appends in-flight envelopes
+//!   (`CompletionClaimed`, `Completed`, `CompletionRejected`,
+//!   `Blocked`, `ProgressRecorded`) through
+//!   [`GoalSession::append_supervisor_events`].
 //!
 //! User-facing surfaces (TUI `/goal` slash commands and Code Control
 //! NDJSON `goal.*` methods) both bottom out in the App methods that
@@ -34,8 +33,9 @@ use super::goal_command::{
     GoalCommandParseError, validate_objective as validate_objective_via_command,
 };
 use crate::internal::ai::goal::{
-    GoalActor, GoalBudget, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy, GoalSpec,
-    GoalSpecError, GoalState, apply,
+    GoalActor, GoalBudget, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
+    GoalPlanStep, GoalReplayOutcome, GoalSpec, GoalSpecError, GoalState, GoalStepStatus, apply,
+    replay,
 };
 
 /// Schema-floor wrapper that re-runs `GoalSpec::new`'s objective
@@ -109,14 +109,10 @@ impl GoalSession {
         &self.state
     }
 
-    /// Read-only access to the cumulative event log. Used by the
-    /// future persistence layer (P6.7) to flush envelopes to the
-    /// session JSONL on demand. The `#[allow(dead_code)]` keeps the
-    /// API surface stable until that consumer lands; without it,
-    /// `cargo clippy --tests -p libra --no-deps -- -D warnings`
-    /// would refuse the compile because P6.6 itself does not yet
-    /// drive event flushing.
-    #[allow(dead_code)]
+    /// Read-only access to the cumulative event log. The TUI flushes
+    /// new envelopes to the session JSONL whenever a Goal mutation
+    /// succeeds; tests also use this to assert the schema-floor event
+    /// order.
     pub fn events(&self) -> &[GoalEventEnvelope] {
         &self.events
     }
@@ -217,6 +213,221 @@ impl GoalSession {
             state: self.state.clone(),
         })
     }
+
+    /// Reconstruct a `GoalSession` by replaying a chronological
+    /// slice of [`GoalEventEnvelope`]s — used by the `--resume
+    /// <thread>` flow in `libra code` (OC-Phase 6 P6.7). The
+    /// envelopes must start with a [`GoalEvent::Created`] (per
+    /// [`crate::internal::ai::goal::replay`]); otherwise this
+    /// returns `None` so the caller can ignore a malformed slice
+    /// rather than seeding a nonsense state.
+    ///
+    /// Skipped (rejected) envelopes are surfaced via the returned
+    /// [`GoalReplayOutcome::rejected`] field so the caller can log
+    /// the gaps; the projected [`GoalState`] folds in every
+    /// envelope that passed `apply()`.
+    ///
+    /// Terminal sessions (`Completed` / `Cancelled`) are still
+    /// returned so callers can render the final status; the App's
+    /// "already active" gate (`self.goal_session.as_ref().is_some_and(|s|
+    /// !s.is_terminal())`) lets a follow-up `/goal start` succeed
+    /// even when the resumed slot holds a terminal session.
+    pub fn from_replay(envelopes: Vec<GoalEventEnvelope>) -> Option<(Self, GoalReplayOutcome)> {
+        let outcome = replay(envelopes.iter())?;
+        Some((
+            Self {
+                state: outcome.state.clone(),
+                events: envelopes,
+            },
+            outcome,
+        ))
+    }
+
+    /// Append a `CriteriaRevised` envelope that adds a single
+    /// user-authored criterion to the active Goal. Implements the
+    /// `/goal criteria add <text>` flow from
+    /// `docs/improvement/opencode.md` line 690 — the criterion id is
+    /// minted server-side as `user-<n>` where `n` is the count of
+    /// existing `user-` prefixed criteria + 1, so two consecutive
+    /// `/goal criteria add` calls produce distinct ids without
+    /// requiring the caller to know about prior revisions.
+    ///
+    /// The new criterion defaults to `required = true` and
+    /// `requires_workspace_change = false`. Required keeps the
+    /// schema honest (a criterion added mid-Goal must be satisfied
+    /// before completion is allowed); workspace-change defaults
+    /// `false` because the natural-language description rarely
+    /// implies a file edit at parse time. The verifier upgrades the
+    /// gate when the user's evidence ref actually shows a `git
+    /// status` change.
+    ///
+    /// Returns the rendered `GoalState` so the caller can echo it
+    /// without a follow-up `status` call.
+    pub fn revise_criteria_add(
+        &mut self,
+        description: String,
+        revised_by: GoalActor,
+    ) -> Result<GoalState, GoalSessionError> {
+        if self.state.status.is_terminal() {
+            return Err(GoalSessionError::NotActive);
+        }
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            return Err(GoalSessionError::InvalidObjective {
+                source: GoalSpecError::EmptyObjective,
+            });
+        }
+        let next_id = next_user_criterion_id(&self.state.spec.acceptance_criteria);
+        let mut criteria = self.state.spec.acceptance_criteria.clone();
+        criteria.push(GoalCriterion {
+            id: next_id,
+            description: trimmed.to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        });
+        let now = Utc::now();
+        let envelope = GoalEventEnvelope {
+            envelope_id: Uuid::new_v4(),
+            goal_id: self.state.spec.goal_id,
+            recorded_at: now.max(self.state.updated_at),
+            event: GoalEvent::CriteriaRevised {
+                criteria,
+                revised_by,
+            },
+        };
+        apply(&mut self.state, &envelope).map_err(|reject| GoalSessionError::InternalApply {
+            detail: reject.to_string(),
+        })?;
+        self.events.push(envelope);
+        Ok(self.state.clone())
+    }
+
+    /// Append envelopes emitted by the Goal supervisor and apply
+    /// them through the same schema floor used by slash-command
+    /// mutations. This is the only path for runtime envelopes such
+    /// as `ProgressRecorded`, `CompletionClaimed`,
+    /// `CompletionRejected`, `Blocked`, and `Completed`.
+    pub fn append_supervisor_events(
+        &mut self,
+        events: &[GoalEventEnvelope],
+    ) -> Result<(), GoalSessionError> {
+        if self.state.status.is_terminal() {
+            return Err(GoalSessionError::NotActive);
+        }
+        for envelope in events {
+            apply(&mut self.state, envelope).map_err(|reject| GoalSessionError::InternalApply {
+                detail: reject.to_string(),
+            })?;
+            self.events.push(envelope.clone());
+        }
+        Ok(())
+    }
+}
+
+/// Render `state` as a compact one-line indicator for the TUI
+/// bottom pane. Per `docs/improvement/opencode.md` line 723 the
+/// active Goal must surface its id short code + status + progress
+/// without requiring the user to invoke `/goal status` every turn.
+///
+/// Shape (stable for golden tests):
+/// `Goal <8-hex-short> · <Status> · <completed>/<total> criteria[ · step <n>/<total> <StepStatus>: <label>][ · blocked: <reason>]`
+///
+/// Examples:
+/// * Idle progress:  `Goal a1a1a1a1 · Active · 0/1 criteria`
+/// * Running:        `Goal a1a1a1a1 · Running · 0/1 criteria · step 1/2 InProgress: run tests`
+/// * Blocked:        `Goal a1a1a1a1 · Blocked · 0/1 criteria · step 1/2 InProgress: run tests · blocked: BudgetApprovalRequired`
+/// * Completed:      `Goal a1a1a1a1 · Completed · 1/1 criteria`
+///
+/// The short code is the first 8 hex digits of the Goal id; long
+/// enough to disambiguate in any realistic session, short enough to
+/// fit the bottom-pane budget alongside the input hint.
+pub fn render_goal_status_line(state: &GoalState) -> String {
+    let short_id: String = state
+        .spec
+        .goal_id
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect();
+    let total = state.spec.acceptance_criteria.len();
+    let completed = state.completed_criteria.len();
+    let mut line = format!(
+        "Goal {short_id} · {:?} · {completed}/{total} criteria",
+        state.status,
+    );
+    if !state.status.is_terminal()
+        && let Some((step_index, step)) = current_goal_status_step(state)
+    {
+        line.push_str(&format!(
+            " · step {}/{} {:?}: {}",
+            step_index + 1,
+            state.plan.len(),
+            step.status,
+            compact_goal_step_label(step)
+        ));
+    }
+    if let Some(blocker) = state.blockers.last() {
+        // `reason` is `GoalBlockReason`; use its Debug discriminant
+        // name (everything before the first `{` / `(`) so a deep
+        // payload doesn't blow past the bottom-pane width.
+        let reason_dbg = format!("{:?}", blocker.reason);
+        let discriminant = reason_dbg
+            .split(['{', '(', ' '])
+            .next()
+            .unwrap_or("Blocked");
+        line.push_str(" · blocked: ");
+        line.push_str(discriminant);
+    }
+    line
+}
+
+const GOAL_STATUS_STEP_LABEL_MAX_CHARS: usize = 48;
+
+fn current_goal_status_step(state: &GoalState) -> Option<(usize, &GoalPlanStep)> {
+    state
+        .plan
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.status == GoalStepStatus::InProgress)
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .find(|(_, step)| step.status == GoalStepStatus::Pending)
+        })
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .find(|(_, step)| step.status == GoalStepStatus::Skipped)
+        })
+        .or_else(|| {
+            state
+                .plan
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, step)| step.status == GoalStepStatus::Completed)
+        })
+}
+
+fn compact_goal_step_label(step: &GoalPlanStep) -> String {
+    let label = if step.description.trim().is_empty() {
+        step.id.trim()
+    } else {
+        step.description.trim()
+    };
+    if label.chars().count() <= GOAL_STATUS_STEP_LABEL_MAX_CHARS {
+        return label.to_string();
+    }
+    let prefix_len = GOAL_STATUS_STEP_LABEL_MAX_CHARS.saturating_sub(3);
+    let mut compact: String = label.chars().take(prefix_len).collect();
+    compact.push_str("...");
+    compact
 }
 
 /// Render `state` as a multi-line human-readable summary — used by
@@ -279,10 +490,30 @@ pub fn render_goal_status(state: &GoalState) -> String {
     out
 }
 
+/// Mint the next `user-<n>` criterion id, skipping any ids already
+/// present (whether minted by an earlier `/goal criteria add` or
+/// authored by the supervisor under the same naming convention).
+/// Iterates from 1 upward so the first `/goal criteria add` always
+/// becomes `user-1` regardless of how many supervisor-authored
+/// criteria already exist.
+fn next_user_criterion_id(existing: &[GoalCriterion]) -> String {
+    let used: std::collections::HashSet<&str> = existing.iter().map(|c| c.id.as_str()).collect();
+    let mut n: u32 = 1;
+    loop {
+        let candidate = format!("user-{n}");
+        if !used.contains(candidate.as_str()) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::goal::{GoalEvent, GoalStatus, MAX_OBJECTIVE_LEN};
+    use crate::internal::ai::goal::{
+        GoalEvent, GoalEventEnvelope, GoalProgressRecord, GoalStatus, MAX_OBJECTIVE_LEN,
+    };
 
     fn user_actor() -> GoalActor {
         GoalActor::User { id: None }
@@ -376,6 +607,352 @@ mod tests {
             .cancel("second cancel".to_string(), user_actor())
             .unwrap_err();
         assert_eq!(err, GoalSessionError::NotActive);
+    }
+
+    /// `/goal criteria add <text>` ships a single `CriteriaRevised`
+    /// envelope, appends the new criterion (minted as `user-1` when
+    /// the existing list has no `user-` prefixed ids), and keeps the
+    /// state non-terminal so the supervisor can continue.
+    #[test]
+    fn revise_criteria_add_mints_user_one_and_emits_envelope() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let prior_event_count = session.events().len();
+        let state = session
+            .revise_criteria_add("tests pass".to_string(), user_actor())
+            .expect("revise must succeed on an active session");
+
+        // One new envelope of the expected shape.
+        assert_eq!(session.events().len(), prior_event_count + 1);
+        let appended = session.events().last().expect("envelope appended");
+        match &appended.event {
+            GoalEvent::CriteriaRevised { criteria, .. } => {
+                assert_eq!(criteria.len(), 1);
+                assert_eq!(criteria[0].id, "user-1");
+                assert_eq!(criteria[0].description, "tests pass");
+                assert!(criteria[0].required);
+                assert!(!criteria[0].requires_workspace_change);
+            }
+            other => panic!("expected CriteriaRevised, got {other:?}"),
+        }
+
+        // Folded into the state's spec.
+        assert_eq!(state.spec.acceptance_criteria.len(), 1);
+        assert_eq!(state.spec.acceptance_criteria[0].id, "user-1");
+        // Session remains active — adding criteria mid-Goal is not
+        // a terminal boundary.
+        assert_eq!(state.status, GoalStatus::Active);
+    }
+
+    /// Two consecutive `/goal criteria add` calls mint `user-1` then
+    /// `user-2`. Pins the minter's monotonic stepping so a future
+    /// "tidy" that collapses to a constant id is loud.
+    #[test]
+    fn revise_criteria_add_mints_distinct_ids_on_successive_calls() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .revise_criteria_add("first crit".to_string(), user_actor())
+            .unwrap();
+        let state = session
+            .revise_criteria_add("second crit".to_string(), user_actor())
+            .unwrap();
+        let ids: Vec<&str> = state
+            .spec
+            .acceptance_criteria
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["user-1", "user-2"]);
+    }
+
+    /// A blank description is rejected at the session boundary
+    /// before any envelope is appended — same pattern the
+    /// `GoalCommand` parser uses for `criteria add` with empty
+    /// trailing args, but the session enforces it independently so
+    /// the NDJSON / future automation surfaces stay protected.
+    #[test]
+    fn revise_criteria_add_rejects_blank_description() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let prior_event_count = session.events().len();
+        let err = session
+            .revise_criteria_add("   ".to_string(), user_actor())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GoalSessionError::InvalidObjective {
+                source: GoalSpecError::EmptyObjective,
+            }
+        ));
+        // No envelope written when the description fails the
+        // trimmed-emptiness gate.
+        assert_eq!(session.events().len(), prior_event_count);
+    }
+
+    /// A terminal (Cancelled) session refuses further revisions —
+    /// matches the same gate `cancel()` uses.
+    #[test]
+    fn revise_criteria_add_refuses_when_session_is_terminal() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session.cancel("dropped".to_string(), user_actor()).unwrap();
+        let err = session
+            .revise_criteria_add("late add".to_string(), user_actor())
+            .unwrap_err();
+        assert_eq!(err, GoalSessionError::NotActive);
+    }
+
+    /// `next_user_criterion_id` walks past any pre-existing
+    /// `user-<n>` ids so a session that already has `user-1` and
+    /// `user-3` gets `user-2` next (filling the gap), and one with
+    /// `user-1` and `user-2` jumps to `user-3`.
+    #[test]
+    fn next_user_criterion_id_fills_gaps_and_appends() {
+        let mk = |id: &str| GoalCriterion {
+            id: id.to_string(),
+            description: "x".to_string(),
+            required: false,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        };
+        // Empty list → user-1.
+        assert_eq!(next_user_criterion_id(&[]), "user-1");
+        // Fill gap.
+        let existing = vec![mk("user-1"), mk("user-3")];
+        assert_eq!(next_user_criterion_id(&existing), "user-2");
+        // No gap → append.
+        let existing = vec![mk("user-1"), mk("user-2")];
+        assert_eq!(next_user_criterion_id(&existing), "user-3");
+        // Non-user-prefixed ids are ignored.
+        let existing = vec![mk("supervisor-x"), mk("user-1")];
+        assert_eq!(next_user_criterion_id(&existing), "user-2");
+    }
+
+    /// `from_replay` rebuilds a `GoalSession` from a previously
+    /// emitted envelope stream — used by the `libra code --resume
+    /// <thread>` path. The reconstructed session must agree with
+    /// what would have been produced live.
+    #[test]
+    fn from_replay_reconstructs_session_state_and_events() {
+        let mut live = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        live.revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        let envelopes = live.events().to_vec();
+
+        let (resumed, outcome) =
+            GoalSession::from_replay(envelopes.clone()).expect("replay must succeed");
+
+        assert_eq!(resumed.state(), live.state());
+        assert_eq!(resumed.events(), envelopes.as_slice());
+        assert!(outcome.rejected.is_empty());
+        assert_eq!(outcome.truncated_rejection_count, 0);
+    }
+
+    /// `from_replay` rejects a stream that does not start with a
+    /// `Created` envelope — the underlying `goal::state::replay`
+    /// guard. The session slot stays empty so the resumed TUI
+    /// behaves as if no Goal was active.
+    #[test]
+    fn from_replay_returns_none_when_first_envelope_is_not_created() {
+        let mut live = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        live.revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        // Drop the `Created` envelope, keep only the
+        // `CriteriaRevised` tail — replay must refuse.
+        let envelopes: Vec<GoalEventEnvelope> = live.events().iter().skip(1).cloned().collect();
+        assert!(GoalSession::from_replay(envelopes).is_none());
+    }
+
+    #[test]
+    fn append_supervisor_events_replays_and_extends_log() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let event = GoalEventEnvelope::new(
+            session.state().spec.goal_id,
+            session.state().updated_at + chrono::Duration::seconds(1),
+            GoalEvent::ProgressRecorded(GoalProgressRecord {
+                summary: "implemented first slice".to_string(),
+                completed_criteria: Vec::new(),
+                evidence_refs: Vec::new(),
+                next_steps: vec!["run tests".to_string()],
+            }),
+        );
+
+        session
+            .append_supervisor_events(std::slice::from_ref(&event))
+            .expect("supervisor event should apply");
+
+        assert_eq!(session.events().last(), Some(&event));
+        assert_eq!(
+            session.state().last_assistant_summary,
+            Some("implemented first slice".to_string())
+        );
+    }
+
+    /// `render_goal_status_line` produces the canonical one-line
+    /// indicator the bottom pane consumes: `Goal <short> · <Status>
+    /// · <completed>/<total> criteria`. Short id is the first 8 hex
+    /// digits of the Goal id with no dashes.
+    #[test]
+    fn render_goal_status_line_pins_canonical_shape() {
+        let session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let line = render_goal_status_line(session.state());
+        let expected_short: String = session
+            .state()
+            .spec
+            .goal_id
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect();
+        assert_eq!(
+            line,
+            format!("Goal {expected_short} · Active · 0/0 criteria"),
+        );
+    }
+
+    /// Adding a criterion bumps the `<total>` slot and keeps the
+    /// status string as `Active`. Pins the integration between the
+    /// criteria-revision mutator and the bottom-pane renderer so a
+    /// future change to either side breaks loudly.
+    #[test]
+    fn render_goal_status_line_reflects_criteria_revision() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .revise_criteria_add("tests pass".to_string(), user_actor())
+            .unwrap();
+        let line = render_goal_status_line(session.state());
+        assert!(line.contains("0/1 criteria"), "got: {line}");
+    }
+
+    /// Once the supervisor has projected a live plan, the bottom
+    /// indicator includes the current step required by
+    /// `docs/improvement/opencode.md`'s Goal contract. The renderer
+    /// prefers an in-progress step over later pending work.
+    #[test]
+    fn render_goal_status_line_includes_current_plan_step() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        let goal_id = session.state().spec.goal_id;
+        let base = session.state().updated_at;
+        let plan = GoalEventEnvelope::new(
+            goal_id,
+            base + chrono::Duration::seconds(1),
+            GoalEvent::PlanUpdated {
+                steps: vec![
+                    GoalPlanStep {
+                        id: "inspect".to_string(),
+                        description: "inspect docs".to_string(),
+                        status: GoalStepStatus::Pending,
+                        criterion_ids: Vec::new(),
+                    },
+                    GoalPlanStep {
+                        id: "test".to_string(),
+                        description: "run focused tests".to_string(),
+                        status: GoalStepStatus::Pending,
+                        criterion_ids: Vec::new(),
+                    },
+                ],
+            },
+        );
+        let started = GoalEventEnvelope::new(
+            goal_id,
+            base + chrono::Duration::seconds(2),
+            GoalEvent::StepStarted {
+                step_id: "test".to_string(),
+            },
+        );
+        session.append_supervisor_events(&[plan, started]).unwrap();
+
+        let line = render_goal_status_line(session.state());
+        assert!(
+            line.contains(" · step 2/2 InProgress: run focused tests"),
+            "got: {line}"
+        );
+
+        session
+            .cancel("stop after verification".to_string(), user_actor())
+            .unwrap();
+        let terminal_line = render_goal_status_line(session.state());
+        assert!(
+            !terminal_line.contains(" · step "),
+            "terminal Goal status lines should omit current-step details, got: {terminal_line}"
+        );
+    }
+
+    /// A terminal (Cancelled) session shows `Cancelled` in the
+    /// `<Status>` slot and drops the blocker tail (there are none
+    /// on a clean cancel).
+    #[test]
+    fn render_goal_status_line_shows_cancelled_status() {
+        let mut session = GoalSession::create(
+            "thread-1",
+            "session-1",
+            "ship feature".to_string(),
+            user_actor(),
+        )
+        .unwrap();
+        session
+            .cancel("user changed mind".to_string(), user_actor())
+            .unwrap();
+        let line = render_goal_status_line(session.state());
+        assert!(line.contains("· Cancelled · "), "got: {line}");
     }
 
     #[test]

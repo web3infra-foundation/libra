@@ -1,10 +1,12 @@
 //! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -14,7 +16,7 @@ use git_internal::{
     Diff,
     hash::ObjectHash,
     internal::{
-        index::Index,
+        index::{Index, IndexEntry, Time},
         object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
         pack::utils::calculate_object_hash,
     },
@@ -28,7 +30,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
-        output::{OutputConfig, emit_json_data},
+        output::{OutputConfig, ProgressMode, emit_json_data},
         pager::Pager,
         path, util,
     },
@@ -62,13 +64,16 @@ pub struct DiffArgs {
     #[clap(help = "Files to compare")]
     pathspec: Vec<String>,
 
-    // TODO: If algorithm support gets added to git-internal
-    /// choose the exact diff algorithm default value is histogram
-    /// support myers and myersMinimal
-    #[clap(long, default_value = "histogram", value_parser=["histogram", "myers", "myersMinimal"])]
+    /// Diff algorithm. `histogram` is currently the only implemented backend.
+    #[clap(
+        long,
+        default_value = "histogram",
+        value_name = "NAME",
+        value_parser = ["histogram", "myers", "myersMinimal"],
+    )]
     pub algorithm: Option<String>,
 
-    // Print the result to file
+    /// Write the diff to `FILENAME` instead of stdout
     #[clap(long, value_name = "FILENAME")]
     pub output: Option<String>,
 
@@ -145,6 +150,11 @@ enum DiffError {
 
     #[error("failed to write output file '{path}': {detail}")]
     OutputWrite { path: String, detail: String },
+
+    #[error(
+        "diff --algorithm={0} is not supported yet; only --algorithm=histogram is currently implemented"
+    )]
+    UnsupportedAlgorithm(String),
 }
 
 impl From<DiffError> for CliError {
@@ -170,6 +180,11 @@ impl From<DiffError> for CliError {
             DiffError::OutputWrite { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
+            DiffError::UnsupportedAlgorithm(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "omit --algorithm or use --algorithm=histogram until alternate diff backends are available",
+                ),
         }
     }
 }
@@ -181,8 +196,46 @@ pub async fn execute(args: DiffArgs) {
 }
 
 pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()> {
+    if util::require_repo().is_err() {
+        return Err(CliError::from(DiffError::NotInRepo));
+    }
+    validate_diff_algorithm(&args).map_err(CliError::from)?;
+    emit_worktree_scan_progress(&args, output);
     let result = run_diff(&args).await.map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
+}
+
+fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {
+    match args.algorithm.as_deref().unwrap_or("histogram") {
+        "histogram" => Ok(()),
+        unsupported => Err(DiffError::UnsupportedAlgorithm(unsupported.to_string())),
+    }
+}
+
+fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
+    if output.quiet || output.is_json() || args.staged || args.new.is_some() {
+        return;
+    }
+
+    match output.progress {
+        ProgressMode::Text => eprintln!("Scanning working tree ..."),
+        ProgressMode::Json => {
+            let event = serde_json::json!({
+                "event": "diff_scan.start",
+                "task": "Scanning working tree",
+            });
+            eprintln!("{event}");
+        }
+        // OutputConfig resolves `--progress=auto` to None when stderr is not a
+        // TTY. `diff` still emits this one-line startup signal for auto mode so
+        // large ignored trees do not look hung in captured/non-interactive runs.
+        ProgressMode::None
+            if output.progress_preference != crate::utils::output::ProgressPreference::None =>
+        {
+            eprintln!("Scanning working tree ...")
+        }
+        ProgressMode::None => {}
+    }
 }
 
 async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
@@ -269,6 +322,9 @@ fn get_files_blobs(
         .iter()
         .filter(|path| !ignore::should_ignore(path, policy, index))
         .map(|p| {
+            if let Some(hash) = index_hash_if_worktree_stat_matches(p, index) {
+                return Ok((p.to_owned(), hash));
+            }
             let path = util::workdir_to_absolute(p);
             let data = std::fs::read(&path).map_err(|e| DiffError::FileRead {
                 path: path.display().to_string(),
@@ -277,6 +333,134 @@ fn get_files_blobs(
             Ok((p.to_owned(), calculate_object_hash(ObjectType::Blob, &data)))
         })
         .collect()
+}
+
+fn index_hash_if_worktree_stat_matches(path: &Path, index: &Index) -> Option<ObjectHash> {
+    let entry = index.get(path.to_str()?, 0)?;
+    let absolute = util::workdir_to_absolute(path);
+    let metadata = std::fs::symlink_metadata(&absolute).ok()?;
+    index_entry_matches_worktree_stat(entry, &metadata).then_some(entry.hash)
+}
+
+fn index_entry_matches_worktree_stat(entry: &IndexEntry, metadata: &std::fs::Metadata) -> bool {
+    let Ok(size) = u32::try_from(metadata.len()) else {
+        return false;
+    };
+    let Ok(ctime) = metadata.created().map(Time::from_system_time) else {
+        return false;
+    };
+    let Ok(mtime) = metadata.modified().map(Time::from_system_time) else {
+        return false;
+    };
+
+    entry.ctime == ctime
+        && entry.mtime == mtime
+        && entry.dev == index_dev_from_metadata(metadata)
+        && entry.ino == index_ino_from_metadata(metadata)
+        && entry.size == size
+        && entry.uid == index_uid_from_metadata(metadata)
+        && entry.gid == index_gid_from_metadata(metadata)
+        && entry.mode == index_mode_from_metadata(metadata)
+}
+
+fn index_dev_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.dev() as u32
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_ino_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.ino() as u32
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_uid_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.uid()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_gid_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.gid()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn index_mode_from_metadata(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        match metadata.mode() & 0o170000 {
+            0o100000 => match metadata.mode() & 0o111 {
+                0 => 0o100644,
+                _ => 0o100755,
+            },
+            0o120000 => 0o120000,
+            _ => 0o100644,
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if metadata.file_type().is_symlink() {
+            0o120000
+        } else {
+            0o100644
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        0o100644
+    }
+}
+
+fn get_worktree_diff_files(index: &Index) -> Result<Vec<PathBuf>, DiffError> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+
+    for file in util::list_workdir_files().map_err(|e| DiffError::WorkdirList(e.to_string()))? {
+        if seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+
+    for file in index.tracked_files() {
+        let absolute = util::workdir_to_absolute(&file);
+        if absolute.is_file() && seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+
+    Ok(files)
 }
 
 /// Returns (path, hash) pairs from the index's stored entries (stage 0).
@@ -317,8 +501,7 @@ async fn resolve_diff_side(
                 worktree_entries: HashMap::new(),
             })
         } else {
-            let files =
-                util::list_workdir_files().map_err(|e| DiffError::WorkdirList(e.to_string()))?;
+            let files = get_worktree_diff_files(index)?;
             let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
             Ok(DiffSide {
                 label: "working tree".to_string(),
@@ -720,27 +903,41 @@ mod test {
             assert!(args.is_err());
             assert!(args.err().unwrap().kind() == clap::error::ErrorKind::MissingRequiredArgument);
         }
-        // TODO: Enable these tests when --algorithm arg is fully implemented
-        // {
-        //     // --algorithm arg
-        //     let args = DiffArgs::try_parse_from([
-        //         "diff",
-        //         "--old",
-        //         "old",
-        //         "--new",
-        //         "new",
-        //         "--algorithm",
-        //         "myers",
-        //         "target paths",
-        //     ])
-        //     .unwrap();
-        //     assert_eq!(args.algorithm, Some("myers".to_string()));
-        // }
-        // {
-        //     // --algorithm arg with default value
-        //     let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
-        //     assert_eq!(args.algorithm, Some("histogram".to_string()));
-        // }
+        {
+            // --algorithm arg is parsed separately from execution-time support.
+            let args = DiffArgs::try_parse_from([
+                "diff",
+                "--old",
+                "old",
+                "--new",
+                "new",
+                "--algorithm",
+                "myers",
+                "target paths",
+            ])
+            .unwrap();
+            assert_eq!(args.algorithm, Some("myers".to_string()));
+        }
+        {
+            // --algorithm defaults to the only currently supported backend.
+            let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
+            assert_eq!(args.algorithm, Some("histogram".to_string()));
+        }
+        {
+            let args = DiffArgs::try_parse_from([
+                "diff",
+                "--old",
+                "old",
+                "--new",
+                "new",
+                "--algorithm",
+                "myers",
+                "target paths",
+            ])
+            .unwrap();
+            let err = validate_diff_algorithm(&args).expect_err("myers is not wired yet");
+            assert!(matches!(err, DiffError::UnsupportedAlgorithm(value) if value == "myers"));
+        }
     }
 
     #[test]
@@ -787,5 +984,35 @@ mod test {
         .unwrap();
         assert_eq!(blob.len(), 1);
         assert_eq!(blob[0].0, PathBuf::from("not_ignore"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_files_blobs_reuses_index_hash_when_stat_matches() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        fs::write("tracked.txt", "worktree content").unwrap();
+        let indexed_content = b"indexed content".to_vec();
+        let worktree_content = b"worktree content".to_vec();
+        let indexed_hash = calculate_object_hash(ObjectType::Blob, &indexed_content);
+        let worktree_hash = calculate_object_hash(ObjectType::Blob, &worktree_content);
+        assert_ne!(indexed_hash, worktree_hash);
+
+        let mut index = Index::new();
+        index.add(
+            IndexEntry::new_from_file(Path::new("tracked.txt"), indexed_hash, temp_path.path())
+                .unwrap(),
+        );
+
+        let blobs = get_files_blobs(
+            &[PathBuf::from("tracked.txt")],
+            &index,
+            IgnorePolicy::Respect,
+        )
+        .unwrap();
+
+        assert_eq!(blobs, vec![(PathBuf::from("tracked.txt"), indexed_hash)]);
     }
 }

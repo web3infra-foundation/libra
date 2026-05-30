@@ -2,123 +2,108 @@
 
 Libra is a partial implementation of a **Git** client, developed in **Rust**. The goal is **not** to build a perfect, 100% feature-complete reimplementation of Git (if you want that, take a look at [gitoxide](https://github.com/Byron/gitoxide)). Instead, Libra is evolving into an **AI agent–native version control system**.
 
-The `libra code` command starts an interactive TUI (with a background web server) that is designed to be driven collaboratively by AI agents and humans.
-
-![Demo Video](docs/video/demo-20260224.gif)
+The `libra code` command starts an interactive TUI (with a background web server and an MCP stdio surface) that is designed to be driven collaboratively by AI agents and humans. Libra also ships AI-native subcommands not found in Git: `code-control`, `automation`, `agent`, `usage`, `graph`, `sandbox`, and `publish`.
 
 ---
 
-## Example
+# AI Features
 
-```bash
-$ libra --help
+The AI surface is what makes Libra different from a vanilla Git client. The sections below cover where AI data lives, how to drive the AI runtime (`libra code`), which providers are supported, and the Libra-only subcommands that orchestrate the agent.
 
-Libra: An AI native version control system for monorepo and trunk-based development.
+## AI Data Storage
 
-Usage: libra [OPTIONS] <COMMAND>
+Libra persists AI threads, runs, tasks, decisions, validation reports, tool-invocation events, patchset snapshots, automation history, captured external-agent sessions, and the live context window into the same repository storage directory that holds Git objects. Everything an AI agent does inside a Libra repository is durable, queryable, and replayable — no out-of-band state.
 
-Commands:
-  init          Initialize a new repository
-  clone         Clone a repository into a new directory
-  code          Start Libra Code interactive TUI (with background web server)
-  code-control  Drive a local Libra Code TUI automation control session
-  automation    Manage AI automation rules and history
-  usage         Report AI provider/model usage
-  graph         Inspect an AI thread version graph in a TUI
-  add           Add file contents to the index
-  rm            Remove files from the working tree and from the index
-  restore       Restore working tree files
-  status        Show the working tree status
-  clean         Remove untracked files from the working tree
-  stash         Stash the changes in a dirty working directory away
-  lfs           Large File Storage
-  log           Show commit logs
-  shortlog      Summarize 'git log' output
-  show          Show various types of objects
-  show-ref      List references in a local repository
-  ls-remote     List references in a remote repository
-  symbolic-ref  Read or update the symbolic HEAD ref
-  branch        List, create, or delete branches
-  tag           Create a new tag
-  commit        Record changes to the repository
-  switch        Switch branches
-  rebase        Reapply commits on top of another base tip
-  merge         Merge changes
-  reset         Reset current HEAD to specified state
-  rev-parse     Parse and normalize revision names and repository paths
-  rev-list      List commit objects reachable from a revision
-  mv            Move or rename a file, a directory, or a symlink
-  describe      Give an object a human readable name based on an available ref
-  cherry-pick   Apply the changes introduced by some existing commits
-  push          Update remote refs along with associated objects
-  fetch         Download objects and refs from another repository
-  pull          Fetch from and integrate with another repository or a local branch
-  diff          Show changes between commits, commit and working tree, etc
-  grep          Search for patterns in tracked files
-  blame         Show author and history of each line of a file
-  revert        Revert some existing commits
-  remote        Manage set of tracked repositories
-  open          Open the repository in the browser
-  config        Manage repository configurations
-  db            Inspect and upgrade the repository database schema
-  reflog        Manage the log of reference changes (e.g., HEAD, branches)
-  worktree      Manage multiple working trees attached to this repository
-  cloud         Cloud backup and restore operations (D1/R2)
-  publish       Materialise the read-only Cloudflare Worker template; sync/deploy are not yet implemented
-  agent         Manage external-agent capture (Claude Code, Gemini, ...)
-  cat-file      Provide content, type or size info for repository objects
-  hash-object   Compute Git-compatible object IDs
-  verify-pack   Validate pack index files against pack archives
-  checkout      Branch compatibility surface; prefer 'switch' for branches and 'restore' for files
-  bisect        Use binary search to find the commit that introduced a bug
-  help          Print this message or the help of the given subcommand(s)
+### Repository Layout (`.libra/`)
 
-Options:
-  -J, --json[=<FORMAT>]       Emit machine-readable JSON to stdout
-      --machine               Strict machine mode
-      --no-pager              Disable automatic pager (less) for long output
-      --color <WHEN>          When to use terminal colors
-  -q, --quiet                 Suppress standard stdout output
-      --exit-code-on-warning  Return non-zero exit code when a warning is emitted
-      --progress <MODE>       Control progress output for long-running operations
-  -h, --help                  Print help
-  -V, --version               Print version
+```
+.libra/
+├── libra.db              # SQLite — Git core + AI threads + AI runtime contracts
+├── vault.db              # libvault — encrypted secrets (signing keys, provider creds)
+├── objects/              # Local object store (loose + pack) — used when no remote backend is configured
+├── sessions/             # JSONL session store for AI conversations and file history
+└── ai/                   # Working files written by the AI runtime
 ```
 
----
+If `--separate-libra-dir <dir>` is passed to `libra init`, the entire storage directory is relocated; the working tree only keeps a pointer file.
 
-## grep
+### SQLite Schema Groups
 
-`grep` searches tracked working-tree files, the index (`--cached`), or committed trees (`--tree <revision>`) using regular expressions by default. It also supports fixed-string mode, multiple explicit patterns, pattern files, and requiring all patterns to match within the same file.
+The single `libra.db` carries three logical schema groups (canonical bootstrap files: `sql/sqlite_20260309_init.sql` and `sql/sqlite_20260415_ai_runtime_contract.sql`; versioned forward + `_down.sql` migrations live in `sql/migrations/`):
+
+| Group | Tables |
+|-------|--------|
+| Git core | `config`, `config_kv`, `reference`, `reflog`, `rebase_state`, `object_index`, `schema_version` |
+| AI threads & scheduling | `ai_thread`, `ai_thread_participant`, `ai_thread_intent`, `ai_thread_provider_metadata`, `ai_scheduler_state`, `ai_scheduler_plan_head`, `ai_scheduler_selected_plan`, `ai_live_context_window` |
+| AI runtime contracts | `ai_index_intent_plan`, `ai_index_intent_task`, `ai_index_intent_context_frame`, `ai_index_plan_step_task`, `ai_index_run_event`, `ai_index_run_patchset`, `ai_index_task_run`, `ai_decision_proposal`, `ai_risk_score_breakdown`, `ai_validation_report` |
+
+The publish Worker uses its own D1 schema in `sql/publish/` (independent from `libra.db`).
+
+### Inspecting AI Data
+
+Every AI record is addressable via `cat-file`'s AI selectors. Pair with `--json=pretty` for machine-readable output:
 
 ```bash
-# Search tracked working-tree files with a regex
-libra grep "foo.*bar"
+libra cat-file --ai-list ai_session                       # List captured AI sessions
+libra cat-file --ai-list run                              # Runs (one per agent invocation)
+libra cat-file --ai-list task                             # Tasks within a plan
+libra cat-file --ai-list tool_invocation_event            # Every tool call the agent issued
+libra cat-file --ai-list patchset_snapshot                # Patchset diffs proposed by the agent
+libra --json=pretty cat-file --ai ai_session:<ai_session_id>
 
-# Search with multiple explicit patterns
-libra grep -e alpha -e beta
-
-# Require every pattern to appear in the same file
-libra grep --all-match -e alpha -e beta
-
-# Search the staged/index version of tracked files
-libra grep --cached "needle"
-
-# Search a specific revision or branch
-libra grep --tree HEAD "needle"
-libra grep --tree main "needle"
-
-# Read patterns from a file
-libra grep -f patterns.txt
+libra graph <thread_id> [--repo /path/to/repo]            # TUI: navigate an AI thread version graph
+libra usage                                               # Token + cost summary per provider/model
+libra --json=pretty usage
+libra db status                                           # Schema version and migration status
 ```
 
----
+### Tiered Object Storage (S3 / R2 / MinIO)
 
-## Error Reporting
+Libra can offload large objects (commits, blobs, packs, AI patchset snapshots) to S3-compatible object storage while keeping a local LRU cache. Tiering rules:
 
-CLI failures use stable exit codes and stable error codes. When `stderr` is not a TTY, Libra also appends a JSON stderr report for agents and wrappers. Set `LIBRA_ERROR_JSON=1` to force that structured report in interactive terminals.
-Run `libra help error-codes` for the built-in CLI reference.
-See [docs/error-codes.md](docs/error-codes.md).
+- **Small objects** (`< LIBRA_STORAGE_THRESHOLD`) — stored in both local and remote storage.
+- **Large objects** (`≥ LIBRA_STORAGE_THRESHOLD`) — stored remotely with a local LRU cache.
+
+If `LIBRA_STORAGE_TYPE` is not set, Libra uses local-only storage under `.libra/objects`.
+
+| Variable                     | Description                                                   | Required (for S3/R2) | Default              |
+|-----------------------------|---------------------------------------------------------------|----------------------|----------------------|
+| `LIBRA_STORAGE_TYPE`        | Storage backend type: `s3` or `r2`                            | Yes                  | –                    |
+| `LIBRA_STORAGE_BUCKET`      | Bucket name                                                   | Yes                  | `libra`              |
+| `LIBRA_STORAGE_ENDPOINT`    | S3-compatible endpoint URL (required for R2)                  | Yes (for R2)         | AWS S3 default       |
+| `LIBRA_STORAGE_REGION`      | Region for bucket                                             | No                   | `auto`               |
+| `LIBRA_STORAGE_ACCESS_KEY`  | Access key ID                                                 | Yes                  | –                    |
+| `LIBRA_STORAGE_SECRET_KEY`  | Secret access key                                             | Yes                  | –                    |
+| `LIBRA_STORAGE_THRESHOLD`   | Size threshold in bytes for tiering                           | No                   | `1048576` (1 MB)     |
+| `LIBRA_STORAGE_CACHE_SIZE`  | Local cache size limit in bytes                               | No                   | `209715200` (200 MB) |
+| `LIBRA_STORAGE_ALLOW_HTTP`  | Allow HTTP (non-TLS) endpoints for testing (not for prod)     | No                   | `false`              |
+
+> If any mandatory variable is invalid or empty, Libra automatically falls back to local storage and logs an error.
+
+### Cloud Backup & Restore (Cloudflare D1 + R2)
+
+`libra cloud` backs up the full repository state — Git objects, refs, **and** all AI tables — to Cloudflare D1 (metadata) plus R2 (objects). This is the canonical way to move a Libra repository (including its AI history) between machines.
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `LIBRA_D1_ACCOUNT_ID` | Cloudflare Account ID | Yes |
+| `LIBRA_D1_API_TOKEN` | Cloudflare API Token | Yes |
+| `LIBRA_D1_DATABASE_ID` | Cloudflare D1 Database ID | Yes |
+
+```bash
+libra cloud sync                       # Sync local repository (incl. AI data) to D1/R2
+libra cloud restore --name <NAME>      # Restore by project name
+libra cloud restore --repo-id <ID>     # Restore by repo ID
+libra cloud status                     # Show synchronization status
+
+libra config cloud.name <my-unique-project-name>   # Override the default (directory name) project name
+```
+
+### Vault-Backed Secrets
+
+`vault.db` (powered by [`libvault`](https://crates.io/crates/libvault)) stores AI provider keys, commit-signing GPG/SSH material, and arbitrary secrets used by the `automation` runtime. The unseal key is held outside the repository at `~/.libra/vault-keys/<repoid>`; the encrypted root token is recorded in repository config (`vault.roottoken_enc`).
+
+Vault is enabled by default for every `libra init`; see [Vault-Backed Signing](#vault-backed-signing) for details.
 
 ---
 
@@ -128,7 +113,7 @@ Libra Code supports three operation modes, each designed for different use cases
 
 ### 1. TUI Mode (Default)
 
-Starts an interactive Terminal User Interface along with a background web server.  
+Starts an interactive Terminal User Interface along with a background web server.
 This is the standard mode for developers who want to work directly in the terminal with AI assistance.
 
 ```bash
@@ -139,7 +124,7 @@ libra code
 
 ### 2. Web Mode
 
-Runs only the web server without the TUI.  
+Runs only the web server without the TUI.
 Useful for remote development or when you prefer using the browser interface exclusively.
 
 ```bash
@@ -150,14 +135,14 @@ libra code --web
 
 ### 3. Stdio Mode (MCP)
 
-Runs the Model Context Protocol (MCP) server over standard input/output.  
+Runs the Model Context Protocol (MCP) server over standard input/output.
 This mode is designed for integration with AI clients like **Claude Desktop**.
 
 ```bash
 libra code --stdio
 ```
 
-- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes).  
+- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes).
   The directory must be writable by the calling process (including sandboxed desktop AI apps).
 
 #### Claude Desktop Configuration
@@ -189,19 +174,7 @@ direct Anthropic chat completions. Claude provider-session flags such as
 longer accepted; use Libra's canonical `--resume <thread_id>` flow for persisted
 sessions.
 
-Useful inspection commands:
-
-```bash
-libra graph <thread_id> [--repo /path/to/repo]
-libra cat-file --ai-list ai_session
-libra cat-file --ai-list run
-libra cat-file --ai-list task
-libra cat-file --ai-list tool_invocation_event
-libra cat-file --ai-list patchset_snapshot
-libra --json=pretty cat-file --ai ai_session:<ai_session_id>
-```
-
-### AI Provider Selection
+## AI Provider Selection
 
 Libra Code supports multiple AI provider backends. Use the `--provider` and `--model` flags to choose which LLM to use:
 
@@ -246,17 +219,109 @@ libra code --provider ollama --model qwen3.6 --ollama-thinking high
 
 > **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Use `--env-file .env.test` to load provider keys from a dotenv-style file and override stale shell environment variables. DeepSeek reasoning fields are opt-in with `--deepseek-thinking enabled|disabled` and `--deepseek-reasoning-effort low|medium|high|max`; `xhigh` is accepted as an alias for `max`. DeepSeek streaming is opt-in with `--deepseek-stream true`; `--stream` is accepted as a DeepSeek-only alias. Kimi thinking can be overridden with `--kimi-thinking enabled|disabled`; omit it to use the selected model's default. Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` for remote/cloud Ollama endpoints that return 503s when receiving Libra's full tool schemas.
 
-| Provider | Default Model | Auth Env Variable | Base URL Override |
-|----------|--------------|-------------------|-------------------|
-| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
-| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
-| `kimi` | `kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL`, `--kimi-thinking` |
-| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
+| Provider | Default Model | Auth Env Variable | Base URL Override | Provider-specific Tuning |
+|----------|--------------|-------------------|-------------------|-------------------------|
+| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — | — |
+| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | — |
+| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | — |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | `--api-base` only (no env var) | `--deepseek-thinking`, `--deepseek-reasoning-effort`, `--deepseek-stream` |
+| `kimi` | `kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` | `--kimi-thinking` |
+| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` | — |
+| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `--api-base` | `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--ollama-thinking`, `--ollama-compact-tools` |
 
 `libra code` tries the Brave Search API for the `web_search` tool when `BRAVE_SEARCH_API_KEY` is set in the process environment or stored as `vault.env.BRAVE_SEARCH_API_KEY`; if Brave is not configured or the request fails, it falls back to DuckDuckGo HTML search. The session network policy must still allow outbound access.
+
+---
+
+## AI-Native Extensions
+
+These subcommands are Libra-only (not present in Git) and form the AI-agent surface around the Git core.
+
+### `libra automation` — Rule-Based Automation
+
+Run scheduled (cron-driven) or ad-hoc automation rules. Rules live in repository config; the runner enforces a command safety preflight before any live shell action is spawned. History is persisted into the AI tables so a previous run can be replayed.
+
+```bash
+libra automation list                                 # List configured rules
+libra automation run                                  # Dry-run all due cron rules
+libra automation run --rule my-rule                   # Force-run a single rule
+libra automation run --now 2026-05-23T12:00:00Z       # Simulate "now" when evaluating cron triggers
+libra automation run --live                           # Actually spawn shell actions (subject to preflight)
+libra automation history --limit 50                   # Recent automation history
+libra --json=pretty automation list                   # Structured JSON output for agents
+```
+
+### `libra agent` — External-Agent Capture
+
+Capture sessions and checkpoints from external coding agents (Claude Code, Gemini, ...) into `refs/libra/agent-traces`. Useful for replaying agent transcripts and pushing traces to a shared remote so the team can audit what an external agent actually did.
+
+```bash
+libra agent status                                    # Captured-session counts and recent checkpoints
+libra agent enable --agent claude                     # Install hooks for one agent
+libra agent enable                                    # Enable every stable external agent
+libra agent disable --agent claude
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint show <id>
+libra agent checkpoint rewind <id>                    # Replay as a JSONL transcript
+libra agent clean [--all]                             # Drop temporary checkpoints from stopped sessions
+libra agent doctor                                    # Diagnose hook installation and capture state
+libra agent push [--remote origin]                    # Push refs/libra/agent-traces
+libra agent rpc list                                  # Discover libra-agent-<name> RPC binaries on PATH
+libra agent rpc invoke <slug> <method> --params '{}'
+```
+
+### `libra publish` — Read-Only Cloudflare Worker Publishing
+
+Publish a snapshot of one or more refs to Cloudflare D1 (metadata) + R2 (objects) and serve them through a thin read-only Worker. Designed for sharing AI-generated artifacts or read-only mirrors of a repository.
+
+```bash
+libra publish init --slug <slug> --clone-domain <domain>   # Materialise the local Worker scaffold
+libra publish status                                       # Inspect local template / D1 ref drift
+libra publish status --site-id <uuid>
+libra publish sync                                         # Sync default refs to D1/R2
+libra publish sync --dry-run
+libra publish sync --ref refs/heads/main
+libra publish sync --force                                 # Re-upload everything, ignoring CAS
+libra publish sync --allow-sensitive-path <path>           # Override the deny list for a private site
+libra publish deploy                                       # Build and deploy the Worker
+libra publish deploy --skip-deploy                         # Build only
+libra publish unpublish --site-id <uuid> --yes
+```
+
+### `libra sandbox` — AI Sandbox Diagnostics
+
+Inspect the command-safety sandbox used by AI tool execution: enforcement mode, network policy, seccomp/seatbelt status, and writable-root tmpdir layout. Every shell tool invoked by the AI runtime passes through this sandbox before it runs.
+
+```bash
+libra sandbox status
+libra sandbox inspect --command "<cmd>"               # Dry-run the safety classifier on a command
+```
+
+Relevant environment toggles:
+
+- `LIBRA_SANDBOX_ENFORCEMENT` — `disabled` / `warn` / `enforce`
+- `LIBRA_SANDBOX_NETWORK_DISABLED` — block outbound network for sandboxed tools
+- `LIBRA_LINUX_SANDBOX_EXE`, `LIBRA_USE_LINUX_SANDBOX_BWRAP` — Linux bwrap integration
+- `LIBRA_SECCOMP_POLICY` — override the bundled `template/seccomp-default.json` allow-list
+
+### `libra code-control` and `libra graph`
+
+`code-control` drives an existing local `libra code` TUI from another process via a lease-based automation API — useful for AI-agent-in-the-loop scripts. `graph` opens a TUI for inspecting an AI thread's version graph.
+
+```bash
+libra code-control --help
+libra graph <thread_id> [--repo /path/to/repo]
+```
+
+### `libra usage` — AI Provider/Model Usage
+
+Report token usage and cost across providers and models, persisted by the AI runtime.
+
+```bash
+libra usage                                           # Summary across all providers
+libra --json=pretty usage                             # Structured JSON output
+```
 
 ---
 
@@ -315,6 +380,12 @@ command -v fusermount3
 If the command is missing, Libra cannot use the unprivileged FUSE mount path and
 will use the copy backend instead.
 
+---
+
+# Git-Compatible Features
+
+Libra's Git surface stays compatible enough to fetch from / push to standard Git servers (GitHub, Gitea, …). The per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
+
 ## Features
 
 ### Clean Code
@@ -323,13 +394,13 @@ The codebase is designed to be clean and easy to read, making it maintainable an
 
 ### Cross-Platform
 
-- [x] Windows  
-- [x] Linux  
+- [x] Windows
+- [x] Linux
 - [x] macOS
 
 ### Compatibility with Git
 
-Libra’s core implementation is essentially compatible with **Git** (developed with reference to Git’s own documentation), including support for on-disk formats such as:
+Libra's core implementation is essentially compatible with **Git** (developed with reference to Git's own documentation), including support for on-disk formats such as:
 
 - `objects`
 - `index`
@@ -343,8 +414,99 @@ This allows Libra to interact seamlessly with Git servers (for example, `push` a
 While maintaining compatibility with Git, Libra intentionally diverges in some areas:
 
 - Uses an **SQLite** database to manage loosely structured files such as `config`, `HEAD`, and `refs`, providing unified and transactional management instead of plain-text files.
+- Records AI threads, runs, decisions, and patchset snapshots in the same SQLite database (see [AI Data Storage](#ai-data-storage)).
+- Object storage can be tiered into S3/R2; backups go to Cloudflare D1/R2.
 
----
+## grep
+
+`grep` searches tracked working-tree files, the index (`--cached`), or committed trees (`--tree <revision>`) using regular expressions by default. It also supports fixed-string mode, multiple explicit patterns, pattern files, and requiring all patterns to match within the same file.
+
+```bash
+# Search tracked working-tree files with a regex
+libra grep "foo.*bar"
+
+# Search with multiple explicit patterns
+libra grep -e alpha -e beta
+
+# Require every pattern to appear in the same file
+libra grep --all-match -e alpha -e beta
+
+# Search the staged/index version of tracked files
+libra grep --cached "needle"
+
+# Search a specific revision or branch
+libra grep --tree HEAD "needle"
+libra grep --tree main "needle"
+
+# Read patterns from a file
+libra grep -f patterns.txt
+```
+
+## Bisect — Binary Search for Bugs
+
+Libra implements a `bisect` subcommand that uses binary search to find the commit that introduced a bug. It is broadly compatible with `git bisect`.
+
+### Basic Usage
+
+```bash
+# Start a bisect session
+libra bisect start
+
+# Mark the current commit as bad (contains the bug)
+libra bisect bad
+
+# Mark a known-good commit
+libra bisect good <commit>
+
+# After marking, bisect will checkout commits for you to test
+# Continue marking commits as good/bad until the culprit is found
+
+# End the session and restore your original HEAD
+libra bisect reset
+```
+
+### Quick Start with Known Bounds
+
+```bash
+# Start with both bad and good commits specified
+libra bisect start HEAD~10 HEAD~20  # HEAD~10 is bad, HEAD~20 is good
+```
+
+### Subcommands
+
+- `libra bisect start [<bad> [<good>]]` – start a new bisect session
+- `libra bisect bad [<rev>]` – mark a commit as bad (contains the bug)
+- `libra bisect good [<rev>]` – mark a commit as good (bug-free)
+- `libra bisect skip [<rev>]` – skip the current commit (untestable)
+- `libra bisect reset [<rev>]` – end the session and restore original HEAD
+- `libra bisect log` – show the current bisect state
+
+### Safety Features
+
+Libra's bisect implementation includes several safety guards:
+
+- **Clean working tree required**: Bisect will not start if you have uncommitted changes (including ignored files like `.env`)
+- **Bare repository protection**: Bisect is blocked in bare repositories (no working tree)
+- **State preserved until reset**: After finding the culprit, bisect state is preserved so you can run `bisect reset` to restore your original branch
+- **Branch restoration**: `bisect reset` restores you to your original branch, not a detached HEAD
+
+## Worktree Management
+
+Libra implements a `worktree` subcommand that is broadly compatible with `git worktree`, allowing you to manage multiple working directories attached to the same repository storage.
+
+Unlike `git worktree remove`, Libra does **not** delete worktree directories on disk by default.
+
+Supported subcommands:
+
+- `libra worktree add <path>` – create a new linked working tree at `<path>`
+- `libra worktree list` – list all registered working trees (including the main worktree)
+- `libra worktree lock <path> [--reason <msg>]` – mark a worktree as locked with an optional reason
+- `libra worktree unlock <path>` – unlock a previously locked worktree
+- `libra worktree move <src> <dest>` – move a worktree directory to a new location
+- `libra worktree prune` – prune missing or non-existent worktrees from the registry
+- `libra worktree remove <path>` – remove a worktree from the registry without deleting its directory on disk (the main worktree cannot be removed)
+- `libra worktree umount <path> [--cleanup]` – unmount a FUSE worktree or stale Agent task worktree mountpoint
+- `libra worktree repair` – repair inconsistent worktree state if the registry and directories get out of sync
 
 ## Vault-Backed Signing
 
@@ -439,140 +601,6 @@ Note:
 - For the very first `git clone` in step 1, Git may still use your existing SSH credentials.
   After step 3, Libra fetch/push uses the vault-generated key for this repository.
 
----
-
-## Bisect - Binary Search for Bugs
-
-Libra implements a `bisect` subcommand that uses binary search to find the commit that introduced a bug. It is broadly compatible with `git bisect`.
-
-### Basic Usage
-
-```bash
-# Start a bisect session
-libra bisect start
-
-# Mark the current commit as bad (contains the bug)
-libra bisect bad
-
-# Mark a known-good commit
-libra bisect good <commit>
-
-# After marking, bisect will checkout commits for you to test
-# Continue marking commits as good/bad until the culprit is found
-
-# End the session and restore your original HEAD
-libra bisect reset
-```
-
-### Quick Start with Known Bounds
-
-```bash
-# Start with both bad and good commits specified
-libra bisect start HEAD~10 HEAD~20  # HEAD~10 is bad, HEAD~20 is good
-```
-
-### Subcommands
-
-- `libra bisect start [<bad> [<good>]]` – start a new bisect session
-- `libra bisect bad [<rev>]` – mark a commit as bad (contains the bug)
-- `libra bisect good [<rev>]` – mark a commit as good (bug-free)
-- `libra bisect skip [<rev>]` – skip the current commit (untestable)
-- `libra bisect reset [<rev>]` – end the session and restore original HEAD
-- `libra bisect log` – show the current bisect state
-
-### Safety Features
-
-Libra's bisect implementation includes several safety guards:
-
-- **Clean working tree required**: Bisect will not start if you have uncommitted changes (including ignored files like `.env`)
-- **Bare repository protection**: Bisect is blocked in bare repositories (no working tree)
-- **State preserved until reset**: After finding the culprit, bisect state is preserved so you can run `bisect reset` to restore your original branch
-- **Branch restoration**: `bisect reset` restores you to your original branch, not a detached HEAD
-
----
-
-## Worktree Management
-
-Libra implements a `worktree` subcommand that is broadly compatible with `git worktree`, allowing you to manage multiple working directories attached to the same repository storage.
-
-Unlike `git worktree remove`, Libra does **not** delete worktree directories on disk by default.
-
-Supported subcommands:
-
-- `libra worktree add <path>` – create a new linked working tree at `<path>`
-- `libra worktree list` – list all registered working trees (including the main worktree)
-- `libra worktree lock <path> [--reason <msg>]` – mark a worktree as locked with an optional reason
-- `libra worktree unlock <path>` – unlock a previously locked worktree
-- `libra worktree move <src> <dest>` – move a worktree directory to a new location
-- `libra worktree prune` – prune missing or non-existent worktrees from the registry
-- `libra worktree remove <path>` – remove a worktree from the registry without deleting its directory on disk (the main worktree cannot be removed)
-- `libra worktree umount <path> [--cleanup]` – unmount a FUSE worktree or stale Agent task worktree mountpoint
-- `libra worktree repair` – repair inconsistent worktree state if the registry and directories get out of sync
-
----
-
-## Object Storage Configuration
-
-Libra supports using S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, etc.) as an alternative or supplement to local storage.  
-This feature implements a **tiered storage architecture**:
-
-- **Small objects** (< threshold) – stored in both local and remote storage
-- **Large objects** (≥ threshold) – stored in remote storage with a local LRU cache
-
-If `LIBRA_STORAGE_TYPE` is **not** set, Libra falls back to local-only storage under `.libra/objects`.
-
-### Environment Variables
-
-Configure object storage by setting these environment variables:
-
-| Variable                     | Description                                                   | Required (for S3/R2) | Default              |
-|-----------------------------|---------------------------------------------------------------|----------------------|----------------------|
-| `LIBRA_STORAGE_TYPE`        | Storage backend type: `s3` or `r2`                            | Yes                  | –                    |
-| `LIBRA_STORAGE_BUCKET`      | Bucket name                                                   | Yes                  | `libra`              |
-| `LIBRA_STORAGE_ENDPOINT`    | S3-compatible endpoint URL (required for R2)                  | Yes (for R2)         | AWS S3 default       |
-| `LIBRA_STORAGE_REGION`      | Region for bucket                                             | No                   | `auto`               |
-| `LIBRA_STORAGE_ACCESS_KEY`  | Access key ID                                                 | Yes                  | –                    |
-| `LIBRA_STORAGE_SECRET_KEY`  | Secret access key                                             | Yes                  | –                    |
-| `LIBRA_STORAGE_THRESHOLD`   | Size threshold in bytes for tiering                           | No                   | `1048576` (1 MB)     |
-| `LIBRA_STORAGE_CACHE_SIZE`  | Local cache size limit in bytes                               | No                   | `209715200` (200 MB) |
-| `LIBRA_STORAGE_ALLOW_HTTP`  | Allow HTTP (non-TLS) endpoints for testing (not for prod)     | No                   | `false`              |
-
-> Note: If any mandatory variable is invalid or empty (for example, empty bucket or credentials), Libra automatically falls back to local storage and logs an error message.
-
----
-
-## Cloud Backup & Restore
-
-Libra supports backing up your repository to Cloudflare D1 (metadata) and R2 (objects).
-
-### Environment Variables for Backup
-
-In addition to the Object Storage variables, you need to configure D1 credentials:
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `LIBRA_D1_ACCOUNT_ID` | Cloudflare Account ID | Yes |
-| `LIBRA_D1_API_TOKEN` | Cloudflare API Token | Yes |
-| `LIBRA_D1_DATABASE_ID` | Cloudflare D1 Database ID | Yes |
-
-### Commands
-
-- `libra cloud sync` - Sync local repository to cloud (automatically registers project name)
-- `libra cloud restore --name <NAME>` - Restore repository by project name
-- `libra cloud restore --repo-id <ID>` - Restore repository by ID
-- `libra cloud status` - Show synchronization status
-
-### Configuration
-
-You can customize the project name used for cloud backup (defaults to the directory name):
-
-```bash
-libra config cloud.name <my-unique-project-name>
-```
-
-
----
-
 ## 🚧 Pending Git commands (not yet supported)
 
 The following Git top-level commands are currently **not implemented** in Libra (excluding `submodule` and `subtree`, which are intentionally omitted):
@@ -588,13 +616,23 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `archive` – create tar/zip archives of tree snapshots
 - `rebase --autosquash` / `rebase --reapply-cherry-picks` – advanced rebase options
 
-These commands are slated for future implementation according to the project roadmap.
+These commands are slated for future implementation according to the project roadmap. The full per-command compatibility status (`supported` / `partial` / `unsupported` / `intentionally-different`) is tracked in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Note on Submodule and Subtree
 
 Libra does **not** provide the `submodule` or `subtree` commands. Because Libra stores objects in an S3-compatible backend and is designed around a **Monorepo** layout with **Trunk-based Development**, the use-cases that `git submodule`/`git subtree` address (embedding separate repositories) are handled differently – large external data lives in S3 and all code lives in a single repository.
 
-This design choice simplifies dependency management and aligns with Libra’s goal of supporting ultra-large repositories while keeping a single source of truth.
+This design choice simplifies dependency management and aligns with Libra's goal of supporting ultra-large repositories while keeping a single source of truth.
+
+---
+
+## Error Reporting
+
+CLI failures use stable exit codes and stable error codes. When `stderr` is not a TTY, Libra also appends a JSON stderr report for agents and wrappers. Set `LIBRA_ERROR_JSON=1` to force that structured report in interactive terminals.
+Run `libra help error-codes` for the built-in CLI reference.
+See [docs/error-codes.md](docs/error-codes.md).
+
+---
 
 ## Contributing & Development
 
@@ -615,7 +653,6 @@ If the formatting check fails, you can automatically fix formatting issues by ru
 ```bash
 cargo +nightly fmt --all
 ```
-
 
 ## Run on Windows
 

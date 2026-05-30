@@ -262,3 +262,155 @@ fn usage_where_clause(filter: &UsageQueryFilter) -> (String, Vec<Value>) {
         (format!("WHERE {}", clauses.join(" AND ")), values)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `UsageGrouping::select_prefix` pins the SQL SELECT projection
+    /// for each grain. Pin so the column-index decoder in
+    /// `decode_aggregate` (which reads positions 0..=2) stays in
+    /// lock-step with what the SELECT actually returns.
+    #[test]
+    fn usage_grouping_select_prefix_pins_three_grain_shapes() {
+        assert_eq!(
+            UsageGrouping::ProviderModel.select_prefix(),
+            "NULL, provider, model",
+        );
+        assert_eq!(
+            UsageGrouping::Agent.select_prefix(),
+            "agent_name, NULL, NULL",
+        );
+        assert_eq!(
+            UsageGrouping::AgentProviderModel.select_prefix(),
+            "agent_name, provider, model",
+        );
+    }
+
+    /// `group_columns` pins the GROUP BY clause for each grain.
+    #[test]
+    fn usage_grouping_group_columns_match_grain_shape() {
+        assert_eq!(
+            UsageGrouping::ProviderModel.group_columns(),
+            "provider, model"
+        );
+        assert_eq!(UsageGrouping::Agent.group_columns(), "agent_name");
+        assert_eq!(
+            UsageGrouping::AgentProviderModel.group_columns(),
+            "agent_name, provider, model",
+        );
+    }
+
+    /// `order_columns` for `Agent` / `AgentProviderModel` must use the
+    /// explicit `IS NULL` prefix so NULL agent_name rows sort
+    /// deterministically regardless of the backing engine's default
+    /// NULL ordering. Pin the explicit-policy form so a future
+    /// "let the engine decide" refactor breaks here.
+    #[test]
+    fn usage_grouping_order_columns_carry_explicit_null_policy() {
+        assert_eq!(
+            UsageGrouping::ProviderModel.order_columns(),
+            "provider, model"
+        );
+        // Agent grouping must surface NULL-handling explicitly.
+        assert!(
+            UsageGrouping::Agent.order_columns().contains("IS NULL"),
+            "Agent ordering must declare NULL policy explicitly; got: {}",
+            UsageGrouping::Agent.order_columns(),
+        );
+        assert!(
+            UsageGrouping::AgentProviderModel
+                .order_columns()
+                .contains("IS NULL"),
+            "AgentProviderModel ordering must declare NULL policy explicitly",
+        );
+    }
+
+    /// `UsageQueryFilter::default()` enables failed-row inclusion by
+    /// default. Pin the canonical "show everything by default" rule —
+    /// a flip to `include_failed=false` would silently hide error
+    /// rows from rollups.
+    #[test]
+    fn usage_query_filter_default_includes_failed_rows() {
+        let filter = UsageQueryFilter::default();
+        assert!(filter.include_failed);
+        assert!(filter.since.is_none());
+        assert!(filter.until.is_none());
+        assert!(filter.session_id.is_none());
+        assert!(filter.thread_id.is_none());
+    }
+
+    /// `non_negative_u64` clamps negatives to 0, passes non-negatives
+    /// through, and handles `i64::MAX` without panic.
+    #[test]
+    fn non_negative_u64_clamps_negatives() {
+        assert_eq!(non_negative_u64(0), 0);
+        assert_eq!(non_negative_u64(42), 42);
+        assert_eq!(non_negative_u64(i64::MAX), i64::MAX as u64);
+        assert_eq!(non_negative_u64(-1), 0);
+        assert_eq!(non_negative_u64(i64::MIN), 0);
+    }
+
+    /// `usage_where_clause` with the default filter (no time bounds,
+    /// no session/thread filter, include_failed=true) produces an
+    /// empty SQL fragment and no bound values.
+    #[test]
+    fn usage_where_clause_default_filter_produces_empty_clause() {
+        let filter = UsageQueryFilter::default();
+        let (sql, values) = usage_where_clause(&filter);
+        assert!(sql.is_empty(), "got SQL: {sql}");
+        assert!(values.is_empty(), "got {} values", values.len());
+    }
+
+    /// `since` / `until` / `session_id` / `thread_id` filters each
+    /// contribute a `?` placeholder and a corresponding bound value.
+    /// All combined under `AND` with the `WHERE` prefix.
+    #[test]
+    fn usage_where_clause_all_filters_combined_with_and() {
+        let filter = UsageQueryFilter {
+            since: Some("2026-01-01T00:00:00Z".to_string()),
+            until: Some("2026-12-31T23:59:59Z".to_string()),
+            session_id: Some("s1".to_string()),
+            thread_id: Some("t1".to_string()),
+            include_failed: false,
+        };
+        let (sql, values) = usage_where_clause(&filter);
+        // Should be 4 bound values; `include_failed=false` adds a
+        // clause with no parameter.
+        assert_eq!(
+            values.len(),
+            4,
+            "expected 4 bound values; got {}",
+            values.len()
+        );
+        assert!(sql.starts_with("WHERE "));
+        // 4 placeholders + 1 literal `success = 1` clause → joined by
+        // exactly 4 `" AND "` separators.
+        assert_eq!(
+            sql.matches(" AND ").count(),
+            4,
+            "expected 4 AND separators; got: {sql}",
+        );
+        // Time-range clauses use COALESCE to fall back to created_at.
+        assert!(sql.contains("COALESCE(started_at, created_at) >= ?"));
+        assert!(sql.contains("COALESCE(started_at, created_at) <= ?"));
+        assert!(sql.contains("session_id = ?"));
+        assert!(sql.contains("thread_id = ?"));
+        assert!(sql.contains("success = 1"));
+    }
+
+    /// `include_failed = false` alone (without any other filter)
+    /// produces a `WHERE success = 1` clause with no bound values.
+    /// Pin the value count so a future refactor that binds the `1`
+    /// as a parameter breaks here.
+    #[test]
+    fn usage_where_clause_include_failed_false_adds_inline_literal_no_value() {
+        let filter = UsageQueryFilter {
+            include_failed: false,
+            ..Default::default()
+        };
+        let (sql, values) = usage_where_clause(&filter);
+        assert_eq!(sql, "WHERE success = 1");
+        assert!(values.is_empty(), "success=1 must be inline, not bound");
+    }
+}

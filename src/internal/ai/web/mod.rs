@@ -29,7 +29,7 @@ use uuid::Uuid;
 use self::code_ui::{
     CodeUiApiError, CodeUiControllerDetachRequest, CodeUiControllerKind, CodeUiGoalCancelRequest,
     CodeUiGoalStartRequest, CodeUiInteractionResponse, CodeUiMessageRequest, CodeUiRuntimeHandle,
-    browser_controller_token_from_headers, ensure_session_updated_event,
+    CodeUiTaskDispatchRequest, browser_controller_token_from_headers, ensure_session_updated_event,
 };
 use crate::{
     command::code::resolve_storage_root,
@@ -146,6 +146,7 @@ fn code_router() -> Router<WebAppState> {
     //   /messages         -> loopback + controller-token; automation also needs control-token
     //   /interactions/{id} -> loopback + controller-token; automation also needs control-token
     //   /control/cancel   -> loopback + controller-token (browser); also requires X-Libra-Control-Token for automation leases
+    //   /task/dispatch    -> loopback + controller-token; OC-Phase 3 P3.6 user-initiated sub-agent dispatch
     //   /goal/start       -> loopback + controller-token; OC-Phase 6 P6.6
     //   /goal/cancel      -> loopback + controller-token; OC-Phase 6 P6.6
     // Codex pass-1 P1: the loopback middleware is the OUTERMOST
@@ -177,6 +178,7 @@ fn code_write_router() -> Router<WebAppState> {
         .route("/messages", post(code_message_handler))
         .route("/interactions/{id}", post(code_interaction_handler))
         .route("/control/cancel", post(code_cancel_handler))
+        .route("/task/dispatch", post(code_task_dispatch_handler))
         .route("/goal/start", post(code_goal_start_handler))
         .route("/goal/cancel", post(code_goal_cancel_handler))
         .layer(middleware::from_fn(enforce_code_write_body_limit))
@@ -742,6 +744,53 @@ async fn code_cancel_handler(
     Ok(Json(serde_json::to_value(code_ui::CodeUiAckResponse {
         accepted: true,
     })?))
+}
+
+/// `POST /api/code/task/dispatch` — explicitly dispatch a
+/// sub-agent from an automation or browser controller. Body:
+/// `{ "agent": "<agent>", "prompt": "<prompt>" }`. Requires a
+/// controller token because it mutates the transcript and may run
+/// tools. OC-Phase 3 P3.6.
+async fn code_task_dispatch_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeUiTaskDispatchRequest>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
+    let mut audit_client_id = "unknown".to_string();
+    let result = async {
+        let lease = runtime
+            .ensure_controller_write_access(token.as_deref())
+            .await?;
+        audit_kind = lease.kind;
+        audit_client_id = lease.client_id.clone();
+        if lease.kind == CodeUiControllerKind::Automation {
+            ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+        }
+        runtime
+            .task_dispatch(token.as_deref(), body.agent, body.prompt)
+            .await
+            .map_err(WebApiError::from)
+    }
+    .await;
+    append_control_audit(
+        &state,
+        &runtime,
+        "task.dispatch",
+        audit_kind,
+        &audit_client_id,
+        control_audit_outcome(&result),
+    )
+    .await;
+    let rendered = result?;
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "result": rendered,
+    })))
 }
 
 /// `POST /api/code/goal/start` — open an active Goal in the

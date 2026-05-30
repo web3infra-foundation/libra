@@ -12,7 +12,7 @@ use crate::{
     },
     info_println,
     internal::{
-        branch::{Branch, BranchStoreError, INTENT_BRANCH},
+        branch::{AGENT_TRACES_BRANCH, Branch, BranchStoreError, INTENT_BRANCH},
         head::Head,
     },
     utils::{
@@ -35,18 +35,24 @@ EXAMPLES:
     libra checkout main                    Switch to a branch (prefer: libra switch main)
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
+    libra checkout -- file.txt             Restore a path from the index (prefer: libra restore file.txt)
+    libra checkout HEAD -- file.txt        Restore a path from HEAD into index + worktree
     libra --json checkout main             Structured compatibility output
     libra checkout --quiet main            Switch without informational stdout";
 
 #[derive(Parser, Debug)]
 #[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
-    /// Target branch name
+    /// Target branch, commit, or tag to check out (prefer `libra switch` for branches)
     branch: Option<String>,
 
     /// Create and switch to a new branch with the same content as the current branch
     #[clap(short = 'b', group = "sub")]
     new_branch: Option<String>,
+
+    /// Paths to restore after an explicit `--` separator
+    #[clap(last = true, value_name = "pathspec")]
+    pathspec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +69,7 @@ struct CheckoutOutput {
     already_on: bool,
     detached: bool,
     tracking: Option<CheckoutTrackingOutput>,
+    restore: Option<restore::RestoreOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +103,9 @@ enum CheckoutError {
 
     #[error("untracked working tree file would be overwritten by checkout: {0}")]
     UntrackedOverwrite(String),
+
+    #[error("checkout path mode cannot be combined with {0}")]
+    InvalidPathMode(String),
 
     #[error("failed to {context}: {detail}")]
     BranchStoreRead { context: String, detail: String },
@@ -157,6 +167,14 @@ impl From<CheckoutError> for CliError {
             ))
             .with_stable_code(StableErrorCode::ConflictOperationBlocked),
 
+            CheckoutError::InvalidPathMode(flag) => CliError::fatal(format!(
+                "checkout path mode cannot be combined with {flag}"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(
+                "use 'libra restore' for file restoration, or omit '--' for branch checkout",
+            ),
+
             CheckoutError::BranchStoreRead { context, detail } => {
                 CliError::fatal(format!("failed to {context}: {detail}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -215,18 +233,20 @@ async fn run_checkout(
     args: CheckoutArgs,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    if !args.pathspec.is_empty() {
+        return restore_checkout_paths(args).await;
+    }
+
     if let Some(ref branch_name) = args.branch
-        && branch_name == INTENT_BRANCH
+        && (branch_name == INTENT_BRANCH || branch_name == AGENT_TRACES_BRANCH)
     {
-        return Err(CheckoutError::CheckingOutBranchBlocked(
-            INTENT_BRANCH.to_string(),
-        ));
+        return Err(CheckoutError::CheckingOutBranchBlocked(branch_name.clone()));
     }
     if let Some(ref new_branch_name) = args.new_branch
-        && new_branch_name == INTENT_BRANCH
+        && (new_branch_name == INTENT_BRANCH || new_branch_name == AGENT_TRACES_BRANCH)
     {
         return Err(CheckoutError::CreatingBranchBlocked(
-            INTENT_BRANCH.to_string(),
+            new_branch_name.clone(),
         ));
     }
 
@@ -251,6 +271,7 @@ async fn run_checkout(
             already_on: true,
             detached: false,
             tracking: None,
+            restore: None,
         });
     }
 
@@ -303,10 +324,47 @@ async fn run_checkout(
                 already_on: false,
                 detached: false,
                 tracking: None,
+                restore: None,
             })
         }
         (None, None) => show_current_branch(previous_branch, previous_commit).await,
     }
+}
+
+async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, CheckoutError> {
+    if args.new_branch.is_some() {
+        return Err(CheckoutError::InvalidPathMode("-b".to_string()));
+    }
+
+    let previous_branch = get_current_branch().await;
+    let previous_commit = current_commit_string().await?;
+    let source = args.branch;
+    let restore_args = RestoreArgs {
+        worktree: true,
+        staged: source.is_some(),
+        source,
+        pathspec: args.pathspec,
+    };
+    let restore = restore::execute_to_output(restore_args)
+        .await
+        .map_err(CheckoutError::DelegatedCli)?;
+    let was_detached = previous_branch.is_none();
+
+    Ok(CheckoutOutput {
+        action: "restore-paths".to_string(),
+        previous_branch: previous_branch.clone(),
+        previous_commit: previous_commit.clone(),
+        branch: previous_branch,
+        commit: previous_commit.clone(),
+        short_commit: previous_commit.as_deref().map(short_oid),
+        switched: false,
+        created: false,
+        pulled: false,
+        already_on: false,
+        detached: was_detached,
+        tracking: None,
+        restore: Some(restore),
+    })
 }
 
 fn map_checkout_branch_store_error(context: &str, error: BranchStoreError) -> CheckoutError {
@@ -350,9 +408,9 @@ async fn switch_branch_with_output(
     branch_name: &str,
     output: &OutputConfig,
 ) -> Result<ObjectHash, CheckoutError> {
-    if branch_name == INTENT_BRANCH {
+    if branch_name == INTENT_BRANCH || branch_name == AGENT_TRACES_BRANCH {
         return Err(CheckoutError::SwitchingToBranchBlocked(
-            INTENT_BRANCH.to_string(),
+            branch_name.to_string(),
         ));
     }
     let target_branch = Branch::find_branch_result(branch_name, None)
@@ -488,6 +546,7 @@ async fn check_and_switch_branch(
                     remote: "origin".to_string(),
                     remote_branch: format!("origin/{branch_name}"),
                 }),
+                restore: None,
             })
         }
         Some(false) => {
@@ -507,6 +566,7 @@ async fn check_and_switch_branch(
                 already_on: false,
                 detached: false,
                 tracking: None,
+                restore: None,
             })
         }
         None => Ok(CheckoutOutput {
@@ -522,6 +582,7 @@ async fn check_and_switch_branch(
             already_on: true,
             detached: false,
             tracking: None,
+            restore: None,
         }),
     }
 }
@@ -556,6 +617,7 @@ async fn show_current_branch(
                 already_on: false,
                 detached: true,
                 tracking: None,
+                restore: None,
             })
         }
         Head::Branch(current_branch) => Ok(CheckoutOutput {
@@ -571,6 +633,7 @@ async fn show_current_branch(
             already_on: false,
             detached: false,
             tracking: None,
+            restore: None,
         }),
     }
 }
@@ -616,6 +679,15 @@ fn render_checkout_output(result: &CheckoutOutput, output: &OutputConfig) -> Cli
                     tracking.remote_branch
                 );
                 println!("Switched to a new branch '{branch}'");
+            }
+        }
+        "restore-paths" => {
+            if let Some(restore) = &result.restore {
+                let total = restore.restored_files.len() + restore.deleted_files.len();
+                if total > 0 {
+                    let source_desc = restore.source.as_deref().unwrap_or("the index");
+                    println!("Updated {total} path(s) from {source_desc}");
+                }
             }
         }
         _ => {}
@@ -739,6 +811,20 @@ mod tests {
             (
                 CheckoutError::UntrackedOverwrite("a.txt".to_string()),
                 StableErrorCode::ConflictOperationBlocked,
+            ),
+            (
+                CheckoutError::BranchStoreRead {
+                    context: "resolve branch".to_string(),
+                    detail: "database is locked".to_string(),
+                },
+                StableErrorCode::IoReadFailed,
+            ),
+            (
+                CheckoutError::BranchStoreCorrupt {
+                    context: "resolve branch".to_string(),
+                    detail: "ref points to non-commit object".to_string(),
+                },
+                StableErrorCode::RepoCorrupt,
             ),
             (
                 CheckoutError::RemoteHeadMissing,

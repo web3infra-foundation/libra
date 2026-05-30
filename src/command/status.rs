@@ -22,7 +22,7 @@ use git_internal::{
 };
 use serde::Serialize;
 
-use super::stash;
+use super::{merge, stash};
 use crate::{
     command::calc_file_blob_hash,
     internal::{
@@ -58,8 +58,10 @@ EXAMPLES:
     libra status --quiet --exit-code   Silent dirty check for scripts";
 
 /// Show the working tree status.
-///
-/// See `libra status --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = STATUS_EXAMPLES)]` and render
+// at the bottom of `libra status --help`. The meta-commentary that used to
+// live here as a `///` line leaked into clap's `--help` body (see
+// `tests/command/status_test.rs::test_status_help_does_not_leak_impl_meta`).
 #[derive(Parser, Debug, Default)]
 #[command(after_help = STATUS_EXAMPLES)]
 pub struct StatusArgs {
@@ -221,6 +223,13 @@ pub struct UpstreamInfo {
     pub gone: bool,
 }
 
+/// In-progress merge metadata surfaced by `status` for recovery guidance.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeStatusInfo {
+    pub target_ref: String,
+    pub conflicted_paths: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // StatusData — shared data layer
 // ---------------------------------------------------------------------------
@@ -235,12 +244,13 @@ struct StatusData {
     ignored_files: Vec<PathBuf>,
     stash_count: Option<usize>,
     upstream: Option<UpstreamInfo>,
+    merge_state: Option<MergeStatusInfo>,
     porcelain_v2: Option<PorcelainV2Data>,
 }
 
 impl StatusData {
     fn is_dirty(&self) -> bool {
-        !self.staged.is_empty() || !self.unstaged.is_empty()
+        !self.staged.is_empty() || !self.unstaged.is_empty() || self.merge_state.is_some()
     }
 }
 
@@ -307,6 +317,27 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
 
     // Resolve upstream tracking info
     let upstream = resolve_upstream_info(&head, head_oid.as_ref()).await?;
+    let merge_state = match merge::MergeState::load_optional_sync().map_err(|detail| {
+        CliError::fatal(format!("failed to inspect merge state: {detail}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        Some(state) => {
+            if maybe_index.is_none() {
+                maybe_index = Some(load_status_index()?);
+            }
+            let index = maybe_index
+                .as_ref()
+                .ok_or_else(|| CliError::internal("status index should be loaded"))?;
+            Some(MergeStatusInfo {
+                target_ref: state.target_ref,
+                conflicted_paths: merge::unresolved_conflicted_paths(
+                    index,
+                    &state.conflicted_paths,
+                ),
+            })
+        }
+        None => None,
+    };
     let porcelain_v2 = if matches!(args.porcelain, Some(PorcelainVersion::V2)) {
         let index = maybe_index
             .take()
@@ -325,6 +356,7 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
         ignored_files,
         stash_count,
         upstream,
+        merge_state,
         porcelain_v2,
     })
 }
@@ -527,6 +559,10 @@ fn render_human_status(
         render_upstream_human(upstream, buffer)?;
     }
 
+    if let Some(merge_state) = &data.merge_state {
+        render_merge_state_human(merge_state, buffer)?;
+    }
+
     if !data.has_commits {
         writeln!(buffer, "\nNo commits yet\n").map_err(write_error)?;
     }
@@ -622,6 +658,33 @@ fn render_human_status(
         }
     }
 
+    Ok(())
+}
+
+fn render_merge_state_human(merge_state: &MergeStatusInfo, buffer: &mut Vec<u8>) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+
+    writeln!(
+        buffer,
+        "You are in the middle of a merge with '{}'.",
+        merge_state.target_ref
+    )
+    .map_err(write_error)?;
+    if merge_state.conflicted_paths.is_empty() {
+        writeln!(
+            buffer,
+            "  (all conflicts fixed: run \"libra merge --continue\")"
+        )
+        .map_err(write_error)?;
+    } else {
+        writeln!(
+            buffer,
+            "  (fix conflicts and run \"libra merge --continue\")"
+        )
+        .map_err(write_error)?;
+    }
+    writeln!(buffer, "  (use \"libra merge --abort\" to abort the merge)").map_err(write_error)?;
     Ok(())
 }
 
@@ -748,6 +811,18 @@ fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value
         "ignored": paths_to_json(&data.ignored_files),
         "is_clean": !data.is_dirty(),
     });
+
+    if let Some(merge_state) = &data.merge_state
+        && let Some(map) = json_data.as_object_mut()
+    {
+        map.insert(
+            "merge_state".to_string(),
+            serde_json::json!({
+                "target_ref": merge_state.target_ref,
+                "conflicted_paths": merge_state.conflicted_paths,
+            }),
+        );
+    }
 
     if let Some(stash_count) = data.stash_count
         && let Some(map) = json_data.as_object_mut()

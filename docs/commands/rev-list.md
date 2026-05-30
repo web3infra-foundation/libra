@@ -5,7 +5,7 @@ List commit objects reachable from a revision.
 ## Synopsis
 
 ```bash
-libra rev-list [<SPEC>]
+libra rev-list [SPEC]
 ```
 
 ## Description

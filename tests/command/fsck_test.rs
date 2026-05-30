@@ -187,15 +187,12 @@ fn test_fsck_exit_code_zero_on_success() {
 fn test_fsck_with_empty_object_id() {
     let repo = create_committed_repo_via_cli();
 
-    // fsck with empty argument should not crash
+    // fsck with empty argument should be classified as command usage, not crash
     let output = run_libra_command(&["fsck", ""], repo.path());
-    // Should return non-zero exit code for invalid input, but not crash
-    assert!(
-        output.status.code() == Some(1)
-            || output.status.code() == Some(128)
-            || output.status.code() == Some(0),
-        "fsck with empty arg should return valid exit code, got: {:?}",
-        output.status.code()
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "fsck with empty arg should return CLI usage exit code"
     );
 }
 
@@ -216,6 +213,34 @@ fn test_fsck_with_short_invalid_object_id() {
         stderr.contains("invalid") || stderr.contains("not a valid"),
         "should report invalid format, stderr: {}",
         stderr
+    );
+}
+
+#[test]
+#[serial]
+/// Tests global --json fsck errors stay in the structured CLI envelope instead
+/// of bypassing the dispatcher through a process exit.
+fn test_fsck_json_invalid_object_id_returns_structured_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "fsck", "abc123"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "invalid object id should remain a CLI usage error"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert!(
+        report.message.contains("invalid object ID: abc123"),
+        "unexpected message: {}",
+        report.message
     );
 }
 
@@ -455,6 +480,47 @@ fn test_fsck_corrupted_object() {
             combined
         );
     }
+}
+
+#[test]
+#[serial]
+/// Tests fsck rejects annotated tag objects that are syntactically valid UTF-8
+/// but missing required tag headers.
+fn test_fsck_rejects_tag_object_missing_tagger() {
+    let repo = create_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    assert_cli_success(&log_output, "log --pretty=%H");
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    let tag_data = format!(
+        "object {commit_hash}\ntype commit\ntag broken-tag\n\nmalformed tag without tagger\n"
+    );
+    let tag_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        git_internal::internal::object::types::ObjectType::Tag,
+        tag_data.as_bytes(),
+    );
+    let storage =
+        libra::utils::client_storage::ClientStorage::init(repo.path().join(".libra/objects"));
+    storage
+        .put(
+            &tag_hash,
+            tag_data.as_bytes(),
+            git_internal::internal::object::types::ObjectType::Tag,
+        )
+        .expect("write malformed tag object");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        !output.status.success(),
+        "fsck should fail on malformed tag object"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing tagger"),
+        "fsck should report missing tagger, stderr: {stderr}"
+    );
 }
 
 #[test]

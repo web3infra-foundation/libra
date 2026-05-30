@@ -31,8 +31,23 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired |
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
-| `matrix_alignment.rs` | C2 | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
+| `matrix_alignment.rs` | C2 / Web Phase E | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection; `local-tui-control.md` docs script coverage for every `/api/code/*` router endpoint; Web CI checks `web/out` drift after static export |
+| `live_compat_workflow.rs` | C2 | optional `compat-live-ai` / `compat-live-cloud` workflow stays manual/scheduled, secret-gated, and outside `base.yml` |
 | `branch_lossy_wrapper_guard.rs` | branch follow-up | `src/` production code must use branch `*_result` APIs instead of lossy compatibility wrappers |
+| `lfs_client_production_unwrap_guard.rs` | unwrap audit (v0.17.260) | `src/internal/protocol/lfs_client.rs` must not regress on bare `.unwrap()` |
+| `config_production_unwrap_guard.rs` | unwrap audit (v0.17.261) | `src/internal/config.rs` must not regress on bare `.unwrap()` |
+| `head_production_unwrap_guard.rs` | unwrap audit (v0.17.262) | `src/internal/head.rs` must not regress on bare `.unwrap()` |
+| `util_production_unwrap_guard.rs` | unwrap audit (v0.17.264) | `src/utils/util.rs` must not regress on bare `.unwrap()` |
+| `client_storage_production_unwrap_guard.rs` | unwrap audit (v0.17.264) | `src/utils/client_storage.rs` must not regress on bare `.unwrap()` |
+| `extra_production_unwrap_guard.rs` | unwrap audit (v0.17.266) | extra audited files (`lfs.rs`, `object.rs`, `storage/local.rs`, `storage/tiered.rs`, `path_ext.rs`, `git_protocol.rs`, `lfs_structs.rs`, `command/reflog.rs`) must not regress |
+| `all_production_unwrap_guard.rs` | unwrap audit (v0.17.268) | catch-all guard walking the entire `src/` tree; new modules are automatically in scope |
+| `agent_run_non_exhaustive_guard.rs` | agent_run | every `pub enum` exposed under `src/internal/ai/agent_run/` must carry `#[non_exhaustive]` so additive evolution is non-breaking |
+| `agent_docs_contract.rs` | agent plan docs | `docs/improvement/agent.md` must not claim removed provider surfaces still exist after source/tests close them |
+| `help_examples_banner.rs` | cross-cutting item B (v0.17.841) | every visible command in `src/cli.rs::Commands` renders `EXAMPLES:` / `Examples:` in `<cmd> --help` |
+| `error_codes_doc_sync.rs` | cross-cutting (v0.17.842) | every `LBR-*-NNN` literal in `src/utils/error.rs` is documented in `docs/error-codes.md` |
+| `command_docs_examples_section.rs` | cross-cutting item B (v0.17.851) | every `docs/commands/<name>.md` page carries an `## Examples` / `## Common Commands` heading |
+| `help_flag_descriptions.rs` | cross-cutting item B (v0.17.887, extended v0.17.900 / v0.17.902 / v0.17.904) | every visible flag and positional argument under `Options:` / `Arguments:` in `libra <cmd> --help` carries a non-empty description line — scans 42 root commands + 53 sub/sub-sub commands (110 surfaces). Rejects clap auto-annotations like `[default: ...]` masquerading as descriptions |
+| `help_no_impl_meta_leak.rs` | cross-cutting item B (v0.17.894, extended v0.17.901 / v0.17.911) | no `libra <cmd> --help` body contains contributor-facing rustdoc that should not have leaked into clap's `long_about`. Currently forbids 6 phrase classes: `for the same EXAMPLES rendered through clap`, `for the same examples rendered through clap`, `CLI arguments for the`, `type is wired into the top-level CLI`, `Codex pass-`, `\`\`\`text `, and `# Examples` (raw markdown heading + code fence) |
 
 ## Authoring guidelines
 

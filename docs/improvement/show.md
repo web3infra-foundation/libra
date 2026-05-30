@@ -8,7 +8,7 @@
 
 第一批全部 8 个命令的主改造已在当前代码库落地。`show` 是第三批（历史查询命令）中展示任意 Git 对象的通用命令。
 
-> **实施状态：✅ 已落地（用户契约）** — `run_show()` / `ShowOutput`、commit/tag/tree/blob JSON / machine 输出、稳定错误码、`--quiet`、refs best-effort、历史 blob strict failure 和 `--help` EXAMPLES 均已交付。完整 `ShowError` + human render split 是后续跨命令内部收口，不阻塞第三批验收。
+> **实施状态：✅ 已落地（用户契约 + 内部错误收口）** — `run_show()` / `ShowOutput`、commit/tag/tree/blob JSON / machine 输出、稳定错误码、`--quiet`、refs best-effort、历史 blob strict failure、`--help` EXAMPLES、`ShowError` typed enum 与 human render split 均已交付。`v0.17.1131` 起，show 的主要失败路径通过 `ShowError → CliError` 集中映射。
 
 **已确认落地的基线：**
 
@@ -26,6 +26,8 @@
 - commit JSON 中的 refs 已改为 best-effort 收集：无关 branch/tag 元数据损坏不会再阻塞 `show`
 - commit patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
 - `--help` EXAMPLES 已落地，`tests/command/show_test.rs` 已覆盖 bad ref 错误码、JSON schema、quiet 和 refs 回归
+- `ShowError` typed enum 已落地，bad revision、path not found、object load、unsupported object type、repo missing 均通过集中映射生成稳定错误码与 hint
+- human render split 已落地：JSON/machine 走 `run_show()`，quiet 走校验路径，默认 human 走 `render_show_human()`
 
 **基于当前代码的 Review 结论：**
 
@@ -37,8 +39,7 @@
 
 后续维护项：
 
-- **统一 `ShowError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
-- **计划文档维护**：后文保留完整设计稿写法作为实现规格；后续可继续收口为“现状 + follow-up”格式，但不阻塞第三批验收
+- **计划文档维护**：后文保留完整设计稿写法作为实现规格；后续可继续收口为“现状 + follow-up”格式，但当前没有阻塞 show 验收的代码缺口
 
 ### 目标与非目标
 
@@ -46,8 +47,7 @@
 - `run_show()` / `ShowOutput`、JSON / machine 输出、`show_bad_revision_error()` 的稳定错误码、`--quiet`、refs best-effort、历史 blob 损坏显式失败和 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 统一 `ShowError` / human render split 到后续跨命令 error/render 收口项
-- 继续用回归测试锁住 refs best-effort、pathspec JSON、tree/blob schema 和 patch/stat strict failure 等对外契约
+- 继续用回归测试锁住 refs best-effort、pathspec JSON、tree/blob schema、typed error mapping 和 patch/stat strict failure 等对外契约
 
 **本批非目标：**
 - **不引入 `--pretty` 格式支持**。log 的 `--pretty` 自定义模板在 show 中不适用（show 面向多种对象类型）
@@ -305,16 +305,20 @@ EXAMPLES:
 
 ### 测试要求
 
+#### `src/command/show.rs`（typed error 单元覆盖）
+
+- **（已落地）`ShowError → CliError` 映射覆盖**：单元测试锁定 `NotInRepo`、`BadRevision`、`PathNotFound`、`ObjectLoad`、`UnsupportedObjectType` 的 stable code、message 与 hint
+
 #### `tests/command/show_test.rs`（核心执行路径扩展）
 
 - **（已有）** badref 错误、lightweight tag、annotated tag、multiple tags、nonexistent tag、execute_safe bad ref
-- **（新增）`ShowError` 变体覆盖**：
+- **（已落地）`ShowError` 变体覆盖**：
   - `PathNotFound`：`libra show HEAD:nonexistent.rs` 返回 exit `129`
   - `UnsupportedObjectType`：内部不支持的对象类型返回错误
-- **（新增）StableErrorCode 验证**：`show_bad_revision_error()` 现在返回 `LBR-CLI-003`（修复已有测试期望）
-- **（新增）`run_show()` 结构化结果**：验证 commit/tag/tree/blob 各自的 `ShowOutput` 变体
+- **（已落地）StableErrorCode 验证**：`show_bad_revision_error()` 现在返回 `LBR-CLI-003`
+- **（已落地）`run_show()` 结构化结果**：验证 commit/tag/tree/blob 各自的 `ShowOutput` 变体
 
-#### `tests/command/show_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/show_test.rs`（JSON schema 稳定性，现有文件）
 
 - **commit `--json`**：验证所有 commit 字段类型和存在性
 - **annotated tag `--json`**：`type == "tag"`，tagger 字段存在
@@ -338,7 +342,5 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/show.rs` | **重构** | 新增 `ShowError` typed enum；新增 `ShowOutput` / `ShowCommitData` / `ShowTagData` / `ShowTreeData` / `ShowBlobData` 结构体；新增 `run_show()` 纯执行入口；`ShowError → CliError` 显式 `StableErrorCode` 映射（修复 `show_bad_revision_error()` 缺失的 stable code）；JSON 输出；补齐 `--help` EXAMPLES |
-| `tests/command/show_test.rs` | **扩展** | 新增 `ShowError` 变体覆盖、StableErrorCode 验证 |
-| `tests/command/show_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `src/command/show.rs` | **重构** | 新增 `ShowError` typed enum；新增 `ShowOutput` / `ShowCommitData` / `ShowTagData` / `ShowTreeData` / `ShowBlobData` 结构体；新增 `run_show()` 纯执行入口；`ShowError → CliError` 显式 `StableErrorCode` 映射（修复 `show_bad_revision_error()` 缺失的 stable code）；JSON 输出；补齐 `--help` EXAMPLES；新增 typed error mapping 单元测试 |
+| `tests/command/show_test.rs` | **扩展** | 覆盖 show 命令 JSON schema、quiet、bad ref、missing path、refs best-effort、历史 blob strict failure 等集成路径 |

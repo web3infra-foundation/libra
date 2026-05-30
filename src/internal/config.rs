@@ -722,6 +722,18 @@ impl ConfigKv {
         if Self::remote_config_with_conn(db, new).await?.is_some() {
             return Err(anyhow!("fatal: remote {new} already exists."));
         }
+        let ssh_old_prefix = format!("vault.ssh.{old}.");
+        let ssh_new_prefix = format!("vault.ssh.{new}.");
+        let existing_target_ssh_entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&ssh_new_prefix))
+            .all(db)
+            .await
+            .context("failed to query target SSH key entries for rename")?;
+        if !existing_target_ssh_entries.is_empty() {
+            return Err(anyhow!(
+                "fatal: SSH key namespace for remote '{new}' already exists"
+            ));
+        }
 
         // Rename remote.old.* → remote.new.*
         let old_prefix = format!("remote.{old}.");
@@ -763,8 +775,6 @@ impl ConfigKv {
         }
 
         // Cascade SSH key rename: vault.ssh.old.* → vault.ssh.new.*
-        let ssh_old_prefix = format!("vault.ssh.{old}.");
-        let ssh_new_prefix = format!("vault.ssh.{new}.");
         let ssh_entries = config_kv::Entity::find()
             .filter(config_kv::Column::Key.starts_with(&ssh_old_prefix))
             .all(db)
@@ -913,6 +923,29 @@ pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
     });
     rx.recv()
         .map_err(|_| anyhow::anyhow!("resolve_env_sync worker for '{name}' exited unexpectedly"))?
+}
+
+/// Required-value wrapper over [`resolve_env_sync`]: returns `Ok(value)`
+/// when the variable is set in the process env, the local repo's
+/// `.libra/libra.db`, or the global `~/.libra/config.db`, and a single
+/// actionable error otherwise. Provider clients use this for the
+/// API-key class of variables where missing means the provider cannot
+/// initialise.
+pub fn resolve_required_env_sync(name: &str) -> anyhow::Result<String> {
+    match resolve_env_sync(name)? {
+        Some(value) => Ok(value),
+        None => Err(anyhow::anyhow!(
+            "environment variable `{name}` is not set — export it or store it in libra config (`libra config set vault.env.{name} <value>`)"
+        )),
+    }
+}
+
+/// Optional-value wrapper over [`resolve_env_sync`]. Identical to
+/// [`resolve_env_sync`]; provided as a named alias so callers can
+/// document at the call site that the variable is optional and
+/// `Ok(None)` is the success path.
+pub fn resolve_optional_env_sync(name: &str) -> anyhow::Result<Option<String>> {
+    resolve_env_sync(name)
 }
 
 /// Resolve an environment variable using an explicit local config target.

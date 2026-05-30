@@ -289,7 +289,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
+        types::{ChangeLogEntry, ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
     };
 
     fn sample_spec() -> IntentSpec {
@@ -368,5 +368,229 @@ mod tests {
                 .any(|i| i.message.contains("unknown artifact name")),
             "{issues:?}"
         );
+    }
+
+    /// High risk + `human_in_loop.required = false` must surface an
+    /// issue at `risk.humanInLoop.required`. This complements the
+    /// existing `min_approvers` test by covering the other half of
+    /// the `validate_high_risk_human_loop` branch.
+    #[test]
+    fn high_risk_without_human_loop_required_is_flagged() {
+        let mut spec = sample_spec();
+        spec.risk.human_in_loop.required = false;
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| i.path == "risk.humanInLoop.required"),
+            "{issues:?}",
+        );
+    }
+
+    /// Low risk MUST NOT trigger `risk.humanInLoop.*` issues even when
+    /// `required = false` and `min_approvers = 0`. The high-risk gate
+    /// is conditioned on `risk.level == High`.
+    #[test]
+    fn low_risk_skips_human_loop_validation() {
+        let mut spec = sample_spec();
+        spec.risk.level = RiskLevel::Low;
+        spec.risk.human_in_loop.required = false;
+        spec.risk.human_in_loop.min_approvers = 0;
+        let issues = validate_intentspec(&spec);
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.path.starts_with("risk.humanInLoop.")),
+            "low risk must not trigger humanInLoop issues; got {issues:?}",
+        );
+    }
+
+    /// Empty `intent.objectives` must be flagged at the dedicated
+    /// `intent.objectives` path with a `must include at least one
+    /// objective` message.
+    #[test]
+    fn empty_objectives_is_flagged_at_dedicated_path() {
+        let mut spec = sample_spec();
+        spec.intent.objectives.clear();
+        let issues = validate_intentspec(&spec);
+        let objective_issue = issues
+            .iter()
+            .find(|i| i.path == "intent.objectives")
+            .expect("missing intent.objectives issue");
+        assert!(
+            objective_issue.message.contains("at least one objective"),
+            "{objective_issue:?}",
+        );
+    }
+
+    /// An objective with an empty/whitespace-only title must be
+    /// flagged with the positional path `intent.objectives[<idx>].title`.
+    /// This pins the per-index path formatting so audit log consumers
+    /// can locate the offending element.
+    #[test]
+    fn empty_objective_title_is_flagged_with_positional_path() {
+        let mut spec = sample_spec();
+        spec.intent.objectives[0].title = "  ".into();
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.path == "intent.objectives[0].title"),
+            "{issues:?}",
+        );
+    }
+
+    /// `intent.changeType = Bugfix` requires
+    /// `requireNewTestsWhenBugfix = true` on the quality gates. Test
+    /// the bugfix-specific gate without retriggering all the unrelated
+    /// checks.
+    #[test]
+    fn bugfix_without_require_new_tests_is_flagged() {
+        let mut spec = sample_spec();
+        spec.intent.change_type = ChangeType::Bugfix;
+        if let Some(quality) = spec.acceptance.quality_gates.as_mut() {
+            quality.require_new_tests_when_bugfix = Some(false);
+        }
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "acceptance.qualityGates.requireNewTestsWhenBugfix"
+                    && i.message.contains("requireNewTestsWhenBugfix=true")
+            }),
+            "{issues:?}",
+        );
+    }
+
+    /// Non-bugfix change types (e.g. Feature) MUST NOT trigger the
+    /// `requireNewTestsWhenBugfix` gate. Pins that the gate is
+    /// conditioned on `ChangeType::Bugfix`.
+    #[test]
+    fn non_bugfix_skips_bugfix_quality_gate() {
+        let mut spec = sample_spec();
+        spec.intent.change_type = ChangeType::Feature;
+        if let Some(quality) = spec.acceptance.quality_gates.as_mut() {
+            quality.require_new_tests_when_bugfix = Some(false);
+        }
+        let issues = validate_intentspec(&spec);
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.path == "acceptance.qualityGates.requireNewTestsWhenBugfix"),
+            "non-bugfix must skip this gate; got {issues:?}",
+        );
+    }
+
+    /// Empty `security.toolAcl.allow` must surface an issue. The
+    /// security ACL is the only Phase-5 hard requirement on the spec
+    /// shape.
+    #[test]
+    fn empty_security_tool_acl_allow_is_flagged() {
+        let mut spec = sample_spec();
+        spec.security.tool_acl.allow.clear();
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "security.toolAcl.allow" && i.message.contains("at least one allow rule")
+            }),
+            "{issues:?}",
+        );
+    }
+
+    /// Privacy cap invariant: `artifacts.retention.days` must equal
+    /// `min(constraints.privacy.retentionDays, artifacts.retention.days)`.
+    /// An artifact retention that exceeds the privacy cap (retaining
+    /// build/test/SAST artifacts longer than the privacy policy permits)
+    /// must be flagged — a compliance defect if it slipped through.
+    #[test]
+    fn artifact_retention_exceeding_privacy_cap_is_flagged() {
+        let mut spec = sample_spec();
+        spec.constraints.privacy.retention_days = 30;
+        spec.artifacts.retention.days = 90; // > privacy cap → min(30,90)=30 ≠ 90
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "artifacts.retention.days"
+                    // Assert the full message incl the computed expected
+                    // value (= 30) so a wrong `min` result is caught, not
+                    // just the message prefix.
+                    && i.message
+                        == "must be min(constraints.privacy.retentionDays, \
+                            artifacts.retention.days) = 30"
+            }),
+            "artifact retention above the privacy cap must be flagged with expected=30: {issues:?}",
+        );
+    }
+
+    /// Retention within the privacy cap is accepted: when
+    /// `artifacts.retention.days <= constraints.privacy.retentionDays`
+    /// the min equals the artifact value, so the rule is satisfied.
+    #[test]
+    fn artifact_retention_within_privacy_cap_passes() {
+        let mut spec = sample_spec();
+        spec.constraints.privacy.retention_days = 90;
+        spec.artifacts.retention.days = 30; // <= cap → min(90,30)=30 == 30
+        let issues = validate_intentspec(&spec);
+        assert!(
+            !issues.iter().any(|i| i.path == "artifacts.retention.days"),
+            "retention within the privacy cap must not be flagged: {issues:?}",
+        );
+    }
+
+    /// A freshly-resolved IntentSpec must start in
+    /// `LifecycleStatus::Active`; any other initial status is flagged.
+    /// Pin every non-Active variant so the rule can't silently accept
+    /// a spec that begins life Deprecated/Closed/Draft.
+    #[test]
+    fn non_active_initial_lifecycle_status_is_flagged() {
+        for status in [
+            LifecycleStatus::Draft,
+            LifecycleStatus::Deprecated,
+            LifecycleStatus::Closed,
+        ] {
+            let label = status.variant_name();
+            let mut spec = sample_spec();
+            spec.lifecycle.status = status;
+            let issues = validate_intentspec(&spec);
+            assert!(
+                issues.iter().any(|i| {
+                    i.path == "lifecycle.status"
+                        && i.message == "initial lifecycle.status must be active"
+                }),
+                "initial lifecycle.status {label} must be flagged as non-active: {issues:?}",
+            );
+        }
+    }
+
+    /// A freshly-resolved IntentSpec must have an empty
+    /// `lifecycle.changeLog` — change-log entries accrue only as the
+    /// spec is revised, never at creation. A pre-populated changelog on
+    /// a new spec is flagged.
+    #[test]
+    fn non_empty_initial_changelog_is_flagged() {
+        let mut spec = sample_spec();
+        spec.lifecycle.change_log.push(ChangeLogEntry {
+            at: "2026-05-25T00:00:00Z".to_string(),
+            by: "tester".to_string(),
+            reason: "should not be here at creation".to_string(),
+            diff_summary: "n/a".to_string(),
+        });
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues.iter().any(|i| {
+                i.path == "lifecycle.changeLog"
+                    && i.message == "initial lifecycle.changeLog must be empty"
+            }),
+            "a pre-populated initial changelog must be flagged: {issues:?}",
+        );
+    }
+
+    /// `ValidationIssue` must derive `Clone` + `PartialEq` so callers
+    /// can compare issues against a fixture set without re-rendering
+    /// from strings.
+    #[test]
+    fn validation_issue_is_clone_and_eq() {
+        let issue = ValidationIssue::new("path.to.field", "message");
+        let cloned = issue.clone();
+        assert_eq!(issue, cloned);
+        assert_eq!(cloned.path, "path.to.field");
+        assert_eq!(cloned.message, "message");
     }
 }

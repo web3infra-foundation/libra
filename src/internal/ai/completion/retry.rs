@@ -222,4 +222,289 @@ mod tests {
             "DeepSeek stream ended before a usable response: error decoding response body"
         ));
     }
+
+    /// `CompletionRetryPolicy::default()` must produce the canonical
+    /// 3-retry / 500ms-base / 5000ms-cap shape. Audit logs and the
+    /// `RetryingCompletionModel::new` shortcut rely on this surface;
+    /// pin it so a re-tune is detected here, not in production behavior.
+    #[test]
+    fn retry_policy_default_pins_canonical_values() {
+        let policy = CompletionRetryPolicy::default();
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.base_delay_ms, 500);
+        assert_eq!(policy.max_delay_ms, 5_000);
+    }
+
+    /// `backoff_delay` grows exponentially with the attempt index but
+    /// is clamped to `max_delay_ms`. Pin the canonical 100ms base /
+    /// 800ms cap table:
+    ///   attempt=1 → 100ms (100 * 2^0)
+    ///   attempt=2 → 200ms (100 * 2^1)
+    ///   attempt=3 → 400ms (100 * 2^2)
+    ///   attempt=4 → 800ms (100 * 2^3, exactly at cap)
+    ///   attempt=5 → 800ms (would be 1600 but clamped)
+    #[test]
+    fn backoff_delay_grows_exponentially_until_max() {
+        let base = 100;
+        let max = 800;
+        assert_eq!(backoff_delay(1, base, max), Duration::from_millis(100));
+        assert_eq!(backoff_delay(2, base, max), Duration::from_millis(200));
+        assert_eq!(backoff_delay(3, base, max), Duration::from_millis(400));
+        assert_eq!(backoff_delay(4, base, max), Duration::from_millis(800));
+        assert_eq!(backoff_delay(5, base, max), Duration::from_millis(800));
+        // Saturating arithmetic protects against overflow at huge attempt
+        // counts — clamped at max.
+        assert_eq!(backoff_delay(64, base, max), Duration::from_millis(800));
+    }
+
+    /// `is_retryable_error` must accept the HTTP-status-and-rate-limit
+    /// taxonomy from `docs/improvement/opencode.md` line 1109. Pin the
+    /// matrix so a future "tighten the retry set" refactor doesn't
+    /// silently drop one of the documented retryable conditions.
+    #[test]
+    fn is_retryable_error_classifies_documented_provider_transients() {
+        let cases = [
+            "Provider returned status 429: too many requests",
+            "Provider returned status 500: internal server error",
+            "Provider returned status 502: bad gateway",
+            "Provider returned status 503: service unavailable",
+            "Provider returned status 504: gateway timeout",
+            "rate limit exceeded",
+            "server_is_overloaded",
+            "server_error",
+            "temporarily unavailable",
+            "temporarily overloaded",
+            "overloaded",
+            "please try again later",
+            "operation timeout",
+            "connection timed out",
+            "connection reset by peer",
+            "error decoding response body",
+            "stream ended before a usable response",
+        ];
+        for msg in cases {
+            let err = CompletionError::ProviderError(msg.to_string());
+            assert!(is_retryable_error(&err), "expected '{msg}' to be retryable",);
+        }
+    }
+
+    /// Non-retryable error categories must surface immediately:
+    /// `JsonError`, `RequestError`, `NotImplemented`. These come from
+    /// schema/serialization paths where retrying would never change
+    /// the outcome.
+    #[test]
+    fn is_retryable_error_rejects_schema_and_request_errors() {
+        let json_err = CompletionError::JsonError(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        );
+        assert!(!is_retryable_error(&json_err));
+
+        let not_impl = CompletionError::NotImplemented("missing".to_string());
+        assert!(!is_retryable_error(&not_impl));
+
+        let req_err: Box<dyn std::error::Error + Send + Sync + 'static> = "bad request".into();
+        let req_err = CompletionError::RequestError(req_err);
+        assert!(!is_retryable_error(&req_err));
+    }
+
+    /// Provider messages that don't match any of the documented
+    /// transient patterns must NOT classify as retryable. Pins the
+    /// "unknown provider message = fail fast" rule.
+    #[test]
+    fn is_retryable_provider_message_rejects_non_transient_text() {
+        let cases = [
+            "Invalid API key",
+            "Model not found",
+            "Quota exceeded permanently",
+            "Permission denied",
+            "Request body too large",
+            "",
+        ];
+        for msg in cases {
+            assert!(
+                !is_retryable_provider_message(msg),
+                "msg '{msg}' must NOT be classified retryable",
+            );
+        }
+    }
+
+    /// `is_retryable_provider_message` is case-insensitive: the
+    /// `RATE LIMIT` and `Rate Limit` forms both match.
+    #[test]
+    fn is_retryable_provider_message_is_case_insensitive() {
+        assert!(is_retryable_provider_message("RATE LIMIT exceeded"));
+        assert!(is_retryable_provider_message("Rate Limit"));
+        assert!(is_retryable_provider_message("rate limit"));
+        assert!(is_retryable_provider_message("STATUS 503"));
+    }
+
+    /// Non-retryable errors must surface on the first attempt without
+    /// retrying. Verifies that the retry loop short-circuits via
+    /// `is_retryable_error`, not just via exhausting the attempts.
+    #[tokio::test]
+    async fn non_retryable_error_surfaces_immediately_without_retry() {
+        #[derive(Clone)]
+        struct AlwaysNotImpl {
+            attempts: Arc<AtomicUsize>,
+        }
+        impl CompletionModel for AlwaysNotImpl {
+            type Response = ();
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(CompletionError::NotImplemented(
+                    "feature missing".to_string(),
+                ))
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let wrapped = RetryingCompletionModel::new(AlwaysNotImpl {
+            attempts: Arc::clone(&attempts),
+        })
+        .with_policy(CompletionRetryPolicy {
+            max_retries: 5, // would retry 5x if classification were wrong
+            base_delay_ms: 1,
+            max_delay_ms: 2,
+        });
+
+        let result = wrapped.completion(CompletionRequest::default()).await;
+        assert!(matches!(result, Err(CompletionError::NotImplemented(_))));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "non-retryable error must NOT retry",
+        );
+    }
+
+    /// When retries are exhausted on a retryable error, the wrapper
+    /// must return that error (not the unreachable "retry loop exited"
+    /// sentinel). Pin the `attempt >= total_attempts` exit path.
+    #[tokio::test]
+    async fn exhausted_retries_returns_last_provider_error() {
+        #[derive(Clone)]
+        struct AlwaysFlaky {
+            attempts: Arc<AtomicUsize>,
+        }
+        impl CompletionModel for AlwaysFlaky {
+            type Response = ();
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(CompletionError::ProviderError(
+                    "status 503: overloaded".to_string(),
+                ))
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let wrapped = RetryingCompletionModel::new(AlwaysFlaky {
+            attempts: Arc::clone(&attempts),
+        })
+        .with_policy(CompletionRetryPolicy {
+            max_retries: 2,
+            base_delay_ms: 1,
+            max_delay_ms: 2,
+        });
+
+        let result = wrapped.completion(CompletionRequest::default()).await;
+        match result {
+            Err(CompletionError::ProviderError(msg)) => {
+                assert!(msg.contains("status 503"), "got: {msg}");
+            }
+            other => panic!("expected ProviderError; got {other:?}"),
+        }
+        // 1 initial + 2 retries = 3 total attempts.
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// `CompletionRetryObserver::on_retry` must be called once per
+    /// retry attempt (i.e. `total_attempts - 1` times when retries
+    /// are exhausted). Each event carries the correct attempt number,
+    /// total, and error string.
+    #[tokio::test]
+    async fn retry_observer_is_invoked_per_retry_with_correct_event() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct CapturingObserver {
+            events: Mutex<Vec<CompletionRetryEvent>>,
+        }
+        impl CompletionRetryObserver for CapturingObserver {
+            fn on_retry(&self, event: &CompletionRetryEvent) {
+                self.events.lock().unwrap().push(event.clone());
+            }
+        }
+
+        #[derive(Clone)]
+        struct AlwaysFlaky {
+            attempts: Arc<AtomicUsize>,
+        }
+        impl CompletionModel for AlwaysFlaky {
+            type Response = ();
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(CompletionError::ProviderError(
+                    "status 503: overloaded".to_string(),
+                ))
+            }
+        }
+
+        let observer = Arc::new(CapturingObserver::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let wrapped = RetryingCompletionModel::new(AlwaysFlaky {
+            attempts: Arc::clone(&attempts),
+        })
+        .with_policy(CompletionRetryPolicy {
+            max_retries: 2,
+            base_delay_ms: 1,
+            max_delay_ms: 2,
+        })
+        .with_observer(observer.clone());
+
+        let _ = wrapped.completion(CompletionRequest::default()).await;
+
+        let events = observer.events.lock().unwrap();
+        // max_retries = 2 → 3 total attempts → 2 retry events
+        // (the final failure doesn't emit a retry event because
+        // there's no next attempt to schedule).
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].next_attempt, 2);
+        assert_eq!(events[0].total_attempts, 3);
+        assert!(events[0].error.contains("status 503"));
+        assert_eq!(events[1].next_attempt, 3);
+        assert_eq!(events[1].total_attempts, 3);
+    }
+
+    /// `RetryingCompletionModel::new` constructor must initialize the
+    /// policy to the canonical default. Combined with the
+    /// `with_policy` / `with_observer` builders, callers should be
+    /// able to construct the wrapper with sane defaults in one line.
+    #[test]
+    fn new_constructor_uses_default_policy_and_no_observer() {
+        #[derive(Clone)]
+        struct Dummy;
+        impl CompletionModel for Dummy {
+            type Response = ();
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                unimplemented!()
+            }
+        }
+
+        let wrapped = RetryingCompletionModel::new(Dummy);
+        assert_eq!(wrapped.policy.max_retries, 3);
+        assert_eq!(wrapped.policy.base_delay_ms, 500);
+        assert_eq!(wrapped.policy.max_delay_ms, 5_000);
+        assert!(wrapped.observer.is_none());
+    }
 }

@@ -19,8 +19,6 @@
 //! MUST `use ... as ...` to avoid name collisions. We follow that pattern
 //! below.
 
-#![cfg(feature = "subagent-scaffold")]
-
 use serde::{Deserialize, Serialize};
 
 use super::{AgentRunId, AnchorScope, Confidence, EventId, EvidenceId, SourceCallId, ToolCallId};
@@ -31,6 +29,7 @@ use super::{AgentRunId, AnchorScope, Confidence, EventId, EvidenceId, SourceCall
 /// coverage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentType {
     Explorer,
     Worker,

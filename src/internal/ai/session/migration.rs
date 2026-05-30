@@ -168,3 +168,151 @@ fn is_stale_lock(lock_path: &Path) -> bool {
     };
     elapsed >= STALE_MIGRATION_LOCK_AGE
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// `legacy_session_path` must append `<id>.json` to the configured
+    /// sessions directory. Pin the path-shape contract; callers like
+    /// `code resume` rely on this exact layout to locate legacy files.
+    #[test]
+    fn legacy_session_path_appends_json_suffix() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let migrator = LegacySessionMigrator::new(tmp.path().to_path_buf());
+        let path = migrator.legacy_session_path("abc-123");
+        assert_eq!(path, tmp.path().join("abc-123.json"));
+        assert!(path.to_string_lossy().ends_with(".json"));
+    }
+
+    /// `is_stale_lock` returns `false` when the path doesn't exist —
+    /// "no lock file" is NOT a stale lock; the caller can race to
+    /// create one.
+    #[test]
+    fn is_stale_lock_false_for_missing_path() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let missing = tmp.path().join("never-created.lock");
+        assert!(!is_stale_lock(&missing));
+    }
+
+    /// `is_stale_lock` returns `false` for a freshly-created file
+    /// (within the staleness window).
+    #[test]
+    fn is_stale_lock_false_for_freshly_created_lock() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let lock_path = tmp.path().join("fresh.lock");
+        std::fs::write(&lock_path, "pid=123\n").expect("write lock");
+        assert!(!is_stale_lock(&lock_path));
+    }
+
+    /// `migrate_if_needed` returns `Ok(false)` when no legacy file
+    /// exists at the configured path — there's nothing to migrate.
+    #[test]
+    fn migrate_if_needed_returns_false_when_no_legacy_file() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        let session_root = tmp.path().join("session-root");
+        std::fs::create_dir_all(&session_root).expect("mkdir");
+
+        let migrator = LegacySessionMigrator::new(sessions_dir);
+        let migrated = migrator
+            .migrate_if_needed("nonexistent", &session_root)
+            .expect("call must succeed");
+        assert!(!migrated, "no legacy file → must report false");
+    }
+
+    /// `migrate_if_needed` returns `Ok(false)` when the JSONL store
+    /// already has events — the migration is idempotent, and a
+    /// second call is a no-op.
+    #[test]
+    fn migrate_if_needed_returns_false_when_jsonl_already_populated() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        let session_root = tmp.path().join("session-root");
+        std::fs::create_dir_all(&session_root).expect("mkdir");
+
+        // Pre-populate the JSONL store with a snapshot.
+        let jsonl = super::SessionJsonlStore::new(session_root.clone());
+        let initial = super::SessionState::new("/tmp/work");
+        jsonl
+            .append(&super::SessionEvent::snapshot(initial))
+            .expect("append snapshot");
+
+        // Also place a "legacy" file that *would* otherwise migrate.
+        let migrator = LegacySessionMigrator::new(sessions_dir.clone());
+        let legacy_path = migrator.legacy_session_path("session-id");
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_string(&super::SessionState::new("/tmp/legacy")).unwrap(),
+        )
+        .expect("write legacy");
+
+        let migrated = migrator
+            .migrate_if_needed("session-id", &session_root)
+            .expect("call must succeed");
+        assert!(
+            !migrated,
+            "JSONL store already populated → must NOT migrate again",
+        );
+    }
+
+    /// Happy-path migration: a legacy `<id>.json` file is parsed and
+    /// converted into a JSONL snapshot event.
+    #[test]
+    fn migrate_if_needed_converts_legacy_json_to_jsonl_snapshot() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        let session_root = tmp.path().join("session-root");
+
+        let migrator = LegacySessionMigrator::new(sessions_dir.clone());
+        let legacy = super::SessionState::new("/tmp/work");
+        let legacy_path = migrator.legacy_session_path("session-id");
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy).unwrap())
+            .expect("write legacy");
+
+        let migrated = migrator
+            .migrate_if_needed("session-id", &session_root)
+            .expect("migrate must succeed");
+        assert!(migrated, "legacy file exists + no JSONL → must migrate");
+
+        // The JSONL store should now have exactly one snapshot event.
+        let jsonl = super::SessionJsonlStore::new(session_root);
+        assert!(jsonl.has_events().expect("has_events"));
+    }
+
+    /// Migration is idempotent: a second `migrate_if_needed` call
+    /// after a successful migration must report `false` and leave the
+    /// JSONL store unchanged.
+    #[test]
+    fn migrate_if_needed_is_idempotent_on_second_call() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        let session_root = tmp.path().join("session-root");
+
+        let migrator = LegacySessionMigrator::new(sessions_dir.clone());
+        let legacy = super::SessionState::new("/tmp/work");
+        let legacy_path = migrator.legacy_session_path("session-id");
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy).unwrap())
+            .expect("write legacy");
+
+        // First call migrates.
+        assert!(
+            migrator
+                .migrate_if_needed("session-id", &session_root)
+                .expect("first call"),
+        );
+
+        // Second call must NOT re-migrate.
+        assert!(
+            !migrator
+                .migrate_if_needed("session-id", &session_root)
+                .expect("second call"),
+        );
+    }
+}

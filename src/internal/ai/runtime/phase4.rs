@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::internal::{
-    ai::runtime::{
-        contracts::FinalDecisionVerdict,
-        derived_records::ensure_runtime_thread,
-        phase3::{
-            ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
-            serialize_summary, timestamp_from_row,
+    ai::{
+        runtime::{
+            contracts::FinalDecisionVerdict,
+            derived_records::ensure_runtime_thread,
+            phase3::{
+                ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
+                serialize_summary, timestamp_from_row,
+            },
         },
+        session::jsonl::{AiArtifactEvent, SessionEvent, SessionJsonlStore},
     },
     model::{ai_decision_proposal, ai_risk_score_breakdown},
 };
@@ -68,6 +71,39 @@ pub enum DecisionProposalRoute {
     Abandon,
 }
 
+impl DecisionProposalRoute {
+    /// `true` only for [`AutoAccept`](Self::AutoAccept) — the path that
+    /// bypasses human review entirely.
+    pub fn is_auto_accept(self) -> bool {
+        matches!(self, DecisionProposalRoute::AutoAccept)
+    }
+
+    /// `true` when the route requires human review before the verdict
+    /// is committed. `RequestChanges` is also included here because a
+    /// rejection must surface to a human before the loop continues.
+    pub fn requires_human_review(self) -> bool {
+        matches!(
+            self,
+            DecisionProposalRoute::HumanReview
+                | DecisionProposalRoute::RequestChanges
+                | DecisionProposalRoute::Abandon
+        )
+    }
+
+    /// Stable lower-snake-case identifier matching the
+    /// `#[serde(rename_all = "snake_case")]` tag values, so audit
+    /// pipelines can stringify a `DecisionProposalRoute` without
+    /// reaching for `serde_json::to_value`.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            DecisionProposalRoute::AutoAccept => "auto_accept",
+            DecisionProposalRoute::HumanReview => "human_review",
+            DecisionProposalRoute::RequestChanges => "request_changes",
+            DecisionProposalRoute::Abandon => "abandon",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionProposalSummary {
     pub route: DecisionProposalRoute,
@@ -90,6 +126,16 @@ pub struct DecisionProposal {
     pub summary: DecisionProposalSummary,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl DecisionProposal {
+    /// Convenience: `true` when this proposal recommends the
+    /// [`AutoAccept`](DecisionProposalRoute::AutoAccept) route — i.e.
+    /// the loop can commit without a human gate. Delegates to
+    /// [`DecisionProposalRoute::is_auto_accept`].
+    pub fn is_auto_accept(&self) -> bool {
+        self.summary.route.is_auto_accept()
+    }
 }
 
 pub fn aggregate_risk_score(
@@ -261,6 +307,17 @@ impl DecisionProposalStore {
         Ok(())
     }
 
+    pub async fn write_latest_with_session_mirror(
+        &self,
+        risk: &RiskScoreBreakdown,
+        proposal: &DecisionProposal,
+        session_store: &SessionJsonlStore,
+    ) -> Result<()> {
+        self.write_latest(risk, proposal).await?;
+        append_decision_session_mirror(session_store, risk, proposal)?;
+        Ok(())
+    }
+
     pub async fn load_latest_risk(&self, thread_id: Uuid) -> Result<Option<RiskScoreBreakdown>> {
         ai_risk_score_breakdown::Entity::find()
             .filter(ai_risk_score_breakdown::Column::ThreadId.eq(thread_id.to_string()))
@@ -284,6 +341,72 @@ impl DecisionProposalStore {
             .map(proposal_from_model)
             .transpose()
     }
+}
+
+pub fn append_decision_session_mirror(
+    session_store: &SessionJsonlStore,
+    risk: &RiskScoreBreakdown,
+    proposal: &DecisionProposal,
+) -> Result<()> {
+    if risk.thread_id != proposal.thread_id {
+        bail!(
+            "Risk score thread {} does not match decision proposal thread {}",
+            risk.thread_id,
+            proposal.thread_id
+        );
+    }
+
+    let risk_event = SessionEvent::ai_artifact(risk_score_artifact_event(risk)?);
+    session_store.append(&risk_event).with_context(|| {
+        format!(
+            "Failed to append risk score {} session artifact mirror for thread {} to {}",
+            risk.breakdown_id,
+            risk.thread_id,
+            session_store.events_path().display()
+        )
+    })?;
+
+    let proposal_event = SessionEvent::ai_artifact(decision_proposal_artifact_event(proposal)?);
+    session_store.append(&proposal_event).with_context(|| {
+        format!(
+            "Failed to append decision proposal {} session artifact mirror for thread {} to {}",
+            proposal.proposal_id,
+            proposal.thread_id,
+            session_store.events_path().display()
+        )
+    })
+}
+
+pub fn risk_score_artifact_event(risk: &RiskScoreBreakdown) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: risk.thread_id,
+        artifact_kind: "risk_score_breakdown".to_string(),
+        artifact_id: Some(risk.breakdown_id.to_string()),
+        payload: serde_json::to_value(risk).with_context(|| {
+            format!(
+                "Failed to serialize risk score {} for session artifact mirror",
+                risk.breakdown_id
+            )
+        })?,
+    })
+}
+
+pub fn decision_proposal_artifact_event(proposal: &DecisionProposal) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: proposal.thread_id,
+        artifact_kind: "decision_proposal".to_string(),
+        artifact_id: Some(proposal.proposal_id.to_string()),
+        payload: serde_json::to_value(proposal).with_context(|| {
+            format!(
+                "Failed to serialize decision proposal {} for session artifact mirror",
+                proposal.proposal_id
+            )
+        })?,
+    })
 }
 
 fn risk_to_active_model(risk: &RiskScoreBreakdown) -> Result<ai_risk_score_breakdown::ActiveModel> {
@@ -359,4 +482,239 @@ fn proposal_from_model(row: ai_decision_proposal::Model) -> Result<DecisionPropo
         created_at: timestamp_from_row(row.created_at, "decision created_at")?,
         updated_at: timestamp_from_row(row.updated_at, "decision updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::runtime::phase3::{
+        ValidationReportSummary, ValidationStage, ValidationStageResult, ValidatorEngine,
+    };
+
+    fn sample_report(status: ValidationStatus) -> ValidationReport {
+        let engine = ValidatorEngine::new("test:phase4");
+        let outcome_stage = ValidationStageResult {
+            stage: ValidationStage::Integration,
+            outcome: match status {
+                ValidationStatus::Passed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::Passed
+                }
+                ValidationStatus::BlockingFailed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::BlockingFailed
+                }
+                ValidationStatus::InfrastructureFailed => {
+                    crate::internal::ai::runtime::phase3::ValidationOutcome::InfrastructureFailed
+                }
+            },
+            evidence: vec![],
+            summary: None,
+        };
+        let mut report = engine.build_report(Uuid::new_v4(), None, vec![outcome_stage]);
+        // The engine always rolls up correctly, but pin the status here
+        // for clarity in the tests.
+        assert_eq!(report.summary.status, status);
+        // Touch summary just to ensure compile reaches `summary`.
+        let _ = &report.summary as *const ValidationReportSummary;
+        report.policy_version = "test:phase4".to_string();
+        report
+    }
+
+    /// `DecisionPolicy::default` must pin to the
+    /// `DEFAULT_DECISION_POLICY_VERSION` constant and the well-known
+    /// 30-score auto-accept threshold, so policy drift across versions
+    /// is detected at compile time.
+    #[test]
+    fn decision_policy_default_pins_version_and_threshold() {
+        let policy = DecisionPolicy::default();
+        assert_eq!(policy.policy_version, DEFAULT_DECISION_POLICY_VERSION);
+        assert_eq!(policy.policy_version, "decision:v1");
+        assert_eq!(policy.auto_accept_max_score, 30);
+    }
+
+    /// `aggregate_risk_score` must produce the canonical score table:
+    /// Passed=20, BlockingFailed=75, InfrastructureFailed=90.
+    /// Pinning these values means a re-tune to the score weights breaks
+    /// the test deliberately rather than silently shifting the
+    /// auto-accept gate.
+    #[test]
+    fn aggregate_risk_score_pins_canonical_score_table() {
+        let policy = DecisionPolicy::default();
+
+        let passed = aggregate_risk_score(&sample_report(ValidationStatus::Passed), &policy);
+        assert_eq!(passed.summary.score, 20);
+        assert!(passed.summary.score <= policy.auto_accept_max_score);
+        assert_eq!(passed.summary.validation_status, ValidationStatus::Passed);
+
+        let blocking =
+            aggregate_risk_score(&sample_report(ValidationStatus::BlockingFailed), &policy);
+        assert_eq!(blocking.summary.score, 75);
+
+        let infra = aggregate_risk_score(
+            &sample_report(ValidationStatus::InfrastructureFailed),
+            &policy,
+        );
+        assert_eq!(infra.summary.score, 90);
+    }
+
+    /// `build_decision_proposal` route table:
+    /// - Passed + score ≤ threshold → AutoAccept (Accepted, no human review)
+    /// - BlockingFailed → RequestChanges (Rejected, human review)
+    /// - InfrastructureFailed → HumanReview (Abandon, human review)
+    #[test]
+    fn build_decision_proposal_routes_per_validation_status() {
+        let policy = DecisionPolicy::default();
+
+        let passed_report = sample_report(ValidationStatus::Passed);
+        let passed_risk = aggregate_risk_score(&passed_report, &policy);
+        let passed_proposal = build_decision_proposal(&passed_report, &passed_risk, &policy);
+        assert_eq!(
+            passed_proposal.summary.route,
+            DecisionProposalRoute::AutoAccept
+        );
+        assert_eq!(
+            passed_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(!passed_proposal.summary.requires_human_review);
+        assert!(passed_proposal.is_auto_accept());
+
+        let blocking_report = sample_report(ValidationStatus::BlockingFailed);
+        let blocking_risk = aggregate_risk_score(&blocking_report, &policy);
+        let blocking_proposal = build_decision_proposal(&blocking_report, &blocking_risk, &policy);
+        assert_eq!(
+            blocking_proposal.summary.route,
+            DecisionProposalRoute::RequestChanges
+        );
+        assert_eq!(
+            blocking_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Rejected
+        );
+        assert!(blocking_proposal.summary.requires_human_review);
+        assert!(!blocking_proposal.is_auto_accept());
+
+        let infra_report = sample_report(ValidationStatus::InfrastructureFailed);
+        let infra_risk = aggregate_risk_score(&infra_report, &policy);
+        let infra_proposal = build_decision_proposal(&infra_report, &infra_risk, &policy);
+        assert_eq!(
+            infra_proposal.summary.route,
+            DecisionProposalRoute::HumanReview
+        );
+        assert_eq!(
+            infra_proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Abandon
+        );
+        assert!(infra_proposal.summary.requires_human_review);
+        assert!(!infra_proposal.is_auto_accept());
+    }
+
+    /// When validation passes but the risk score crosses the
+    /// `auto_accept_max_score` threshold, the proposal must escalate to
+    /// `HumanReview` (still proposes Accepted but requires review).
+    #[test]
+    fn build_decision_proposal_passed_above_threshold_routes_to_human_review() {
+        let policy = DecisionPolicy {
+            policy_version: "test:phase4".to_string(),
+            auto_accept_max_score: 10, // force the Passed=20 score to exceed
+        };
+        let report = sample_report(ValidationStatus::Passed);
+        let risk = aggregate_risk_score(&report, &policy);
+        assert!(risk.summary.score > policy.auto_accept_max_score);
+
+        let proposal = build_decision_proposal(&report, &risk, &policy);
+        assert_eq!(proposal.summary.route, DecisionProposalRoute::HumanReview);
+        assert_eq!(
+            proposal.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+        assert!(proposal.summary.requires_human_review);
+    }
+
+    /// Pin the **exact** inclusive auto-accept boundary
+    /// (`risk.score <= policy.auto_accept_max_score`). The route-table
+    /// test only exercises 20≤30 and 20>10; neither hits the precise
+    /// edge. An off-by-one here (`<` instead of `<=`, or vice-versa) is
+    /// a security-relevant defect: it would either auto-merge a
+    /// sub-agent patch one risk point too risky, or force review on a
+    /// patch that policy says is acceptable. This constructs a
+    /// `Passed` report with a hand-built `RiskScoreBreakdown` at the
+    /// threshold and one point above it.
+    #[test]
+    fn build_decision_proposal_auto_accept_boundary_is_inclusive() {
+        let policy = DecisionPolicy {
+            policy_version: "test:phase4".to_string(),
+            auto_accept_max_score: 30,
+        };
+        let report = sample_report(ValidationStatus::Passed);
+
+        let risk_at = |score: u8| RiskScoreBreakdown {
+            breakdown_id: Uuid::new_v4(),
+            thread_id: report.thread_id,
+            validation_report_id: Some(report.report_id),
+            policy_version: "test:phase4".to_string(),
+            stale: false,
+            is_latest: true,
+            summary: RiskScoreSummary {
+                score,
+                reasons: vec![],
+                validation_status: ValidationStatus::Passed,
+            },
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // score == threshold → AutoAccept (the boundary is inclusive).
+        let at_threshold = build_decision_proposal(&report, &risk_at(30), &policy);
+        assert_eq!(
+            at_threshold.summary.route,
+            DecisionProposalRoute::AutoAccept,
+            "score exactly at auto_accept_max_score must auto-accept (`<=`)",
+        );
+        assert!(at_threshold.is_auto_accept());
+        assert!(!at_threshold.summary.requires_human_review);
+
+        // score == threshold + 1 → HumanReview (just over the edge).
+        let over_threshold = build_decision_proposal(&report, &risk_at(31), &policy);
+        assert_eq!(
+            over_threshold.summary.route,
+            DecisionProposalRoute::HumanReview,
+            "score one point over the threshold must escalate to review",
+        );
+        assert!(!over_threshold.is_auto_accept());
+        assert!(over_threshold.summary.requires_human_review);
+        // A Passed-but-too-risky patch still proposes Accepted, just gated.
+        assert_eq!(
+            over_threshold.summary.proposed_verdict,
+            FinalDecisionVerdict::Accepted
+        );
+    }
+
+    /// `DecisionProposalRoute::variant_name` must match the
+    /// `#[serde(rename_all = "snake_case")]` tag values for all four
+    /// variants. Failure means audit logs (which use variant_name) and
+    /// serialised payloads (which use the serde tag) drift apart.
+    #[test]
+    fn decision_proposal_route_variant_names_match_serde_tags() {
+        for (route, expected) in [
+            (DecisionProposalRoute::AutoAccept, "auto_accept"),
+            (DecisionProposalRoute::HumanReview, "human_review"),
+            (DecisionProposalRoute::RequestChanges, "request_changes"),
+            (DecisionProposalRoute::Abandon, "abandon"),
+        ] {
+            assert_eq!(route.variant_name(), expected);
+            let json = serde_json::to_string(&route).unwrap();
+            // Serde writes it as a JSON string literal: "auto_accept".
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    /// `requires_human_review` must include every non-AutoAccept route
+    /// (HumanReview, RequestChanges, Abandon). AutoAccept alone bypasses
+    /// the human gate.
+    #[test]
+    fn decision_proposal_route_requires_human_review_excludes_auto_accept() {
+        assert!(!DecisionProposalRoute::AutoAccept.requires_human_review());
+        assert!(DecisionProposalRoute::HumanReview.requires_human_review());
+        assert!(DecisionProposalRoute::RequestChanges.requires_human_review());
+        assert!(DecisionProposalRoute::Abandon.requires_human_review());
+    }
 }

@@ -18,7 +18,7 @@
 
   "assets": {
     "directory": ".open-next/assets",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
   },
 
   "d1_databases": [
@@ -26,15 +26,15 @@
       "binding": "LIBRA_PUBLISH_DB",
       "database_name": "libra-publish",
       "database_id": "REPLACE_WITH_D1_DATABASE_ID",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations",
+    },
   ],
 
   "r2_buckets": [
     {
       "binding": "LIBRA_PUBLISH_BUCKET",
-      "bucket_name": "libra-publish"
-    }
+      "bucket_name": "REPLACE_WITH_R2_BUCKET_NAME",
+    },
   ],
 
   // CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are required for
@@ -47,6 +47,6 @@
 
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
-  }
+    "head_sampling_rate": 1,
+  },
 }

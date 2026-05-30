@@ -74,18 +74,12 @@ const CLOUD_CLONE_TEST_R2_ROOT_ENV: &str = "LIBRA_CLOUD_CLONE_TEST_R2_ROOT";
 const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
 
 /// Clone a repository into a new directory.
-///
-/// # Examples
-///
-/// ```text
-/// libra clone git@github.com:user/repo.git             Clone via SSH
-/// libra clone https://github.com/user/repo.git          Clone via HTTPS
-/// libra clone git@github.com:user/repo.git my-dir       Clone to specific directory
-/// libra clone --bare git@github.com:user/repo.git       Create bare clone
-/// libra clone -b develop git@github.com:user/repo.git   Clone specific branch
-/// libra clone --single-branch -b main <url>             Clone only one branch
-/// libra clone --depth 1 <url>                           Shallow clone (latest commit only)
-/// ```
+//
+// The user-visible examples block is rendered by clap via the
+// `after_help = "EXAMPLES:\n    …"` attribute below — not by this
+// rustdoc. Keeping the rustdoc to one summary line stops clap from
+// echoing a markdown `# Examples` heading and triple-backtick fences
+// verbatim into `--help` output (those don't render outside cargo doc).
 #[derive(Parser, Debug, Clone)]
 #[clap(after_help = "EXAMPLES:\n    \
     libra clone git@github.com:user/repo.git             Clone via SSH\n    \
@@ -114,8 +108,8 @@ pub struct CloneArgs {
     #[clap(long)]
     pub bare: bool,
 
-    /// Create a shallow clone with a history truncated to the specified number of commits
-    #[clap(long, value_name = "DEPTH", value_parser = validate_depth)]
+    /// Create a shallow clone with history truncated to N commits (must be > 0)
+    #[clap(long, value_name = "N", value_parser = validate_depth)]
     pub depth: Option<usize>,
 }
 
@@ -451,11 +445,14 @@ impl From<CloneError> for CliError {
                 CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::AuthMissingCredentials)
                     .with_detail("clone_domain", domain.clone())
-                    .with_detail("missing_keys", "LIBRA_D1_API_TOKEN (env or vault)")
-                    .with_hint(
-                        "set LIBRA_D1_API_TOKEN in the environment or Libra vault config so \
-                         the CLI can query the configured D1 database.",
+                    .with_detail(
+                        "missing_keys",
+                        "vault.env.LIBRA_D1_API_TOKEN or LIBRA_D1_API_TOKEN",
                     )
+                .with_hint(
+                    "set vault.env.LIBRA_D1_API_TOKEN with `libra config set`, or export \
+                     LIBRA_D1_API_TOKEN, so the CLI can query the configured D1 database.",
+                )
             }
             CloneError::CloudCloneD1ApiBaseUrlInvalid {
                 ref domain,
@@ -475,8 +472,9 @@ impl From<CloneError> for CliError {
                 .with_detail("clone_domain", domain.clone())
                 .with_detail("missing_keys", missing_keys.clone())
                 .with_hint(
-                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_ACCESS_KEY, and \
-                     LIBRA_STORAGE_SECRET_KEY in the environment or Libra vault config.",
+                    "set vault.env.LIBRA_STORAGE_ENDPOINT, vault.env.LIBRA_STORAGE_ACCESS_KEY, \
+                     and vault.env.LIBRA_STORAGE_SECRET_KEY with `libra config set`, or export \
+                     the matching LIBRA_STORAGE_* variables.",
                 ),
             CloneError::CloudCloneR2ConfigRead { ref domain, .. } => {
                 CliError::fatal(error.to_string())
@@ -850,6 +848,10 @@ fn map_checkout_error(source: RestoreError) -> CliError {
         // the match exhaustive without burying the case.
         RestoreError::LockedSource(name) => CliError::fatal(format!(
             "internal error: clone checkout attempted to restore from locked branch '{name}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+        RestoreError::LockedCurrentBranch(name) => CliError::fatal(format!(
+            "internal error: clone checkout attempted to write worktree while on locked branch '{name}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
@@ -4245,6 +4247,104 @@ mod tests {
             }
             .to_string(),
             "invalid libra+cloud clone source 'libra+cloud://bad': missing site",
+        );
+    }
+
+    /// Pins the `--json` `CloneOutput` wire contract (documented in
+    /// docs/improvement/clone.md). The ordinary-Git case must carry every
+    /// always-present field — including `gitignore_converted` (the
+    /// `.gitignore` → `.libraignore` conversion report) — and must OMIT
+    /// the optional `source_kind` / `cloud_site` (their
+    /// `skip_serializing_if = Option::is_none`). A rename/drop/retype that
+    /// silently breaks JSON consumers trips here.
+    #[test]
+    fn clone_output_json_pins_ordinary_git_contract() {
+        let output = CloneOutput {
+            path: "/tmp/repo".to_string(),
+            bare: false,
+            remote_url: "git@github.com:user/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            object_format: "sha1".to_string(),
+            repo_id: "a1b2c3d4".to_string(),
+            vault_signing: true,
+            ssh_key_detected: Some("/home/u/.ssh/id_ed25519".to_string()),
+            shallow: false,
+            warnings: Vec::new(),
+            gitignore_converted: vec![".libraignore".to_string(), "sub/.libraignore".to_string()],
+            source_kind: None,
+            cloud_site: None,
+        };
+
+        let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
+        let map = value
+            .as_object()
+            .expect("CloneOutput serializes to an object");
+
+        // gitignore_converted is always present (no skip) and carries the
+        // converted-file list verbatim.
+        assert_eq!(
+            map.get("gitignore_converted"),
+            Some(&serde_json::json!([".libraignore", "sub/.libraignore"])),
+            "gitignore_converted must serialize the converted .libraignore paths",
+        );
+
+        // The always-present field set, pinned by name.
+        for key in [
+            "path",
+            "bare",
+            "remote_url",
+            "branch",
+            "object_format",
+            "repo_id",
+            "vault_signing",
+            "ssh_key_detected",
+            "shallow",
+            "warnings",
+            "gitignore_converted",
+        ] {
+            assert!(
+                map.contains_key(key),
+                "CloneOutput JSON must contain `{key}`"
+            );
+        }
+
+        // Optional source fields are omitted for ordinary Git sources.
+        assert!(
+            !map.contains_key("source_kind"),
+            "source_kind must be omitted when None (skip_serializing_if)",
+        );
+        assert!(
+            !map.contains_key("cloud_site"),
+            "cloud_site must be omitted when None (skip_serializing_if)",
+        );
+    }
+
+    /// A bare clone reports no `.gitignore` conversions (clone.md: "Empty
+    /// for bare clones"), but the key is still present as an empty array
+    /// rather than dropped — JSON consumers can rely on it always existing.
+    #[test]
+    fn clone_output_json_gitignore_converted_empty_is_present() {
+        let output = CloneOutput {
+            path: "/tmp/repo.git".to_string(),
+            bare: true,
+            remote_url: "git@github.com:user/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            object_format: "sha1".to_string(),
+            repo_id: "a1b2c3d4".to_string(),
+            vault_signing: true,
+            ssh_key_detected: None,
+            shallow: false,
+            warnings: Vec::new(),
+            gitignore_converted: Vec::new(),
+            source_kind: None,
+            cloud_site: None,
+        };
+
+        let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
+        assert_eq!(
+            value.get("gitignore_converted"),
+            Some(&serde_json::json!([])),
+            "gitignore_converted must be an empty array, not absent, for bare clones",
         );
     }
 }

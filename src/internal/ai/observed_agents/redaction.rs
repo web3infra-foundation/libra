@@ -256,6 +256,12 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
         ("slack-token", r"\bxox[abprs]-[0-9A-Za-z-]{10,72}\b"),
         // Google API keys.
         ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        // Anthropic API keys (`sk-ant-…`). MUST come BEFORE the bare
+        // `sk-…` OpenAI rule below — the OpenAI pattern is a strict
+        // superset of the Anthropic shape (both start `sk-`), so without
+        // this earlier rule Anthropic keys would be silently mistagged
+        // as `openai-api-key`.
+        ("anthropic-api-key", r"\bsk-ant-[0-9A-Za-z_-]{20,}\b"),
         // OpenAI API keys (current "sk-..." family — both legacy and project keys).
         ("openai-api-key", r"\bsk-[0-9A-Za-z_-]{20,}\b"),
         // Generic JWTs (header.payload.signature).
@@ -449,6 +455,45 @@ mod tests {
         assert_eq!(report.bytes_scanned, clean.len());
     }
 
+    /// False-positive guard: realistic non-secret developer content
+    /// must pass through untouched. The positive tests confirm secrets
+    /// ARE redacted; this confirms an over-broad rule doesn't corrupt a
+    /// captured transcript by redacting legitimate tokens (a 40-hex git
+    /// SHA, a UUID, a `path:line` ref, a semver, and prose that merely
+    /// contains the words "sk"/"key"). Each string below is a plausible
+    /// false-positive candidate — if a rule regex is ever loosened to
+    /// match one, this test flips red.
+    #[test]
+    fn clean_developer_content_is_not_over_redacted() {
+        let r = Redactor::new_default();
+        for clean in [
+            // 40-char lowercase hex git SHA — must NOT trip a rule.
+            // No rule matches a bare hex run: the entropy-bearing rules
+            // (aws-secret, etc.) require a `key=`/`secret=` context, and
+            // the structural rules (telegram `\d{8,11}:…`, discord, jwt
+            // `eyJ…`) require their own distinct shapes that 40 hex
+            // chars don't satisfy.
+            "commit 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+            // A UUID (e.g. a thread id) — hyphen-separated hex groups.
+            "thread 550e8400-e29b-41d4-a716-446655440000 resumed",
+            // A repo-relative path with a line number.
+            "see src/internal/ai/observed_agents/redaction.rs:163",
+            // A semver / version banner.
+            "libra 0.17.1004 release build",
+            // Prose containing the substrings "sk" and "key" without a
+            // key SHAPE (no `sk-`+20chars, no `AIza`, no `xox…`).
+            "the sk module exports a key helper for the task",
+        ] {
+            let (out, report) = redact_str(&r, clean);
+            assert_eq!(out, clean, "clean content must pass through unchanged");
+            assert!(
+                report.matches.is_empty(),
+                "clean content `{clean}` must not match any redaction rule, got {:?}",
+                report.matches,
+            );
+        }
+    }
+
     #[test]
     fn preserves_byte_count_metadata() {
         let r = Redactor::new_default();
@@ -493,6 +538,28 @@ mod tests {
     }
 
     // ── Phase 3.2 expanded rules ─────────────────────────────────────────
+
+    #[test]
+    fn redacts_anthropic_api_key_with_correct_tag() {
+        // Anthropic keys share the `sk-` prefix with OpenAI keys, so the
+        // more-specific `sk-ant-…` rule must fire first to give the right
+        // provider tag. If this regresses (rule order swapped or the
+        // `anthropic-api-key` rule is removed), the placeholder would be
+        // `<REDACTED:openai-api-key>` and downstream provenance would lose
+        // the Anthropic attribution.
+        let r = Redactor::new_default();
+        let key = format!("sk-ant-{}", "a".repeat(40));
+        let (out, report) = redact_str(&r, &format!("ANTHROPIC_API_KEY={key}"));
+        assert!(out.contains("<REDACTED:anthropic-api-key>"));
+        assert!(!out.contains("<REDACTED:openai-api-key>"));
+        assert!(!out.contains(&key));
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|m| m.rule_id == "anthropic-api-key")
+        );
+    }
 
     #[test]
     fn redacts_stripe_secret_key() {
@@ -665,6 +732,71 @@ mod tests {
         let (out, _) = redact_str(&r, &format!("https://api.telegram.org/bot{token}/getMe"));
         assert!(out.contains("<REDACTED:telegram-bot-token>"));
         assert!(!out.contains(token));
+    }
+
+    /// Slack tokens (`xox[abprs]-…`) must be redacted before an observed
+    /// transcript is persisted. The fixture is composed at runtime so a
+    /// literal Slack-token shape isn't checked into source (GitHub
+    /// secret-scanning push protection flags the literal shape even for
+    /// fake values).
+    #[test]
+    fn redacts_slack_token() {
+        let r = Redactor::new_default();
+        let token = format!("xoxb-{}", "a".repeat(24));
+        let (out, report) = redact_str(&r, &format!("SLACK_TOKEN={token}"));
+        assert!(out.contains("<REDACTED:slack-token>"));
+        assert!(!out.contains(&token));
+        assert!(report.matches.iter().any(|m| m.rule_id == "slack-token"));
+    }
+
+    /// Google API keys (`AIza` + 35 chars) must be redacted. Composed at
+    /// runtime to dodge secret-scanning push protection.
+    #[test]
+    fn redacts_google_api_key() {
+        let r = Redactor::new_default();
+        let key = format!("AIza{}", "a".repeat(35));
+        let (out, report) = redact_str(&r, &format!("GOOGLE_API_KEY={key}"));
+        assert!(out.contains("<REDACTED:google-api-key>"));
+        assert!(!out.contains(&key));
+        assert!(report.matches.iter().any(|m| m.rule_id == "google-api-key"));
+    }
+
+    /// OpenAI keys (`sk-…`, distinct from the more-specific `sk-ant-…`
+    /// Anthropic shape) must be redacted and tagged `openai-api-key`.
+    /// The fixture deliberately does NOT start with `ant-` so the
+    /// Anthropic rule does not claim it.
+    ///
+    /// `redacts_anthropic_api_key_with_correct_tag` already asserts the
+    /// *negative* (an `sk-ant-…` key must NOT get the `openai-api-key`
+    /// tag); this is the missing *positive* counterpart — a plain
+    /// `sk-…` key actually gets redacted and tagged `openai-api-key`.
+    #[test]
+    fn redacts_openai_api_key() {
+        let r = Redactor::new_default();
+        let key = format!("sk-{}", "a".repeat(24));
+        let (out, report) = redact_str(&r, &format!("OPENAI_API_KEY={key}"));
+        assert!(out.contains("<REDACTED:openai-api-key>"));
+        assert!(!out.contains("<REDACTED:anthropic-api-key>"));
+        assert!(!out.contains(&key));
+        assert!(report.matches.iter().any(|m| m.rule_id == "openai-api-key"));
+    }
+
+    /// JWTs (`eyJ…header.payload.signature`) must be redacted — they
+    /// frequently carry bearer credentials. Composed from three
+    /// base64url-shaped segments at runtime.
+    #[test]
+    fn redacts_jwt() {
+        let r = Redactor::new_default();
+        let jwt = format!(
+            "eyJ{}.{}.{}",
+            "a".repeat(12),
+            "b".repeat(12),
+            "c".repeat(12)
+        );
+        let (out, report) = redact_str(&r, &format!("Authorization: Bearer {jwt}"));
+        assert!(out.contains("<REDACTED:jwt>"));
+        assert!(!out.contains(&jwt));
+        assert!(report.matches.iter().any(|m| m.rule_id == "jwt"));
     }
 
     #[test]

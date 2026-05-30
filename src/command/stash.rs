@@ -1476,6 +1476,83 @@ mod tests {
         );
     }
 
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`StashError`]. JSON consumers branch on the
+    /// [`StableErrorCode`] in the error envelope; three variants
+    /// share `IoWriteFailed` (WriteObject / IndexSave / ResetFailed)
+    /// and two share both `IoReadFailed` (BranchLookupFailed /
+    /// ReadObject) and `CliInvalidArguments` (InvalidStashRef /
+    /// ClearRequiresForce). A future refactor that reroutes any
+    /// variant — for example flipping `BranchExists` from
+    /// `ConflictOperationBlocked` to `CliInvalidTarget` — silently
+    /// changes the wire surface unless every variant has its own
+    /// guard. The single-variant `stash_error_other_has_issue_url_hint`
+    /// below stays focused on the Issues-URL hint surface; this test
+    /// owns the stable_code surface contract exhaustively.
+    #[test]
+    fn stash_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            StashError::NotInRepo.stable_code(),
+            StableErrorCode::RepoNotFound,
+        );
+        assert_eq!(
+            StashError::NoInitialCommit.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            StashError::NoStashFound.stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            StashError::InvalidStashRef("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            StashError::StashNotExist(0).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            StashError::MergeConflict("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            StashError::BranchExists("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            StashError::BranchLookupFailed {
+                branch: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            StashError::ClearRequiresForce.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            StashError::ReadObject("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            StashError::WriteObject("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            StashError::IndexSave("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            StashError::ResetFailed("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            StashError::Other("ignored".to_string()).stable_code(),
+            StableErrorCode::InternalInvariant,
+        );
+    }
+
     /// Cross-Cutting G: `StashError::Other` is the catch-all bucket
     /// that maps to `InternalInvariant`. It must surface the GitHub
     /// Issues URL hint so users can report the bug.

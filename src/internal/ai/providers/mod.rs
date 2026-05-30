@@ -19,6 +19,19 @@
 //! implements `Provider` (for authentication) and `CompletionModel`
 //! (for the chat completions round-trip).
 //!
+//! ## Environment construction policy
+//!
+//! Runtime call sites that know the repository/global config identity should
+//! build clients with each provider's async `Client::from_resolved_env(...)`.
+//! That path resolves process environment variables plus Libra vault-backed
+//! config entries such as `vault.env.<PROVIDER>_API_KEY`, and is the supported
+//! bootstrap surface for `libra code`, headless web mode, and orchestration.
+//!
+//! `Client::from_env()` remains source-compatible for simple programmatic
+//! callers and legacy tests in the 0.17 line. It is a compatibility helper,
+//! not the preferred runtime bootstrap. The v0.18 release notes announce its
+//! deprecation path and the migration to `from_resolved_env`.
+//!
 //! ## Available Providers
 //!
 //! | Module       | Vendor           | Auth method              | Default base URL |

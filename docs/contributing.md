@@ -7,7 +7,7 @@ Here are some guidelines for contributing to this project:
 1. Report issues/bugs: If you find any issues or bugs in the project, please report them by creating an issue on the issue tracker. Describe the issue in detail and also mention the steps to reproduce it. The more details you provide, the easier it will be for me to investigate and fix the issue.
 2. Suggest enhancements: If you have an idea to enhance or improve this project, you can suggest it by creating an issue on the issue tracker. Explain your enhancement in detail along with its use cases and benefits. I appreciate well-thought-out enhancement suggestions.
 3. Contribute code: If you want to develop and contribute code, follow these steps:
-    - Familiarize yourself with the [Code of Conduct](CODE-OF-CONDUCT.md). libra has a strict policy against abusive, unethical, or illegal behavior.
+    - Familiarize yourself with the [Code of Conduct](code-of-conduct.md). libra has a strict policy against abusive, unethical, or illegal behavior.
     - Choose an issue to work on. Issues labeled `good first issue` are suitable for newcomers. You can also look for issues marked `help wanted`.
     - Fork the libra repository and create a branch for your changes.
     - Make your changes and commit them with a clear commit message. Sign the [Developer Certificate of Origin](https://developercertificate.org) (DCO) by adding a `Signed-off-by` line to your commit messages. This certifies that you wrote or have the right to submit the code you are contributing to the project.
@@ -23,11 +23,21 @@ Your contributions are highly appreciated. Feel free to ask any questions if you
 
 To comply with the requirements, contributors must include both a `Signed-off-by` line and a PGP signature in their commit messages. You can find more information about how to generate a PGP key [here](https://docs.github.com/en/github/authenticating-to-github/managing-commit-signature-verification/generating-a-new-gpg-key).
 
-Git even has a `-s` command line option to append this automatically to your commit message, and `-S` to sign your commit with your PGP key. For example:
+Both `libra` and `git` accept a `-s` command line option that appends the
+`Signed-off-by` trailer automatically, and a `-S` (or vault-managed identity
+configured via `libra config`) that signs the commit. For example:
 
 ```bash
+# With Libra (recommended — Libra-managed vault signing identity)
+$ libra commit -s -m 'This is my commit message'
+
+# With Git (Git-managed PGP key)
 $ git commit -S -s -m 'This is my commit message'
 ```
+
+Libra commits are vault-signed by default once `vault.signing=true` is
+configured. See [config.md](commands/config.md) for vault key generation
+and identity selection.
 
 ### Rebase the branch
 

@@ -8,6 +8,7 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -19,7 +20,14 @@ use super::parse_arguments;
 use crate::{
     internal::ai::{
         runtime::hardening::{CommandSafetySurface, SafetyDecision, SafetyDisposition},
-        sandbox::{ShellCommandRequest, run_shell_command_with_approval},
+        sandbox::{
+            ShellCommandRequest,
+            evidence::{
+                FanoutSandboxEvidenceSink, InMemorySandboxEvidenceSink, SandboxEvidenceSink,
+                TracingSandboxEvidenceSink,
+            },
+            run_shell_command_with_approval,
+        },
         tools::{
             context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
             error::{ToolError, ToolResult},
@@ -29,7 +37,7 @@ use crate::{
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-            snapshot_workspace,
+            is_cargo_cache_path, snapshot_workspace,
         },
     },
     utils::util::is_sub_path,
@@ -103,6 +111,13 @@ impl ToolHandler for ShellHandler {
         let sandbox_runtime = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.sandbox_runtime.clone());
+        let sandbox_evidence_capture = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_evidence_sink = shell_sandbox_evidence_sink(
+            sandbox_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.evidence_sink.clone()),
+            sandbox_evidence_capture.clone(),
+        );
         let approval = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.approval.clone());
@@ -119,7 +134,7 @@ impl ToolHandler for ShellHandler {
             capture_cargo_manifest_contents(&working_dir, &baseline_snapshot)?;
 
         let command_for_error = args.command.clone();
-        let output = run_shell_command_with_approval(ShellCommandRequest {
+        let output = match run_shell_command_with_approval(ShellCommandRequest {
             call_id,
             command: args.command,
             cwd: cwd.clone(),
@@ -127,22 +142,37 @@ impl ToolHandler for ShellHandler {
             max_output_bytes,
             sandbox,
             sandbox_runtime,
+            evidence_sink: Some(sandbox_evidence_sink),
             approval,
             justification: args.justification,
             safety_decision: Some(safety_decision.clone()),
         })
         .await
-        .map_err(|err| {
-            // Surface the command and cwd so the LLM has full context when the
-            // sandbox refuses to execute, rather than just a bare runtime
-            // error string.
-            ToolError::ExecutionFailed(format!(
-                "shell sandbox refused command (cwd={}): {}\ncommand: {}",
-                cwd.display(),
-                err,
-                command_for_error
-            ))
-        })?;
+        {
+            Ok(output) => output,
+            Err(err) => {
+                // Surface the command and cwd so the LLM has full context when
+                // the sandbox refuses to execute, rather than just a bare
+                // runtime error string.
+                let rendered_error = format!(
+                    "shell sandbox refused command (cwd={}): {}\ncommand: {}",
+                    cwd.display(),
+                    err,
+                    command_for_error
+                );
+                let sandbox_evidence = sandbox_evidence_metadata(&sandbox_evidence_capture);
+                if sandbox_evidence.is_empty() {
+                    return Err(ToolError::ExecutionFailed(rendered_error));
+                }
+                let metadata = serde_json::json!({
+                    "paths_written": [],
+                    "diffs": [],
+                    "safety": shell_safety_metadata(&safety_decision),
+                    "sandbox_evidence": sandbox_evidence,
+                });
+                return Ok(ToolOutput::failure(rendered_error).with_metadata(metadata));
+            }
+        };
         let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!(
                 "failed to inspect workspace changes after shell command: {err}"
@@ -159,6 +189,7 @@ impl ToolHandler for ShellHandler {
                 &baseline_manifest_contents,
             )?,
             "safety": shell_safety_metadata(&safety_decision),
+            "sandbox_evidence": sandbox_evidence_metadata(&sandbox_evidence_capture),
         });
 
         let formatted = format_output(
@@ -179,6 +210,28 @@ impl ToolHandler for ShellHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::shell()
     }
+}
+
+fn shell_sandbox_evidence_sink(
+    runtime_sink: Option<Arc<dyn SandboxEvidenceSink>>,
+    capture: Arc<InMemorySandboxEvidenceSink>,
+) -> Arc<dyn SandboxEvidenceSink> {
+    let mut sinks: Vec<Arc<dyn SandboxEvidenceSink>> = Vec::new();
+    if let Some(sink) = runtime_sink {
+        sinks.push(sink);
+    } else {
+        sinks.push(Arc::new(TracingSandboxEvidenceSink));
+    }
+    sinks.push(capture);
+    Arc::new(FanoutSandboxEvidenceSink::new(sinks))
+}
+
+fn sandbox_evidence_metadata(capture: &InMemorySandboxEvidenceSink) -> Vec<serde_json::Value> {
+    capture
+        .events()
+        .iter()
+        .map(|event| event.to_metadata_value())
+        .collect()
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -519,7 +572,7 @@ fn read_capped_utf8_file(path: &Path) -> ToolResult<Option<String>> {
 }
 
 fn is_cargo_manifest_path(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "Cargo.toml")
+    path.file_name().is_some_and(|name| name == "Cargo.toml") && !is_cargo_cache_path(path)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -534,7 +587,7 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         sandbox::{
-            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest,
+            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest, NetworkAccess,
             ReviewDecision, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
             ToolRuntimeContext, ToolSandboxContext,
         },
@@ -564,7 +617,7 @@ mod tests {
                 sandbox: Some(ToolSandboxContext {
                     policy: SandboxPolicy::WorkspaceWrite {
                         writable_roots: Vec::new(),
-                        network_access: false,
+                        network_access: NetworkAccess::Denied,
                         exclude_tmpdir_env_var: false,
                         exclude_slash_tmp: false,
                     },
@@ -987,6 +1040,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shell_metadata_captures_sandbox_rejection_evidence() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "true" }),
+            temp.path().to_path_buf(),
+        )
+        .with_runtime_context(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![PathBuf::from("/")],
+                    network_access: NetworkAccess::Denied,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            sandbox_runtime: None,
+            approval: None,
+            file_history: None,
+            max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
+        });
+
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        assert!(!result.is_success());
+        let metadata = result
+            .metadata()
+            .expect("sandbox failures should keep evidence metadata");
+        let events = metadata["sandbox_evidence"]
+            .as_array()
+            .expect("sandbox evidence should be an array");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "writable_root_rejected");
+        assert_eq!(events[0]["root"], "/");
+    }
+
+    #[tokio::test]
     #[serial]
     async fn test_shell_metadata_includes_text_file_diffs() {
         let temp = TempDir::new().unwrap();
@@ -1015,6 +1105,32 @@ mod tests {
                 .is_some_and(|diff| diff.contains("+serde = \"1\"")),
             "{diffs:?}"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_ignores_cargo_home_registry_manifest_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("cargo-home/registry/src/index/dep-1.0.0"))
+            .unwrap();
+        let manifest = temp
+            .path()
+            .join("cargo-home/registry/src/index/dep-1.0.0/Cargo.toml");
+        std::fs::write(&manifest, "[dependencies]\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "printf 'clap = \"4\"\\n' >> cargo-home/registry/src/index/dep-1.0.0/Cargo.toml"
+            }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["diffs"], serde_json::json!([]));
     }
 
     #[tokio::test]

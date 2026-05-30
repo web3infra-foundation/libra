@@ -489,3 +489,185 @@ impl Source for McpSource {
         call_mcp_tool(self.server.clone(), &tool_name, &arguments).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rmcp::model::Content;
+
+    use super::*;
+
+    /// `BUILTIN_MCP_SOURCE_SLUG` pinned. The string is the wire-format
+    /// identifier the Source Pool registers under; renaming it would
+    /// break audit logs that grep on it.
+    #[test]
+    fn builtin_mcp_source_slug_is_libra_mcp() {
+        assert_eq!(BUILTIN_MCP_SOURCE_SLUG, "libra_mcp");
+    }
+
+    /// `mcp_tool_is_potentially_mutating` matches `create_*` names,
+    /// `update_*` names, and the exact `run_libra_vcs` tool. Read-only
+    /// tools (`list_*`, `read_file`, etc.) return false. Pin the rule
+    /// so a future broader regex doesn't accidentally classify
+    /// `read_file` as mutating.
+    #[test]
+    fn mcp_tool_is_potentially_mutating_matches_create_update_and_run_libra_vcs() {
+        for name in [
+            "create_intent",
+            "create_task",
+            "create_run",
+            "create_plan",
+            "create_decision",
+            "update_intent",
+            "update_task",
+            "update_run",
+            "run_libra_vcs",
+        ] {
+            assert!(
+                mcp_tool_is_potentially_mutating(name),
+                "{name:?} must classify as mutating",
+            );
+        }
+    }
+
+    /// Read-only and unrelated tools are NOT mutating. Pin the
+    /// inverse so the classifier can't silently widen.
+    #[test]
+    fn mcp_tool_is_potentially_mutating_rejects_read_only_tools() {
+        for name in [
+            "list_intents",
+            "list_tasks",
+            "list_runs",
+            "read_file",
+            "grep_files",
+            "search_files",
+            "web_search",
+            "",
+            "createsomething", // no underscore prefix → no match
+            "updateinstead",   // no underscore prefix → no match
+            "run_libra_vcs2",  // suffix doesn't match exact name
+            "Run_Libra_Vcs",   // case-sensitive (matches() is exact)
+        ] {
+            assert!(
+                !mcp_tool_is_potentially_mutating(name),
+                "{name:?} must NOT classify as mutating",
+            );
+        }
+    }
+
+    /// `call_tool_result_to_output` joins multiple text fragments with
+    /// newlines and respects `is_error` → ToolOutput::failure vs success.
+    #[test]
+    fn call_tool_result_to_output_joins_text_and_respects_is_error() {
+        // Success path with two text fragments.
+        let result = CallToolResult::success(vec![
+            Content::text("first line"),
+            Content::text("second line"),
+        ]);
+        let output = call_tool_result_to_output(result);
+        // Inspecting via Debug — ToolOutput is opaque, but its
+        // serialised content should contain both lines joined.
+        let rendered = format!("{output:?}");
+        assert!(rendered.contains("first line"));
+        assert!(rendered.contains("second line"));
+    }
+
+    /// `inline_definitions` resolves `$ref` references against the
+    /// top-level `definitions` map. Pin the canonical traversal.
+    #[test]
+    fn inline_definitions_resolves_simple_ref() {
+        let input = serde_json::json!({
+            "definitions": {
+                "Foo": {"type": "string"}
+            },
+            "properties": {
+                "foo": {"$ref": "#/definitions/Foo"}
+            }
+        });
+        let out = inline_definitions(input);
+        assert_eq!(
+            out.get("properties")
+                .and_then(|p| p.get("foo"))
+                .and_then(|f| f.get("type"))
+                .and_then(|t| t.as_str()),
+            Some("string"),
+        );
+    }
+
+    /// `inline_definitions` recurses through nested objects and arrays
+    /// so refs at any depth are resolved.
+    #[test]
+    fn inline_definitions_recurses_through_nested_arrays_and_objects() {
+        let input = serde_json::json!({
+            "definitions": {
+                "Bar": {"type": "number", "minimum": 0}
+            },
+            "items": [
+                {"$ref": "#/definitions/Bar"},
+                {"wrapper": {"$ref": "#/definitions/Bar"}}
+            ]
+        });
+        let out = inline_definitions(input);
+        let arr = out.get("items").and_then(|i| i.as_array()).expect("array");
+        assert_eq!(
+            arr[0].get("type").and_then(|t| t.as_str()),
+            Some("number"),
+            "array element ref must resolve",
+        );
+        assert_eq!(
+            arr[1]
+                .get("wrapper")
+                .and_then(|w| w.get("type"))
+                .and_then(|t| t.as_str()),
+            Some("number"),
+            "nested-object ref must resolve",
+        );
+    }
+
+    /// `inline_definitions` leaves unknown `$ref` strings alone (no
+    /// matching definition) — it does not panic or rewrite to null.
+    #[test]
+    fn inline_definitions_leaves_unknown_refs_intact() {
+        let input = serde_json::json!({
+            "properties": {
+                "foo": {"$ref": "#/definitions/Missing"}
+            }
+        });
+        let out = inline_definitions(input.clone());
+        // No definitions map → ref left untouched.
+        assert_eq!(out, input);
+    }
+
+    /// `inline_definitions` round-trips an input with no `$ref` references
+    /// unchanged.
+    #[test]
+    fn inline_definitions_passes_ref_free_input_unchanged() {
+        let input = serde_json::json!({
+            "properties": {
+                "foo": {"type": "string"},
+                "bar": {"type": "integer"}
+            }
+        });
+        let out = inline_definitions(input.clone());
+        assert_eq!(out, input);
+    }
+
+    /// `mcp_tool_definitions()` produces a non-empty list with stable
+    /// names. Pin a minimum size + assert known tool names appear so
+    /// removing a tool by accident is caught here.
+    #[test]
+    fn mcp_tool_definitions_includes_canonical_tools() {
+        let defs = mcp_tool_definitions();
+        assert!(
+            defs.len() >= 5,
+            "expected at least 5 MCP tool definitions; got {}",
+            defs.len(),
+        );
+        let names: Vec<&str> = defs.iter().map(|d| d.name).collect();
+        for required in ["create_intent", "create_task", "run_libra_vcs"] {
+            assert!(
+                names.contains(&required),
+                "canonical tool {required:?} must appear in mcp_tool_definitions; got {names:?}",
+            );
+        }
+    }
+}

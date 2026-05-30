@@ -100,6 +100,9 @@ structured report is always present.
 | `128` | `LBR-BISECT-001` | `repo` | `bisect view` / `bisect run` invoked outside an active bisect session | running `bisect view` before `bisect start` |
 | `128` | `LBR-BISECT-002` | `internal` | `bisect run` command exited with code ≥ 128 or was killed by a signal | run script aborted via SIGINT, exit 130 |
 | `128` | `LBR-BISECT-003` | `repo` | `bisect run` cannot advance because no candidate commits remain | bisect already converged when `run` is invoked |
+| `129` | `LBR-ADD-001` | `cli` | `libra add` invoked with no matched paths and nothing already staged | `libra add nonexistent.txt` on an empty index |
+| `128` | `LBR-UNSUPPORTED-001` | `repo` | Operation declined because the requested mode is intentionally unsupported in this batch | requesting a Git feature explicitly declined in `docs/improvement/compatibility/declined.md` |
+| `128` | `LBR-AGENT-001` | `internal` | AI agent run exceeded a configured budget dimension (tokens, tool calls, wall-clock, source calls, or cost) | a sub-agent ran 500 tool calls when `max_tool_calls = 200` |
 | `9` | `LBR-WARN-001` | `warning` | Command completed with warnings | `--exit-code-on-warning` |
 
 ## Stable Codes By Category
@@ -111,6 +114,7 @@ structured report is always present.
 | `LBR-CLI-001` | Unknown command |
 | `LBR-CLI-002` | Invalid or missing CLI arguments |
 | `LBR-CLI-003` | Invalid object, revision, pathspec, or move target |
+| `LBR-ADD-001` | `libra add` matched no paths and nothing already staged |
 
 ### Repository
 
@@ -153,6 +157,13 @@ structured report is always present.
 | Stable code | Meaning |
 | --- | --- |
 | `LBR-INTERNAL-001` | Unexpected internal invariant failure |
+| `LBR-AGENT-001` | AI agent run exceeded a configured budget dimension (tokens, tool calls, wall-clock, source calls, or cost) |
+
+### Unsupported
+
+| Stable code | Meaning |
+| --- | --- |
+| `LBR-UNSUPPORTED-001` | Operation declined because the requested mode is intentionally unsupported in this batch (see `docs/improvement/compatibility/declined.md`) |
 
 Reportable internal failures (`CliError::internal`, explicit
 `InternalInvariant` mappings, and legacy `internal error` / `panic` /

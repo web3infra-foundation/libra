@@ -146,3 +146,120 @@ pub trait HookProvider: Sync {
     /// reporting and idempotent installs.
     fn hooks_are_installed(&self) -> Result<bool>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ProviderHookCommand::lifecycle_event_kind` is the canonical
+    /// 7-way mapping from CLI subcommand to lifecycle event. Pin every
+    /// pair so a future renumbering / variant addition surfaces
+    /// here — the runner's session-state mutation table depends on
+    /// this exact mapping.
+    #[test]
+    fn provider_hook_command_lifecycle_event_kind_table() {
+        let cases = [
+            (
+                ProviderHookCommand::SessionStart,
+                LifecycleEventKind::SessionStart,
+            ),
+            (ProviderHookCommand::Prompt, LifecycleEventKind::TurnStart),
+            (ProviderHookCommand::ToolUse, LifecycleEventKind::ToolUse),
+            (
+                ProviderHookCommand::ModelUpdate,
+                LifecycleEventKind::ModelUpdate,
+            ),
+            (
+                ProviderHookCommand::Compaction,
+                LifecycleEventKind::Compaction,
+            ),
+            (ProviderHookCommand::Stop, LifecycleEventKind::TurnEnd),
+            (
+                ProviderHookCommand::SessionEnd,
+                LifecycleEventKind::SessionEnd,
+            ),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(
+                command.lifecycle_event_kind(),
+                expected,
+                "command {command:?} must map to {expected:?}",
+            );
+        }
+    }
+
+    /// `ProviderHookCommand::Display` produces kebab-case strings
+    /// matching the CLI subcommand names. Pin all 7 variants so a
+    /// future rename gets caught at this gate — the CLI surface and
+    /// the provider config files both depend on these exact strings.
+    #[test]
+    fn provider_hook_command_display_uses_kebab_case() {
+        let cases = [
+            (ProviderHookCommand::SessionStart, "session-start"),
+            (ProviderHookCommand::Prompt, "prompt"),
+            (ProviderHookCommand::ToolUse, "tool-use"),
+            (ProviderHookCommand::ModelUpdate, "model-update"),
+            (ProviderHookCommand::Compaction, "compaction"),
+            (ProviderHookCommand::Stop, "stop"),
+            (ProviderHookCommand::SessionEnd, "session-end"),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(command.to_string(), expected);
+        }
+    }
+
+    /// `ProviderHookCommand::Copy` + `Eq` + `Hash` are required for
+    /// the `HashMap<Command, ...>` lookup table in
+    /// `providers::find_provider`. Pin the derives via a static
+    /// type-system check + duplicate-detection via HashSet.
+    #[test]
+    fn provider_hook_command_derives_copy_and_hash() {
+        use std::collections::HashSet;
+        let set: HashSet<ProviderHookCommand> = [
+            ProviderHookCommand::SessionStart,
+            ProviderHookCommand::Prompt,
+            ProviderHookCommand::ToolUse,
+            ProviderHookCommand::ModelUpdate,
+            ProviderHookCommand::Compaction,
+            ProviderHookCommand::Stop,
+            ProviderHookCommand::SessionEnd,
+        ]
+        .into_iter()
+        .collect();
+        // 7 distinct variants must populate 7 hash buckets.
+        assert_eq!(set.len(), 7, "all variants must be hash-distinct");
+    }
+
+    /// `ProviderInstallOptions::default()` initialises both fields
+    /// to `None` so providers can fall back to their own defaults
+    /// (binary path discovery, timeout heuristics).
+    #[test]
+    fn provider_install_options_default_is_none_for_both_fields() {
+        let opts = ProviderInstallOptions::default();
+        assert!(opts.binary_path.is_none());
+        assert!(opts.timeout_secs.is_none());
+    }
+
+    /// `CANONICAL_DEDUP_IDENTITY_KEYS` priority ordering matters —
+    /// the first non-null field wins. Pin the exact order so
+    /// providers documented to rely on `event_id` as primary key
+    /// keep that precedence.
+    #[test]
+    fn canonical_dedup_identity_keys_priority_order_is_pinned() {
+        assert_eq!(
+            CANONICAL_DEDUP_IDENTITY_KEYS,
+            &[
+                "event_id",
+                "request_id",
+                "turn_id",
+                "message_id",
+                "tool_use_id",
+                "sequence",
+                "timestamp",
+            ],
+        );
+        // Length pin so a new key addition forces a deliberate test
+        // update (and surfaces priority-ordering review).
+        assert_eq!(CANONICAL_DEDUP_IDENTITY_KEYS.len(), 7);
+    }
+}

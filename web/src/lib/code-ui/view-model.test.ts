@@ -4,6 +4,7 @@ import {
   CHAT_MESSAGE_PREVIEW_CHARS,
   CHAT_TRANSCRIPT_MESSAGE_LIMIT,
   deriveChatMessages,
+  deriveTerminalRows,
 } from "./view-model";
 import type { CodeUiSessionSnapshot, CodeUiTranscriptEntry } from "./types";
 
@@ -75,5 +76,26 @@ describe("deriveChatMessages", () => {
     expect(messages[0].body).not.toContain(tail);
     expect(messages[0].fullBody).toBe(longBody);
     expect(messages[0].hiddenChars).toBe(8 + tail.length);
+  });
+});
+
+describe("deriveTerminalRows", () => {
+  it("maps completed backend tool calls to passed terminal rows", () => {
+    const state = snapshot([]);
+    state.toolCalls = [
+      {
+        id: "tool-1",
+        toolName: "shell",
+        status: "completed",
+        summary: "cargo test",
+        details: "ok",
+        updatedAt: "2026-05-14T00:00:00Z",
+      },
+    ];
+
+    const toolRow = deriveTerminalRows(state).find((row) =>
+      row.text.includes("cargo test"),
+    );
+    expect(toolRow?.kind).toBe("pass");
   });
 });

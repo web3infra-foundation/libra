@@ -458,6 +458,39 @@ mod tests {
         assert!(result.stdout.contains("hello"));
     }
 
+    #[tokio::test]
+    async fn test_run_check_uses_task_local_build_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree_root = temp
+            .path()
+            .join(".libra/worktrees/tasks/libra-task-worktree-copy-123-019e");
+        let workspace = worktree_root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let worktree_root = worktree_root.canonicalize().unwrap();
+        let workspace = worktree_root.join("workspace");
+        let check = make_check(
+            "t8",
+            CheckKind::Command,
+            Some("printf '%s\\n%s\\n' \"$HOME\" \"$CARGO_HOME\""),
+        );
+
+        let result = run_check(&check, &workspace).await;
+
+        assert!(result.passed, "stderr: {}", result.stderr);
+        let lines = result.stdout.lines().collect::<Vec<_>>();
+        let expected = [
+            worktree_root.join("home").to_string_lossy().into_owned(),
+            worktree_root
+                .join("cargo-home")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        assert_eq!(
+            lines,
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn project_marker_recognises_known_toolchains() {
         assert!(project_marker_for_command("cargo fmt --all --check").is_some());

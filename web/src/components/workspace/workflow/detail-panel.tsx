@@ -13,6 +13,7 @@ import type {
   IntentDoc,
   PlanStep,
   StepStatus,
+  WorkflowTask,
 } from "./types";
 
 type Props = {
@@ -75,6 +76,7 @@ function DetailContent({ detail, onClose }: { detail: DetailState; onClose: () =
       <div className="flex-1 overflow-y-auto px-4 pb-7 pt-4">
         {detail.kind === "intent" && <IntentDetail intent={detail.data} />}
         {detail.kind === "plan-step" && <PlanStepDetail data={detail.data} />}
+        {detail.kind === "task" && <TaskDetail task={detail.data} />}
         {detail.kind === "run" && <RunDetail run={detail.data} />}
         {detail.kind === "validation" && <ValidationDetail />}
         {detail.kind === "release" && <ReleaseDetail />}
@@ -93,6 +95,8 @@ function detailMeta(d: DetailState) {
         title: d.data.planKind === "test" ? "Test step" : "Execution step",
         subtitle: d.data.step.id,
       };
+    case "task":
+      return { badge: "Phase 2", title: "Task", subtitle: d.data.id };
     case "run":
       return { badge: "Phase 2", title: "Run", subtitle: d.data.id };
     case "validation":
@@ -188,6 +192,46 @@ function PlanStepDetail({
         <div className="text-[12px] text-ink-3">
           Linked into the plan DAG. Downstream gates won&apos;t open until this node reports DONE.
         </div>
+      </Section>
+    </>
+  );
+}
+
+function TaskDetail({ task }: { task: WorkflowTask }) {
+  const meta = statusMeta(task.status);
+  return (
+    <>
+      <div className="mb-3 flex items-center gap-2.5">
+        <div className="min-w-0 flex-1 text-[15px] font-semibold">
+          {task.title}
+        </div>
+        <span
+          className="mono shrink-0 rounded-sm px-2 py-px text-[10px] tracking-[0.05em]"
+          style={{
+            color: meta.color,
+            background: `color-mix(in oklch, ${meta.color} 12%, var(--paper))`,
+          }}
+        >
+          {meta.label}
+        </span>
+      </div>
+
+      <Section label="Metadata">
+        <KV k="Task ID" v={task.id} />
+        <KV k="Status" v={task.status} />
+        <KV k="Updated" v={task.ago || "—"} />
+      </Section>
+
+      <Section label="Details" mono>
+        {task.details ? (
+          <pre className="mono m-0 whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">
+            {task.details}
+          </pre>
+        ) : (
+          <div className="text-[12px] leading-[1.55] text-ink-3">
+            No task details are attached to this snapshot.
+          </div>
+        )}
       </Section>
     </>
   );

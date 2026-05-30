@@ -6,7 +6,8 @@ use async_trait::async_trait;
 
 use crate::internal::ai::{
     sandbox::{
-        AskForApproval, ExecApprovalRequest, ReviewDecision, request_cached_approval_with_keys,
+        AskForApproval, ExecApprovalRequest, NetworkAccess, ReviewDecision,
+        request_cached_approval_with_keys,
     },
     session::file_history::FileHistoryStore,
     tools::{
@@ -94,7 +95,7 @@ impl ToolHandler for ApplyPatchHandler {
                     } else {
                         "outside workspace".to_string()
                     },
-                    network_access: false,
+                    network_access: NetworkAccess::Denied,
                     writable_roots: touched_paths.iter().cloned().collect(),
                     cache_disabled_reason: None,
                     response_tx,

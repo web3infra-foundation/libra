@@ -746,3 +746,35 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
 
     assert!(temp_path.path().join("dir/file.txt").exists());
 }
+
+/// `libra mv --help` surfaces the EXAMPLES banner so users see the
+/// rename / move-into-dir / multi-source / dry-run / force / JSON forms
+/// without having to read the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_mv_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for mv --help");
+    let output = run_libra_command(&["mv", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "mv --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "mv --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra mv old.txt new.txt",
+        "libra mv src/file.rs lib/",
+        "libra mv -n",
+        "libra mv -f",
+        "libra mv --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "mv --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

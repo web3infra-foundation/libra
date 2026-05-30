@@ -14,6 +14,10 @@ libra fsck [OPTIONS] [OBJECT]
 It is analogous to `git fsck` and serves as the primary diagnostic tool for detecting repository
 corruption, broken references, or data inconsistencies.
 
+Global structured-error flags such as `--json` and `--machine` are honored on
+failure paths. For example, invalid object IDs return the standard Libra CLI
+error envelope on stderr instead of bypassing the dispatcher.
+
 The command performs the following checks:
 
 - **Object hash integrity**: Recomputes SHA1/SHA256 hash and verifies it matches the stored hash
@@ -231,7 +235,9 @@ Libra supports the same object types as Git:
 - **blob**: File content
 - **tree**: Directory listing with mode, name, and object references
 - **commit**: Snapshot metadata with tree, parents, author, committer
-- **tag**: Annotated tag with target, type, tagger, and message
+- **tag**: Annotated tag with required `object`, `type`, `tag`, and `tagger`
+  headers plus an optional message. Missing or malformed tag headers fail fsck
+  with tag-specific diagnostics such as `missing tagger`.
 
 ### Hash Algorithms
 

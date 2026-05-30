@@ -5,7 +5,7 @@ Parse revision names and print normalized commit IDs, symbolic refs, or reposito
 ## Synopsis
 
 ```bash
-libra rev-parse [OPTIONS] [<SPEC>]
+libra rev-parse [OPTIONS] [SPEC]
 ```
 
 ## Description

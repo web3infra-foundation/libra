@@ -6,7 +6,7 @@ use clap::Parser;
 use git_internal::errors::GitError;
 use serde::Serialize;
 
-use super::{fetch, merge};
+use super::{fetch, merge, rebase};
 use crate::{
     internal::{
         config::{ConfigKv, RemoteConfig},
@@ -22,12 +22,21 @@ const PULL_EXAMPLES: &str = "\
 EXAMPLES:
     libra pull                             Pull from tracking remote
     libra pull origin main                 Pull specific branch from origin
+    libra pull --ff-only                   Refuse to create a merge commit
+    libra pull --rebase                    Rebase the current branch onto the upstream
     libra pull --json                      Structured JSON output for agents
-    libra pull --quiet                     Suppress progress output";
+    libra pull --quiet                     Suppress progress output
+
+NOTES:
+    By default pull uses the same merge engine as `libra merge`, including
+    clean three-way merges and merge-state conflicts. Use --ff-only to reject
+    divergent histories instead of creating a merge commit. Use --rebase to
+    replay local-only commits onto the upstream tip instead.";
 
 /// Fetch from a remote and integrate changes into the current branch.
-///
-/// See `libra pull --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = PULL_EXAMPLES)]` and render
+// at the bottom of `libra pull --help`. The meta-commentary that used to live
+// here as a `///` line leaked into clap's `--help` body.
 #[derive(Parser, Debug)]
 #[command(after_help = PULL_EXAMPLES)]
 pub struct PullArgs {
@@ -37,6 +46,14 @@ pub struct PullArgs {
     /// The refspec to pull, usually a branch name
     #[clap(requires("repository"))]
     refspec: Option<String>,
+
+    /// Rebase the current branch onto the upstream after fetching instead of merging
+    #[clap(long, short = 'r')]
+    rebase: bool,
+
+    /// Refuse to merge unless the upstream can be fast-forwarded
+    #[clap(long = "ff-only", conflicts_with = "rebase")]
+    ff_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +79,28 @@ pub struct PullMergeResult {
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub continued: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PullRebaseResult {
+    /// One of `"fast-forwarded"`, `"already-up-to-date"`, `"completed"`, or `"no-commits"`.
+    pub status: String,
+    /// HEAD before the rebase.
+    pub old_commit: String,
+    /// HEAD after the rebase.
+    pub commit: String,
+    /// Number of commits replayed onto the upstream tip.
+    pub replay_count: usize,
+    /// True when the rebase did not move HEAD.
+    pub up_to_date: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,7 +108,14 @@ pub struct PullOutput {
     pub branch: String,
     pub upstream: String,
     pub fetch: PullFetchResult,
-    pub merge: PullMergeResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge: Option<PullMergeResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<PullRebaseResult>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,11 +132,11 @@ pub(crate) enum PullError {
     #[error("pull failed during fetch phase: {0}")]
     Fetch(#[source] fetch::FetchError),
 
-    #[error("pull requires a non-fast-forward merge from '{upstream}', which is not yet supported")]
-    ManualMergeRequired { upstream: String },
-
     #[error("pull failed during merge phase: {0}")]
     Merge(#[source] merge::PullMergeError),
+
+    #[error("pull failed during rebase phase: {0}")]
+    Rebase(#[source] rebase::RebaseError),
 }
 
 impl From<PullError> for CliError {
@@ -108,21 +154,14 @@ impl From<PullError> for CliError {
                         "or set upstream with 'libra branch --set-upstream-to=<remote>/<branch>'",
                     )
             }
-            PullError::RemoteNotFound(remote) => CliError::command_usage(format!(
-                "remote '{remote}' not found"
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra remote -v' to see configured remotes"),
+            PullError::RemoteNotFound(remote) => {
+                CliError::command_usage(format!("remote '{remote}' not found"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra remote -v' to see configured remotes")
+            }
             PullError::Fetch(error) => map_fetch_error_to_cli(&error).with_detail("phase", "fetch"),
-            PullError::ManualMergeRequired { upstream } => CliError::failure(format!(
-                "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
-            ))
-            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-            .with_hint(format!(
-                "run 'libra fetch' first if needed, then merge manually with 'libra merge {upstream}'"
-            ))
-            .with_detail("phase", "merge"),
             PullError::Merge(error) => map_merge_error_to_cli(&error).with_detail("phase", "merge"),
+            PullError::Rebase(error) => CliError::from(error).with_detail("phase", "rebase"),
         }
     }
 }
@@ -132,6 +171,8 @@ impl PullArgs {
         Self {
             repository,
             refspec,
+            rebase: false,
+            ff_only: false,
         }
     }
 }
@@ -185,40 +226,73 @@ pub(crate) async fn run_pull(
     .await
     .map_err(PullError::Fetch)?;
 
-    let merge_result =
-        merge::run_merge_for_pull(&target.merge_target, &target.upstream, &child_output)
+    let fetch_summary = PullFetchResult {
+        remote: fetch_result.remote,
+        url: fetch_result.url,
+        refs_updated: fetch_result
+            .refs_updated
+            .into_iter()
+            .map(|update| PullRefUpdate {
+                remote_ref: update.remote_ref,
+                old_oid: update.old_oid,
+                new_oid: update.new_oid,
+            })
+            .collect(),
+        objects_fetched: fetch_result.objects_fetched,
+    };
+
+    if args.rebase {
+        // Rebase resolves `<remote>/<branch>` through the same public ref
+        // path used by `libra rebase`, so keep the human-readable upstream form.
+        let rebase_summary = rebase::run_rebase_for_pull(&target.upstream)
             .await
-            .map_err(|error| match error {
-                merge::PullMergeError::ManualMergeRequired { upstream } => {
-                    PullError::ManualMergeRequired { upstream }
-                }
-                other => PullError::Merge(other),
-            })?;
+            .map_err(PullError::Rebase)?;
+        let up_to_date = matches!(
+            rebase_summary.status.as_str(),
+            "already-up-to-date" | "no-commits"
+        ) || rebase_summary.old_commit == rebase_summary.commit;
+        return Ok(PullOutput {
+            branch: target.branch,
+            upstream: target.upstream,
+            fetch: fetch_summary,
+            merge: None,
+            rebase: Some(PullRebaseResult {
+                status: rebase_summary.status,
+                old_commit: rebase_summary.old_commit,
+                commit: rebase_summary.commit,
+                replay_count: rebase_summary.replay_count,
+                up_to_date,
+            }),
+        });
+    }
+
+    let merge_result = merge::run_merge_for_pull_with_options(
+        &target.merge_target,
+        &target.upstream,
+        &child_output,
+        merge::PullMergeOptions {
+            ff_only: args.ff_only,
+        },
+    )
+    .await
+    .map_err(PullError::Merge)?;
 
     Ok(PullOutput {
         branch: target.branch,
         upstream: target.upstream,
-        fetch: PullFetchResult {
-            remote: fetch_result.remote,
-            url: fetch_result.url,
-            refs_updated: fetch_result
-                .refs_updated
-                .into_iter()
-                .map(|update| PullRefUpdate {
-                    remote_ref: update.remote_ref,
-                    old_oid: update.old_oid,
-                    new_oid: update.new_oid,
-                })
-                .collect(),
-            objects_fetched: fetch_result.objects_fetched,
-        },
-        merge: PullMergeResult {
+        fetch: fetch_summary,
+        merge: Some(PullMergeResult {
             strategy: merge_result.strategy,
             old_commit: merge_result.old_commit,
             commit: merge_result.commit,
             files_changed: merge_result.files_changed,
             up_to_date: merge_result.up_to_date,
-        },
+            parents: merge_result.parents,
+            conflicted_paths: merge_result.conflicted_paths,
+            aborted: merge_result.aborted,
+            continued: merge_result.continued,
+        }),
+        rebase: None,
     })
 }
 
@@ -290,6 +364,7 @@ fn child_output_for_pull(output: &OutputConfig) -> OutputConfig {
     let mut child = output.clone();
     if output.is_json() || output.quiet {
         child.progress = ProgressMode::None;
+        child.progress_preference = crate::utils::output::ProgressPreference::None;
     }
     child
 }
@@ -329,26 +404,91 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
         }
     }
 
-    if result.merge.up_to_date {
+    if let Some(rebase) = &result.rebase {
+        render_pull_rebase_summary(&mut writer, &result.upstream, rebase)?;
+        return Ok(());
+    }
+
+    let Some(merge) = &result.merge else {
+        return Ok(());
+    };
+
+    if merge.up_to_date {
         writeln!(writer, "Already up to date.")
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
         return Ok(());
     }
 
-    if let (Some(old), Some(new)) = (&result.merge.old_commit, &result.merge.commit) {
+    if let (Some(old), Some(new)) = (&merge.old_commit, &merge.commit) {
         writeln!(writer, "Updating {}..{}", short_oid(old), short_oid(new))
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
     }
-    writeln!(writer, "Fast-forward")
-        .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
-    if result.merge.files_changed > 0 {
-        let noun = if result.merge.files_changed == 1 {
+    match merge.strategy.as_str() {
+        "three-way" => writeln!(writer, "Merge made by the 'three-way' strategy."),
+        _ => writeln!(writer, "Fast-forward"),
+    }
+    .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
+    if merge.files_changed > 0 {
+        let noun = if merge.files_changed == 1 {
             "file"
         } else {
             "files"
         };
-        writeln!(writer, " {} {} changed", result.merge.files_changed, noun)
+        writeln!(writer, " {} {} changed", merge.files_changed, noun)
             .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
+    }
+    Ok(())
+}
+
+fn render_pull_rebase_summary<W: Write>(
+    writer: &mut W,
+    upstream: &str,
+    rebase: &PullRebaseResult,
+) -> CliResult<()> {
+    let map_io_err =
+        |error: std::io::Error| CliError::io(format!("failed to write pull summary: {error}"));
+    if rebase.up_to_date {
+        writeln!(
+            writer,
+            "Current branch is already up to date with '{upstream}'."
+        )
+        .map_err(map_io_err)?;
+        return Ok(());
+    }
+    match rebase.status.as_str() {
+        "already-up-to-date" | "no-commits" => {
+            writeln!(
+                writer,
+                "Current branch is already up to date with '{upstream}'."
+            )
+            .map_err(map_io_err)?;
+        }
+        "fast-forwarded" => {
+            writeln!(
+                writer,
+                "Fast-forwarded onto '{upstream}' ({}..{}).",
+                short_oid(&rebase.old_commit),
+                short_oid(&rebase.commit),
+            )
+            .map_err(map_io_err)?;
+        }
+        _ => {
+            let commits_noun = if rebase.replay_count == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
+            writeln!(
+                writer,
+                "Successfully rebased {count} {noun} onto '{upstream}' ({old}..{new}).",
+                count = rebase.replay_count,
+                noun = commits_noun,
+                old = short_oid(&rebase.old_commit),
+                new = short_oid(&rebase.commit),
+                upstream = upstream,
+            )
+            .map_err(map_io_err)?;
+        }
     }
     Ok(())
 }
@@ -460,24 +600,48 @@ fn is_timeout_io_error(error: &std::io::Error) -> bool {
 
 fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
     match error {
+        merge::PullMergeError::MissingAction | merge::PullMergeError::ConflictingAction => {
+            CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        }
         merge::PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidTarget),
         merge::PullMergeError::TargetLoad { .. }
         | merge::PullMergeError::CurrentLoad { .. }
         | merge::PullMergeError::History(..)
-        | merge::PullMergeError::TreeLoad { .. } => {
+        | merge::PullMergeError::TreeLoad { .. }
+        | merge::PullMergeError::ObjectLoad { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
         }
         merge::PullMergeError::UnrelatedHistories => {
             CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
-        // ManualMergeRequired is extracted into PullError::ManualMergeRequired in run_pull(),
-        // so this arm is unreachable via PullError::Merge. Keep it for exhaustiveness in case
-        // map_merge_error_to_cli is called from other contexts.
-        merge::PullMergeError::ManualMergeRequired { upstream } => CliError::failure(format!(
-            "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
-        ))
-        .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+        merge::PullMergeError::NonFastForward { .. } => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
+            .with_hint("or run 'libra pull --rebase' to replay local commits"),
+        merge::PullMergeError::Conflicts { .. }
+        | merge::PullMergeError::DirtyWorktree
+        | merge::PullMergeError::UntrackedOverwrite { .. }
+        | merge::PullMergeError::MergeInProgress
+        | merge::PullMergeError::UnresolvedConflicts => CliError::failure(error.to_string())
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("resolve conflicts, then run 'libra merge --continue'")
+            .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
+        merge::PullMergeError::NoMergeInProgress => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
+        merge::PullMergeError::StateLoad(..) | merge::PullMergeError::IndexLoad(..) => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        merge::PullMergeError::StateSave(..)
+        | merge::PullMergeError::StateCleanup(..)
+        | merge::PullMergeError::IndexSave(..)
+        | merge::PullMergeError::TreeCreate(..)
+        | merge::PullMergeError::CommitSave(..)
+        | merge::PullMergeError::WorkdirReset(..) => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+        }
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
         }
@@ -525,13 +689,6 @@ mod tests {
         assert_eq!(
             PullError::RemoteNotFound("origin".to_string()).to_string(),
             "remote 'origin' not found",
-        );
-        assert_eq!(
-            PullError::ManualMergeRequired {
-                upstream: "origin/main".to_string(),
-            }
-            .to_string(),
-            "pull requires a non-fast-forward merge from 'origin/main', which is not yet supported",
         );
     }
 }

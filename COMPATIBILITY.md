@@ -38,7 +38,7 @@ batch document.
 | status | supported | |
 | clean | supported | |
 | stash | partial | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see [docs/improvement/compatibility/declined.md#d8-stash-create](docs/improvement/compatibility/declined.md#d8-stash-create) and [#d9-stash-store](docs/improvement/compatibility/declined.md#d9-stash-store)) |
-| lfs | partial | built-in Libra LFS command; uses `.libraattributes`, not Git LFS filters/hooks (see [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
+| lfs | partial | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)) |
 | log | supported | |
 | shortlog | supported | |
 | show | supported | |
@@ -50,15 +50,15 @@ batch document.
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward only; other strategies unsupported |
+| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |
 | describe | supported | |
 | cherry-pick | supported | |
-| push | partial | local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
+| push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
-| pull | partial | fast-forward only (mirroring `merge`); no `--ff-only` / `--rebase` / `--squash` strategy flags exposed; non-FF integrations report `ManualMergeRequired` |
+| pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
@@ -79,7 +79,7 @@ batch document.
 | prune | supported | |
 | verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. JSON/machine success output, render split, and typed `CheckoutError` all supported |
+| checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
@@ -97,7 +97,7 @@ batch document.
 ## LFS compatibility notes
 
 - `libra lfs`: `partial` command compatibility. Libra uses built-in pointer /
-  lock management and `.libraattributes`.
+  lock management and `.libra_attributes`.
 - Git LFS filter bridge (`.gitattributes` smudge/clean filters + `git-lfs` hook
   install): `intentionally-different` (see
   [docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge](docs/improvement/compatibility/declined.md#d5-git-lfs-gitattributes-filter--hooks-bridge)).

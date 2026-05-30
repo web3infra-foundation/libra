@@ -44,8 +44,9 @@ const LOG_EXAMPLES: &str = "\
 EXAMPLES:
     libra log -n 5                         Show the latest 5 commits
     libra log --oneline --graph            Show a compact commit graph
-    libra log --author alice --since 2026-01-01
-                                          Filter commits by author and date
+    libra log --author alice                Filter commits by author (case-insensitive substring)
+    libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
+    libra log --grep 'fix(' -n 20          Filter commits by message substring
     libra log --name-status src/           Show changed files under src/
     libra --json log -n 1                  Structured JSON output for agents";
 
@@ -121,8 +122,8 @@ pub struct LogArgs {
     /// Show abbreviated commit hash instead of full hash
     #[clap(long)]
     pub abbrev_commit: bool,
-    /// Length of abbreviated commit hash
-    #[clap(long)]
+    /// Number of hex digits for abbreviated commit hash (default: dynamically computed, min 7)
+    #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
     /// Show full hash
     #[clap(long)]
@@ -137,17 +138,17 @@ pub struct LogArgs {
     /// Show names and status of changed files
     #[clap(long)]
     pub name_status: bool,
-    /// Filter commits by author name or email
-    #[clap(long)]
+    /// Filter commits by author name or email (case-insensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
     pub author: Option<String>,
-    /// Show commits more recent than a specific date
-    #[clap(long)]
+    /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+    #[clap(long, value_name = "DATE")]
     pub since: Option<String>,
-    /// Show commits older than a specific date
-    #[clap(long)]
+    /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+    #[clap(long, value_name = "DATE")]
     pub until: Option<String>,
-    /// Custom pretty format (e.g. `%h - %s`)
-    #[clap(long)]
+    /// Custom pretty format string (e.g. `%h - %s`)
+    #[clap(long, value_name = "FORMAT")]
     pub pretty: Option<String>,
     /// Print out ref names of any commits that are shown
     #[clap(
@@ -171,8 +172,8 @@ pub struct LogArgs {
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 
-    /// Filter commits by message content (case-sensitive substring match)
-    #[clap(long)]
+    /// Filter commits whose message contains PATTERN (case-sensitive substring match)
+    #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
 }
 

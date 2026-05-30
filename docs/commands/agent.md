@@ -35,8 +35,8 @@ their hook installation path is implemented.
 | `disable` | Disable one or more external agents and uninstall hooks |
 | `session list` | List captured sessions |
 | `session show <id>` | Show a captured session |
-| `session stop <id>` | Stop a captured session when supported |
-| `session resume <id>` | Resume a stopped session when supported |
+| `session stop <id>` | Mark a captured session as stopped |
+| `session resume <id>` | Mark a stopped captured session active again |
 | `session promote <id>` | Promote a captured session into Libra intent metadata |
 | `session derive-tool-calls <id>` | Derive tool-call records from a captured session |
 | `checkpoint list` | List captured checkpoints |
@@ -53,6 +53,7 @@ their hook installation path is implemented.
 | Flag | Subcommand | Description |
 |------|------------|-------------|
 | `--agent <name>` | `enable`, `disable` | Select agent names; omit to target all stable agents |
+| `--extract-transcript <path>` | `session show` | Copy the captured transcript path from session metadata to a local file |
 | `--all` | `clean` | Clean all stopped-session checkpoints instead of only the most recent |
 | `--remote <name>` | `push` | Select the remote used for pushing agent trace refs |
 | `--dry-run` | `checkpoint rewind` | Show the impact without modifying files; this is the default |
@@ -68,6 +69,71 @@ libra --json agent status
 libra --json agent checkpoint list
 libra --json agent rpc list
 ```
+
+## Examples
+
+```bash
+# Show captured-session counts and recent checkpoint summary
+libra agent status
+
+# Enable Claude Code capture and install its hooks
+libra agent enable --agent claude
+
+# Enable every stable external agent at once
+libra agent enable
+
+# Disable Claude Code capture and uninstall its hooks
+libra agent disable --agent claude
+
+# List captured sessions
+libra agent session list
+
+# Show a session and copy its captured transcript
+libra agent session show <session-id> --extract-transcript /tmp/session.jsonl
+
+# Stop a captured session
+libra agent session stop <session-id>
+
+# Resume a stopped captured session
+libra agent session resume <session-id>
+
+# List captured checkpoints
+libra agent checkpoint list
+
+# Show a single checkpoint by id
+libra agent checkpoint show <id>
+
+# Replay a checkpoint as a JSONL transcript
+libra agent checkpoint rewind <id>
+
+# Drop temporary checkpoints from the most recent stopped session
+libra agent clean
+
+# Drop temporary checkpoints from every stopped session
+libra agent clean --all
+
+# Diagnose hook installation and capture state
+libra agent doctor
+
+# Push refs/libra/agent-traces to the default remote
+libra agent push
+
+# Push refs/libra/agent-traces to a named remote
+libra agent push --remote origin
+
+# Discover libra-agent-<name> RPC binaries on PATH
+libra agent rpc list
+
+# Invoke a single JSON-RPC method on a libra-agent-<slug> binary
+libra agent rpc invoke <slug> <method> --params '<json>'
+
+# Structured JSON envelope for agents
+libra agent --json status
+```
+
+The same banner is rendered by `libra agent --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
 
 ## Notes
 

@@ -47,7 +47,7 @@ use crate::{
     internal::ai::{
         codex::{
             model::{
-                IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepSnapshot,
+                EvidenceEvent, IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepSnapshot,
                 ProvenanceSnapshot, RunSnapshot, TaskSnapshot, ToolInvocationEvent,
             },
             types::{FileChange, PatchStatus},
@@ -69,12 +69,13 @@ use crate::{
             DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
             ValidationOutcome, ValidationReportStore, ValidationStage, ValidationStageResult,
             ValidatorEngine, aggregate_risk_score, build_decision_proposal,
-            contracts::{EvidenceKind, FinalDecisionVerdict},
+            contracts::{EvidenceKind, FinalDecisionVerdict, TaskExecutionStatus},
         },
+        session::{SessionStore, jsonl::SessionJsonlStore},
         tools::ToolOutput,
         workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
     },
-    utils::storage_ext::StorageExt,
+    utils::{storage_ext::StorageExt, util::try_get_storage_path},
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
@@ -244,6 +245,7 @@ struct RuntimeAuditState {
     latest_task_event_kind: HashMap<Uuid, TaskEventKind>,
     latest_plan_step_status: HashMap<Uuid, &'static str>,
     latest_run_event_kind: Option<RunEventKind>,
+    latest_task_run_event_kind: HashMap<Uuid, RunEventKind>,
     preview_plan_id: Option<String>,
 }
 
@@ -368,6 +370,7 @@ impl ExecutionAuditSession {
             latest_task_event_kind: HashMap::new(),
             latest_plan_step_status: HashMap::new(),
             latest_run_event_kind: Some(RunEventKind::Created),
+            latest_task_run_event_kind: HashMap::new(),
             preview_plan_id,
         }));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -553,6 +556,272 @@ impl ExecutionAuditSession {
                 .or_insert("pending");
         }
         Ok(())
+    }
+
+    pub(crate) async fn record_attempt_start(
+        &self,
+        task: &super::types::TaskSpec,
+        model_name: &str,
+        summary: Option<String>,
+    ) -> Result<crate::internal::ai::runtime::phase2::AttemptWriteOutcome, OrchestratorError> {
+        let logical_task_id = task.id();
+        let (
+            persisted_task_id,
+            existing_run_id,
+            plan_id,
+            step_id,
+            base_commit_sha,
+            initial_snapshot_id,
+            latest_task_event_kind,
+            latest_plan_step_status,
+            latest_task_run_event_kind,
+        ) = {
+            let state = self.state.lock().await;
+            (
+                state
+                    .persisted_task_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot start Phase 2 attempt for task {logical_task_id}: \
+                             no persisted task exists; call record_plan_compiled before \
+                             write_attempt_start_with_session"
+                        ))
+                    })?,
+                state.persisted_task_run_ids.get(&logical_task_id).cloned(),
+                state
+                    .persisted_plan_ids_by_task_id
+                    .get(&logical_task_id)
+                    .cloned()
+                    .or_else(|| state.latest_plan_id.clone()),
+                state
+                    .persisted_step_ids_by_task_id
+                    .get(&logical_task_id)
+                    .copied(),
+                state.base_commit_sha.clone(),
+                state.initial_snapshot_id.clone(),
+                state.latest_task_event_kind.get(&logical_task_id).cloned(),
+                state.latest_plan_step_status.get(&logical_task_id).copied(),
+                state
+                    .latest_task_run_event_kind
+                    .get(&logical_task_id)
+                    .cloned(),
+            )
+        };
+
+        if matches!(
+            latest_task_run_event_kind,
+            Some(RunEventKind::Completed | RunEventKind::Failed)
+        ) {
+            return Err(OrchestratorError::PersistenceError(format!(
+                "cannot start Phase 2 attempt for task {logical_task_id}: \
+                 its task run is already terminal"
+            )));
+        }
+
+        let start_kind = start_run_event_kind_for_task(task);
+        let run_id = if let Some(run_id) = existing_run_id {
+            run_id
+        } else {
+            let run_id = create_task_attempt_run(
+                &self.mcp_server,
+                task,
+                &persisted_task_id,
+                plan_id.as_deref(),
+                &base_commit_sha,
+                initial_snapshot_id.as_deref(),
+                model_name,
+                start_kind.clone(),
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .persisted_task_run_ids
+                .insert(logical_task_id, run_id.clone());
+            state
+                .latest_task_run_event_kind
+                .insert(logical_task_id, start_kind.clone());
+            run_id
+        };
+
+        if latest_task_event_kind.as_ref() != Some(&TaskEventKind::Running) {
+            append_task_event(
+                &self.mcp_server,
+                &self.actor,
+                &persisted_task_id,
+                Some(run_id.as_str()),
+                TaskEventKind::Running,
+                summary.clone().or_else(|| Some("task started".to_string())),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_event_kind
+                .insert(logical_task_id, TaskEventKind::Running);
+        }
+
+        if latest_plan_step_status != Some("progressing")
+            && let (Some(plan_id), Some(step_id)) = (plan_id.as_deref(), step_id)
+        {
+            create_plan_step_event(
+                &self.mcp_server,
+                plan_id,
+                &step_id.to_string(),
+                &run_id,
+                "progressing",
+                &persisted_task_id,
+                summary.clone().or_else(|| Some("task started".to_string())),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_plan_step_status
+                .insert(logical_task_id, "progressing");
+        }
+
+        let run_uuid = parse_object_id(&run_id).map_err(|e| {
+            OrchestratorError::PersistenceError(format!("invalid persisted attempt run id: {e}"))
+        })?;
+        Ok(crate::internal::ai::runtime::phase2::write_attempt_start(
+            crate::internal::ai::runtime::phase2::AttemptStartParams {
+                task_id: logical_task_id,
+                run_id: run_uuid,
+                summary,
+            },
+        ))
+    }
+
+    pub(crate) async fn record_attempt_finish(
+        &self,
+        task: &super::types::TaskSpec,
+        status: crate::internal::ai::runtime::contracts::TaskExecutionStatus,
+        summary: Option<String>,
+    ) -> Result<crate::internal::ai::runtime::phase2::AttemptWriteOutcome, OrchestratorError> {
+        let logical_task_id = task.id();
+        let (
+            persisted_task_id,
+            run_id,
+            plan_id,
+            step_id,
+            latest_task_event_kind,
+            latest_plan_step_status,
+            latest_task_run_event_kind,
+        ) = {
+            let state = self.state.lock().await;
+            (
+                state
+                    .persisted_task_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot finish Phase 2 attempt for task {logical_task_id}: \
+                             no persisted task exists; call record_plan_compiled before \
+                             write_attempt_finish_with_session"
+                        ))
+                    })?,
+                state
+                    .persisted_task_run_ids
+                    .get(&logical_task_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OrchestratorError::PersistenceError(format!(
+                            "cannot finish Phase 2 attempt for task {logical_task_id}: \
+                             no task run was started; call \
+                             write_attempt_start_with_session first"
+                        ))
+                    })?,
+                state
+                    .persisted_plan_ids_by_task_id
+                    .get(&logical_task_id)
+                    .cloned()
+                    .or_else(|| state.latest_plan_id.clone()),
+                state
+                    .persisted_step_ids_by_task_id
+                    .get(&logical_task_id)
+                    .copied(),
+                state.latest_task_event_kind.get(&logical_task_id).cloned(),
+                state.latest_plan_step_status.get(&logical_task_id).copied(),
+                state
+                    .latest_task_run_event_kind
+                    .get(&logical_task_id)
+                    .cloned(),
+            )
+        };
+        let task_event_kind = task_event_kind_for_attempt_status(&status);
+        let plan_status = plan_step_status_for_attempt_status(&status);
+        let run_event_kind = run_event_kind_for_attempt_status(&status);
+
+        if latest_task_event_kind.as_ref() != Some(&task_event_kind) {
+            append_task_event(
+                &self.mcp_server,
+                &self.actor,
+                &persisted_task_id,
+                Some(run_id.as_str()),
+                task_event_kind.clone(),
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_event_kind
+                .insert(logical_task_id, task_event_kind);
+        }
+
+        if latest_plan_step_status != Some(plan_status)
+            && let (Some(plan_id), Some(step_id)) = (plan_id.as_deref(), step_id)
+        {
+            create_plan_step_event(
+                &self.mcp_server,
+                plan_id,
+                &step_id.to_string(),
+                &run_id,
+                plan_status,
+                &persisted_task_id,
+                summary.clone(),
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_plan_step_status
+                .insert(logical_task_id, plan_status);
+        }
+
+        if latest_task_run_event_kind.as_ref() != Some(&run_event_kind) {
+            append_run_event(
+                &self.mcp_server,
+                &self.actor,
+                RunEventRequest {
+                    run_id: &run_id,
+                    kind: run_event_kind.clone(),
+                    reason: summary.clone(),
+                    error: (run_event_kind == RunEventKind::Failed).then(|| {
+                        summary
+                            .clone()
+                            .unwrap_or_else(|| "task execution failed".to_string())
+                    }),
+                    metrics: None,
+                    patchset_id: None,
+                },
+            )
+            .await?;
+            let mut state = self.state.lock().await;
+            state
+                .latest_task_run_event_kind
+                .insert(logical_task_id, run_event_kind);
+        }
+
+        let run_uuid = parse_object_id(&run_id).map_err(|e| {
+            OrchestratorError::PersistenceError(format!("invalid persisted attempt run id: {e}"))
+        })?;
+        Ok(crate::internal::ai::runtime::phase2::write_attempt_finish(
+            logical_task_id,
+            run_uuid,
+            status,
+            summary,
+        ))
     }
 
     pub async fn finalize(
@@ -1732,11 +2001,11 @@ async fn persist_runtime_event(
             tool_name,
             result,
         } => {
-            let payload = match result {
+            let payload = match &result {
                 Ok(output) => json!({
                     "invocation_id": build_runtime_invocation_key(task, &call_id),
                     "call_id": call_id,
-                    "result": tool_output_to_json(&output),
+                    "result": tool_output_to_json(output),
                     "error": serde_json::Value::Null,
                 }),
                 Err(error) => json!({
@@ -1746,20 +2015,20 @@ async fn persist_runtime_event(
                     "error": error,
                 }),
             };
+            let status = match &result {
+                Ok(output) if output.is_success() => "completed",
+                Ok(_) | Err(_) => "failed",
+            };
             persist_tool_invocation_event(
-                mcp_server,
-                &context,
-                task,
-                &call_id,
-                &tool_name,
-                if payload.get("error").is_some_and(|value| !value.is_null()) {
-                    "failed"
-                } else {
-                    "completed"
-                },
-                payload,
+                mcp_server, &context, task, &call_id, &tool_name, status, payload,
             )
             .await?;
+            if let Ok(output) = &result {
+                persist_sandbox_evidence_events(
+                    mcp_server, &context, task, &call_id, &tool_name, output,
+                )
+                .await?;
+            }
         }
         super::types::TaskRuntimeEvent::UsageUpdated { .. } => {}
     }
@@ -1850,6 +2119,49 @@ async fn persist_tool_invocation_event(
         payload,
     };
     put_history_json(mcp_server, "tool_invocation_event", &object_id, &event).await
+}
+
+async fn persist_sandbox_evidence_events(
+    mcp_server: &Arc<LibraMcpServer>,
+    context: &RuntimeEventContext,
+    task: &super::types::TaskSpec,
+    call_id: &str,
+    tool_name: &str,
+    output: &ToolOutput,
+) -> Result<(), OrchestratorError> {
+    let Some(events) = sandbox_evidence_events_from_output(output) else {
+        return Ok(());
+    };
+
+    for (index, event_data) in events.iter().enumerate() {
+        let data = json!({
+            "task_id": task.id().to_string(),
+            "tool": tool_name,
+            "call_id": call_id,
+            "event": event_data,
+        });
+        let object_id = stable_history_object_id(
+            "orchestrator_sandbox_evidence_event",
+            &json!({
+                "run_id": context.run_id,
+                "task_id": task.id().to_string(),
+                "call_id": call_id,
+                "index": index,
+                "event": event_data,
+            }),
+        )?;
+        let evidence = EvidenceEvent {
+            id: object_id.clone(),
+            run_id: context.run_id.clone(),
+            patchset_id: None,
+            at: Utc::now(),
+            kind: "sandbox".to_string(),
+            data,
+        };
+        put_history_json(mcp_server, "evidence", &object_id, &evidence).await?;
+    }
+
+    Ok(())
 }
 
 async fn append_task_event(
@@ -2073,6 +2385,14 @@ fn tool_output_to_json(output: &ToolOutput) -> serde_json::Value {
             "result": result,
         }),
     }
+}
+
+fn sandbox_evidence_events_from_output(output: &ToolOutput) -> Option<&Vec<serde_json::Value>> {
+    output
+        .metadata()
+        .and_then(|metadata| metadata.get("sandbox_evidence"))
+        .and_then(|value| value.as_array())
+        .filter(|events| !events.is_empty())
 }
 
 fn build_runtime_invocation_key(task: &super::types::TaskSpec, call_id: &str) -> String {
@@ -2713,6 +3033,115 @@ async fn create_task_run(
         .await
         .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
     parse_created_id("run", &result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_task_attempt_run(
+    mcp_server: &Arc<LibraMcpServer>,
+    task: &super::types::TaskSpec,
+    persisted_task_id: &str,
+    plan_id: Option<&str>,
+    base_commit_sha: &str,
+    context_snapshot_id: Option<&str>,
+    model_name: &str,
+    start_kind: RunEventKind,
+    summary: Option<String>,
+) -> Result<String, OrchestratorError> {
+    let status = run_event_status_label(&start_kind);
+    let metrics_json = json!({
+        "taskId": task.id(),
+        "taskTitle": task.title(),
+        "taskKind": format!("{:?}", task.kind).to_lowercase(),
+        "model": model_name,
+        "phase": "runtime_phase2_attempt_start",
+    })
+    .to_string();
+    let params = CreateRunParams {
+        task_id: persisted_task_id.to_string(),
+        base_commit_sha: base_commit_sha.to_string(),
+        plan_id: plan_id.map(ToString::to_string),
+        status: Some(status.to_string()),
+        context_snapshot_id: context_snapshot_id.map(ToString::to_string),
+        error: None,
+        agent_instances: Some(vec![AgentInstanceParams {
+            role: if task.kind == TaskKind::Gate {
+                "verifier".to_string()
+            } else {
+                "executor".to_string()
+            },
+            provider_route: Some(model_name.to_string()),
+        }]),
+        metrics_json: Some(metrics_json),
+        reason: summary.or_else(|| Some(format!("{} started", task.title()))),
+        orchestrator_version: Some("libra-runtime-phase2".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("agent".to_string()),
+        actor_id: Some(if task.kind == TaskKind::Gate {
+            "libra-verifier".to_string()
+        } else {
+            "libra-coder".to_string()
+        }),
+    };
+    let actor = resolve_actor(
+        mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = mcp_server
+        .create_run_impl(params, actor)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
+    parse_created_id("run", &result)
+}
+
+fn start_run_event_kind_for_task(task: &super::types::TaskSpec) -> RunEventKind {
+    if task.kind == TaskKind::Gate {
+        RunEventKind::Validating
+    } else {
+        RunEventKind::Patching
+    }
+}
+
+fn task_event_kind_for_attempt_status(status: &TaskExecutionStatus) -> TaskEventKind {
+    match status {
+        TaskExecutionStatus::Completed => TaskEventKind::Done,
+        TaskExecutionStatus::Cancelled => TaskEventKind::Cancelled,
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => TaskEventKind::Failed,
+    }
+}
+
+fn plan_step_status_for_attempt_status(status: &TaskExecutionStatus) -> &'static str {
+    match status {
+        TaskExecutionStatus::Completed => "completed",
+        TaskExecutionStatus::Cancelled => "skipped",
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => "failed",
+    }
+}
+
+fn run_event_kind_for_attempt_status(status: &TaskExecutionStatus) -> RunEventKind {
+    match status {
+        TaskExecutionStatus::Completed => RunEventKind::Completed,
+        TaskExecutionStatus::Failed
+        | TaskExecutionStatus::Cancelled
+        | TaskExecutionStatus::TimedOut
+        | TaskExecutionStatus::Interrupted => RunEventKind::Failed,
+    }
+}
+
+fn run_event_status_label(kind: &RunEventKind) -> &'static str {
+    match kind {
+        RunEventKind::Created => "created",
+        RunEventKind::Patching => "patching",
+        RunEventKind::Validating => "validating",
+        RunEventKind::Completed => "completed",
+        RunEventKind::Failed => "failed",
+        RunEventKind::Checkpointed => "checkpointed",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3615,24 +4044,36 @@ async fn persist_validation_decision_derivatives(
     align_decision_proposal_with_outcome(&mut proposal, decision);
 
     let db = history.database_connection();
-    ValidationReportStore::new(db.clone())
-        .write_latest(&report)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist validation report {} for thread {}: {error}",
-                report.report_id, report.thread_id
-            ))
-        })?;
-    DecisionProposalStore::new(db)
-        .write_latest(&risk, &proposal)
-        .await
-        .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
-                "failed to persist decision proposal {} for thread {}: {error}",
-                proposal.proposal_id, proposal.thread_id
-            ))
-        })?;
+    let session_mirror = session_jsonl_store_for_thread(mcp_server, thread_id);
+    let validation_store = ValidationReportStore::new(db.clone());
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        validation_store
+            .write_latest_with_session_mirror(&report, session_mirror)
+            .await
+    } else {
+        validation_store.write_latest(&report).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist validation report {} for thread {}: {error}",
+            report.report_id, report.thread_id
+        ))
+    })?;
+
+    let decision_store = DecisionProposalStore::new(db);
+    if let Some(session_mirror) = session_mirror.as_ref() {
+        decision_store
+            .write_latest_with_session_mirror(&risk, &proposal, session_mirror)
+            .await
+    } else {
+        decision_store.write_latest(&risk, &proposal).await
+    }
+    .map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "failed to persist decision proposal {} for thread {}: {error}",
+            proposal.proposal_id, proposal.thread_id
+        ))
+    })?;
 
     Ok(PersistedDerivedRecords {
         validation_report_id: report.report_id,
@@ -3664,6 +4105,40 @@ fn align_decision_proposal_with_outcome(
                 &mut proposal.summary.rationale,
                 "orchestrator decision abandoned execution",
             );
+        }
+    }
+}
+
+fn session_jsonl_store_for_thread(
+    mcp_server: &Arc<LibraMcpServer>,
+    thread_id: Uuid,
+) -> Option<SessionJsonlStore> {
+    let working_dir = mcp_server.working_dir.as_ref()?;
+    let storage_root = try_get_storage_path(Some(working_dir.clone()))
+        .unwrap_or_else(|_| working_dir.join(".libra"));
+    let session_store = SessionStore::from_storage_path(&storage_root);
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+
+    match session_store.load_for_thread_id(&thread_id.to_string(), &working_dir_str) {
+        Ok(Some(session)) => Some(SessionJsonlStore::new(
+            session_store.session_root(&session.id),
+        )),
+        Ok(None) => {
+            tracing::debug!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                "skipping Phase 3/4 session artifact mirror because no matching Code session was found"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %thread_id,
+                working_dir = %working_dir.display(),
+                error = %error,
+                "skipping Phase 3/4 session artifact mirror because the Code session could not be loaded"
+            );
+            None
         }
     }
 }
@@ -4019,9 +4494,19 @@ fn parse_created_id(kind: &str, result: &CallToolResult) -> Result<String, Orche
         if let Some(text) = content.as_text().map(|value| value.text.as_str())
             && let Some(id) = text.split("ID:").nth(1)
         {
-            let id = id.trim();
+            let id = id
+                .trim()
+                .split(|c: char| c.is_ascii_whitespace() || c == '|')
+                .next()
+                .unwrap_or("");
             if !id.is_empty() {
-                return Ok(id.to_string());
+                return parse_object_id(id)
+                    .map(|id| id.to_string())
+                    .map_err(|error| {
+                        OrchestratorError::ConfigError(format!(
+                            "failed to parse {kind} id from MCP response: {error}"
+                        ))
+                    });
             }
         }
     }
@@ -4321,6 +4806,7 @@ mod tests {
                         TaskSpec, ToolDiffRecord,
                     },
                 },
+                session::SessionState,
             },
             db,
             model::{
@@ -4562,6 +5048,34 @@ mod tests {
                 .rationale
                 .iter()
                 .any(|reason| reason.contains("abandoned execution"))
+        );
+    }
+
+    #[test]
+    fn session_jsonl_store_for_thread_loads_matching_code_session() {
+        let temp_dir = tempdir().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let storage_root = working_dir.join(".libra");
+        let session_store = SessionStore::from_storage_path(&storage_root);
+        let thread_id = Uuid::new_v4();
+        let mut session = SessionState::new(&working_dir.to_string_lossy());
+        session.id = "session-jsonl-mirror-test".to_string();
+        session
+            .metadata
+            .insert("thread_id".to_string(), json!(thread_id.to_string()));
+        session_store.save(&session).unwrap();
+
+        let server = Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir,
+        ));
+
+        let mirror = session_jsonl_store_for_thread(&server, thread_id)
+            .expect("matching session mirror store");
+        assert_eq!(
+            mirror.events_path(),
+            session_store.session_root(&session.id).join("events.jsonl")
         );
     }
 
@@ -4871,6 +5385,31 @@ mod tests {
                 result: Ok(crate::internal::ai::tools::ToolOutput::success("patched")),
             },
         );
+        observer.on_task_runtime_event(
+            &plan_spec.tasks[0],
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id: "call-2".to_string(),
+                tool_name: "shell".to_string(),
+                arguments: json!({"command":"true"}),
+            },
+        );
+        observer.on_task_runtime_event(
+            &plan_spec.tasks[0],
+            TaskRuntimeEvent::ToolCallEnd {
+                call_id: "call-2".to_string(),
+                tool_name: "shell".to_string(),
+                result: Ok(crate::internal::ai::tools::ToolOutput::failure(
+                    "sandbox rejected command",
+                )
+                .with_metadata(json!({
+                    "sandbox_evidence": [{
+                        "kind": "writable_root_rejected",
+                        "root": "/",
+                        "reason": "dangerous writable root",
+                    }]
+                }))),
+            },
+        );
         let results = vec![TaskResult {
             task_id: impl_task_id,
             status: TaskNodeStatus::Completed,
@@ -4937,10 +5476,36 @@ mod tests {
             .await
             .unwrap();
         assert!(!persisted.run_id.is_empty());
+        assert!(persisted.provenance_id.is_some());
         assert!(persisted.run_usage_id.is_some());
         assert!(persisted.derived_records.is_some());
+        assert_eq!(persisted.tasks.len(), 1);
+        let task_artifacts = &persisted.tasks[0];
+        assert_eq!(task_artifacts.task_id, impl_task_id);
+        assert!(task_artifacts.persisted_task_id.is_some());
+        assert_eq!(task_artifacts.tool_invocation_ids.len(), 1);
+        assert!(task_artifacts.patchset_id.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        for (object_type, object_id) in [
+            ("run", persisted.run_id.as_str()),
+            ("provenance", persisted.provenance_id.as_deref().unwrap()),
+            ("run_usage", persisted.run_usage_id.as_deref().unwrap()),
+            ("patchset", task_artifacts.patchset_id.as_deref().unwrap()),
+            ("invocation", task_artifacts.tool_invocation_ids[0].as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(
+                        object_type,
+                        &parse_object_id(object_id).unwrap().to_string()
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "expected persisted {object_type} id {object_id} to resolve in history",
+            );
+        }
         let db = history.database_connection();
         assert!(
             !ai_scheduler_selected_plan::Entity::find()
@@ -5067,16 +5632,182 @@ mod tests {
         assert!(assistant_context_frame.contains("\"fullTextStored\":false"));
         assert!(assistant_context_frame.contains("\"contentChars\""));
         assert!(!assistant_context_frame.contains(raw_tail));
-        assert!(
-            history
-                .list_objects("tool_invocation_event")
-                .await
-                .unwrap()
-                .len()
-                >= 2
-        );
+        let tool_invocation_events = history.list_objects("tool_invocation_event").await.unwrap();
+        assert!(tool_invocation_events.len() >= 2);
+        let mut saw_failed_shell_invocation = false;
+        for (_, hash) in &tool_invocation_events {
+            let value = storage.get_json::<serde_json::Value>(hash).await.unwrap();
+            if value["payload"]["call_id"] == "call-2" && value["status"] == "failed" {
+                assert_eq!(value["tool"], "shell");
+                saw_failed_shell_invocation = true;
+            }
+        }
+        assert!(saw_failed_shell_invocation);
+        let mut saw_sandbox_evidence = false;
+        for (_, hash) in history.list_objects("evidence").await.unwrap() {
+            let value = storage.get_json::<serde_json::Value>(&hash).await.unwrap();
+            if value.get("kind").and_then(|kind| kind.as_str()) == Some("sandbox") {
+                assert_eq!(value["data"]["tool"], "shell");
+                assert_eq!(value["data"]["call_id"], "call-2");
+                assert_eq!(value["data"]["event"]["kind"], "writable_root_rejected");
+                saw_sandbox_evidence = true;
+            }
+        }
+        assert!(saw_sandbox_evidence);
         assert!(history.list_objects("run_event").await.unwrap().len() >= 2);
         assert!(history.list_objects("task_event").await.unwrap().len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn phase2_session_bridge_persists_attempt_lifecycle_events() {
+        use crate::internal::ai::runtime::{
+            contracts::TaskExecutionStatus,
+            phase2::{write_attempt_finish_with_session, write_attempt_start_with_session},
+        };
+
+        let server = setup_server().await;
+        let spec = test_spec(vec![]);
+        let impl_task = {
+            let actor = ActorRef::agent("test-phase2-bridge").unwrap();
+            GitTask::new(actor, "Bridge runtime attempt", None).unwrap()
+        };
+        let logical_task_id = impl_task.header().object_id();
+        let plan_spec = ExecutionPlanSpec {
+            intent_spec_id: "intent-1".to_string(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("Bridge runtime attempt"),
+                task: impl_task,
+                objective: "Persist a stateful attempt lifecycle".to_string(),
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".to_string()),
+                scope_in: vec!["src/".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let task = &plan_spec.tasks[0];
+        let session =
+            ExecutionAuditSession::start(server.clone(), &spec, Path::new("."), None, None, None)
+                .await
+                .unwrap();
+        session.record_plan_compiled(&plan_spec).await.unwrap();
+
+        let start = write_attempt_start_with_session(
+            &session,
+            task,
+            "test-model",
+            Some("first attempt".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(start.task_id, logical_task_id);
+        assert_eq!(start.status, TaskExecutionStatus::Interrupted);
+        assert!(start.is_failure());
+        assert!(!start.is_terminal());
+
+        let finish = write_attempt_finish_with_session(
+            &session,
+            task,
+            TaskExecutionStatus::Completed,
+            Some("attempt completed".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(finish.task_id, logical_task_id);
+        assert_eq!(finish.run_id, start.run_id);
+        assert_eq!(finish.status, TaskExecutionStatus::Completed);
+        assert!(!finish.is_failure());
+        assert!(finish.is_terminal());
+
+        let history = server.intent_history_manager.as_ref().unwrap();
+        let storage = server.storage.as_ref().unwrap();
+
+        let mut run_event_kinds = Vec::new();
+        for (_, hash) in history.list_objects("run_event").await.unwrap() {
+            let event = storage.get_json::<RunEvent>(&hash).await.unwrap();
+            if event.run_id() == start.run_id {
+                run_event_kinds.push(event.kind().clone());
+            }
+        }
+        assert!(run_event_kinds.contains(&RunEventKind::Patching));
+        assert!(run_event_kinds.contains(&RunEventKind::Completed));
+
+        let mut saw_running_task_event = false;
+        let mut saw_done_task_event = false;
+        for (_, hash) in history.list_objects("task_event").await.unwrap() {
+            let event = storage.get_json::<TaskEvent>(&hash).await.unwrap();
+            if event.run_id() != Some(start.run_id) {
+                continue;
+            }
+            saw_running_task_event |= event.kind() == &TaskEventKind::Running;
+            saw_done_task_event |= event.kind() == &TaskEventKind::Done;
+        }
+        assert!(saw_running_task_event);
+        assert!(saw_done_task_event);
+
+        let mut saw_progressing_step_event = false;
+        let mut saw_completed_step_event = false;
+        for (_, hash) in history.list_objects("plan_step_event").await.unwrap() {
+            let event = storage.get_json::<PlanStepEvent>(&hash).await.unwrap();
+            if event.run_id() != start.run_id {
+                continue;
+            }
+            saw_progressing_step_event |= event.status() == &PlanStepStatus::Progressing;
+            saw_completed_step_event |= event.status() == &PlanStepStatus::Completed;
+        }
+        assert!(saw_progressing_step_event);
+        assert!(saw_completed_step_event);
+    }
+
+    #[test]
+    fn phase2_attempt_status_mappings_cover_terminal_variants() {
+        use crate::internal::ai::runtime::contracts::TaskExecutionStatus;
+
+        let cases = [
+            (
+                TaskExecutionStatus::Completed,
+                TaskEventKind::Done,
+                "completed",
+                RunEventKind::Completed,
+            ),
+            (
+                TaskExecutionStatus::Failed,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::Cancelled,
+                TaskEventKind::Cancelled,
+                "skipped",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::TimedOut,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+            (
+                TaskExecutionStatus::Interrupted,
+                TaskEventKind::Failed,
+                "failed",
+                RunEventKind::Failed,
+            ),
+        ];
+
+        for (status, task_kind, plan_status, run_kind) in cases {
+            assert_eq!(task_event_kind_for_attempt_status(&status), task_kind);
+            assert_eq!(plan_step_status_for_attempt_status(&status), plan_status);
+            assert_eq!(run_event_kind_for_attempt_status(&status), run_kind);
+        }
     }
 
     #[tokio::test]

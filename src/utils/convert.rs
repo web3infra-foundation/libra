@@ -79,6 +79,7 @@ pub async fn convert_from_git_repository(
     let child_output = OutputConfig {
         quiet: true,
         progress: ProgressMode::None,
+        progress_preference: crate::utils::output::ProgressPreference::None,
         json_format: None,
         pager: false,
         ..Default::default()
@@ -183,4 +184,101 @@ fn source_worktree_root(git_repo: &Path, git_dir: &Path) -> Option<PathBuf> {
     }
     let canonical_dot_git = dot_git.canonicalize().ok()?;
     (canonical_dot_git == git_dir).then(|| git_repo.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct unit coverage of the `resolve_git_source_dir` validation
+    //! gate. `tests/command/init_from_git_test.rs` exercises the
+    //! worktree / bare / non-Git paths end-to-end through `libra init
+    //! --from-git-repository`; these tests pin the resolver's contract
+    //! at the function level (layout preference, the per-marker AND
+    //! requirement, the `InvalidGitRepository` path) without spinning
+    //! up a full fetch, so a regression is localised here.
+
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    /// Lay down the minimal Git marker set (`HEAD`, `config` files +
+    /// `objects` dir) under `dir` so `resolve_git_source_dir` accepts
+    /// it. Mirrors the three markers the function checks.
+    fn write_git_markers(dir: &Path) {
+        fs::write(dir.join("HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
+        fs::write(dir.join("config"), b"[core]\n").expect("write config");
+        fs::create_dir_all(dir.join("objects")).expect("create objects dir");
+    }
+
+    /// Working-tree layout: when `<repo>/.git` exists with the markers,
+    /// the resolver returns the canonicalised `.git` path (not the
+    /// worktree root).
+    #[test]
+    fn resolve_prefers_dot_git_subdir_for_worktree_layout() {
+        let repo = tempdir().expect("tempdir");
+        let dot_git = repo.path().join(".git");
+        fs::create_dir_all(&dot_git).expect("create .git");
+        write_git_markers(&dot_git);
+
+        let resolved = resolve_git_source_dir(repo.path()).expect("worktree repo must resolve");
+        assert_eq!(resolved, dot_git.canonicalize().expect("canonicalize .git"));
+    }
+
+    /// Bare layout: when there is no `.git` subdir but the markers sit
+    /// at the repo root, the resolver treats the root itself as the Git
+    /// directory.
+    #[test]
+    fn resolve_accepts_bare_layout_at_root() {
+        let repo = tempdir().expect("tempdir");
+        write_git_markers(repo.path());
+
+        let resolved = resolve_git_source_dir(repo.path()).expect("bare repo must resolve");
+        assert_eq!(
+            resolved,
+            repo.path().canonicalize().expect("canonicalize repo root")
+        );
+    }
+
+    /// A directory with none of the markers is rejected as
+    /// `InvalidGitRepository` carrying the original path — converting
+    /// a non-repo would otherwise produce an unusable Libra repo.
+    #[test]
+    fn resolve_rejects_directory_without_markers() {
+        let repo = tempdir().expect("tempdir");
+        match resolve_git_source_dir(repo.path()) {
+            Err(InitError::InvalidGitRepository { path }) => {
+                assert_eq!(path, repo.path().to_path_buf());
+            }
+            other => panic!("expected InvalidGitRepository, got {other:?}"),
+        }
+    }
+
+    /// Each of the three markers is individually required: omitting
+    /// ANY one of `HEAD` / `config` / `objects` must still be rejected.
+    /// Parametrising over each omitted marker pins the AND conjunction —
+    /// a regression that required only one marker (e.g. just `objects`)
+    /// would pass a single-case test but fails here.
+    #[test]
+    fn resolve_requires_every_marker() {
+        for omit in ["HEAD", "config", "objects"] {
+            let repo = tempdir().expect("tempdir");
+            if omit != "HEAD" {
+                fs::write(repo.path().join("HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
+            }
+            if omit != "config" {
+                fs::write(repo.path().join("config"), b"[core]\n").expect("config");
+            }
+            if omit != "objects" {
+                fs::create_dir_all(repo.path().join("objects")).expect("objects");
+            }
+            assert!(
+                matches!(
+                    resolve_git_source_dir(repo.path()),
+                    Err(InitError::InvalidGitRepository { .. })
+                ),
+                "a repo missing the `{omit}` marker must be rejected",
+            );
+        }
+    }
 }

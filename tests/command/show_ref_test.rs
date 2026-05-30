@@ -430,3 +430,38 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
         "main should also match: {stdout}"
     );
 }
+
+/// `libra show-ref --help` surfaces the EXAMPLES banner so users see
+/// the all-refs default, --heads / --tags scope filters, --head opt-in,
+/// -s hash-only form, pattern filter, and the JSON variant without
+/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_show_ref_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for show-ref --help");
+    let output = run_libra_command(&["show-ref", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "show-ref --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "show-ref --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "List all local refs with their object hashes",
+        "libra show-ref --heads",
+        "libra show-ref --tags",
+        "libra show-ref --head",
+        "libra show-ref -s",
+        "libra show-ref main",
+        "libra show-ref --json",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "show-ref --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

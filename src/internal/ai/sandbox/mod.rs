@@ -26,15 +26,27 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use self::evidence::SandboxEvidenceSink;
 use super::runtime::hardening::{SafetyDecision, SafetyDisposition};
 
 mod command_safety;
+pub mod evidence;
 pub mod policy;
+pub mod proxy;
+mod proxy_runtime;
 pub mod runtime;
+#[cfg(target_os = "linux")]
+pub mod seccomp_compile;
 
 pub use policy::{
-    NetworkAccess, SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
-    WritableRoot, sensitive_read_paths,
+    NetworkAccess, NetworkProtocol, NetworkService, NetworkServiceValidationError,
+    SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError, WritableRoot,
+    sensitive_read_paths,
+};
+pub use proxy::{
+    LoopbackOnlyProxy, NetworkAccessMode, NetworkDecision, NetworkProxy, NetworkProxySelection,
+    NetworkRequest, NoopProxy, ProxyEnforcement, allowlist_proxy_from_policy, is_loopback_host,
+    select_network_proxy,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
@@ -63,6 +75,26 @@ pub struct SandboxRuntimeConfig {
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
     pub deny_read_paths: Vec<PathBuf>,
+    /// Optional structured-event sink that receives sandbox-level
+    /// notifications (tmp cleanup failures, writable-root rejections,
+    /// future enforcement / network denials). Defaults to `None` —
+    /// the sandbox falls back to [`evidence::TracingSandboxEvidenceSink`]
+    /// so existing log scrapers see no change. See
+    /// [`evidence`](self::evidence) for the full event vocabulary and
+    /// `docs/improvement/sandbox.md` lines 142-144 / 162 / 373 for
+    /// the doc contract this hook satisfies.
+    pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
+    /// Optional seccomp BPF policy file path. When set on Linux
+    /// and the built-in bwrap path is selected,
+    /// [`runtime::create_bwrap_command_args_with_seccomp`] appends
+    /// `--seccomp <fd>` to the bwrap args and
+    /// [`runtime::install_seccomp_policy_pre_exec`] opens the
+    /// file in the child to populate that FD. Default `None`
+    /// keeps Linux as opt-in unless `~/.libra/seccomp.bpf` exists and
+    /// no explicit `LIBRA_SECCOMP_POLICY` override is set. See
+    /// `docs/improvement/sandbox.md` line 19 ("seccomp 注入") for
+    /// the doc contract.
+    pub seccomp_policy_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -773,7 +805,7 @@ pub struct ExecApprovalRequest {
     pub reason: Option<String>,
     pub is_retry: bool,
     pub sandbox_label: String,
-    pub network_access: bool,
+    pub network_access: NetworkAccess,
     pub writable_roots: Vec<PathBuf>,
     pub cache_disabled_reason: Option<String>,
     pub response_tx: oneshot::Sender<ReviewDecision>,
@@ -813,6 +845,7 @@ pub struct ShellCommandRequest {
     pub max_output_bytes: usize,
     pub sandbox: Option<ToolSandboxContext>,
     pub sandbox_runtime: Option<SandboxRuntimeConfig>,
+    pub evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
     pub approval: Option<ToolApprovalContext>,
     pub justification: Option<String>,
     pub safety_decision: Option<SafetyDecision>,
@@ -830,6 +863,14 @@ const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMAND_TMPDIR_PREFIX: &str = "libra-sandbox-";
 const COMMAND_TMPDIR_CREATE_ATTEMPTS: usize = 8;
 const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
+/// Environment variable users export to opt into seccomp BPF
+/// policy injection without editing `SandboxRuntimeConfig`
+/// directly. Value is an absolute path to a precompiled BPF
+/// binary (output of `seccompiler --output bpf-bin` or
+/// equivalent). See `docs/sandbox-seccomp.md` for the recommended
+/// policy and compilation steps.
+const DEFAULT_SECCOMP_POLICY_PATH: &str = ".libra/seccomp.bpf";
+const SANDBOX_SECCOMP_POLICY_ENV: &str = "LIBRA_SECCOMP_POLICY";
 const SANDBOX_CONFIG_FILE: &str = "sandbox.toml";
 #[cfg(unix)]
 const COMMAND_TMPDIR_MODE: u32 = 0o700;
@@ -862,7 +903,7 @@ pub async fn run_shell_command(
             .unwrap_or(SandboxPermissions::UseDefault),
         None,
     );
-    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime).await
+    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime, None, None).await
 }
 
 pub async fn run_shell_command_with_approval(
@@ -876,6 +917,7 @@ pub async fn run_shell_command_with_approval(
         max_output_bytes,
         sandbox,
         sandbox_runtime,
+        evidence_sink,
         approval,
         justification,
         safety_decision,
@@ -930,42 +972,121 @@ pub async fn run_shell_command_with_approval(
     };
 
     let mut already_approved = allow_all_bypasses_prompt;
-    if let Some(approval_ctx) = approval.as_ref() {
-        match requirement {
-            ExecApprovalRequirement::Skip { .. } => {}
-            ExecApprovalRequirement::NeedsApproval { ref reason } => {
-                let decision = request_exec_approval(
-                    approval_ctx,
-                    ExecApprovalPrompt {
-                        call_id: &call_id,
-                        command: &command,
-                        cwd: &cwd,
-                        reason: reason.clone().or_else(|| {
-                            justification
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|text| !text.is_empty())
-                                .map(ToString::to_string)
-                        }),
-                        sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
-                        sandbox_permissions: spec.sandbox_permissions,
-                        is_retry: false,
-                    },
-                )
-                .await;
 
-                if decision.is_approved() {
+    if let ExecApprovalRequirement::Forbidden { ref reason } = requirement {
+        return Err(reason.clone());
+    }
+
+    let network_access_upgrade = if approval.is_some() {
+        requested_network_access_upgrade(
+            sandbox.as_ref().map(|context| &context.policy),
+            spec.sandbox_permissions,
+            &cwd,
+            false,
+        )?
+    } else {
+        None
+    };
+
+    let mut approved_network_access_upgrade = None;
+
+    if let Some(approval_ctx) = approval.as_ref() {
+        if let Some(upgrade_access) = network_access_upgrade.as_ref() {
+            if matches!(approval_ctx.policy, AskForApproval::Never) {
+                return Err(
+                    "network access escalation requires approval, but approval policy is never"
+                        .to_string(),
+                );
+            }
+            let network_reason = format!(
+                "requested network access escalation from {current:?} to {requested:?}",
+                current = shell_policy_network_access(
+                    sandbox.as_ref().map(|context| &context.policy),
+                    spec.sandbox_permissions,
+                    false,
+                ),
+                requested = upgrade_access,
+            );
+            let reason = match &requirement {
+                ExecApprovalRequirement::NeedsApproval { reason } => reason
+                    .clone()
+                    .or_else(|| {
+                        justification
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(ToString::to_string)
+                    })
+                    .map(|reason| format!("{reason}; {network_reason}"))
+                    .or(Some(network_reason)),
+                _ => Some(network_reason),
+            };
+            let decision = request_uncached_exec_approval(
+                approval_ctx,
+                ExecApprovalPrompt {
+                    call_id: &call_id,
+                    command: &command,
+                    cwd: &cwd,
+                    reason,
+                    sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                    sandbox_permissions: spec.sandbox_permissions,
+                    is_retry: false,
+                    requested_network_access: Some(upgrade_access.clone()),
+                },
+                Some("network access escalation approvals are not cached".to_string()),
+            )
+            .await;
+
+            if decision.is_approved() {
+                if matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. }) {
                     already_approved = true;
-                } else {
-                    match decision {
-                        ReviewDecision::Denied => return Err("rejected by user".to_string()),
-                        ReviewDecision::Abort => return Err("aborted by user".to_string()),
-                        _ => {}
-                    }
+                }
+                approved_network_access_upgrade = Some(upgrade_access.clone());
+            } else {
+                match decision {
+                    ReviewDecision::Denied => return Err("rejected by user".to_string()),
+                    ReviewDecision::Abort => return Err("aborted by user".to_string()),
+                    _ => {}
                 }
             }
-            ExecApprovalRequirement::Forbidden { ref reason } => {
-                return Err(reason.clone());
+        } else {
+            match requirement {
+                ExecApprovalRequirement::Skip { .. } => {}
+                ExecApprovalRequirement::NeedsApproval { ref reason } => {
+                    let decision = request_exec_approval(
+                        approval_ctx,
+                        ExecApprovalPrompt {
+                            call_id: &call_id,
+                            command: &command,
+                            cwd: &cwd,
+                            reason: reason.clone().or_else(|| {
+                                justification
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|text| !text.is_empty())
+                                    .map(ToString::to_string)
+                            }),
+                            sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                            sandbox_permissions: spec.sandbox_permissions,
+                            is_retry: false,
+                            requested_network_access: None,
+                        },
+                    )
+                    .await;
+
+                    if decision.is_approved() {
+                        already_approved = true;
+                    } else {
+                        match decision {
+                            ReviewDecision::Denied => return Err("rejected by user".to_string()),
+                            ReviewDecision::Abort => return Err("aborted by user".to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+                ExecApprovalRequirement::Forbidden { ref reason } => {
+                    return Err(reason.clone());
+                }
             }
         }
     }
@@ -1002,6 +1123,7 @@ pub async fn run_shell_command_with_approval(
                 sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
                 sandbox_permissions: SandboxPermissions::RequireEscalated,
                 is_retry: true,
+                requested_network_access: None,
             },
             Some("sandbox fallback approvals are not cached".to_string()),
         )
@@ -1027,6 +1149,8 @@ pub async fn run_shell_command_with_approval(
         max_output_bytes,
         first_attempt_sandbox,
         sandbox_runtime.as_ref(),
+        approved_network_access_upgrade,
+        evidence_sink.clone(),
     )
     .await?;
 
@@ -1052,6 +1176,7 @@ pub async fn run_shell_command_with_approval(
                 sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
                 sandbox_permissions: spec.sandbox_permissions,
                 is_retry: true,
+                requested_network_access: None,
             },
         )
         .await;
@@ -1065,7 +1190,15 @@ pub async fn run_shell_command_with_approval(
         }
     }
 
-    run_command_spec(spec, max_output_bytes, None, sandbox_runtime.as_ref()).await
+    run_command_spec(
+        spec,
+        max_output_bytes,
+        None,
+        sandbox_runtime.as_ref(),
+        None,
+        evidence_sink,
+    )
+    .await
 }
 
 pub async fn run_command_spec(
@@ -1073,12 +1206,26 @@ pub async fn run_command_spec(
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
+    network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
     let command_tmpdir = create_command_tmpdir()?;
     inject_command_tmp_env(&mut spec, &command_tmpdir);
 
-    let output = run_command_spec_inner(spec, max_output_bytes, sandbox, sandbox_runtime).await;
-    cleanup_command_tmpdir(&command_tmpdir).await;
+    let output = run_command_spec_inner(
+        spec,
+        max_output_bytes,
+        sandbox,
+        sandbox_runtime,
+        network_access_override,
+        evidence_sink.clone(),
+    )
+    .await;
+    let runtime_evidence_sink = sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone());
+    let cleanup_sink = evidence_sink
+        .as_deref()
+        .or(runtime_evidence_sink.as_deref());
+    cleanup_command_tmpdir(&command_tmpdir, cleanup_sink).await;
     output
 }
 
@@ -1087,13 +1234,37 @@ async fn run_command_spec_inner(
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
+    network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
 ) -> Result<SandboxExecOutput, String> {
-    let (mut cmd, timeout_override) =
-        build_command_from_spec(spec, sandbox.as_ref(), sandbox_runtime)?;
+    let mut built = build_command_from_spec(
+        spec,
+        sandbox.as_ref(),
+        sandbox_runtime,
+        network_access_override,
+        evidence_sink.as_deref(),
+    )?;
+    let proxy_evidence_sink = evidence_sink
+        .clone()
+        .or_else(|| sandbox_runtime.and_then(|cfg| cfg.evidence_sink.clone()));
+    let allowlist_proxy = start_allowlist_proxy_if_needed(
+        &mut built.command,
+        built.allowlist_proxy_services,
+        proxy_evidence_sink,
+    )
+    .await?;
+    let timeout_override = built.timeout_ms;
+    let mut cmd = built.command;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn shell: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(proxy) = allowlist_proxy {
+                proxy.shutdown().await;
+            }
+            return Err(format!("failed to spawn shell: {error}"));
+        }
+    };
 
     let stdout_pipe = child
         .stdout
@@ -1151,6 +1322,10 @@ async fn run_command_spec_inner(
         stderr.push_str("\n[stderr stream incomplete]");
     }
 
+    if let Some(proxy) = allowlist_proxy {
+        proxy.shutdown().await;
+    }
+
     Ok(SandboxExecOutput {
         exit_code,
         stdout,
@@ -1203,15 +1378,30 @@ fn inject_command_tmp_env(spec: &mut CommandSpec, command_tmpdir: &Path) {
     spec.env.insert("TMP".to_string(), command_tmpdir);
 }
 
-async fn cleanup_command_tmpdir(path: &Path) {
+async fn cleanup_command_tmpdir(
+    path: &Path,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+) {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => {}
         Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => tracing::warn!(
-            path = %path.display(),
-            error = %err,
-            "failed to cleanup private command tmp dir"
-        ),
+        Err(err) => {
+            // Doc contract: `docs/improvement/sandbox.md:142` —
+            // surface tmp cleanup failure as a structured Evidence
+            // event in addition to the legacy tracing line. The
+            // default `TracingSandboxEvidenceSink` keeps the
+            // existing log shape; an opt-in agent-runtime sink can
+            // route to `AgentEvidence` rows downstream.
+            let event = evidence::SandboxEvidenceEvent::TmpdirCleanupFailed {
+                path: path.to_path_buf(),
+                error: err.to_string(),
+            };
+            if let Some(sink) = evidence_sink {
+                sink.record(event);
+            } else {
+                evidence::TracingSandboxEvidenceSink.record(event);
+            }
+        }
     }
 }
 
@@ -1219,51 +1409,273 @@ fn build_command_from_spec(
     spec: CommandSpec,
     sandbox: Option<&ToolSandboxContext>,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
-) -> Result<(tokio::process::Command, Option<u64>), String> {
+    network_access_override: Option<NetworkAccess>,
+    evidence_sink: Option<&dyn evidence::SandboxEvidenceSink>,
+) -> Result<BuiltCommand, String> {
     let sandbox_policy_cwd = spec.cwd.clone();
-    let linux_sandbox_exe = sandbox_runtime
-        .and_then(|config| config.linux_sandbox_exe.clone())
-        .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+    let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
     let use_linux_sandbox_bwrap = sandbox_runtime
         .map(|config| config.use_linux_sandbox_bwrap)
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
-    let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
+    // Read `.libra/sandbox.toml` once and derive both deny-read paths
+    // and the network restriction from the same parsed struct, so the
+    // two never observe different file versions under a concurrent edit.
+    let sandbox_config = load_sandbox_config_file(&sandbox_policy_cwd)?;
+    let deny_read_paths =
+        resolve_deny_read_paths_from(&sandbox_config, &sandbox_policy_cwd, sandbox_runtime);
+    let fallback_seccomp_policy_path = resolve_seccomp_policy_path();
+    let seccomp_policy_path = sandbox_runtime
+        .and_then(|cfg| cfg.seccomp_policy_path.as_deref())
+        .or(fallback_seccomp_policy_path.as_deref());
+    // Apply any `.libra/sandbox.toml [sandbox.network]` restriction to
+    // the policy BEFORE the transform reads it. This is tightening-only
+    // (see `SandboxPolicy::with_network_restriction`): the config can
+    // lock the workspace down but never widen the policy's reach, so the
+    // security-critical transform derivation is left untouched.
+    let config_network_access = sandbox_config.network_access()?;
+    let policy = sandbox.map(|context| {
+        network_access_override
+            .as_ref()
+            .map_or(context.policy.clone(), |access| {
+                context.policy.with_network_access(access)
+            })
+    });
+    let restricted_policy = match (&policy, &config_network_access) {
+        (Some(context), Some(config_access)) => {
+            Some(context.with_network_restriction(config_access))
+        }
+        _ => None,
+    };
+    let effective_policy = restricted_policy.as_ref().or(policy.as_ref());
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
             spec,
-            policy: sandbox.map(|context| &context.policy),
+            policy: effective_policy,
             sandbox_policy_cwd: &sandbox_policy_cwd,
             linux_sandbox_exe: linux_sandbox_exe.as_ref(),
             use_linux_sandbox_bwrap,
             enforcement,
             deny_read_paths: &deny_read_paths,
+            seccomp_policy_path,
         })
-        .map_err(|err| err.to_string())?;
-    exec_env.into_command()
+        .map_err(|err| {
+            // Doc contract: `docs/improvement/sandbox.md:143`, L162,
+            // L373 — writable_root rejections AND enforcement
+            // failures must surface as structured Evidence in
+            // addition to the propagated error string. The default
+            // `TracingSandboxEvidenceSink` keeps the existing log
+            // shape; opt-in agent-runtime sinks fan out to
+            // `AgentEvidence` rows.
+            let event = match &err {
+                runtime::SandboxTransformError::InvalidPolicy(
+                    policy::SandboxPolicyError::DangerousWritableRoot { root, reason },
+                ) => Some(evidence::SandboxEvidenceEvent::WritableRootRejected {
+                    root: root.clone(),
+                    reason: (*reason).to_string(),
+                }),
+                runtime::SandboxTransformError::EnforcementFailed { reason } => {
+                    Some(evidence::SandboxEvidenceEvent::EnforcementFailed {
+                        reason: reason.clone(),
+                    })
+                }
+                runtime::SandboxTransformError::NetworkEnforcementFailed { reason } => {
+                    Some(evidence::SandboxEvidenceEvent::NetworkEnforcementFailed {
+                        reason: reason.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                if let Some(sink) = evidence_sink
+                    .or_else(|| sandbox_runtime.and_then(|c| c.evidence_sink.as_deref()))
+                {
+                    sink.record(event);
+                } else {
+                    evidence::TracingSandboxEvidenceSink.record(event);
+                }
+            }
+            err.to_string()
+        })?;
+    let allowlist_proxy_services = exec_env.allowlist_proxy_services.clone();
+    let (command, timeout_ms) = exec_env.into_command()?;
+    Ok(BuiltCommand {
+        command,
+        timeout_ms,
+        allowlist_proxy_services,
+    })
+}
+
+struct BuiltCommand {
+    command: tokio::process::Command,
+    timeout_ms: Option<u64>,
+    allowlist_proxy_services: Option<Vec<NetworkService>>,
+}
+
+async fn start_allowlist_proxy_if_needed(
+    command: &mut tokio::process::Command,
+    services: Option<Vec<NetworkService>>,
+    evidence_sink: Option<std::sync::Arc<dyn evidence::SandboxEvidenceSink>>,
+) -> Result<Option<proxy_runtime::RunningAllowlistProxy>, String> {
+    let Some(services) = services else {
+        return Ok(None);
+    };
+    let proxy = if evidence_sink.is_some() {
+        proxy_runtime::spawn_allowlist_http_proxy_with_evidence(services, evidence_sink).await?
+    } else {
+        proxy_runtime::spawn_allowlist_http_proxy(services).await?
+    };
+    inject_allowlist_proxy_env(command, &proxy);
+    Ok(Some(proxy))
+}
+
+fn inject_allowlist_proxy_env(
+    command: &mut tokio::process::Command,
+    proxy: &proxy_runtime::RunningAllowlistProxy,
+) {
+    let proxy_url = proxy.local_http_proxy_url();
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, &proxy_url);
+    }
+    // Force proxy-aware tools through Libra's allowlist proxy even when the
+    // parent shell has broad NO_PROXY defaults for loopback or local domains.
+    command.env("NO_PROXY", "");
+    command.env("no_proxy", "");
+    command.env("LIBRA_SANDBOX_ALLOWLIST_PROXY", proxy_url);
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct SandboxConfigFile {
     #[serde(default)]
     deny_read: Vec<PathBuf>,
+    /// Optional `[sandbox]` table. Network access lives under
+    /// `[sandbox.network]` per `docs/improvement/sandbox.md` §7.3,
+    /// while `deny_read` stays at the file root for backward
+    /// compatibility with existing configs.
+    #[serde(default)]
+    sandbox: Option<SandboxConfigSection>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxConfigSection {
+    #[serde(default)]
+    network: Option<SandboxNetworkConfig>,
+}
+
+/// The `[sandbox.network]` section of `.libra/sandbox.toml`.
+///
+/// ```toml
+/// [sandbox.network]
+/// mode = "allowlist"  # denied | allowlist | full; default denied
+///
+/// [[sandbox.network.services]]
+/// host = "registry.npmjs.org"
+/// ports = [443]
+/// ```
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxNetworkConfig {
+    #[serde(default)]
+    mode: SandboxNetworkMode,
+    /// Allowlist entries; only consulted when `mode = "allowlist"`.
+    #[serde(default)]
+    services: Vec<NetworkService>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SandboxNetworkMode {
+    #[default]
+    Denied,
+    Allowlist,
+    Full,
+}
+
+impl SandboxConfigFile {
+    /// Translate the `[sandbox.network]` section into a
+    /// [`NetworkAccess`], validating allowlist services per
+    /// `docs/improvement/sandbox.md` §7.3 (no bare `*` / empty host,
+    /// no implicit high-sensitivity-port grants). Returns `Ok(None)`
+    /// when no `[sandbox.network]` section is present so callers leave
+    /// the policy-derived access untouched.
+    ///
+    /// The returned access is only ever applied as a *tightening*
+    /// constraint via [`SandboxPolicy::with_network_restriction`], so a
+    /// `mode = "full"` here can never loosen a more-restrictive policy.
+    fn network_access(&self) -> Result<Option<NetworkAccess>, String> {
+        let Some(network) = self
+            .sandbox
+            .as_ref()
+            .and_then(|section| section.network.as_ref())
+        else {
+            return Ok(None);
+        };
+
+        let access = match network.mode {
+            SandboxNetworkMode::Denied => NetworkAccess::Denied,
+            SandboxNetworkMode::Full => NetworkAccess::Full,
+            SandboxNetworkMode::Allowlist => {
+                for service in &network.services {
+                    service.validate().map_err(|error| {
+                        format!(
+                            "invalid `[sandbox.network]` service '{}' in .libra/sandbox.toml: {error}",
+                            service.host
+                        )
+                    })?;
+                }
+                NetworkAccess::Allowlist {
+                    services: network.services.clone(),
+                }
+            }
+        };
+        Ok(Some(access))
+    }
+}
+
+/// Load `.libra/sandbox.toml` and resolve its deny-read paths in one
+/// call. Production code (`build_command_from_spec`) loads the file
+/// once and calls [`resolve_deny_read_paths_from`] directly so the
+/// network section is derived from the same parsed struct; this
+/// convenience wrapper is retained for the focused deny-read tests,
+/// which also exercise the load/parse-error path.
+#[cfg(test)]
 fn resolve_deny_read_paths(
     cwd: &Path,
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<Vec<PathBuf>, String> {
-    let mut paths = load_sandbox_config_file(cwd)?.deny_read;
-    if let Some(config) = sandbox_runtime {
-        paths.extend(config.deny_read_paths.iter().cloned());
+    let config = load_sandbox_config_file(cwd)?;
+    Ok(resolve_deny_read_paths_from(&config, cwd, sandbox_runtime))
+}
+
+/// Resolve deny-read paths from an already-loaded config so the
+/// `.libra/sandbox.toml` file is read once per command setup (the
+/// network access is derived from the same parsed struct). Reading it
+/// twice could otherwise observe two different file versions if the
+/// file is edited concurrently.
+fn resolve_deny_read_paths_from(
+    config: &SandboxConfigFile,
+    cwd: &Path,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Vec<PathBuf> {
+    let mut paths = config.deny_read.clone();
+    if let Some(runtime) = sandbox_runtime {
+        paths.extend(runtime.deny_read_paths.iter().cloned());
     }
 
     let mut resolved = Vec::with_capacity(paths.len());
     for path in paths {
         push_unique_path(&mut resolved, resolve_deny_read_path(cwd, path));
     }
-    Ok(resolved)
+    resolved
 }
 
 fn load_sandbox_config_file(cwd: &Path) -> Result<SandboxConfigFile, String> {
@@ -1340,12 +1752,10 @@ fn prefer_strict_sandbox_fallback_reason(
 
     #[cfg(target_os = "linux")]
     {
-        let linux_sandbox_exe = sandbox_runtime
-            .and_then(|config| config.linux_sandbox_exe.clone())
-            .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
-        if linux_sandbox_exe.is_none() {
+        let linux_sandbox_exe = resolve_linux_sandbox_exe(sandbox_runtime);
+        if linux_sandbox_exe.is_none() && locate_bwrap_binary_for_prefer_strict().is_none() {
             return Ok(Some(
-                "sandbox enforcement is prefer_strict, but Linux sandbox helper is not configured and the built-in bwrap sandbox is not available yet; approve to run outside Libra's internal sandbox".to_string(),
+                "sandbox enforcement is prefer_strict, but Linux sandbox helper is not configured and the built-in bwrap sandbox is not available; approve to run outside Libra's internal sandbox".to_string(),
             ));
         }
     }
@@ -1358,6 +1768,63 @@ fn prefer_strict_sandbox_fallback_reason(
     }
 
     Ok(None)
+}
+
+fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> Option<PathBuf> {
+    let candidate = sandbox_runtime
+        .and_then(|config| config.linux_sandbox_exe.clone())
+        .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+
+    #[cfg(target_os = "linux")]
+    {
+        if candidate
+            .as_ref()
+            .is_some_and(|path| is_executable_file(path))
+        {
+            return candidate;
+        }
+        return None;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        candidate.filter(|path| path.is_file())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn locate_bwrap_binary_for_prefer_strict() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("LIBRA_BWRAP_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.is_absolute() && is_executable_file(&path) {
+            return Some(path);
+        }
+        return None;
+    }
+
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join("bwrap");
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 fn sandbox_policy_needs_internal_backend(policy: &SandboxPolicy) -> bool {
@@ -1395,6 +1862,63 @@ fn env_flag_enabled(name: &str) -> bool {
     })
 }
 
+/// Read `LIBRA_SECCOMP_POLICY` and return it as a `PathBuf` when
+/// set to a non-empty value. Used by `build_command_from_spec` as
+/// a fallback when `SandboxRuntimeConfig::seccomp_policy_path`
+/// is `None`, so users can opt into seccomp without editing
+/// in-process config. An empty / whitespace-only value is
+/// treated as unset.
+fn resolve_seccomp_policy_env() -> Option<PathBuf> {
+    let raw = std::env::var(SANDBOX_SECCOMP_POLICY_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// Resolve seccomp policy using explicit env override first,
+/// then defaulting to `~/.libra/seccomp.bpf` when the env
+/// var is not set at all. Empty / whitespace-only env values
+/// explicitly disable seccomp and therefore block defaulting.
+///
+/// On Linux, if the env var is unset and the default file is
+/// missing, the v0.17.770
+/// [`seccomp_compile::ensure_compiled_seccomp_policy_at`] helper
+/// materialises it from the bundled JSON template before the
+/// `is_file()` filter runs. This means a fresh Linux install
+/// gets the default seccomp policy with zero operator action —
+/// the file is created on first dispatch and reused thereafter.
+/// Compile failures (unknown host arch, malformed bundled JSON)
+/// downgrade to None so the legacy "no fallback" behaviour
+/// kicks in; we never block a sandbox dispatch on a seccomp
+/// compile error.
+fn resolve_seccomp_policy_path() -> Option<PathBuf> {
+    if std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV).is_some() {
+        return resolve_seccomp_policy_env();
+    }
+
+    let default_path = dirs::home_dir().map(|home| home.join(DEFAULT_SECCOMP_POLICY_PATH))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        if !default_path.is_file()
+            && let Err(err) = seccomp_compile::ensure_compiled_seccomp_policy_at(&default_path)
+        {
+            tracing::warn!(
+                error = %err,
+                path = %default_path.display(),
+                "failed to materialise default seccomp policy at first launch; \
+                 sandbox dispatch will run without seccomp enforcement",
+            );
+            return None;
+        }
+    }
+
+    Some(default_path).filter(|path| path.is_file())
+}
+
 async fn request_exec_approval(
     ctx: &ToolApprovalContext,
     request: ExecApprovalPrompt<'_>,
@@ -1407,9 +1931,15 @@ async fn request_exec_approval(
         sandbox_policy,
         sandbox_permissions,
         is_retry,
+        requested_network_access,
     } = request;
-    let (sandbox_label, network_access, writable_roots) =
-        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
+    let (sandbox_label, network_access, writable_roots) = approval_request_context(
+        sandbox_policy,
+        cwd,
+        sandbox_permissions,
+        is_retry,
+        requested_network_access.as_ref(),
+    );
     let keys = ApprovalCacheKeys::shell(command, cwd, sandbox_permissions);
     let cache_disabled_reason = ctx.cache_policy.disabled_reason_for_command(command);
     request_cached_approval_with_cache_keys(
@@ -1445,9 +1975,15 @@ async fn request_uncached_exec_approval(
         sandbox_policy,
         sandbox_permissions,
         is_retry,
+        requested_network_access,
     } = request;
-    let (sandbox_label, network_access, writable_roots) =
-        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
+    let (sandbox_label, network_access, writable_roots) = approval_request_context(
+        sandbox_policy,
+        cwd,
+        sandbox_permissions,
+        is_retry,
+        requested_network_access.as_ref(),
+    );
     let (response_tx, response_rx) = oneshot::channel();
     if ctx
         .request_tx
@@ -1479,6 +2015,7 @@ struct ExecApprovalPrompt<'a> {
     sandbox_policy: Option<&'a SandboxPolicy>,
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
+    requested_network_access: Option<NetworkAccess>,
 }
 
 fn approval_request_context(
@@ -1486,32 +2023,102 @@ fn approval_request_context(
     cwd: &Path,
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
-) -> (String, bool, Vec<PathBuf>) {
+    requested_network_access: Option<&NetworkAccess>,
+) -> (String, NetworkAccess, Vec<PathBuf>) {
+    let resolved_network_access = requested_network_access.cloned().unwrap_or_else(|| {
+        shell_policy_network_access(sandbox_policy, sandbox_permissions, is_retry)
+    });
+
     if sandbox_permissions.requires_escalated_permissions() || is_retry {
-        return ("outside sandbox".to_string(), true, Vec::new());
+        return (
+            "outside sandbox".to_string(),
+            NetworkAccess::Full,
+            Vec::new(),
+        );
     }
 
     match sandbox_policy {
-        Some(SandboxPolicy::DangerFullAccess) => {
-            ("danger-full-access".to_string(), true, Vec::new())
-        }
-        Some(SandboxPolicy::ExternalSandbox { network_access }) => (
-            "external-sandbox".to_string(),
-            network_access.is_enabled(),
+        Some(SandboxPolicy::DangerFullAccess) => (
+            "danger-full-access".to_string(),
+            resolved_network_access,
             Vec::new(),
         ),
-        Some(SandboxPolicy::ReadOnly) => ("read-only".to_string(), false, Vec::new()),
-        Some(policy @ SandboxPolicy::WorkspaceWrite { network_access, .. }) => (
+        Some(SandboxPolicy::ExternalSandbox { .. }) => (
+            "external-sandbox".to_string(),
+            resolved_network_access,
+            Vec::new(),
+        ),
+        Some(SandboxPolicy::ReadOnly) => {
+            ("read-only".to_string(), resolved_network_access, Vec::new())
+        }
+        Some(policy @ SandboxPolicy::WorkspaceWrite { .. }) => (
             "workspace-write".to_string(),
-            *network_access,
+            resolved_network_access,
             policy
                 .get_writable_roots_with_cwd(cwd)
                 .into_iter()
                 .map(|root| root.root)
                 .collect(),
         ),
-        None => ("no sandbox".to_string(), true, Vec::new()),
+        None => (
+            "no sandbox".to_string(),
+            resolved_network_access,
+            Vec::new(),
+        ),
     }
+}
+
+fn shell_policy_network_access(
+    sandbox_policy: Option<&SandboxPolicy>,
+    sandbox_permissions: SandboxPermissions,
+    is_retry: bool,
+) -> NetworkAccess {
+    if sandbox_permissions.requires_escalated_permissions() || is_retry {
+        return NetworkAccess::Full;
+    }
+
+    match sandbox_policy {
+        Some(SandboxPolicy::DangerFullAccess) => NetworkAccess::Full,
+        Some(SandboxPolicy::ExternalSandbox { network_access }) => network_access.clone(),
+        Some(SandboxPolicy::ReadOnly) => NetworkAccess::Denied,
+        Some(SandboxPolicy::WorkspaceWrite { network_access, .. }) => network_access.clone(),
+        None => NetworkAccess::Full,
+    }
+}
+
+fn requested_network_access_upgrade(
+    sandbox_policy: Option<&SandboxPolicy>,
+    sandbox_permissions: SandboxPermissions,
+    cwd: &Path,
+    is_retry: bool,
+) -> Result<Option<NetworkAccess>, String> {
+    if !matches!(
+        sandbox_policy,
+        Some(SandboxPolicy::ExternalSandbox { .. } | SandboxPolicy::WorkspaceWrite { .. })
+    ) {
+        return Ok(None);
+    }
+
+    let current_network_access =
+        shell_policy_network_access(sandbox_policy, sandbox_permissions, is_retry);
+    let config_network_access = load_sandbox_config_file(cwd)?.network_access()?;
+
+    let Some(config_network_access) = config_network_access else {
+        return Ok(None);
+    };
+
+    if config_network_access.restrictiveness_rank() > current_network_access.restrictiveness_rank()
+    {
+        return Ok(Some(config_network_access));
+    }
+
+    Ok(None)
+}
+
+pub(crate) fn load_sandbox_config_network_access(
+    cwd: &Path,
+) -> Result<Option<NetworkAccess>, String> {
+    load_sandbox_config_file(cwd)?.network_access()
 }
 
 pub fn shell_approval_key(
@@ -1833,6 +2440,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+    use crate::utils::test::ScopedEnvVar;
 
     #[test]
     fn sandbox_enforcement_env_defaults_to_best_effort() {
@@ -1858,6 +2466,105 @@ mod tests {
         assert_eq!(
             error,
             "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
+        );
+    }
+
+    /// `LIBRA_SECCOMP_POLICY` env var resolves to a `PathBuf`
+    /// when set to a non-empty value; whitespace-only and unset
+    /// both yield `None` so users can clear the policy by
+    /// `unset LIBRA_SECCOMP_POLICY` rather than needing to set
+    /// an empty string sentinel. Pins the contract that env-var
+    /// seccomp opt-in is the lowest-friction path for users who
+    /// don't customise `SandboxRuntimeConfig` directly.
+    #[cfg_attr(target_os = "linux", serial)]
+    #[test]
+    fn seccomp_policy_env_resolves_path_only_when_non_empty() {
+        // SAFETY: test-only env mutation.
+        let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
+        let _policy = match prior {
+            Some(value) => Some(ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, value)),
+            None => {
+                // SAFETY: test-only env cleanup before running the assertion.
+                unsafe {
+                    std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+                }
+                None
+            }
+        };
+        unsafe {
+            std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+        }
+        assert!(resolve_seccomp_policy_env().is_none(), "unset env → None");
+
+        unsafe {
+            std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, "   ");
+        }
+        assert!(
+            resolve_seccomp_policy_env().is_none(),
+            "whitespace-only env → None so a stale `export VAR=' '` doesn't accidentally enable seccomp",
+        );
+
+        unsafe {
+            std::env::set_var(SANDBOX_SECCOMP_POLICY_ENV, "/etc/libra/seccomp.bpf");
+        }
+        assert_eq!(
+            resolve_seccomp_policy_env().as_deref(),
+            Some(std::path::Path::new("/etc/libra/seccomp.bpf")),
+        );
+    }
+
+    #[cfg_attr(target_os = "linux", serial)]
+    #[test]
+    fn seccomp_policy_path_falls_back_to_default_and_obeys_explicit_disable() {
+        let temp = tempfile::tempdir().expect("tempdir for default seccomp path test");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let policy_path = temp.path().join(".libra").join("seccomp.bpf");
+        let _ = std::fs::create_dir_all(policy_path.parent().expect("policy parent dir exists"));
+        std::fs::write(&policy_path, b"placeholder bpf bytes").expect("write placeholder bpf");
+
+        let prior = std::env::var_os(SANDBOX_SECCOMP_POLICY_ENV);
+        unsafe {
+            std::env::remove_var(SANDBOX_SECCOMP_POLICY_ENV);
+        }
+        struct EnvRestore {
+            key: &'static str,
+            value: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(val) = &self.value {
+                        std::env::set_var(self.key, val);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
+                }
+            }
+        }
+        let _restore = EnvRestore {
+            key: SANDBOX_SECCOMP_POLICY_ENV,
+            value: prior,
+        };
+        assert_eq!(
+            resolve_seccomp_policy_path().as_deref(),
+            Some(policy_path.as_path()),
+            "default policy path should be used when env var is unset",
+        );
+
+        let _policy_explicit = ScopedEnvVar::set(
+            SANDBOX_SECCOMP_POLICY_ENV,
+            policy_path.to_string_lossy().to_string(),
+        );
+        assert_eq!(
+            resolve_seccomp_policy_path().as_deref(),
+            Some(policy_path.as_path()),
+            "explicit env path should be preferred",
+        );
+
+        let _policy_disabled = ScopedEnvVar::set(SANDBOX_SECCOMP_POLICY_ENV, " ");
+        assert!(
+            resolve_seccomp_policy_path().is_none(),
+            "whitespace env value should disable seccomp even when default path exists",
         );
     }
 
@@ -1937,11 +2644,172 @@ mod tests {
         );
     }
 
+    fn parse_network_access(toml: &str) -> Result<Option<NetworkAccess>, String> {
+        toml::from_str::<SandboxConfigFile>(toml)
+            .map_err(|error| error.to_string())?
+            .network_access()
+    }
+
+    /// `[sandbox.network]` is optional. A config with only the legacy
+    /// top-level `deny_read` (or an empty file) yields `None`, leaving
+    /// the policy-derived network access untouched.
+    #[test]
+    fn config_network_access_absent_yields_none() {
+        assert_eq!(parse_network_access("").expect("empty parses"), None);
+        assert_eq!(
+            parse_network_access(r#"deny_read = ["/secret"]"#).expect("deny_read-only parses"),
+            None,
+            "deny_read at root must not be confused for a network section",
+        );
+    }
+
+    /// A misspelled table or field name under `[sandbox]` must fail
+    /// loudly rather than be silently ignored (which would leave the
+    /// intended restriction unapplied). `deny_unknown_fields` on the
+    /// new config structs guarantees this; an unknown `mode` value is
+    /// already rejected by the enum.
+    #[test]
+    fn config_network_access_rejects_unknown_keys_and_modes() {
+        // Typo'd subtable name: `networks` instead of `network`.
+        assert!(
+            parse_network_access("[sandbox.networks]\nmode = \"denied\"").is_err(),
+            "a typo'd [sandbox.networks] table must not be silently ignored",
+        );
+        // Typo'd field inside the network table.
+        assert!(
+            parse_network_access("[sandbox.network]\nmodee = \"denied\"").is_err(),
+            "a typo'd field under [sandbox.network] must be rejected",
+        );
+        // Unknown mode value.
+        assert!(
+            parse_network_access("[sandbox.network]\nmode = \"denyed\"").is_err(),
+            "an unknown mode value must be rejected",
+        );
+    }
+
+    /// The three documented `mode` values map onto the three-state
+    /// `NetworkAccess` (sandbox.md §7.3). `deny_read` at the root and
+    /// `[sandbox.network]` coexist in one file without collision.
+    #[test]
+    fn config_network_access_parses_each_mode() {
+        assert_eq!(
+            parse_network_access("[sandbox.network]\nmode = \"denied\"").expect("denied parses"),
+            Some(NetworkAccess::Denied),
+        );
+        assert_eq!(
+            parse_network_access("[sandbox.network]\nmode = \"full\"").expect("full parses"),
+            Some(NetworkAccess::Full),
+        );
+
+        let allowlist = parse_network_access(
+            "deny_read = [\"/secret\"]\n\
+             [sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("allowlist parses");
+        assert_eq!(
+            allowlist,
+            Some(NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }),
+        );
+    }
+
+    /// Allowlist services are validated per sandbox.md §7.3: a bare
+    /// `host = "*"` and an entry that omits `ports` for a
+    /// high-sensitivity service are rejected with an actionable,
+    /// file-attributed error.
+    #[test]
+    fn config_network_access_rejects_invalid_allowlist_services() {
+        let wildcard = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"*\"\n\
+             ports = [443]\n",
+        )
+        .expect_err("bare wildcard host must be rejected");
+        assert!(
+            wildcard.contains(".libra/sandbox.toml") && wildcard.contains("bare wildcard"),
+            "expected file-attributed wildcard error, got: {wildcard}",
+        );
+
+        let empty_ports = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"bastion.example.com\"\n",
+        )
+        .expect_err("empty ports on a high-sensitivity entry must be rejected");
+        assert!(
+            empty_ports.contains("high-sensitivity"),
+            "expected high-sensitivity-port error, got: {empty_ports}",
+        );
+    }
+
+    /// End-to-end of the tightening wire: a `mode = "denied"` config
+    /// locks down a `WorkspaceWrite { Full }` policy, while a config
+    /// allowlist narrows a `Full` policy to exactly the listed
+    /// services. The config can never widen the policy.
+    #[test]
+    fn config_network_access_tightens_policy_via_with_network_restriction() {
+        let full_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+
+        let denied = parse_network_access("[sandbox.network]\nmode = \"denied\"")
+            .expect("denied parses")
+            .expect("present");
+        match full_policy.with_network_restriction(&denied) {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(network_access, NetworkAccess::Denied);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+
+        // A config that opens an allowlist cannot loosen a Denied policy.
+        let denied_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let allowlist = parse_network_access(
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("allowlist parses")
+        .expect("present");
+        match denied_policy.with_network_restriction(&allowlist) {
+            SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                assert_eq!(
+                    network_access,
+                    NetworkAccess::Denied,
+                    "config allowlist must not open a Denied policy without approval",
+                );
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+
     #[test]
     fn on_request_requires_approval_in_workspace_write() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -1962,7 +2830,7 @@ mod tests {
     fn on_request_skips_approval_for_sandboxed_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2002,7 +2870,7 @@ mod tests {
     fn unless_trusted_allows_known_safe_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2025,7 +2893,7 @@ mod tests {
     fn never_forbids_dangerous_commands() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: Vec::new(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
@@ -2068,8 +2936,226 @@ mod tests {
 
         assert_eq!(metadata.permissions().mode() & 0o777, COMMAND_TMPDIR_MODE);
 
-        cleanup_command_tmpdir(&tmpdir).await;
+        cleanup_command_tmpdir(&tmpdir, None).await;
         assert!(!tmpdir.exists());
+    }
+
+    /// Pin the structured `TmpdirCleanupFailed` Evidence event the
+    /// sandbox emits when `remove_dir_all` fails. We force a
+    /// failure by pointing the cleanup at a path that exists as a
+    /// regular file (not a directory) — `remove_dir_all` returns
+    /// `NotADirectory`/`Other` and the sink should capture exactly
+    /// one event with the file path. See
+    /// `docs/improvement/sandbox.md:142`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_command_tmpdir_records_evidence_on_failure() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::evidence::{
+            InMemorySandboxEvidenceSink, SandboxEvidenceEvent,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir for cleanup-evidence test");
+        let file_path = temp.path().join("not-a-directory.txt");
+        std::fs::write(&file_path, b"file, not a dir").expect("write tmpdir-target file");
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        cleanup_command_tmpdir(&file_path, Some(sink.as_ref())).await;
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SandboxEvidenceEvent::TmpdirCleanupFailed { path, error } => {
+                assert_eq!(path, &file_path);
+                assert!(
+                    !error.is_empty(),
+                    "tmpdir cleanup failure must include a non-empty error string"
+                );
+            }
+            other => panic!("expected TmpdirCleanupFailed, got {other:?}"),
+        }
+    }
+
+    /// Pin that a successful cleanup emits **no** Evidence event.
+    /// The sink contract is "structured surface for failures"; a
+    /// happy-path cleanup must remain silent on the structured
+    /// channel so consumers can treat any event as actionable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_command_tmpdir_records_no_evidence_on_success() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::evidence::InMemorySandboxEvidenceSink;
+
+        let tmpdir = create_command_tmpdir().expect("private command tmpdir should be created");
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+
+        cleanup_command_tmpdir(&tmpdir, Some(sink.as_ref())).await;
+
+        assert!(!tmpdir.exists());
+        assert!(
+            sink.events().is_empty(),
+            "successful cleanup must not emit an Evidence event"
+        );
+    }
+
+    /// Pin the structured `EnforcementFailed` Evidence event the
+    /// sandbox emits when `SandboxEnforcement::Required` cannot
+    /// produce an effective backend (Linux without
+    /// `LIBRA_LINUX_SANDBOX_EXE`). See
+    /// `docs/improvement/sandbox.md:143`, L162, L373. Linux-only
+    /// because the EnforcementFailed branch fires on the missing-
+    /// helper path; on macOS the seatbelt helper is always
+    /// available so the same inputs select `MacosSeatbelt` instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_command_from_spec_records_evidence_on_enforcement_failed() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::{
+            evidence::{InMemorySandboxEvidenceSink, SandboxEvidenceEvent},
+            policy::SandboxPolicy,
+        };
+
+        // Clear any ambient `LIBRA_LINUX_SANDBOX_EXE` so the
+        // missing-helper branch fires deterministically. Use a
+        // serial guard if other tests touch the same env in this
+        // suite.
+        // SAFETY: tests run with `--test-threads=1` under CI for
+        // the offline-core matrix; for the dev-local run we
+        // accept best-effort isolation.
+        let _ambient = std::env::var_os("LIBRA_LINUX_SANDBOX_EXE");
+        // SAFETY: setting an env var in tests; restored below.
+        unsafe {
+            std::env::remove_var("LIBRA_LINUX_SANDBOX_EXE");
+        }
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_runtime = SandboxRuntimeConfig {
+            enforcement: runtime::SandboxEnforcement::Required,
+            evidence_sink: Some(sink.clone()),
+            ..SandboxRuntimeConfig::default()
+        };
+        let sandbox_context = ToolSandboxContext {
+            policy: SandboxPolicy::WorkspaceWrite {
+                writable_roots: Vec::new(),
+                network_access: NetworkAccess::Denied,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            },
+            permissions: SandboxPermissions::default(),
+        };
+        let spec = CommandSpec {
+            program: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: None,
+            sandbox_permissions: SandboxPermissions::default(),
+            justification: None,
+        };
+
+        let result = build_command_from_spec(
+            spec,
+            Some(&sandbox_context),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        );
+
+        // SAFETY: restore the ambient env var.
+        unsafe {
+            if let Some(value) = _ambient {
+                std::env::set_var("LIBRA_LINUX_SANDBOX_EXE", value);
+            }
+        }
+
+        assert!(
+            result.is_err(),
+            "Required enforcement without a helper must abort build"
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
+        match &events[0] {
+            SandboxEvidenceEvent::EnforcementFailed { reason } => {
+                assert!(
+                    reason.contains("enforcement is required"),
+                    "reason must echo the doc's enforcement phrase: {reason}"
+                );
+            }
+            other => panic!("expected EnforcementFailed, got {other:?}"),
+        }
+    }
+
+    /// Pin the structured `WritableRootRejected` Evidence event
+    /// the sandbox emits when a configured writable_root matches a
+    /// dangerous mount pattern (e.g. `/var/run/docker.sock`). See
+    /// `docs/improvement/sandbox.md:143`. The sandbox's
+    /// `validate_writable_roots_with_cwd` returns
+    /// `SandboxPolicyError::DangerousWritableRoot`, which
+    /// `build_command_from_spec` propagates as a `String` error
+    /// after emitting the Evidence row.
+    #[test]
+    fn build_command_from_spec_records_evidence_on_dangerous_writable_root() {
+        use std::sync::Arc;
+
+        use crate::internal::ai::sandbox::{
+            evidence::{InMemorySandboxEvidenceSink, SandboxEvidenceEvent},
+            policy::SandboxPolicy,
+        };
+
+        let sink = Arc::new(InMemorySandboxEvidenceSink::new());
+        let sandbox_runtime = SandboxRuntimeConfig {
+            evidence_sink: Some(sink.clone()),
+            ..SandboxRuntimeConfig::default()
+        };
+        let dangerous_root = PathBuf::from("/var/run/docker.sock");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![dangerous_root.clone()],
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let sandbox_context = ToolSandboxContext {
+            policy,
+            permissions: SandboxPermissions::default(),
+        };
+        let spec = CommandSpec {
+            program: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            env: std::collections::HashMap::new(),
+            timeout_ms: None,
+            sandbox_permissions: SandboxPermissions::default(),
+            justification: None,
+        };
+
+        let result = build_command_from_spec(
+            spec,
+            Some(&sandbox_context),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        );
+
+        // The dangerous writable root must reject the spec.
+        assert!(result.is_err(), "dangerous writable root must abort build");
+
+        // AND the sink must have captured the structured event.
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
+        match &events[0] {
+            SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
+                assert_eq!(root, &dangerous_root);
+                assert!(
+                    !reason.is_empty(),
+                    "rejection must include a non-empty reason"
+                );
+            }
+            other => panic!("expected WritableRootRejected, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -2100,7 +3186,7 @@ mod tests {
         spec.env
             .insert("TMP".to_string(), caller_tmp.to_string_lossy().into_owned());
 
-        let output = run_command_spec(spec, 16 * 1024, None, None)
+        let output = run_command_spec(spec, 16 * 1024, None, None, None, None)
             .await
             .expect("command should run with private tmp env");
 
@@ -2116,11 +3202,62 @@ mod tests {
         assert!(!command_tmpdir.exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_spec_injects_allowlist_proxy_env_for_allowlist_policy() {
+        let spec = CommandSpec {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\"".to_string(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: Some(5_000),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            justification: None,
+        };
+        let sandbox = ToolSandboxContext {
+            policy: SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Allowlist {
+                    services: vec![NetworkService {
+                        host: "registry.npmjs.org".to_string(),
+                        ports: vec![443],
+                        protocol: Some(NetworkProtocol::Tcp),
+                    }],
+                },
+            },
+            permissions: SandboxPermissions::UseDefault,
+        };
+        let sandbox_runtime = SandboxRuntimeConfig {
+            enforcement: SandboxEnforcement::Required,
+            ..SandboxRuntimeConfig::default()
+        };
+
+        let output = run_command_spec(
+            spec,
+            16 * 1024,
+            Some(sandbox),
+            Some(&sandbox_runtime),
+            None,
+            None,
+        )
+        .await
+        .expect("allowlist command should receive proxy env");
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "stdout: {:?}", output.stdout);
+        assert!(lines[0].starts_with("http://127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], lines[0]);
+    }
+
     #[test]
     fn approval_context_reports_workspace_write_details() {
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![PathBuf::from("src")],
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
         };
@@ -2130,10 +3267,11 @@ mod tests {
             Path::new("/tmp/workspace"),
             SandboxPermissions::UseDefault,
             false,
+            None,
         );
 
         assert_eq!(sandbox_label, "workspace-write");
-        assert!(!network_access);
+        assert_eq!(network_access, NetworkAccess::Denied);
         assert_eq!(writable_roots, vec![PathBuf::from("/tmp/workspace/src")]);
     }
 
@@ -2144,11 +3282,340 @@ mod tests {
             Path::new("/tmp/workspace"),
             SandboxPermissions::UseDefault,
             true,
+            None,
         );
 
         assert_eq!(sandbox_label, "outside sandbox");
-        assert!(network_access);
+        assert_eq!(network_access, NetworkAccess::Full);
         assert!(writable_roots.is_empty());
+    }
+
+    #[test]
+    fn requested_network_access_upgrade_detects_config_widening() {
+        let temp = tempfile::tempdir().expect("tempdir for network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![temp.path().to_path_buf()],
+            network_access: NetworkAccess::Denied,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&policy),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            upgrade,
+            Some(NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn requested_network_access_upgrade_detects_config_full_widening() {
+        let temp = tempfile::tempdir().expect("tempdir for full network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Denied,
+        };
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&policy),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(upgrade, Some(NetworkAccess::Full));
+    }
+
+    #[test]
+    fn requested_network_access_upgrade_skips_non_network_bearing_policy() {
+        let temp = tempfile::tempdir().expect("tempdir for read-only network config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+
+        let upgrade = requested_network_access_upgrade(
+            Some(&SandboxPolicy::ReadOnly),
+            SandboxPermissions::UseDefault,
+            temp.path(),
+            false,
+        )
+        .expect("config should parse");
+
+        assert_eq!(upgrade, None);
+    }
+
+    #[tokio::test]
+    async fn network_access_upgrade_uses_uncached_approval_request() {
+        let temp = tempfile::tempdir().expect("tempdir for network approval test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn({
+            let cwd = cwd.clone();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-network-upgrade".to_string(),
+                    command: "true".to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::WorkspaceWrite {
+                            writable_roots: vec![cwd],
+                            network_access: NetworkAccess::Denied,
+                            exclude_tmpdir_env_var: false,
+                            exclude_slash_tmp: false,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: None,
+                    evidence_sink: None,
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("network upgrade approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(request.command, "true");
+        assert_eq!(request.sandbox_label, "workspace-write");
+        assert_eq!(
+            request.cache_disabled_reason.as_deref(),
+            Some("network access escalation approvals are not cached")
+        );
+        assert_eq!(
+            request.network_access,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }
+        );
+        assert!(
+            request
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("requested network access escalation")
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Denied)
+            .expect("approval receiver should be active");
+
+        let error = run
+            .await
+            .expect("network upgrade run task should not panic")
+            .expect_err("denying network upgrade should stop execution");
+        assert_eq!(error, "rejected by user");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_network_access_upgrade_reaches_command_environment() {
+        let temp = tempfile::tempdir().expect("tempdir for approved network test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\n\
+             mode = \"allowlist\"\n\
+             [[sandbox.network.services]]\n\
+             host = \"registry.npmjs.org\"\n\
+             ports = [443]\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn({
+            let cwd = cwd.clone();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-approved-network-upgrade".to_string(),
+                    command: "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+                        .to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::ExternalSandbox {
+                            network_access: NetworkAccess::Denied,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: Some(SandboxRuntimeConfig {
+                        enforcement: SandboxEnforcement::Required,
+                        ..SandboxRuntimeConfig::default()
+                    }),
+                    evidence_sink: None,
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("network upgrade approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(
+            request.command,
+            "printf '%s\n%s\n%s\n' \"$HTTPS_PROXY\" \"$NO_PROXY\" \"$LIBRA_SANDBOX_ALLOWLIST_PROXY\""
+        );
+        assert_eq!(request.sandbox_label, "external-sandbox");
+        assert_eq!(
+            request.network_access,
+            NetworkAccess::Allowlist {
+                services: vec![NetworkService {
+                    host: "registry.npmjs.org".to_string(),
+                    ports: vec![443],
+                    protocol: None,
+                }],
+            }
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Approved)
+            .expect("approval receiver should be active");
+
+        let output = run
+            .await
+            .expect("approved network upgrade task should not panic")
+            .expect("approved network upgrade should run command");
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let lines = output.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "stdout: {:?}", output.stdout);
+        assert!(lines[0].starts_with("http://127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], lines[0]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn safety_deny_does_not_request_network_upgrade_approval() {
+        let temp = tempfile::tempdir().expect("tempdir for denied network approval test");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            "[sandbox.network]\nmode = \"full\"\n",
+        )
+        .expect("write sandbox config");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+
+        let error = run_shell_command_with_approval(ShellCommandRequest {
+            call_id: "call-network-upgrade-denied".to_string(),
+            command: "echo should-not-run".to_string(),
+            cwd: temp.path().to_path_buf(),
+            timeout_ms: Some(5_000),
+            max_output_bytes: 16 * 1024,
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![temp.path().to_path_buf()],
+                    network_access: NetworkAccess::Denied,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            sandbox_runtime: None,
+            evidence_sink: None,
+            approval: Some(ctx),
+            justification: None,
+            safety_decision: Some(SafetyDecision::deny(
+                "test.deny",
+                "policy denial remains authoritative",
+                super::super::runtime::hardening::BlastRadius::Workspace,
+            )),
+        })
+        .await
+        .expect_err("safety deny should stop before network upgrade approval");
+
+        assert!(error.contains("policy denial remains authoritative"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
@@ -2178,7 +3645,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -2219,7 +3686,7 @@ mod tests {
                 reason: Some("test".to_string()),
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -2264,7 +3731,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -2286,7 +3753,7 @@ mod tests {
                     reason: None,
                     is_retry: false,
                     sandbox_label: "workspace-write".to_string(),
-                    network_access: false,
+                    network_access: NetworkAccess::Denied,
                     writable_roots: vec![PathBuf::from("/tmp/other")],
                     cache_disabled_reason: None,
                     response_tx,
@@ -2334,6 +3801,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::RequireEscalated,
                 is_retry: true,
+                requested_network_access: None,
             },
             Some("sandbox fallback approvals are not cached".to_string()),
         )
@@ -2366,6 +3834,7 @@ mod tests {
             max_output_bytes: 16 * 1024,
             sandbox: None,
             sandbox_runtime: None,
+            evidence_sink: None,
             approval: Some(ctx),
             justification: None,
             safety_decision: None,
@@ -2403,6 +3872,7 @@ mod tests {
             max_output_bytes: 16 * 1024,
             sandbox: None,
             sandbox_runtime: None,
+            evidence_sink: None,
             approval: Some(ctx),
             justification: None,
             safety_decision: Some(SafetyDecision::deny(
@@ -2426,6 +3896,7 @@ mod tests {
     #[serial(sandbox_env)]
     async fn prefer_strict_missing_linux_helper_requires_fallback_approval() {
         let _env_guard = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let _bwrap_guard = EnvVarGuard::set("LIBRA_BWRAP_BINARY", "/tmp/libra-never-exists");
         let temp = tempfile::tempdir().expect("tempdir for prefer-strict fallback test");
         let marker = temp.path().join("should-not-run");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2450,7 +3921,7 @@ mod tests {
                     sandbox: Some(ToolSandboxContext {
                         policy: SandboxPolicy::WorkspaceWrite {
                             writable_roots: vec![cwd],
-                            network_access: false,
+                            network_access: NetworkAccess::Denied,
                             exclude_tmpdir_env_var: false,
                             exclude_slash_tmp: false,
                         },
@@ -2460,6 +3931,7 @@ mod tests {
                         enforcement: SandboxEnforcement::PreferStrict,
                         ..SandboxRuntimeConfig::default()
                     }),
+                    evidence_sink: None,
                     approval: Some(ctx),
                     justification: None,
                     safety_decision: None,
@@ -2610,6 +4082,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 is_retry: false,
+                requested_network_access: None,
             },
         )
         .await;
@@ -2625,6 +4098,7 @@ mod tests {
                 sandbox_policy: None,
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 is_retry: false,
+                requested_network_access: None,
             },
         )
         .await;
@@ -2693,7 +4167,7 @@ mod tests {
                 reason: None,
                 is_retry: false,
                 sandbox_label: "workspace-write".to_string(),
-                network_access: false,
+                network_access: NetworkAccess::Denied,
                 writable_roots: vec![PathBuf::from("/tmp/workspace")],
                 cache_disabled_reason: None,
                 response_tx,
@@ -2725,7 +4199,7 @@ mod tests {
             reason: None,
             is_retry: false,
             sandbox_label: "workspace-write".to_string(),
-            network_access: false,
+            network_access: NetworkAccess::Denied,
             writable_roots: vec![cwd.to_path_buf()],
             cache_disabled_reason,
             response_tx,
@@ -2740,6 +4214,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: this test helper is only used from tests serialized by
+            // `#[serial(sandbox_env)]`, so no sibling test mutates this env var
+            // concurrently.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
             // SAFETY: this test helper is only used from tests serialized by

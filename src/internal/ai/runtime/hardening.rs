@@ -18,6 +18,35 @@ pub enum PrincipalRole {
     System,
 }
 
+impl PrincipalRole {
+    /// `true` for roles that may execute state-mutating operations.
+    /// Observers are read-only and fail-closed against mutation; every
+    /// other role passes this gate (the mutating-vs-approval decision
+    /// lives downstream in [`is_privileged`](Self::is_privileged)).
+    ///
+    /// Used by [`ToolBoundaryPolicy::decide`] in place of the inline
+    /// `role == Observer && mutates` check so capability rules stay
+    /// in one place.
+    pub fn can_mutate(self) -> bool {
+        !matches!(self, PrincipalRole::Observer)
+    }
+}
+
+impl PrincipalRole {
+    /// `true` for roles that can execute mutating tools **without
+    /// runtime-mediated approval**. Today only `System` qualifies —
+    /// platform code running on Libra's behalf doesn't go through the
+    /// approval pipeline. Owners and Contributors still need approval
+    /// for mutations even though they pass [`can_mutate`](Self::can_mutate).
+    ///
+    /// Used by [`ToolBoundaryPolicy::decide`] in place of the inline
+    /// `role != System` check so the privileged-skip rule stays in one
+    /// place.
+    pub fn is_privileged(self) -> bool {
+        matches!(self, PrincipalRole::System)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalContext {
     pub principal_id: String,
@@ -31,13 +60,102 @@ impl PrincipalContext {
             role: PrincipalRole::System,
         }
     }
+
+    /// Map a git-internal [`ActorRef`](git_internal::internal::object::types::ActorRef)
+    /// onto a [`PrincipalContext`].
+    ///
+    /// Mapping policy (one-way, lossy — `ActorKind` carries more granularity
+    /// than `PrincipalRole`):
+    ///
+    /// - `ActorKind::System` → `PrincipalRole::System`
+    /// - `ActorKind::Human` / `ActorKind::Agent` / `ActorKind::McpClient`
+    ///   → `PrincipalRole::Contributor` (all act on behalf of the
+    ///   workspace owner, distinct from platform-level System)
+    /// - `ActorKind::Other(_)` → `PrincipalRole::Observer` (fail-closed
+    ///   to least-privilege for unknown actor categories)
+    ///
+    /// The `principal_id` is the verbatim
+    /// [`ActorRef::id`](git_internal::internal::object::types::ActorRef::id),
+    /// so audit pipelines can correlate `PrincipalContext.principal_id`
+    /// with the on-object actor identifier without a side table.
+    pub fn from_actor(actor: &git_internal::internal::object::types::ActorRef) -> Self {
+        use git_internal::internal::object::types::ActorKind;
+        let role = match actor.kind() {
+            ActorKind::System => PrincipalRole::System,
+            ActorKind::Human | ActorKind::Agent | ActorKind::McpClient => {
+                PrincipalRole::Contributor
+            }
+            ActorKind::Other(_) => PrincipalRole::Observer,
+        };
+        Self {
+            principal_id: actor.id().to_string(),
+            role,
+        }
+    }
 }
 
+/// A tool-boundary operation the runtime is about to attempt.
+///
+/// Carries the classifier inputs the policy actually reads
+/// (`tool_name`, `mutates_state`, `requires_network`) plus a
+/// structured [`ToolOperationDetails`] tag that distinguishes the
+/// payload shape — currently a plain tool call vs. a sub-agent spawn
+/// (mirrors the `task` tool semantics introduced in OC-Phase 2 P3.3).
+/// Construct via the [`ToolOperation::tool`] / [`ToolOperation::sub_agent_spawn`]
+/// helpers so the `details` discriminator stays in sync with the
+/// shape-determined fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOperation {
     pub tool_name: String,
     pub mutates_state: bool,
     pub requires_network: bool,
+    #[serde(default)]
+    pub details: ToolOperationDetails,
+}
+
+/// Shape-tag for a [`ToolOperation`]. `Tool` is the default for the
+/// model's normal tool-loop calls; `SubAgentSpawn` carries the
+/// child-agent name and a redacted prompt digest so auditors can
+/// reconstruct who-asked-what without seeing the verbatim user
+/// prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolOperationDetails {
+    /// A regular registry-routed tool call.
+    #[default]
+    Tool,
+    /// A sub-agent spawn issued via the `task` tool.
+    SubAgentSpawn { name: String, prompt_digest: String },
+}
+
+impl ToolOperation {
+    /// Build a regular tool-call operation. Use this in the
+    /// registry's pre-execute path; the policy classifies based on
+    /// the three boolean/string fields.
+    pub fn tool(tool_name: impl Into<String>, mutates_state: bool, requires_network: bool) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            mutates_state,
+            requires_network,
+            details: ToolOperationDetails::Tool,
+        }
+    }
+
+    /// Build a sub-agent spawn operation. Pinned to `tool_name =
+    /// "task"`, `mutates_state = true`, `requires_network = false`
+    /// because every spawn must route through the approval-mediated
+    /// `task` boundary (CEX-S2-12 dispatcher).
+    pub fn sub_agent_spawn(name: impl Into<String>, prompt_digest: impl Into<String>) -> Self {
+        Self {
+            tool_name: "task".to_string(),
+            mutates_state: true,
+            requires_network: false,
+            details: ToolOperationDetails::SubAgentSpawn {
+                name: name.into(),
+                prompt_digest: prompt_digest.into(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +336,7 @@ impl ToolBoundaryPolicy {
             };
         }
 
-        if principal.role == PrincipalRole::Observer && operation.mutates_state {
+        if !principal.role.can_mutate() && operation.mutates_state {
             return BoundaryDecision {
                 allowed: false,
                 approval_required: false,
@@ -243,7 +361,7 @@ impl ToolBoundaryPolicy {
         if known_mutating || operation.mutates_state {
             return BoundaryDecision {
                 allowed: true,
-                approval_required: principal.role != PrincipalRole::System,
+                approval_required: !principal.role.is_privileged(),
                 reason: "mutating tool requires runtime-mediated approval".to_string(),
             };
         }
@@ -572,5 +690,120 @@ mod tests {
         assert!(!output.contains(" raw"));
         assert!(output.contains("X-Libra-Control-Token: [REDACTED]"));
         assert!(output.contains("X-Code-Controller-Token=[REDACTED]"));
+    }
+
+    /// `PrincipalContext::from_actor` must map every `ActorKind` variant
+    /// to the right `PrincipalRole`. Human / Agent / McpClient all
+    /// collapse to `Contributor` (they act on behalf of the workspace
+    /// owner); System maps to `System`; the open-ended `Other(_)` variant
+    /// is fail-closed to `Observer` (least privilege) so a malformed
+    /// actor on disk can't accidentally route as System.
+    #[test]
+    fn principal_context_from_actor_maps_actor_kinds_to_roles() {
+        use git_internal::internal::object::types::{ActorKind, ActorRef};
+
+        let human = ActorRef::new(ActorKind::Human, "user@example").unwrap();
+        let agent = ActorRef::new(ActorKind::Agent, "libra-coder").unwrap();
+        let system = ActorRef::new(ActorKind::System, "libra-orchestrator").unwrap();
+        let mcp_client = ActorRef::new(ActorKind::McpClient, "mcp-user").unwrap();
+        let other = ActorRef::new(ActorKind::Other("custom".to_string()), "unknown").unwrap();
+
+        assert_eq!(
+            PrincipalContext::from_actor(&human),
+            PrincipalContext {
+                principal_id: "user@example".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&agent),
+            PrincipalContext {
+                principal_id: "libra-coder".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&system),
+            PrincipalContext {
+                principal_id: "libra-orchestrator".to_string(),
+                role: PrincipalRole::System,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&mcp_client),
+            PrincipalContext {
+                principal_id: "mcp-user".to_string(),
+                role: PrincipalRole::Contributor,
+            }
+        );
+        assert_eq!(
+            PrincipalContext::from_actor(&other),
+            PrincipalContext {
+                principal_id: "unknown".to_string(),
+                role: PrincipalRole::Observer,
+            }
+        );
+    }
+
+    /// `can_mutate()` must return `false` only for `Observer` so the
+    /// rule "observers are read-only" stays in one place. Every other
+    /// role passes the gate.
+    #[test]
+    fn principal_role_can_mutate_rejects_only_observer() {
+        assert!(!PrincipalRole::Observer.can_mutate());
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::System,
+        ] {
+            assert!(role.can_mutate(), "{role:?} must be allowed to mutate",);
+        }
+    }
+
+    /// `is_privileged()` must return `true` only for `System` — Owners
+    /// and Contributors still need approval for mutations even though
+    /// they pass `can_mutate()`.
+    #[test]
+    fn principal_role_is_privileged_only_for_system() {
+        assert!(PrincipalRole::System.is_privileged());
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::Observer,
+        ] {
+            assert!(
+                !role.is_privileged(),
+                "{role:?} must NOT be privileged (still needs approval)",
+            );
+        }
+    }
+
+    /// `can_mutate()` and `is_privileged()` are not equivalent — every
+    /// privileged role also passes `can_mutate()`, but `can_mutate()`
+    /// alone is not sufficient to skip approval. This test pins that
+    /// asymmetry so a future "simplify the predicates" refactor can't
+    /// silently collapse the two.
+    #[test]
+    fn principal_role_privileged_implies_can_mutate_but_not_vice_versa() {
+        // Forward: privileged ⇒ can_mutate.
+        for role in [
+            PrincipalRole::Owner,
+            PrincipalRole::Contributor,
+            PrincipalRole::Observer,
+            PrincipalRole::System,
+        ] {
+            if role.is_privileged() {
+                assert!(
+                    role.can_mutate(),
+                    "{role:?} is privileged but failed can_mutate",
+                );
+            }
+        }
+        // Reverse must NOT hold: Contributor + Owner are can_mutate but
+        // NOT privileged.
+        assert!(
+            PrincipalRole::Contributor.can_mutate() && !PrincipalRole::Contributor.is_privileged(),
+        );
+        assert!(PrincipalRole::Owner.can_mutate() && !PrincipalRole::Owner.is_privileged());
     }
 }

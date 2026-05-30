@@ -28,8 +28,8 @@
 | `HistoryManager::new_with_ref` / `create_append_commit` / `resolve_history_head` / `update_ref_if_matches` | [src/internal/ai/history.rs](../../src/internal/ai/history.rs)（`new_with_ref` :176、`resolve_history_head` :459、`create_append_commit` :601、`update_ref_if_matches` :745） | 任意 orphan ref 上的 CAS 追加，已带 SQLite-busy 与 head-conflict 双重重试 |
 | `SessionStore::lock_session` + `SessionFileLock` | [src/internal/ai/session/store.rs:440](../../src/internal/ai/session/store.rs)（`SessionFileLock` 类型在 store.rs:44；`SESSION_LOCK_TIMEOUT = 5s`、`STALE_SESSION_LOCK_AGE = 30s`） | 跨进程会话文件锁，基于 `.libra/sessions/<id>.lock` |
 | 分层存储 | [src/utils/client_storage.rs:351](../../src/utils/client_storage.rs)（`LIBRA_STORAGE_THRESHOLD` 解析）+ `put()`（client_storage.rs:500） | 大 blob 自动按 `LIBRA_STORAGE_THRESHOLD` 推到 R2 |
-| 云同步 | [src/command/cloud.rs::run_cloud_sync](../../src/command/cloud.rs)（当前位于 cloud.rs:840；`ensure_object_index_table` 在 :861 起 driver query） | 增量按 `object_index` 表迭代 |
-| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:532](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 当前注册表共 6 条迁移（`automation_log` / `agent_usage_stats` / `agent_capture` / `agent_checkpoint_parent_nullable` / `approved_permission` / `agent_usage_stats_agent_name`），全部走 `include_str!` 加载（v0.17.400 起 inline SQL 已抽取到文件）；`run_builtin_migrations`（migration.rs:635）公开 API 可用 |
+| 云同步 | [src/command/cloud.rs::run_cloud_sync](../../src/command/cloud.rs)（当前位于 cloud.rs:872；`ensure_object_index_table` 在 :893 起 driver query） | 增量按 `object_index` 表迭代 |
+| Migration runner（CEX-12.5） | [src/internal/db/migration.rs:532](../../src/internal/db/migration.rs)、[sql/migrations/README.md](../../sql/migrations/README.md) | 当前注册表共 7 条迁移（`automation_log` / `agent_usage_stats` / `agent_capture` / `agent_checkpoint_parent_nullable` / `approved_permission` / `agent_usage_stats_agent_name` / `source_call_log`），全部走 `include_str!` 加载（v0.17.400 起 inline SQL 已抽取到文件）；`run_builtin_migrations`（migration.rs:652）公开 API 可用 |
 | `stash::build_tree_recursive` | [src/command/stash.rs](../../src/command/stash.rs) | 工作目录 → tree，已处理 index 合并、忽略文件、子模块 |
 | `restore` 路径还原 | [src/command/restore.rs](../../src/command/restore.rs) | rewind 复用此路径 |
 | `object_index` 表 | [src/utils/object.rs](../../src/utils/object.rs) + [src/internal/db.rs](../../src/internal/db.rs) | 自动驱动云同步 |
@@ -38,11 +38,11 @@
 
 | 现状 | 必须修正 |
 |------|---------|
-| `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | ✅ 已落地：`Commands::Agent(command::agent::AgentArgs)`（cli.rs:325）与 `Commands::Hooks(command::hooks::HooksArgs)`（cli.rs:337，`#[command(hide = true)]` 兼容层）已实现，并在 dispatch match 中接入（cli.rs:1095 / :1096） |
+| `src/cli.rs` 的 `Commands` 枚举**无** `Hooks` 或 `Agent` 变体（grep 已确认） | ✅ 已落地：`Commands::Agent(command::agent::AgentArgs)`（cli.rs:422）与 `Commands::Hooks(command::hooks::HooksArgs)`（cli.rs:434，`#[command(hide = true)]` 兼容层）已实现，并在 dispatch match 中接入（cli.rs:1198 / :1199） |
 | `builtin_migrations()` 历史上**用 inline SQL 字符串**，未走 `include_str!`（曾位于 migration.rs:499-540） | ✅ 已落地（v0.17.400）：`2026050301_automation_log` / `2026050302_agent_usage_stats` 已抽取到 `sql/migrations/2026050301_automation_log{,_down}.sql` 与 `2026050302_agent_usage_stats{,_down}.sql`，与 `2026050303_agent_capture` 起的后续迁移一致走 `include_str!`；[sql/migrations/README.md](../../sql/migrations/README.md) 注册表已同步标记两条 SQL 文件来源。当前 builtin_migrations 位于 migration.rs:532 |
 | [sql/migrations/README.md](../../sql/migrations/README.md) 仍写"4 位版本号 NNNN"，与现网 `2026050301` 不一致 | ✅ 已落地：README 已改为 `YYYYMMDDNN` 形式说明，并明确所有迁移走 `include_str!`（v0.17.400 起注册表的两条 inline 来源已抽取为文件） |
-| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | 部分落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)），`branch`（create / delete）与 `switch`（create）已检查；`restore`/`reset` 命令对锁定分支的拦截属于行为变更，留作独立切片 |
-| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部六个迁移（`2026050301`..`2026050801`）；新增迁移仍需同步更新这三处断言 |
+| `is_locked_branch` 仅匹配 `DEFAULT_BRANCH \| INTENT_BRANCH`（曾位于 branch.rs:45） | ✅ 已落地：`AGENT_TRACES_BRANCH` 已加入 `is_locked_branch`（[branch.rs:51](../../src/internal/branch.rs)）；`branch`（create / delete / rename）、`switch`（create）已直接检查；`restore` 通过 [restore.rs:198-202](../../src/command/restore.rs) 调用 `is_locked_revision` 拒绝 `agent-traces` / `agent-traces~1` 等所有源 revision，`reset` 通过 [reset.rs:335](../../src/command/reset.rs) 同样拒绝 `agent-traces` / `agent-traces^` 等所有目标 revision。回归覆盖：[tests/command/restore_test.rs:305](../../tests/command/restore_test.rs)（`--source agent-traces~1`）+ [tests/command/reset_test.rs:207/339](../../tests/command/reset_test.rs) |
+| `tests/db_migration_test.rs` **硬编码** `vec![2026050301, 2026050302]` 与 `vec!["automation_log", "agent_usage_stats"]`（[lines 47-63, 68, 1040](../../tests/db_migration_test.rs)） | ✅ 已落地：注册表回归测试已扩展到全部七个迁移（`2026050301`..`2026052301`，含 v0.17.800 source_call_log）；新增迁移仍需同步更新这三处断言 |
 
 ---
 
@@ -62,7 +62,7 @@
 2. 不强制统一整库 transcript schema；保留 provider 原生格式（`jsonl/sqlite/markdown/binary`）的字节语义。
 3. **不建 `agent_session_event` 表**——`SessionStore` 的 JSONL 已承载事件流。
 4. **不建 shadow ref `refs/libra/agent-shadow/...`**——用 orphan commit 上的 `Libra-Scope: temporary` trailer 区分。
-5. **不实装 `libra agent checkpoint rewind` 的 transcript 覆写**——仅工作树恢复，transcript 截断需要每个 Provider 实现 `TranscriptTruncator`，归 v2。v1 命令打印明显警告。
+5. **不承诺统一 transcript 覆写**——v1 只对已实现 `TranscriptTruncator` 的 Agent 执行本地 transcript 截断（当前为 Claude Code）；其它 provider 仍只恢复工作树并打印明显 warning。
 6. 不向 D1 同步全量 `agent_session_event`（事件流量大，v1 仅同步 session/checkpoint 摘要）。
 
 ---
@@ -229,9 +229,9 @@ pub fn builtin_migrations() -> Vec<Migration> {
 ### 4.4 测试覆盖
 
 修改 [`tests/db_migration_test.rs`](../../tests/db_migration_test.rs)：
-- 第 47-63 行：`vec![2026050301, …, 2026050801]` / `vec!["automation_log", …, "agent_usage_stats_agent_name"]`
-- 第 68 行：`max_registered_version() == Some(2026050801)`
-- 第 1040 行：`applied == vec![2026050301, …, 2026050801]`
+- 第 47-63 行：`vec![2026050301, …, 2026052301]` / `vec!["automation_log", …, "source_call_log"]`
+- 第 68 行：`max_registered_version() == Some(2026052301)`
+- 第 1040 行：`applied == vec![2026050301, …, 2026052301]`
 - 新增断言：`table_exists(&conn, "agent_session").await` 与 `table_exists(&conn, "agent_checkpoint").await`
 
 新增 [`tests/agent_capture_migration_test.rs`](../../tests/agent_capture_migration_test.rs)：
@@ -410,26 +410,25 @@ async fn process_hook_event_with_target(
 
 - `libra agent checkpoint show <id>`：展示 metadata + transcript 长度 + tree 摘要
 - `libra agent checkpoint rewind <id> --dry-run`：默认 dry-run，打印将影响的文件列表
-- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：仅恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；**不**覆写本地 transcript 文件——v1 命令明确打印：
+- `libra agent checkpoint rewind <id> --apply`（不带 `--apply` 时拒绝执行）：恢复**工作树**（复用 `restore` 路径），HEAD 与 `refs/heads/*` 不动；若 checkpoint 属于 Claude Code 且 `metadata_json.transcript_path` 可用，则把本地 transcript 截断到 checkpoint boundary；其它 agent kind 明确打印 warning 并保持 transcript 不变：
   ```
-  Note: Transcript truncation for <provider> is not yet implemented in v1.
-  The Agent's local transcript file remains unchanged. Re-running the Agent
-  may produce inconsistent context.
+  Note: agent_kind '<provider>' has no TranscriptTruncator adapter yet;
+  the agent's local transcript was left untouched.
   ```
 
 ### 7.4 清理
 
 `libra agent clean [--all]`：
-1. 查 `agent_session WHERE state='stopped'`
-2. 对每个，查 `agent_checkpoint WHERE session_id=? AND scope='temporary'`
-3. 重写 `refs/libra/agent-traces` orphan branch tip 跳过这些 commit
-4. 删 `agent_checkpoint` 对应行
+1. 默认查最近一个 `state='stopped'` session；`--all` 才扩大到所有 stopped session（v0.17.1115 已落地）。active session 永不清理，避免删掉仍在运行的外部 Agent 临时 checkpoint。
+2. 对选中 session，查 `agent_checkpoint WHERE session_id=? AND scope='temporary'`
+3. 删 `agent_checkpoint` 对应行（v0.17.1115 已加回归测试覆盖 default/`--all` 的 stopped-only 语义）
+4. v0.17.1117 已补齐 `refs/libra/agent-traces` orphan branch rewrite：clean 会按保留的 checkpoint catalog 重建可达 commit 链，跳过被删除的 temporary checkpoint；若仓库只有历史 DB 行且 ref 为空，则保持 SQLite-only cleanup。
 5. 不主动 `git gc`——交底层自然回收
 
 ### 7.5 与现有命令交互
 
-- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）与 `switch`（create）均已调用
-- 部分：[`command/restore.rs`](../../src/command/restore.rs) 已通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`；[`command/reset.rs`](../../src/command/reset.rs) 已通过 `ResetError::LockedTarget` 守 `reset --hard <locked-ref>`。但**cwd 当前位于锁定分支时拦截 worktree-modifying commands** 属于行为变更，仍留作独立切片，未在本批落地
+- ✅ 扩展 [`is_locked_branch`](../../src/internal/branch.rs)：已新增匹配 `AGENT_TRACES_BRANCH` 常量（branch.rs:42 / :51）；`branch`（create / delete）、`switch`（create / existing target）与 `checkout` 均已调用
+- ✅ 锁定分支互操作已收口：[`command/restore.rs`](../../src/command/restore.rs) 通过 `RestoreError::LockedSource` 守 `--source <locked-ref>`，并通过 `RestoreError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的 worktree restore；[`command/reset.rs`](../../src/command/reset.rs) 通过 `ResetError::LockedTarget` 守 `reset <locked-ref>`，并通过 `ResetError::LockedCurrentBranch` 拦截当前位于 `intent` / `agent-traces` 时的整树 reset。`main` 仍只在 branch-management 语义下锁定，不阻塞普通用户工作树。
 - ✅ `git log refs/libra/agent-traces` 直接可用
 
 ---
@@ -534,11 +533,11 @@ libra agent
   status                                 # 活跃会话计数 + 最近 checkpoint
   session list [--agent <name>] [--state <s>]
   session show <id> [--extract-transcript <path>]
-  session stop <id>
-  session resume <id>                    # v1 仅恢复 metadata，不恢复 transcript 上下文
+  session stop <id>                      # 标记 metadata state=stopped
+  session resume <id>                    # 标记 metadata state=active，不恢复 transcript 上下文
   checkpoint list [--session <id>]
   checkpoint show <id>                   # metadata + diff 摘要（合并自 explain）
-  checkpoint rewind <id> [--dry-run|--apply]   # v1: --apply 仅恢复工作树，不覆写 transcript
+  checkpoint rewind <id> [--dry-run|--apply]   # --apply 恢复工作树；Claude Code transcript 会按 checkpoint 截断
   clean [--all]
   doctor                                 # 诊断 hook 安装、stuck 状态、孤儿 checkpoint
   push [--remote <name>]                 # 推送 refs/libra/agent-traces
@@ -548,7 +547,7 @@ libra agent
 **v1 不实现**：
 - `session promote <id> --as-intent`（v2 跨体系提升）
 - `checkpoint explain <id>`（合并到 `checkpoint show`）
-- `checkpoint rewind <id> --apply` 的 transcript 截断（v2 接 `TranscriptTruncator`）
+- 非 Claude Code provider 的 `checkpoint rewind <id> --apply` transcript 截断（需各 provider 接 `TranscriptTruncator`）
 
 ### 9.1 初始化
 
@@ -599,7 +598,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 10.3 推送独立 remote
 
-`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`，对应 `[remote "agent-traces"]` 配置写在 `.libra/config`。薄包装现 push 机器，无新 transport。
+`libra agent push [--remote <name>]`：scope 限定 `refs/libra/agent-traces`；默认 remote 为 `origin`，如需专用 remote 可传 `--remote agent-traces` 并在 `.libra/config` 配置 `[remote "agent-traces"]`。v0.17.1114 已落地为现有 push 机器的薄包装，无新 transport：本地 `agent-traces` tip 通过固定 refspec `agent-traces:refs/libra/agent-traces` 推送，且不会在远端创建 `refs/heads/agent-traces`。
 
 ---
 
@@ -625,10 +624,10 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 文件锁 | `SessionStore::lock_session` + `SessionFileLock`（5s timeout、30s stale） | [session/store.rs:440](../../src/internal/ai/session/store.rs) |
 | 工作树 → tree | `build_tree_recursive` | [stash.rs](../../src/command/stash.rs) |
 | 文件还原 | restore 的 path-walking | [restore.rs](../../src/command/restore.rs) |
-| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/353](../../src/command/checkout.rs)（多个 INTENT_BRANCH match arm 散落在 219/222/226/229/353/355 等）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
+| 分支保护 | `is_locked_branch`（扩展） / `INTENT_BRANCH` 拒绝模式 | [branch.rs:51](../../src/internal/branch.rs)、[checkout.rs:219/224/351](../../src/command/checkout.rs)（三处 INTENT_BRANCH/AGENT_TRACES match arm，分别在 :219 / :224 / :351）、[switch.rs:36/266](../../src/command/switch.rs)（`is_locked_branch` 调用 + INTENT_BRANCH 字面比较） |
 | 分层存储 | `TieredStorage` + `LIBRA_STORAGE_THRESHOLD` 路由 | [client_storage.rs:351/500](../../src/utils/client_storage.rs) |
 | 对象 I/O | `write_git_object` / `read_git_object` | [object.rs](../../src/utils/object.rs) |
-| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 817)](../../src/command/cloud.rs) |
+| 云同步 | `object_index` 迭代 | [cloud.rs::run_cloud_sync (line 872)](../../src/command/cloud.rs) |
 | 现 Claude/Gemini provider | 保留 `HookProvider`，新加 `ObservedAgent` wrapper 组合复用 | [hooks/providers/](../../src/internal/ai/hooks/providers/) |
 | Projection 层 | **不直接复用** —— 独立 storage.rs，弱关联 | [projection/](../../src/internal/ai/projection/) |
 
@@ -647,7 +646,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | 7 | **CAS 风暴** | P1 | 模拟单 session 100 events/s 持续 60s，`agent-traces` 写入成功率 100%；必要时调整 `HISTORY_HEAD_CONFLICT_MAX_RETRIES`（现 32） |
 | 8 | **Hook 失败安全** | P1 | 集成测试：安装 hook 后 `mv $(which libra) /tmp` 卸载 libra，Claude Code 仍能完整跑完一个 session（`|| true` 吃错误）；libra 还原后 `libra agent doctor` 报告"未捕获的 session N 个" |
 | 9 | **多 worktree SQLite 共享** | P2 | `agent_session` 必须存于 `git rev-parse --git-common-dir` 对应的 SQLite；`worktree_id` 列允许 `list` 按需过滤；多 worktree 试跑 |
-| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 时不动 transcript 文件且打印明显警告 |
+| 10 | **v1 过度承诺 rewind** | P1 | `checkpoint rewind` 在 v1 默认 dry-run；`--apply` 只对已实现 `TranscriptTruncator` 的 Agent 改写 transcript（当前 Claude Code），其它 agent kind 保持 transcript 不变并打印明显 warning |
 | 11 | **Cursor SQLite transcript 取查** | P2 | `libra agent session show --extract-transcript <path>` 把 SQLite blob 物化到指定路径，文档说明用 `sqlite3` 查看 |
 | 12 | **Unknown-event-safe envelope 兼容** | P2 | 老 reader 读包含未来虚构事件 `kind=future_event_xyz` 的 metadata.json，应落到 `Unknown(Value)` 分支不报错（与 [agent_run/event.rs](../../src/internal/ai/agent_run/event.rs) 对外承诺一致） |
 
@@ -675,9 +674,9 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 1. **Checkpoint commit 生成**：复用 `stash::build_tree_recursive`（排除 `protected_dirs`）构造 tree；构 metadata.json blob；transcript 经 `Redactor` → `RedactedBytes` → `write_git_object`；events.jsonl 同样作 blob；构 checkpoint tree；`HistoryManager::new_with_ref("refs/libra/agent-traces")` 追加 commit；commit message 含 `Libra-*` trailer
 2. **`agent_checkpoint` 表写入**：`scope` ∈ {temporary, committed}；`traces_commit` 指向 orphan commit；`tree_oid` / `metadata_blob_oid`
-3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`
-4. **清理**：`libra agent clean`：按 `state='stopped' AND scope='temporary'` 重写 `agent-traces` tip 移除对应 commit
-5. **Rewind dry-run**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径仅还原工作树并打印 transcript 不变更警告
+3. **CLI**：实现 `libra agent session list/info/show/stop/resume`、`libra agent checkpoint list/show`、`libra agent doctor`、`libra agent push`（v0.17.1114：`agent push` 已接入 `refs/libra/agent-traces` 推送）
+4. **清理**：`libra agent clean`：v0.17.1115 已按 `state='stopped' AND scope='temporary'` 删除 SQLite catalog 行，且 `--all` 不再触碰 active session；v0.17.1117 已补齐 agent-traces rewrite，temporary checkpoint commit 会从可达链移除，保留 checkpoint 的 `traces_commit` / `tree_oid` 同步改写。
+5. **Rewind dry-run / apply**：`libra agent checkpoint rewind <id> --dry-run` 列出将影响的文件；`--apply` 调 `restore` 路径还原工作树，并在 Claude Code checkpoint 上截断本地 transcript；其它 agent kind 打印 transcript 不变更 warning
 6. **TUI/MCP 扩展（可选）**：在现有 [tui/](../../src/internal/tui/) 加一个最小 view 展示 `agent_session` 列表
 
 **阶段 2 验收**：完整 Claude/Gemini session 能生成多个 checkpoint commit；`libra agent checkpoint list` 列出按时间排序；`git log refs/libra/agent-traces` 可读；`libra agent clean` 后 temporary commit 从 `agent-traces` 移除且 SQLite 索引同步清理。
@@ -695,7 +694,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 
 ### 阶段 4（v2，本次不做）
 
-1. `TranscriptTruncator` 实装 + `checkpoint rewind --apply` 支持 transcript 覆写
+1. 非 Claude Code provider 的 `TranscriptTruncator` 实装 + `checkpoint rewind --apply` transcript 覆写
 2. `session promote <id> --as-intent` 跨体系提升
 3. 从 `agent_session` 反算 `ToolCallRecord` 回写 `ai_thread`
 4. 5 个 preview adapter → stable
@@ -750,8 +749,9 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
 | `src/command/reset.rs` | 同上 |
 | `src/internal/ai/hooks/runtime.rs:157` `process_hook_event_from_stdin` | 抽离为 `process_hook_event_with_target(..., target: HookTarget)`；旧函数 1:1 包装传 `AiIntent` |
 | `src/command/init.rs`（或对应初始化路径） | 调 `HistoryManager::new_with_ref("refs/libra/agent-traces").init_branch()` |
+| `src/command/agent/push.rs` + `src/command/push.rs` | ✅ v0.17.1114：`libra agent push` 复用 push 传输并允许显式 `refs/libra/*` 远端目的 ref；回归测试确认只写 `refs/libra/agent-traces`，不创建 `refs/heads/agent-traces` |
 | `src/internal/ai/session/store.rs`（路径子目录） | 新增 `code/` vs `agent/` 子目录区分 |
-| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部六个迁移版本（`2026050301..2026050801`）与对应表名 |
+| `tests/db_migration_test.rs:50 / :56-61 / :1040` | ✅ 已落地：注册表回归测试硬编码断言已扩展到全部七个迁移版本（`2026050301..2026052301`，含 v0.17.800 source_call_log）与对应表名 |
 | `sql/migrations/README.md` | 版本号规则改 `YYYYMMDDNN`、`include_str!` 加载示例 |
 | `Cargo.toml` | 如需 `regex`、`once_cell`、`fs2` 等新依赖在此声明 |
 
@@ -811,7 +811,7 @@ Transcript blob、metadata blob、events blob 都走 `write_git_object` → `obj
   - **删除 shadow ref**：用 `agent-traces` 上的 orphan commit + scope trailer
   - **`RedactedBytes` 编译契约**：未脱敏字节类型层面无法进入持久化
   - **Adapter trait 拆分**：`ObservedAgent` 核心 + `ObservedAgentHooks` / `TranscriptTruncator` / `TranscriptChunker` 可选
-  - **v1 rewind 仅 dry-run / 工作树**：transcript 覆写归 v2
+  - **v1 rewind**：默认 dry-run；`--apply` 恢复工作树，Claude Code transcript 可截断，其它 provider transcript 覆写归 v2
   - **Migration 文件化**：`include_str!` 加载新增 `2026050303_agent_capture.sql`
   - **`is_locked_branch` 扩展**：加 `agent-traces`，并在 `restore`/`reset` 调用
   - **Phase 1 文件级落地清单**：新增第 16 章，把抽象计划落到具体文件

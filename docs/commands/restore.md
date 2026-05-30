@@ -14,6 +14,8 @@ libra restore [--source <tree-ish>] [--staged] [--worktree] <pathspec>...
 
 `libra restore` restores files in the working tree or index from a given source. By default (when neither `--staged` nor `--worktree` is specified), it restores files in the working tree from the index -- effectively discarding unstaged changes. With `--staged`, it restores the index from HEAD (or the specified `--source`), which unstages files. With both `-S` and `-W`, it restores both the index and working tree simultaneously.
 
+For new workflows, use `libra restore` directly. `libra checkout -- <path>` and `libra checkout <tree-ish> -- <path>` are accepted only as Git-compatible aliases for this path-restore behavior.
+
 The `<pathspec>` argument is required and accepts one or more file paths or directory paths. The special path `.` restores all files.
 
 When a source commit contains files that do not exist in the current worktree, those files are created. When the current worktree contains files that do not exist in the source, those files are deleted. The output reports both `restored_files` and `deleted_files` separately.
@@ -129,7 +131,7 @@ When restoring from the index (no `--source` specified for worktree restore), th
 
 ### Why separate from checkout?
 
-Git's `checkout` command serves two very different purposes: switching branches and restoring files. This overloading is widely recognized as one of Git's worst UX decisions. Git itself addressed this by introducing `git restore` (for files) and `git switch` (for branches) in Git 2.23. Libra follows this split from the start, making `restore` exclusively about file content and never about branch operations.
+Git's `checkout` command serves two very different purposes: switching branches and restoring files. This overloading is widely recognized as one of Git's worst UX decisions. Git itself addressed this by introducing `git restore` (for files) and `git switch` (for branches) in Git 2.23. Libra follows this split from the start, making `restore` the preferred command for file content and never for branch operations. `checkout -- <path>` remains available only as a compatibility alias for users bringing Git muscle memory.
 
 ### Why explicit `--worktree` / `--staged` flags?
 

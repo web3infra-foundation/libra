@@ -23,13 +23,17 @@
 - JSON / machine 输出
 - 显式错误码
 - human 成功确认消息
+- `-d` / `--dir`：清理未跟踪目录（已实现，`tests/command/clean_test.rs` 覆盖）
+- `-x`：含 ignored 文件的全量清理（已实现）
+- `-X`：仅清理 ignored 文件（已实现）
+- `--exclude <pattern>`：可重复的额外排除模式（已实现）
 
 **后续维护目标：**
 - 继续维护 symlink / 权限拒绝 / 缺失索引回归
+- `-d` / `-x` / `-X` 与 `--exclude` 组合路径的 JSON envelope 字段（`mode`、`exclude`）保持向后兼容
 
 **本批非目标：**
-- 不引入 `-d` / `-x` / `-X`
-- 不清理目录树和 ignored 文件的 Git 全量兼容选项
+- 不引入交互式 `-i` 模式（Git 的 prompt-driven path）
 
 ## 验证方式
 

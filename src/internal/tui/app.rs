@@ -5,8 +5,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     future::Future,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +19,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ring::digest;
 use serde::Deserialize;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -47,9 +50,12 @@ use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
+            BudgetTracker, TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
             TaskIntentClassifierError, TaskIntentDecision, ToolLoopConfig, ToolLoopObserver,
-            profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
+            format_agents_table, format_budget_status,
+            profile::{AgentProfileRouter, AgentsConfig},
+            run_tool_loop_with_history_and_observer,
+            runtime::{TaskEntryKind, TaskInvocation, TaskResult as SubAgentTaskResult},
         },
         commands::CommandDispatcher,
         completion::{
@@ -60,6 +66,12 @@ use crate::{
         context_budget::{
             MemoryAnchor, MemoryAnchorDraft, MemoryAnchorEvent, MemoryAnchorLookupError,
             build_memory_anchor_prompt_section,
+        },
+        goal::{
+            DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor,
+            GoalEventClock, GoalEventEnvelope, GoalLoopDecision, GoalStopPolicy,
+            GoalSupervisedToolLoopRequest, GoalSupervisor, GoalVerifierContext, RecentToolCall,
+            ToolResultStatus, run_goal_supervised_tool_loop,
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
@@ -89,7 +101,10 @@ use crate::{
         },
         projection::ProjectionRebuilder,
         prompt::SystemPromptBuilder,
-        sandbox::{ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, ReviewDecision},
+        sandbox::{
+            ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, NetworkAccess,
+            ReviewDecision,
+        },
         session::{
             SessionState, SessionStore,
             file_history::FileHistoryError,
@@ -403,6 +418,7 @@ pub struct AppConfig {
     pub command_dispatcher: CommandDispatcher,
     pub skill_dispatcher: SkillDispatcher,
     pub agent_router: AgentProfileRouter,
+    pub agents_config: AgentsConfig,
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
@@ -425,6 +441,8 @@ pub struct AppConfig {
     pub default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
     pub auto_classify_first_user_message: bool,
+    /// Goal objective supplied via `libra code --goal`, if any.
+    pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
     pub source_pool: SourcePool,
 }
@@ -455,6 +473,12 @@ pub struct App<M: CompletionModel> {
     last_draw_time: Instant,
     /// Background agent task handle (used for interrupt).
     agent_task: Option<JoinHandle<()>>,
+    /// Per-turn `AbortToken` shared with `config.subagent_runtime`'s
+    /// (v0.17.786). `cancel_current_turn` cancels this so any
+    /// in-flight sub-agent dispatch short-circuits via the
+    /// runner's `tokio::select!` (v0.17.767). Reset at every
+    /// turn start; cleared when the turn ends.
+    current_turn_abort_token: Option<crate::internal::ai::agent::runtime::AbortToken>,
     /// Delayed draw task for frame coalescing inside frame interval.
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
@@ -467,6 +491,10 @@ pub struct App<M: CompletionModel> {
     skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
     agent_router: AgentProfileRouter,
+    /// Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.
+    agents_config: AgentsConfig,
+    /// In-memory budget totals for this TUI session.
+    budget_tracker: BudgetTracker,
     /// Session state for persistence.
     session: SessionState,
     /// Session store for saving/loading.
@@ -609,6 +637,56 @@ where
             .get(LATEST_EXECUTION_PLAN_ID)
             .and_then(|value| value.as_str())
             .map(ToString::to_string);
+        let initial_goal_session = app_config.initial_goal.as_ref().and_then(|objective| {
+            let session_id = app_config.session.id.clone();
+            match super::goal_session::GoalSession::create(
+                session_id.clone(),
+                session_id,
+                objective.clone(),
+                crate::internal::ai::goal::GoalActor::User { id: None },
+            ) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to create initial Goal session from validated CLI objective"
+                    );
+                    None
+                }
+            }
+        });
+        // OC-Phase 6 P6.7 — `--resume <thread>` replays the
+        // session's Goal envelope stream so the resumed TUI shows
+        // the same active Goal it left. We only do this when no
+        // `--goal "..."` flag was supplied (the explicit-objective
+        // path takes precedence so the user can start a fresh Goal
+        // even mid-thread). The replay surfaces `GoalReplayOutcome`'s
+        // rejection list as a single warn-level trace event so a
+        // forged JSONL slice is observable without crashing the
+        // resume.
+        let initial_goal_session = initial_goal_session.or_else(|| {
+            let session_root = app_config
+                .session_store
+                .session_root(&app_config.session.id);
+            replay_goal_session_from_session_root(&session_root)
+        });
+        if let Some(session) = initial_goal_session.as_ref()
+            && app_config.initial_goal.is_some()
+        {
+            // Only persist when we built the session from a fresh
+            // `--goal` flag; a resumed session already has its
+            // events on disk.
+            let session_root = app_config
+                .session_store
+                .session_root(&app_config.session.id);
+            if let Err(error) = persist_goal_events_to_session_root(session_root, session.events())
+            {
+                tracing::warn!(
+                    error = %error,
+                    "failed to persist initial Goal event"
+                );
+            }
+        }
         Self {
             tui,
             widget,
@@ -627,12 +705,15 @@ where
             exit_info: None,
             last_draw_time: Instant::now(),
             agent_task: None,
+            current_turn_abort_token: None,
             scheduled_draw_task: None,
             welcome_message: app_config.welcome_message,
             welcome_active: true,
             command_dispatcher: app_config.command_dispatcher,
             skill_dispatcher: app_config.skill_dispatcher,
             agent_router: app_config.agent_router,
+            agents_config: app_config.agents_config,
+            budget_tracker: BudgetTracker::new(),
             session: app_config.session,
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
@@ -668,7 +749,7 @@ where
             default_network_access: app_config.default_network_access,
             auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
-            goal_session: None,
+            goal_session: initial_goal_session,
             source_pool: app_config.source_pool,
         }
     }
@@ -764,6 +845,10 @@ where
             )
         }));
         self.widget.bottom_pane.set_command_hints(hints);
+        // Seed the bottom-pane Goal indicator so a `libra code --goal "..."`
+        // launch shows the active Goal on the very first frame (no
+        // need to wait for the first slash-command refresh).
+        self.refresh_bottom_pane_goal_status();
 
         // Initial draw - ensure UI is rendered immediately
         self.draw()?;
@@ -991,6 +1076,10 @@ where
                 let result = self.cancel_current_turn(CancelSource::Automation).await;
                 let _ = ack.send(result);
             }
+            TuiControlCommand::TaskDispatch { agent, prompt, ack } => {
+                let result = self.task_dispatch_from_control(agent, prompt).await;
+                let _ = ack.send(result);
+            }
             TuiControlCommand::ReclaimController { ack } => {
                 let result = self.reclaim_local_controller().await;
                 let _ = ack.send(result);
@@ -1031,8 +1120,14 @@ where
         let actor = goal_actor_for_session(self);
         match GoalSession::create(session_id.clone(), session_id, objective, actor) {
             Ok(session) => {
+                if let Err(error) = self.persist_goal_events_to_jsonl(session.events()) {
+                    return Err(TuiControlError::Internal(format!(
+                        "failed to persist Goal start event: {error}"
+                    )));
+                }
                 let rendered = render_goal_status(session.state());
                 self.goal_session = Some(session);
+                self.refresh_bottom_pane_goal_status();
                 Ok(rendered)
             }
             Err(GoalSessionError::InvalidObjective { source }) => {
@@ -1061,25 +1156,96 @@ where
     ) -> Result<String, TuiControlError> {
         use super::goal_session::{GoalSessionError, render_goal_status};
         let actor = goal_actor_for_session(self);
+        let session_root = self.session_store.session_root(&self.session.id);
         let Some(session) = self.goal_session.as_mut() else {
             return Err(TuiControlError::GoalNotActive);
         };
+        let previous_event_count = session.events().len();
         match session.cancel(reason, actor) {
             Ok(outcome) => {
+                let new_events = session.events()[previous_event_count..].to_vec();
+                if let Err(error) = persist_goal_events_to_session_root(session_root, &new_events) {
+                    return Err(TuiControlError::Internal(format!(
+                        "failed to persist Goal cancel event: {error}"
+                    )));
+                }
                 let rendered = render_goal_status(&outcome.state);
                 // Per opencode.md:665 a Cancelled session is
                 // terminal; clear the slot so a subsequent
                 // `goal.start` succeeds without an explicit
                 // teardown call.
                 self.goal_session = None;
+                self.refresh_bottom_pane_goal_status();
                 Ok(rendered)
             }
             Err(GoalSessionError::NotActive) => {
                 self.goal_session = None;
+                self.refresh_bottom_pane_goal_status();
                 Err(TuiControlError::GoalNotActive)
             }
             Err(other) => Err(TuiControlError::Internal(other.to_string())),
         }
+    }
+
+    /// `/goal criteria add <text>` — append a single user-authored
+    /// acceptance criterion to the active Goal via a
+    /// `CriteriaRevised` envelope. The dispatcher delegates id
+    /// minting to `GoalSession::revise_criteria_add`; the user only
+    /// supplies the natural-language description. Refuses with
+    /// `GoalNotActive` when no Goal is in flight (mirrors the
+    /// `/goal status` and `/goal cancel` shape).
+    fn goal_session_criteria_add_from_control(
+        &mut self,
+        description: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSessionError, render_goal_status};
+        let actor = goal_actor_for_session(self);
+        let session_root = self.session_store.session_root(&self.session.id);
+        let Some(session) = self.goal_session.as_mut() else {
+            return Err(TuiControlError::GoalNotActive);
+        };
+        let previous_event_count = session.events().len();
+        match session.revise_criteria_add(description, actor) {
+            Ok(state) => {
+                let new_events = session.events()[previous_event_count..].to_vec();
+                if let Err(error) = persist_goal_events_to_session_root(session_root, &new_events) {
+                    return Err(TuiControlError::Internal(format!(
+                        "failed to persist Goal criteria revision: {error}"
+                    )));
+                }
+                let rendered = render_goal_status(&state);
+                self.refresh_bottom_pane_goal_status();
+                Ok(rendered)
+            }
+            Err(GoalSessionError::NotActive) => Err(TuiControlError::GoalNotActive),
+            Err(GoalSessionError::InvalidObjective { source }) => {
+                Err(TuiControlError::GoalInvalidObjective(source.to_string()))
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
+        }
+    }
+
+    fn persist_goal_events_to_jsonl(&self, events: &[GoalEventEnvelope]) -> std::io::Result<()> {
+        persist_goal_events_to_session_root(
+            self.session_store.session_root(&self.session.id),
+            events,
+        )
+    }
+
+    /// Refresh the bottom-pane Goal indicator from the current
+    /// `goal_session` slot. Call after every mutation
+    /// (`start` / `cancel` / `criteria add` / supervisor envelope
+    /// fold) so the user sees the live state without invoking
+    /// `/goal status`. Setting the line to `None` when there is no
+    /// active Goal hides the row entirely so the layout shrinks
+    /// back to its non-Goal height.
+    fn refresh_bottom_pane_goal_status(&mut self) {
+        use super::goal_session::render_goal_status_line;
+        let line = self
+            .goal_session
+            .as_ref()
+            .map(|session| render_goal_status_line(session.state()));
+        self.widget.bottom_pane.set_goal_status_line(line);
     }
 
     async fn submit_message_from_code_ui(&mut self, text: String) -> Result<(), TuiControlError> {
@@ -1103,6 +1269,24 @@ where
             && self.pending_intent_review.is_none()
             && self.pending_plan_revision.is_none()
             && self.pending_execution_plan_revision.is_none()
+    }
+
+    async fn task_dispatch_from_control(
+        &mut self,
+        agent: String,
+        prompt: String,
+    ) -> Result<String, TuiControlError> {
+        if !self.can_accept_code_ui_submit() {
+            return Err(TuiControlError::Busy);
+        }
+        let invocation = task_invocation_from_parts(&agent, &prompt)
+            .map_err(TuiControlError::TaskInvalidRequest)?;
+        let message = self.dispatch_user_task_invocation(invocation).await;
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        Ok(message)
     }
 
     async fn automation_controller_active(&self) -> bool {
@@ -1315,12 +1499,39 @@ where
             CancelSource::Esc => "Turn interrupted by user",
             CancelSource::SlashQuit => "Turn interrupted by quit command",
             CancelSource::Automation => "Turn interrupted by automation",
+            CancelSource::Budget => "Turn interrupted by budget cap",
         };
         self.enqueue_mcp_turn_decision("abandon", reason.to_string());
         self.cancel_pending_user_input();
         self.cancel_pending_exec_approval();
         self.cancel_pending_phase_confirmation_for_control();
         self.clear_pending_code_ui_dialogs().await;
+        // OC-Phase 5 P5.4 usage-row backfill (v0.17.797): when a
+        // turn is cancelled, the tool_loop's `record_summary` /
+        // `record_failure` path never fires (the future tree is
+        // dropped). Record the cancellation as a failure row so
+        // the `agent_usage_stats` audit reflects the abandoned
+        // turn — error_kind carries the CancelSource so an
+        // operator can distinguish Esc / SlashQuit / Automation /
+        // Budget abandons in the rollup.
+        if let (Some(recorder), Some(context)) = (
+            self.config.usage_recorder.as_ref(),
+            self.config.usage_context.as_ref(),
+        ) {
+            let error_kind = match source {
+                CancelSource::Esc => "cancelled_esc",
+                CancelSource::SlashQuit => "cancelled_quit",
+                CancelSource::Automation => "cancelled_automation",
+                CancelSource::Budget => "cancelled_budget",
+            };
+            if let Err(err) = recorder.record_failure(context, error_kind, None).await {
+                tracing::warn!(
+                    %err,
+                    error_kind,
+                    "failed to record cancellation as usage failure row",
+                );
+            }
+        }
         self.interrupt_agent_task();
         self.clear_mcp_run_id();
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
@@ -1329,7 +1540,7 @@ where
         self.complete_running_tool_cells_with_interrupt();
         self.schedule_draw();
         if let Some(code_ui_session) = self.code_ui_session.clone() {
-            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+            code_ui_session.cancel_active_turn("Interrupted.").await;
         }
         Ok(())
     }
@@ -2083,7 +2294,7 @@ where
             command = %log_preview_text(&request.command),
             cwd = %request.cwd.display(),
             sandbox = %request.sandbox_label,
-            network_access = request.network_access,
+            network_access = ?request.network_access,
             writable_roots = request.writable_roots.len(),
             is_retry = request.is_retry,
             has_reason = request.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()),
@@ -2101,7 +2312,7 @@ where
             metadata: serde_json::json!({
                 "cwd": request.cwd,
                 "sandboxLabel": request.sandbox_label,
-                "networkAccess": request.network_access,
+                "networkAccess": network_access_label(&request.network_access),
                 "writableRoots": request.writable_roots,
                 "isRetry": request.is_retry,
                 "cacheDisabledReason": request.cache_disabled_reason,
@@ -2152,7 +2363,7 @@ where
             details.clone(),
             false,
             "orchestrator phase gate".to_string(),
-            false,
+            None,
             Vec::new(),
             vec![
                 (
@@ -2362,7 +2573,7 @@ where
         let command = pending.request.command.clone();
         let cwd = pending.request.cwd.clone();
         let sandbox_label = pending.request.sandbox_label.clone();
-        let network_access = pending.request.network_access;
+        let network_access = pending.request.network_access.clone();
         let writable_roots = pending.request.writable_roots.clone();
         let is_retry = pending.request.is_retry;
 
@@ -2376,7 +2587,7 @@ where
             ),
             is_retry,
             sandbox_label.clone(),
-            network_access,
+            Some(network_access.clone()),
             writable_roots.clone(),
             vec![
                 (
@@ -2410,7 +2621,7 @@ where
                 metadata: serde_json::json!({
                     "cwd": cwd,
                     "sandboxLabel": sandbox_label,
-                    "networkAccess": network_access,
+                    "networkAccess": network_access_label(&network_access),
                     "writableRoots": writable_roots,
                     "isRetry": is_retry,
                     "confirmation": "allow_all_commands",
@@ -2673,10 +2884,28 @@ where
                 if source == TurnInputSource::Automation {
                     apply_automation_approval_scope(&mut config, turn_id);
                 }
+                // OC-Phase 3 P3.7 per-turn abort token (v0.17.786):
+                // attach a fresh `AbortToken` to the sub-agent
+                // runtime via the v0.17.779 `with_abort_token`
+                // builder. `cancel_current_turn` cancels this
+                // token to short-circuit any in-flight sub-agent
+                // dispatch independent of the session-level token,
+                // while the session token survives for subsequent
+                // turns. No-op when sub-agents are disabled.
+                if let Some(rt) = config.subagent_runtime.clone() {
+                    let turn_token = crate::internal::ai::agent::runtime::AbortToken::new();
+                    self.current_turn_abort_token = Some(turn_token.clone());
+                    config.subagent_runtime = Some(rt.with_abort_token(turn_token));
+                }
                 let session_root = self.session_store.session_root(&self.session.id);
                 attach_file_history_context(&mut config, session_root.clone(), turn_id);
                 config.context_frame_session_root = Some(session_root.clone());
                 config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
+                let active_goal_state = self
+                    .goal_session
+                    .as_ref()
+                    .filter(|session| !session.is_terminal())
+                    .map(|session| session.state().clone());
                 let should_auto_classify = should_auto_classify_first_user_message(
                     self.auto_classify_first_user_message,
                     &self.history,
@@ -2685,11 +2914,18 @@ where
                 if self.auto_classify_first_user_message && self.history.is_empty() {
                     self.auto_classify_first_user_message = false;
                 }
-                config.allowed_tools = Some(
-                    allowed_tools
-                        .clone()
-                        .unwrap_or_else(|| self.default_allowed_tools.clone()),
+                let mut turn_allowed_tools = allowed_tools
+                    .clone()
+                    .unwrap_or_else(|| self.default_allowed_tools.clone());
+                apply_goal_tool_visibility(
+                    &mut turn_allowed_tools,
+                    active_goal_state.is_some(),
+                    &registry,
                 );
+                config.allowed_tools = Some(turn_allowed_tools);
+                if active_goal_state.is_some() {
+                    ensure_terminal_tool_name(&mut config, "submit_goal_complete");
+                }
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
@@ -2699,6 +2935,7 @@ where
                     .clone()
                     .unwrap_or_else(|| Arc::new(Mutex::new(None)));
                 let mcp_write_tracker = self.mcp_write_tracker.clone();
+                let working_dir = registry.working_dir().to_path_buf();
 
                 // Execute agent call in background task
                 let handle = tokio::spawn(async move {
@@ -2707,6 +2944,8 @@ where
                         mcp_server: Option<Arc<LibraMcpServer>>,
                         run_id: Arc<Mutex<Option<String>>>,
                         mcp_write_tracker: McpWriteTracker,
+                        recent_tool_results: Arc<Mutex<Vec<RecentToolCall>>>,
+                        goal_cost_micro_usd: Arc<AtomicU64>,
                         turn_id: TurnId,
                     }
 
@@ -2755,6 +2994,10 @@ where
                             usage: &crate::internal::ai::completion::CompletionUsageSummary,
                             wall_clock_ms: u64,
                         ) {
+                            let cost = usage_cost_micro_usd(usage);
+                            if cost > 0 {
+                                self.goal_cost_micro_usd.fetch_add(cost, Ordering::Relaxed);
+                            }
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::UsageUpdated {
@@ -2769,6 +3012,34 @@ where
                             let _ = self.tx.send(AppEvent::InsertHistoryCell {
                                 turn_id: self.turn_id,
                                 cell,
+                            });
+                        }
+
+                        fn on_sub_agent_completed(
+                            &mut self,
+                            agent_name: &str,
+                            usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                        ) {
+                            // OC-Phase 5 P5.3 per-agent budget
+                            // attribution. The dispatcher already
+                            // returned the sub-agent's accumulated
+                            // usage on the TaskResult; route it
+                            // through a dedicated AppEvent so the
+                            // budget tracker can call
+                            // `accumulate(usage, _, Some(agent))`
+                            // and `check_agent` enforces per-agent
+                            // caps. The trait's default impl folds
+                            // this into the parent's anonymous
+                            // bucket via `on_model_usage`, so a
+                            // future regression that drops this
+                            // override would silently degrade to
+                            // session-only enforcement.
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::SubAgentUsageUpdated {
+                                    agent_name: agent_name.to_string(),
+                                    usage: usage.clone(),
+                                },
                             });
                         }
 
@@ -2792,6 +3063,12 @@ where
                             tool_name: &str,
                             result: &Result<ToolOutput, String>,
                         ) {
+                            record_recent_goal_tool_result(
+                                &self.recent_tool_results,
+                                call_id,
+                                tool_name,
+                                result,
+                            );
                             let _ = self.tx.send(AppEvent::ToolCallEnd {
                                 turn_id: self.turn_id,
                                 call_id: call_id.to_string(),
@@ -2866,11 +3143,15 @@ where
                         }
                     }
 
+                    let recent_tool_results = Arc::new(Mutex::new(Vec::new()));
+                    let goal_cost_micro_usd = Arc::new(AtomicU64::new(0));
                     let mut observer = UiObserver {
                         tx,
                         mcp_server,
                         run_id,
                         mcp_write_tracker,
+                        recent_tool_results: recent_tool_results.clone(),
+                        goal_cost_micro_usd: goal_cost_micro_usd.clone(),
                         turn_id,
                     };
                     if should_auto_classify {
@@ -2884,12 +3165,20 @@ where
                         .await
                         {
                             Ok(decision) => {
+                                if let Some(tools) = config.allowed_tools.as_mut() {
+                                    apply_goal_tool_visibility(
+                                        tools,
+                                        active_goal_state.is_some(),
+                                        &registry,
+                                    );
+                                }
                                 send_task_intent_classified_event(
                                     &observer.tx,
                                     observer.turn_id,
                                     decision,
                                     &config,
                                     &registry,
+                                    active_goal_state.is_some(),
                                 );
                             }
                             Err(error) => {
@@ -2901,15 +3190,61 @@ where
                         }
                     }
                     attach_memory_anchor_prompt_context(&mut config);
-                    let result = run_tool_loop_with_history_and_observer(
-                        &model,
-                        history,
-                        user_text,
-                        &registry,
-                        config,
-                        &mut observer,
-                    )
-                    .await;
+                    let result = if let Some(goal_state) = active_goal_state {
+                        let stop_policy =
+                            bind_goal_stop_policy(&mut config, goal_state.spec.goal_id);
+                        let supervisor = GoalSupervisor {
+                            stop_policy,
+                            verifier: DeterministicGoalVerifier,
+                            prompt_builder: DefaultGoalContinuationPromptBuilder,
+                        };
+                        let verifier_ctx = WorkspaceGoalVerifierContext {
+                            working_dir,
+                            recent_tool_results,
+                            goal_cost_micro_usd,
+                            created_at: goal_state.spec.created_at,
+                        };
+                        let clock = SystemGoalEventClock;
+                        match run_goal_supervised_tool_loop(GoalSupervisedToolLoopRequest {
+                            model: &model,
+                            history,
+                            initial_prompt: user_text,
+                            registry: &registry,
+                            config,
+                            observer: &mut observer,
+                            state: goal_state,
+                            supervisor: &supervisor,
+                            verifier_ctx: &verifier_ctx,
+                            clock: &clock,
+                        })
+                        .await
+                        {
+                            Ok(run) => {
+                                let _ = observer.tx.send(AppEvent::AgentEvent {
+                                    turn_id: observer.turn_id,
+                                    event: AgentEvent::GoalResponseComplete {
+                                        text: run.final_text,
+                                        new_history: run.history,
+                                        goal_state: Box::new(run.state),
+                                        goal_events: run.events,
+                                        decision: run.decision,
+                                    },
+                                });
+                                return;
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        run_tool_loop_with_history_and_observer(
+                            &model,
+                            history,
+                            user_text,
+                            &registry,
+                            config,
+                            &mut observer,
+                        )
+                        .await
+                    };
 
                     match result {
                         Ok(turn) => {
@@ -2953,10 +3288,69 @@ where
                 event: agent_event,
             } => {
                 match agent_event {
+                    AgentEvent::SubAgentUsageUpdated { agent_name, usage } => {
+                        // OC-Phase 5 P5.3: attribute the sub-agent's
+                        // cost to the per-agent bucket so
+                        // `check_agent` enforces per-agent caps.
+                        // wall_clock_ms = None (the dispatcher does
+                        // not yet thread the wall-clock through;
+                        // child loop turns each record their own
+                        // wall-clock via the parent observer's
+                        // `on_model_usage_recorded`).
+                        self.budget_tracker
+                            .accumulate(&usage, None, Some(agent_name.as_str()));
+                        for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
+                        }
+                        let agent_budget_breach = self
+                            .budget_tracker
+                            .check_agent(&agent_name, &self.agents_config)
+                            .err();
+                        if let Some(error) = agent_budget_breach {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                            let _ = self.cancel_current_turn(CancelSource::Budget).await;
+                        }
+                        self.schedule_draw();
+                    }
                     AgentEvent::UsageUpdated {
                         usage,
                         wall_clock_ms,
                     } => {
+                        self.budget_tracker
+                            .accumulate(&usage, Some(wall_clock_ms), None);
+                        // OC-Phase 5 budget warnings: surface any axis
+                        // that just crossed its `warn_*` threshold via
+                        // a one-shot history cell so the operator sees
+                        // the alert inline with the conversation. The
+                        // tracker's `warnings_emitted` table guarantees
+                        // each (scope, axis) fires at most once per
+                        // session — back-to-back UsageUpdated events
+                        // do not spam.
+                        for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
+                        }
+                        // OC-Phase 5 budget enforcement: any
+                        // `max_*_cost_usd` / `max_session_tokens` /
+                        // `max_wall_clock_minutes` breach surfaces as
+                        // an inline error cell **and** interrupts the
+                        // current turn so the model cannot keep
+                        // burning budget. `check_session` returns the
+                        // first cap that was crossed; `check_goal`
+                        // covers the Goal-mode wall-clock / cost cap
+                        // independently of the session-wide one.
+                        let budget_breach = self
+                            .budget_tracker
+                            .check_session(&self.agents_config)
+                            .err()
+                            .or_else(|| self.budget_tracker.check_goal(&self.agents_config).err());
+                        if let Some(error) = budget_breach {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                            let _ = self.cancel_current_turn(CancelSource::Budget).await;
+                        }
                         apply_final_usage_update(
                             &mut self.usage_snapshot,
                             &usage,
@@ -2970,6 +3364,106 @@ where
                         self.widget.set_usage_header(Some(usage_badge));
                         self.refresh_usage_detail_panel().await;
                         self.schedule_draw();
+                    }
+                    AgentEvent::GoalResponseComplete {
+                        text,
+                        new_history,
+                        goal_state,
+                        goal_events,
+                        decision,
+                    } => {
+                        self.pending_stream_output_tokens = 0;
+                        let rendered_text = render_goal_response_text(&text, &decision);
+                        let mcp_decision = match &decision {
+                            GoalLoopDecision::Completed { .. } => "Goal completed successfully",
+                            GoalLoopDecision::Cancelled => "Goal cancelled",
+                            GoalLoopDecision::AwaitUser { .. } => "Goal paused for user input",
+                            GoalLoopDecision::Continue { .. } => {
+                                "Goal supervisor returned an unexpected continuation"
+                            }
+                        };
+                        self.enqueue_mcp_turn_decision("checkpoint", mcp_decision.to_string());
+                        self.finish_turn_state();
+                        self.history = new_history;
+
+                        if let Some(session) = self.goal_session.as_mut() {
+                            if let Err(error) = session.append_supervisor_events(&goal_events) {
+                                let message =
+                                    format!("failed to apply Goal supervisor events: {error}");
+                                self.complete_streaming_assistant_cell(format!("Error: {message}"));
+                                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                                    code_ui_session
+                                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                            id: Self::code_ui_assistant_entry_id(_turn_id),
+                                            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                            title: Some("Assistant".to_string()),
+                                            content: Some(format!("Error: {message}")),
+                                            status: Some("error".to_string()),
+                                            streaming: false,
+                                            metadata: serde_json::json!({}),
+                                            created_at: Utc::now(),
+                                            updated_at: Utc::now(),
+                                        })
+                                        .await;
+                                    code_ui_session.set_status(CodeUiSessionStatus::Error).await;
+                                }
+                                self.set_idle_and_draw();
+                                return Ok(());
+                            }
+                            // The supervisor returns its own projection so callers can
+                            // verify the App-side replay stayed aligned.
+                            debug_assert_eq!(session.state(), goal_state.as_ref());
+                        } else {
+                            tracing::warn!(
+                                "Goal supervisor completed but the App no longer has an active Goal session"
+                            );
+                        }
+
+                        if let Err(error) = self.persist_goal_events_to_jsonl(&goal_events) {
+                            tracing::warn!(
+                                error = %error,
+                                "failed to persist Goal supervisor events"
+                            );
+                        }
+                        // Supervisor envelope fold changed the active
+                        // Goal's progress / blocker / completion state;
+                        // refresh the bottom-pane indicator so the
+                        // next frame reflects the new short-line.
+                        self.refresh_bottom_pane_goal_status();
+
+                        self.session.add_assistant_message(&rendered_text);
+                        self.complete_streaming_assistant_cell(rendered_text.clone());
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            let transcript_status = match &decision {
+                                GoalLoopDecision::AwaitUser { .. } => "paused",
+                                GoalLoopDecision::Completed { .. } => "completed",
+                                GoalLoopDecision::Cancelled => "cancelled",
+                                GoalLoopDecision::Continue { .. } => "completed",
+                            };
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: Some(
+                                        self.session
+                                            .messages
+                                            .last()
+                                            .map(|message| message.content.clone())
+                                            .unwrap_or_default(),
+                                    ),
+                                    status: Some(transcript_status.to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({
+                                        "goalStatus": format!("{:?}", goal_state.status),
+                                    }),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                        }
+                        self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.pending_stream_output_tokens = 0;
@@ -4272,7 +4766,7 @@ where
             interaction.description.clone(),
             false,
             "codex managed runtime".to_string(),
-            true,
+            None,
             vec![self.registry.working_dir().to_path_buf()],
             options,
         );
@@ -4650,29 +5144,26 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
+            BuiltinCommand::Task => {
+                let message = self.task_command_message(args).await;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
             BuiltinCommand::Agents => {
-                // OC-Phase 5 P5.4: declarative agents.toml is not yet wired
-                // through the TUI session config (lands with the dispatcher
-                // integration in P5.5 + later). Until then, surface an
-                // actionable placeholder so the slash command exists as a
-                // discoverable UX surface.
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Multi-agent declarative config (`agents.toml`) is not yet loaded by this \
-                     session. See `docs/improvement/opencode.md` OC-Phase 5 for the rollout \
-                     plan."
-                        .to_string(),
-                )));
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(format_agents_table(
+                        &self.agents_config,
+                    ))));
             }
             BuiltinCommand::Budget => {
-                // Same gating as Agents — budget enforcement is implemented
-                // (`src/internal/ai/agent/budget.rs`) but the runtime tracker
-                // is not yet plumbed into the TUI session.
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Per-session / per-agent budget tracker is not yet plumbed through this \
-                     TUI session. The `[code.budget]` config schema and enforcement primitive \
-                     are in place; runtime wiring lands in OC-Phase 5 P5.5."
-                        .to_string(),
-                )));
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(format_budget_status(
+                        &self.agents_config,
+                        &self.budget_tracker,
+                        &[],
+                    ))));
             }
             BuiltinCommand::Goal => {
                 let message = self.format_goal_command_response(args);
@@ -4713,12 +5204,69 @@ where
                     Err(err) => format!("`/goal cancel` failed: {}", err.message()),
                 }
             }
-            Ok(GoalSubcommand::CriteriaAdd { text }) => format!(
-                "`/goal criteria add` parsed.\n  Description: {text}\n\
-                 Appending criteria mid-Goal needs the supervisor's `CriteriaRevised` \
-                 envelope path, which lands once `run_tool_loop` integrates."
-            ),
+            Ok(GoalSubcommand::CriteriaAdd { text }) => {
+                match self.goal_session_criteria_add_from_control(text) {
+                    Ok(rendered) => format!("Goal criteria revised.\n{rendered}"),
+                    Err(err) => format!("`/goal criteria add` failed: {}", err.message()),
+                }
+            }
             Err(err) => err.to_string(),
+        }
+    }
+
+    /// Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.
+    ///
+    /// This is the OC-Phase 3 P3.6 user entry point: it skips the
+    /// LLM-initiated permission dialog because the human explicitly
+    /// requested the sub-agent, while keeping all other dispatcher
+    /// gates (feature flag, depth, concurrency, safety, permission
+    /// escalation, model build, child loop) intact.
+    async fn task_command_message(&self, args: &str) -> String {
+        let invocation = match parse_task_command_args(args) {
+            Ok(invocation) => invocation,
+            Err(message) => return message,
+        };
+        self.dispatch_user_task_invocation(invocation).await
+    }
+
+    async fn dispatch_user_task_invocation(&self, invocation: TaskInvocation) -> String {
+        let Some(runtime) = self.config.subagent_runtime.clone() else {
+            return "`/task` requires `code.multi_agent.enabled = true` in `.libra/agents.toml`."
+                .to_string();
+        };
+
+        let subagent_name = invocation.subagent_type.clone();
+        // The `/task` slash command runs outside a turn loop, so there
+        // is no per-turn `ToolLoopConfig` carrying a file-history batch.
+        // Derive a per-invocation context from the session's base
+        // runtime context (sandbox / approval authority) and attach a
+        // fresh file-history batch so a child `apply_patch` records undo
+        // preimages — matching the per-turn LLM-initiated path
+        // (S2-INV-06). Falls back to the runtime's stored snapshot when
+        // the session has no base runtime context.
+        let user_task_id = uuid::Uuid::new_v4();
+        let live_runtime_context = self.config.runtime_context.clone().map(|mut ctx| {
+            ctx.file_history = Some(FileHistoryRuntimeContext {
+                session_root: self.session_store.session_root(&self.session.id),
+                batch_id: format!("user-task-{user_task_id}"),
+            });
+            ctx
+        });
+        let ctx =
+            runtime.dispatch_context(format!("user-task:{user_task_id}"), live_runtime_context);
+        match runtime
+            .dispatcher
+            .dispatch(
+                ctx,
+                invocation,
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+        {
+            Ok(result) => format_task_command_result(result),
+            Err(error) => format!("`/task {subagent_name}` failed: {error}"),
         }
     }
 
@@ -6672,7 +7220,7 @@ where
                 {
                     Ok(decision) => {
                         send_task_intent_classified_event(
-                            &tx, turn_id, decision, &config, &registry,
+                            &tx, turn_id, decision, &config, &registry, false,
                         );
                     }
                     Err(error) => {
@@ -7013,6 +7561,14 @@ where
     }
 
     fn interrupt_agent_task(&mut self) {
+        // v0.17.786: cancel the per-turn sub-agent abort token
+        // BEFORE aborting the JoinHandle so cooperative-cancel
+        // paths (the runner's `tokio::select!`) get the signal
+        // even when the JoinHandle drop alone wouldn't unwind a
+        // detached worker future.
+        if let Some(token) = self.current_turn_abort_token.take() {
+            token.cancel();
+        }
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
@@ -7770,6 +8326,61 @@ fn parse_usage_grouping(args: &str) -> Result<UsageGrouping, String> {
     }
 }
 
+fn parse_task_command_args(args: &str) -> Result<TaskInvocation, String> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Err("Usage: /task <agent> <prompt>".to_string());
+    }
+    let Some((agent, prompt)) = trimmed.split_once(char::is_whitespace) else {
+        return Err("Usage: /task <agent> <prompt>".to_string());
+    };
+    task_invocation_from_parts(agent, prompt)
+        .map_err(|_| "Usage: /task <agent> <prompt>".to_string())
+}
+
+fn task_invocation_from_parts(agent: &str, prompt: &str) -> Result<TaskInvocation, String> {
+    let agent = agent.trim();
+    let prompt = prompt.trim();
+    if agent.is_empty() {
+        return Err("agent must not be empty".to_string());
+    }
+    if prompt.is_empty() {
+        return Err("prompt must not be empty".to_string());
+    }
+    Ok(TaskInvocation {
+        description: task_description_from_prompt(prompt),
+        prompt: prompt.to_string(),
+        subagent_type: agent.to_string(),
+        task_id: None,
+    })
+}
+
+fn task_description_from_prompt(prompt: &str) -> String {
+    const MAX_DESCRIPTION_CHARS: usize = 96;
+    let first_line = prompt.lines().next().unwrap_or(prompt).trim();
+    if first_line.chars().count() <= MAX_DESCRIPTION_CHARS {
+        return first_line.to_string();
+    }
+    let mut description = first_line
+        .chars()
+        .take(MAX_DESCRIPTION_CHARS.saturating_sub(3))
+        .collect::<String>();
+    description.push_str("...");
+    description
+}
+
+fn format_task_command_result(result: SubAgentTaskResult) -> String {
+    format!(
+        "Task `{}` completed with `{}` on {}/{} ({} step(s)).\n\n{}",
+        result.task_id,
+        result.agent_name,
+        result.provider_id,
+        result.model_id,
+        result.steps_used,
+        result.final_text.trim(),
+    )
+}
+
 fn usage_grouping_label(grouping: UsageGrouping) -> &'static str {
     match grouping {
         UsageGrouping::ProviderModel => "provider/model",
@@ -8293,28 +8904,32 @@ mod tests {
         FirstTurnIntentPolicyUpdate, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
         PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep, ReviewScrollAction,
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
-        apply_developer_network_access, apply_final_usage_update, apply_streaming_usage_delta,
-        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
+        apply_developer_network_access, apply_final_usage_update, apply_goal_tool_visibility,
+        apply_streaming_usage_delta, automatic_plan_repair_request_from_report,
+        automatic_plan_repair_threshold_message, bind_goal_stop_policy,
         build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
-        build_plan_revision_prompt, classify_execution_failure_revision,
-        classify_first_turn_task_intent, code_ui_response_from_managed_selection,
-        default_chat_allowed_tools, estimate_streamed_output_tokens,
-        exec_approval_decision_from_selection, execution_failure_report,
-        execution_failure_revision_message, execution_requires_plan_repair,
-        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
+        build_plan_revision_prompt, changed_path_from_short_status_line,
+        classify_execution_failure_revision, classify_first_turn_task_intent,
+        code_ui_response_from_managed_selection, default_chat_allowed_tools,
+        estimate_streamed_output_tokens, exec_approval_decision_from_selection,
+        execution_failure_report, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
         is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
-        normalize_terminal_paste_text, parse_pending_plan_revision_command, parse_usage_grouping,
+        normalize_terminal_paste_text, parse_pending_plan_revision_command,
+        parse_task_command_args, parse_usage_grouping,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
         provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
         session_graph_thread_id, should_auto_classify_first_user_message,
         should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
         should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
-        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
+        task_description_from_prompt, undo_should_prefer_vcs_rollback,
+        usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
@@ -8323,6 +8938,7 @@ mod tests {
                 AssistantContent, CompletionError, CompletionModel, CompletionRequest,
                 CompletionResponse, CompletionUsageSummary, Message, Text,
             },
+            goal::GoalStopPolicy,
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
@@ -8344,7 +8960,7 @@ mod tests {
                 context::{PlanDraftStep, SubmitPlanDraftArgs},
                 spec::ToolSpec,
             },
-            usage::{UsageDisplaySnapshot, UsageGrouping},
+            usage::{UsageDisplaySnapshot, UsageGrouping, format_usage_badge},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -8390,6 +9006,36 @@ mod tests {
     }
 
     #[test]
+    fn task_command_parser_requires_agent_and_prompt() {
+        assert_eq!(
+            parse_task_command_args("").unwrap_err(),
+            "Usage: /task <agent> <prompt>"
+        );
+        assert_eq!(
+            parse_task_command_args("explorer").unwrap_err(),
+            "Usage: /task <agent> <prompt>"
+        );
+
+        let invocation = parse_task_command_args(" explorer   grep TODO src/ ").unwrap();
+        assert_eq!(invocation.subagent_type, "explorer");
+        assert_eq!(invocation.prompt, "grep TODO src/");
+        assert_eq!(invocation.description, "grep TODO src/");
+        assert!(invocation.task_id.is_none());
+    }
+
+    #[test]
+    fn task_description_from_prompt_is_bounded_to_first_line() {
+        assert_eq!(
+            task_description_from_prompt("first line\nsecond line"),
+            "first line"
+        );
+        let long = "a".repeat(140);
+        let description = task_description_from_prompt(&long);
+        assert!(description.ends_with("..."));
+        assert!(description.chars().count() <= 96);
+    }
+
+    #[test]
     fn usage_detail_popup_config_defaults_to_enabled() {
         assert!(usage_detail_popup_enabled_from_toml("").unwrap());
         assert!(
@@ -8417,6 +9063,10 @@ mod tests {
         assert_eq!(estimate_streamed_output_tokens("abcdefgh"), 2);
         assert_eq!(snapshot.completion_tokens, 12);
         assert_eq!(pending, 2);
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 12 tok · 0.0s"
+        );
 
         apply_final_usage_update(
             &mut snapshot,
@@ -8437,6 +9087,10 @@ mod tests {
         assert_eq!(snapshot.completion_tokens, 17);
         assert_eq!(snapshot.wall_clock_ms, 1500);
         assert_eq!(snapshot.cost_usd, Some(0.01));
+        assert_eq!(
+            format_usage_badge(&snapshot),
+            "openai/gpt-test · 22 tok · 1.5s · $0.0100"
+        );
     }
 
     #[test]
@@ -8746,8 +9400,70 @@ mod tests {
     fn default_chat_tools_exclude_phase_review_submission_tools() {
         assert!(!is_default_chat_tool("submit_intent_draft"));
         assert!(!is_default_chat_tool("submit_plan_draft"));
+        assert!(!is_default_chat_tool("update_goal_progress"));
+        assert!(!is_default_chat_tool("submit_goal_complete"));
         assert!(is_default_chat_tool("update_plan"));
         assert!(is_default_chat_tool("web_search"));
+    }
+
+    #[test]
+    fn goal_tools_are_visible_only_when_goal_is_active() {
+        let registry = ToolRegistryBuilder::with_working_dir(std::path::PathBuf::from("/tmp"))
+            .register("read_file", Arc::new(NamedToolHandler("read_file")))
+            .register(
+                "update_goal_progress",
+                Arc::new(NamedToolHandler("update_goal_progress")),
+            )
+            .register(
+                "submit_goal_complete",
+                Arc::new(NamedToolHandler("submit_goal_complete")),
+            )
+            .build();
+        let mut allowed = vec![
+            "read_file".to_string(),
+            "update_goal_progress".to_string(),
+            "submit_goal_complete".to_string(),
+        ];
+
+        apply_goal_tool_visibility(&mut allowed, false, &registry);
+        assert_eq!(allowed, vec!["read_file".to_string()]);
+
+        apply_goal_tool_visibility(&mut allowed, true, &registry);
+        assert_eq!(
+            allowed,
+            vec![
+                "read_file".to_string(),
+                "update_goal_progress".to_string(),
+                "submit_goal_complete".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn goal_stop_policy_is_bound_into_tool_loop_config() {
+        let goal_id = uuid::Uuid::new_v4();
+        let mut config = ToolLoopConfig::default();
+
+        let policy = bind_goal_stop_policy(&mut config, goal_id);
+
+        assert_eq!(policy, GoalStopPolicy::GoalBound { goal_id });
+        assert_eq!(
+            config.goal_stop_policy,
+            Some(GoalStopPolicy::GoalBound { goal_id })
+        );
+    }
+
+    #[test]
+    fn short_status_parser_extracts_changed_path() {
+        assert_eq!(
+            changed_path_from_short_status_line(" M src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            changed_path_from_short_status_line("R  old.rs -> new.rs"),
+            Some("new.rs".to_string())
+        );
+        assert_eq!(changed_path_from_short_status_line("## main"), None);
     }
 
     #[test]
@@ -10705,6 +11421,14 @@ fn provider_plan_draft_from_args(args: SubmitPlanDraftArgs) -> Result<ProviderPl
     })
 }
 
+fn network_access_label(network_access: &NetworkAccess) -> &'static str {
+    match network_access {
+        NetworkAccess::Denied => "denied",
+        NetworkAccess::Allowlist { .. } => "allowlist",
+        NetworkAccess::Full => "full",
+    }
+}
+
 fn apply_developer_network_access(spec: &mut IntentSpec, network_access: bool) {
     spec.constraints.security.network_policy = if network_access {
         NetworkPolicy::Allow
@@ -10843,6 +11567,7 @@ fn send_task_intent_classified_event(
     decision: TaskIntentDecision,
     config: &ToolLoopConfig,
     registry: &ToolRegistry,
+    goal_active: bool,
 ) {
     let preamble = config.preamble.clone().unwrap_or_else(|| {
         SystemPromptBuilder::new(registry.working_dir())
@@ -10850,7 +11575,8 @@ fn send_task_intent_classified_event(
             .with_dynamic_context()
             .build()
     });
-    let allowed_tools = registry.filter_by_intent(decision.intent);
+    let mut allowed_tools = registry.filter_by_intent(decision.intent);
+    apply_goal_tool_visibility(&mut allowed_tools, goal_active, registry);
     let _ = tx.send(AppEvent::TaskIntentClassified {
         turn_id,
         intent: decision.intent,
@@ -10860,7 +11586,13 @@ fn send_task_intent_classified_event(
 }
 
 fn is_default_chat_tool(tool_name: &str) -> bool {
-    !matches!(tool_name, "submit_intent_draft" | "submit_plan_draft")
+    !matches!(
+        tool_name,
+        "submit_intent_draft"
+            | "submit_plan_draft"
+            | "update_goal_progress"
+            | "submit_goal_complete"
+    )
 }
 
 fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) -> Vec<String> {
@@ -10872,6 +11604,299 @@ fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) 
             .filter(|name| is_default_chat_tool(name))
             .collect()
     })
+}
+
+fn apply_goal_tool_visibility(
+    allowed_tools: &mut Vec<String>,
+    goal_active: bool,
+    registry: &ToolRegistry,
+) {
+    if goal_active {
+        for tool_name in ["update_goal_progress", "submit_goal_complete"] {
+            if registry.contains_tool(tool_name)
+                && !allowed_tools.iter().any(|name| name == tool_name)
+            {
+                allowed_tools.push(tool_name.to_string());
+            }
+        }
+    } else {
+        allowed_tools.retain(|name| !is_goal_tool(name));
+    }
+}
+
+fn bind_goal_stop_policy(config: &mut ToolLoopConfig, goal_id: uuid::Uuid) -> GoalStopPolicy {
+    let policy = GoalStopPolicy::GoalBound { goal_id };
+    config.goal_stop_policy = Some(policy);
+    policy
+}
+
+fn is_goal_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "update_goal_progress" | "submit_goal_complete")
+}
+
+fn ensure_terminal_tool_name(config: &mut ToolLoopConfig, tool_name: &str) {
+    let terminal_tools = config.terminal_tools.get_or_insert_with(Vec::new);
+    if !terminal_tools.iter().any(|name| name == tool_name) {
+        terminal_tools.push(tool_name.to_string());
+    }
+}
+
+fn persist_goal_events_to_session_root(
+    session_root: PathBuf,
+    events: &[GoalEventEnvelope],
+) -> std::io::Result<()> {
+    let store = SessionJsonlStore::new(session_root);
+    for event in events {
+        store.append(&SessionEvent::goal(event.clone()))?;
+    }
+    Ok(())
+}
+
+/// Replay the resumed session's Goal envelope stream into a fresh
+/// [`super::goal_session::GoalSession`].
+///
+/// Returns `None` when:
+/// * The session JSONL is missing or has no [`SessionEvent::Goal`]
+///   envelopes (the resumed thread never started a Goal).
+/// * The envelope stream fails `goal::state::replay`'s shape checks
+///   (no leading `Created`, mismatched `goal_id`, invalid spec).
+///
+/// On success the projected state is logged together with the
+/// rejection count so a forged or corrupted JSONL slice surfaces
+/// in `tracing` instead of silently producing a nonsense state.
+/// I/O failures are downgraded to a warn-level trace and an
+/// empty-replay return because the resume path must not abort on
+/// a broken events.jsonl.
+fn replay_goal_session_from_session_root(
+    session_root: &Path,
+) -> Option<super::goal_session::GoalSession> {
+    let store = SessionJsonlStore::new(session_root.to_path_buf());
+    match store.has_events() {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_root = %session_root.display(),
+                "failed to probe session events while replaying active Goal on resume — continuing without Goal session"
+            );
+            return None;
+        }
+    }
+    let events = match store.load_events() {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_root = %session_root.display(),
+                "failed to load session events while replaying active Goal on resume — continuing without Goal session"
+            );
+            return None;
+        }
+    };
+    let envelopes: Vec<GoalEventEnvelope> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::Goal(envelope) => Some(envelope),
+            _ => None,
+        })
+        .collect();
+    if envelopes.is_empty() {
+        return None;
+    }
+    let (session, outcome) =
+        super::goal_session::GoalSession::from_replay(envelopes.clone()).or_else(|| {
+            tracing::warn!(
+                envelope_count = envelopes.len(),
+                session_root = %session_root.display(),
+                "Goal replay returned None on resume — first envelope is not Created or the spec failed validation"
+            );
+            None
+        })?;
+    if !outcome.rejected.is_empty() || outcome.truncated_rejection_count > 0 {
+        tracing::warn!(
+            rejected = outcome.rejected.len(),
+            truncated = outcome.truncated_rejection_count,
+            session_root = %session_root.display(),
+            "Goal replay dropped envelopes on resume — partial state surfaced; check events.jsonl for corruption"
+        );
+    }
+    Some(session)
+}
+
+fn render_goal_response_text(text: &str, decision: &GoalLoopDecision) -> String {
+    match decision {
+        GoalLoopDecision::AwaitUser { question } => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                format!("Goal paused: {question}")
+            } else {
+                format!("{trimmed}\n\nGoal paused: {question}")
+            }
+        }
+        GoalLoopDecision::Cancelled if text.trim().is_empty() => "Goal cancelled.".to_string(),
+        GoalLoopDecision::Continue { .. } if text.trim().is_empty() => {
+            "Goal paused before completion.".to_string()
+        }
+        _ => text.to_string(),
+    }
+}
+
+fn record_recent_goal_tool_result(
+    recent_tool_results: &Arc<Mutex<Vec<RecentToolCall>>>,
+    call_id: &str,
+    tool_name: &str,
+    result: &Result<ToolOutput, String>,
+) {
+    let status = match result {
+        Ok(_) => ToolResultStatus::Succeeded,
+        Err(message) if looks_like_permission_denial(message) => ToolResultStatus::Denied,
+        Err(message) if looks_like_timeout(message) => ToolResultStatus::TimedOut,
+        Err(_) => ToolResultStatus::Failed,
+    };
+    if let Ok(mut recent) = recent_tool_results.lock() {
+        recent.insert(
+            0,
+            RecentToolCall {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                status,
+            },
+        );
+        recent.truncate(32);
+    }
+}
+
+fn looks_like_permission_denial(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("denied") || lower.contains("permission") || lower.contains("approval")
+}
+
+fn looks_like_timeout(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
+}
+
+fn usage_cost_micro_usd(usage: &CompletionUsageSummary) -> u64 {
+    let Some(cost) = usage.cost_usd else {
+        return 0;
+    };
+    if !cost.is_finite() || cost <= 0.0 {
+        return 0;
+    }
+    let micros = cost * 1_000_000.0;
+    if micros >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        micros.round() as u64
+    }
+}
+
+struct SystemGoalEventClock;
+
+impl GoalEventClock for SystemGoalEventClock {
+    fn mint_envelope_id(&self) -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+
+    fn now(&self) -> chrono::DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+struct WorkspaceGoalVerifierContext {
+    working_dir: PathBuf,
+    recent_tool_results: Arc<Mutex<Vec<RecentToolCall>>>,
+    goal_cost_micro_usd: Arc<AtomicU64>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+impl GoalVerifierContext for WorkspaceGoalVerifierContext {
+    fn file_sha256(&self, path: &str) -> Option<String> {
+        let relative = Path::new(path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        let bytes = fs::read(self.working_dir.join(relative)).ok()?;
+        Some(hex::encode(
+            digest::digest(&digest::SHA256, &bytes).as_ref(),
+        ))
+    }
+
+    fn recent_tool_results(&self) -> Vec<RecentToolCall> {
+        self.recent_tool_results
+            .lock()
+            .map(|recent| recent.clone())
+            .unwrap_or_default()
+    }
+
+    fn changed_files(&self) -> Vec<String> {
+        changed_files_from_status(&self.working_dir)
+    }
+
+    fn now(&self) -> chrono::DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn finalised_by(&self) -> GoalActor {
+        GoalActor::System {
+            reason: "deterministic Goal verifier accepted completion".to_string(),
+        }
+    }
+
+    fn total_spent_micro_usd(&self) -> u64 {
+        self.goal_cost_micro_usd.load(Ordering::Relaxed)
+    }
+
+    fn elapsed_wall_clock_seconds(&self) -> u64 {
+        (Utc::now() - self.created_at).num_seconds().max(0) as u64
+    }
+
+    fn continuation_loops_used(&self) -> u32 {
+        0
+    }
+}
+
+fn changed_files_from_status(working_dir: &Path) -> Vec<String> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let Ok(output) = Command::new(exe)
+        .arg("status")
+        .arg("--short")
+        .current_dir(working_dir)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(changed_path_from_short_status_line)
+        .collect()
+}
+
+fn changed_path_from_short_status_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_end();
+    if trimmed.is_empty() || trimmed.starts_with("##") {
+        return None;
+    }
+    let path = trimmed.get(3..).unwrap_or(trimmed).trim();
+    let path = path
+        .rsplit_once(" -> ")
+        .map_or(path, |(_, new_path)| new_path);
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
 }
 
 fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {

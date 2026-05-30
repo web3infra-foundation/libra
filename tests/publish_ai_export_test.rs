@@ -15,7 +15,9 @@ use libra::{
                 AiExportError, AiExportRequest, HistoryAiExportRequest,
                 ai_history_object_type_specs, ai_object_model_type_specs, build_ai_export_plan,
                 collect_publish_ai_objects_from_history, publish_ai_bundle_key,
-                publish_ai_graph_key, publish_ai_index_key, publish_ai_object_key,
+                publish_ai_bundle_relative_key, publish_ai_graph_key,
+                publish_ai_graph_relative_key, publish_ai_index_key, publish_ai_index_relative_key,
+                publish_ai_object_key, publish_ai_object_relative_key,
             },
             contract::{
                 AiBundleAssociatedIds, AiBundleIndexes, AiObjectLayer, AiObjectRedaction,
@@ -33,6 +35,97 @@ const SITE_ID: &str = "00000000-0000-0000-0000-0000publish01";
 const REVISION_OID: &str = "abcdef0123456789abcdef0123456789abcdef01";
 const AI_VERSION_ID: &str = "ai-version-2026-05-13-001";
 const RULES_VERSION: &str = "2026.05.13-1";
+
+/// The relative R2 keys (used as the per-site object paths) must keep
+/// a fixed `revisions/<oid>/ai/...` layout, and every absolute key must
+/// be exactly `<repo>/publish/sites/<site>/<relative_key>`. If an
+/// absolute builder and its relative builder ever diverge, a published
+/// AI object would be uploaded under one key but referenced in the
+/// index under another — silently unreachable.
+///
+/// `publish_upload_test.rs` hard-codes the relative path *strings* when
+/// fetching uploaded artifacts, but never calls the relative-key
+/// *builder functions* nor pins the absolute = prefix + relative
+/// relationship — so a builder that diverged from those hard-coded
+/// strings would slip through there. This test closes that gap: it
+/// exercises the builder functions directly and pins the composition
+/// invariant.
+#[test]
+fn publish_ai_relative_keys_compose_into_absolute_keys() {
+    // Literal relative-key shapes (the per-revision site-relative paths).
+    assert_eq!(
+        publish_ai_index_relative_key(REVISION_OID),
+        format!("revisions/{REVISION_OID}/ai/index.json"),
+    );
+    assert_eq!(
+        publish_ai_graph_relative_key(REVISION_OID),
+        format!("revisions/{REVISION_OID}/ai/graph.json"),
+    );
+    assert_eq!(
+        publish_ai_bundle_relative_key(REVISION_OID, AI_VERSION_ID),
+        format!("revisions/{REVISION_OID}/ai/bundles/{AI_VERSION_ID}.json"),
+    );
+    assert_eq!(
+        publish_ai_object_relative_key(REVISION_OID, "snapshot", "Run", "run-1"),
+        format!("revisions/{REVISION_OID}/ai/objects/snapshot/Run/run-1.json"),
+    );
+
+    // Absolute = `<repo>/publish/sites/<site>/<relative>` for every key
+    // family — the consistency that keeps uploaded objects reachable
+    // through the index.
+    let prefix = format!("{REPO_ID}/publish/sites/{SITE_ID}/");
+    assert_eq!(
+        publish_ai_index_key(REPO_ID, SITE_ID, REVISION_OID),
+        format!("{prefix}{}", publish_ai_index_relative_key(REVISION_OID)),
+    );
+    assert_eq!(
+        publish_ai_graph_key(REPO_ID, SITE_ID, REVISION_OID),
+        format!("{prefix}{}", publish_ai_graph_relative_key(REVISION_OID)),
+    );
+    assert_eq!(
+        publish_ai_bundle_key(REPO_ID, SITE_ID, REVISION_OID, AI_VERSION_ID),
+        format!(
+            "{prefix}{}",
+            publish_ai_bundle_relative_key(REVISION_OID, AI_VERSION_ID)
+        ),
+    );
+    assert_eq!(
+        publish_ai_object_key(
+            REPO_ID,
+            SITE_ID,
+            REVISION_OID,
+            AiObjectLayer::Snapshot,
+            "Run",
+            "run-1",
+        ),
+        format!(
+            "{prefix}{}",
+            publish_ai_object_relative_key(REVISION_OID, "snapshot", "Run", "run-1")
+        ),
+    );
+}
+
+/// The object-key layer segment must map each `AiObjectLayer` to its
+/// stable lowercase directory (`snapshot` / `event` / `projection`).
+/// A wrong mapping would scatter objects across layer dirs that the
+/// index doesn't reference. Pin all three.
+#[test]
+fn publish_ai_object_key_maps_each_layer_to_its_directory() {
+    for (layer, dir) in [
+        (AiObjectLayer::Snapshot, "snapshot"),
+        (AiObjectLayer::Event, "event"),
+        (AiObjectLayer::Projection, "projection"),
+    ] {
+        let key = publish_ai_object_key(REPO_ID, SITE_ID, REVISION_OID, layer, "Run", "run-1");
+        assert_eq!(
+            key,
+            format!(
+                "{REPO_ID}/publish/sites/{SITE_ID}/revisions/{REVISION_OID}/ai/objects/{dir}/Run/run-1.json"
+            ),
+            "layer {layer:?} must map to the `{dir}` object directory",
+        );
+    }
+}
 
 #[test]
 fn publish_ai_export_test_builds_index_graph_bundle_and_storage_keys() {

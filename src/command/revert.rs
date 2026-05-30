@@ -342,6 +342,7 @@ async fn build_tree_from_map(
                 id: subdir_tree.id,
             });
         }
+        crate::utils::tree::sort_tree_items_for_git(&mut tree_items);
         Tree::from_tree_items(tree_items).map_err(|e| RevertError::SaveObject(e.to_string()))
     }
 
@@ -522,4 +523,115 @@ async fn update_head(commit_id: &str) -> Result<(), RevertError> {
             .map_err(|e| RevertError::UpdateHead(e.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `Display` format for every variant of [`RevertError`].
+    /// The strings are surfaced as the `CliError` message via
+    /// `From<RevertError> for CliError` and appear in both the human
+    /// and `--json` envelopes for `libra revert`. Variants that wrap a
+    /// `{0}` `String` use an "ignored" payload — every template ends
+    /// with the bare interpolation, so the surface prefix is enough
+    /// to lock the contract.
+    #[test]
+    fn revert_error_display_pins_each_variant() {
+        assert_eq!(RevertError::NotInRepo.to_string(), "not a libra repository",);
+        assert_eq!(
+            RevertError::DetachedHead.to_string(),
+            "you are in a 'detached HEAD' state; reverting is not allowed",
+        );
+        assert_eq!(
+            RevertError::InvalidCommit("deadbeef".to_string()).to_string(),
+            "failed to resolve commit reference 'deadbeef'",
+        );
+        assert_eq!(
+            RevertError::MergeCommitUnsupported.to_string(),
+            "reverting merge commits is not yet supported",
+        );
+        assert_eq!(
+            RevertError::Conflict {
+                path: "src/main.rs".to_string(),
+            }
+            .to_string(),
+            "conflict: file 'src/main.rs' was modified in a later commit",
+        );
+        assert_eq!(
+            RevertError::LoadObject("ignored".to_string()).to_string(),
+            "failed to load object: ignored",
+        );
+        assert_eq!(
+            RevertError::SaveObject("ignored".to_string()).to_string(),
+            "failed to save object: ignored",
+        );
+        assert_eq!(
+            RevertError::WriteWorktree("ignored".to_string()).to_string(),
+            "failed to write worktree: ignored",
+        );
+        assert_eq!(
+            RevertError::IndexSave("ignored".to_string()).to_string(),
+            "failed to save index: ignored",
+        );
+        assert_eq!(
+            RevertError::UpdateHead("ignored".to_string()).to_string(),
+            "failed to update HEAD: ignored",
+        );
+    }
+
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`RevertError`]. The [`StableErrorCode`] is what `--json`
+    /// consumers read from the error envelope and branch on
+    /// (e.g. `IoWriteFailed` is the retry-on-disk-failure code).
+    /// Enumerate every variant explicitly so a future refactor that
+    /// reroutes any variant — for example flipping `IndexSave` from
+    /// `IoWriteFailed` to `IoReadFailed` — trips this guard rather
+    /// than silently changing the wire surface.
+    #[test]
+    fn revert_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            RevertError::NotInRepo.stable_code(),
+            StableErrorCode::RepoNotFound,
+        );
+        assert_eq!(
+            RevertError::DetachedHead.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            RevertError::InvalidCommit("deadbeef".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            RevertError::MergeCommitUnsupported.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::Conflict {
+                path: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            RevertError::LoadObject("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            RevertError::SaveObject("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            RevertError::WriteWorktree("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            RevertError::IndexSave("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            RevertError::UpdateHead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+    }
 }

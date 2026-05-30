@@ -59,6 +59,28 @@ impl std::fmt::Display for SetUrlMode {
     }
 }
 
+/// `--help` examples shown in `libra remote --help` output (attached
+/// in `src/cli.rs` via `after_help` on the `Remote` subcommand).
+///
+/// `remote` exposes eight sub-commands (`add` / `remove` / `rename`
+/// / `-v` / `show` / `get-url` / `set-url` / `prune`); the banner pins
+/// the most common invocation per sub-command (where it carries enough
+/// signal beyond the sub-command name) plus a JSON variant so users can
+/// map intent to invocation without reading the design doc. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REMOTE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra remote -v                                List remotes with fetch/push URLs
+    libra remote add origin git@example.com:org/repo.git
+                                                   Register a new remote
+    libra remote rename origin upstream            Rename an existing remote
+    libra remote remove upstream                   Drop a remote and its tracking refs
+    libra remote get-url --all origin              Print every URL configured for origin
+    libra remote set-url --push origin https://example.com/org/repo.git
+                                                   Replace the push URL only
+    libra remote prune --dry-run origin            Preview which tracking refs would be removed
+    libra remote --json -v                         Structured JSON output for agents";
+
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
     /// Add a remote
@@ -85,12 +107,9 @@ pub enum RemoteCmds {
     List,
     /// List configured remote names
     Show,
-    /// Print URLs for the given remote
+    /// Print URLs for the given remote.
     ///
-    /// Examples:
-    /// `libra remote get-url origin` - print the fetch URL (first)
-    /// `libra remote get-url --push origin` - print push URLs
-    /// `libra remote get-url --all origin` - print all configured URLs
+    /// Examples:{n}{n}  libra remote get-url origin              # print the fetch URL (first){n}  libra remote get-url --push origin       # print push URLs{n}  libra remote get-url --all origin        # print all configured URLs
     GetUrl {
         /// Print push URLs instead of fetch URL
         #[arg(long)]
@@ -101,13 +120,9 @@ pub enum RemoteCmds {
         /// Remote name
         name: String,
     },
-    /// Set or modify URLs for the given remote
+    /// Set or modify URLs for the given remote.
     ///
-    /// Examples:
-    /// `libra remote set-url origin newurl` - replace first url
-    /// `libra remote set-url --all origin newurl` - replace all urls
-    /// `libra remote set-url --add origin newurl` - add a new url
-    /// `libra remote set-url --delete origin urlpattern` - delete matching url(s)
+    /// Examples:{n}{n}  libra remote set-url origin newurl              # replace first url{n}  libra remote set-url --all origin newurl        # replace all urls{n}  libra remote set-url --add origin newurl        # add a new url{n}  libra remote set-url --delete origin urlpattern # delete matching url(s)
     SetUrl {
         /// Add the new URL instead of replacing
         #[arg(long)]
@@ -127,11 +142,9 @@ pub enum RemoteCmds {
         value: String,
     },
 
-    /// Delete stale remote-tracking branches
+    /// Delete stale remote-tracking branches.
     ///
-    /// Examples:
-    /// `libra remote prune origin` - prune stale branches for origin
-    /// `libra remote prune --dry-run origin` - preview what would be pruned
+    /// Examples:{n}{n}  libra remote prune origin              # prune stale branches for origin{n}  libra remote prune --dry-run origin   # preview what would be pruned
     Prune {
         /// Remote name
         name: String,
@@ -145,6 +158,9 @@ pub enum RemoteCmds {
 enum RemoteError {
     #[error("remote '{name}' already exists")]
     AlreadyExists { name: String },
+
+    #[error("SSH key namespace for remote '{name}' already exists")]
+    SshKeyNamespaceExists { name: String },
 
     #[error("no such remote: {name}")]
     NotFound { name: String },
@@ -189,6 +205,13 @@ impl From<RemoteError> for CliError {
                     .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                     .with_hint("use 'libra remote -v' to inspect configured remotes")
             }
+            RemoteError::SshKeyNamespaceExists { name } => CliError::conflict(format!(
+                "SSH key namespace for remote '{name}' already exists"
+            ))
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint(format!(
+                "remove or rename vault.ssh.{name}.* config entries before renaming a remote to '{name}'"
+            )),
             RemoteError::NotFound { name } => CliError::fatal(format!("no such remote: {name}"))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("use 'libra remote -v' to inspect configured remotes"),
@@ -348,12 +371,21 @@ async fn run_rename_remote(old: String, new: String) -> Result<RemoteOutput, Rem
     if remote_exists(&new).await? {
         return Err(RemoteError::AlreadyExists { name: new });
     }
+    if ssh_key_namespace_exists(&new).await? {
+        return Err(RemoteError::SshKeyNamespaceExists { name: new });
+    }
 
-    ConfigKv::rename_remote(&old, &new)
-        .await
-        .map_err(|error| RemoteError::ConfigWrite {
-            detail: error.to_string(),
-        })?;
+    let new_for_error = new.clone();
+    ConfigKv::rename_remote(&old, &new).await.map_err(|error| {
+        let detail = error.to_string();
+        if detail.contains("SSH key namespace for remote") {
+            RemoteError::SshKeyNamespaceExists {
+                name: new_for_error,
+            }
+        } else {
+            RemoteError::ConfigWrite { detail }
+        }
+    })?;
     Ok(RemoteOutput::Rename {
         old_name: old,
         new_name: new,
@@ -642,6 +674,16 @@ async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
     }))
 }
 
+async fn ssh_key_namespace_exists(name: &str) -> Result<bool, RemoteError> {
+    let prefix = format!("vault.ssh.{name}.");
+    ConfigKv::get_by_prefix(&prefix)
+        .await
+        .map(|entries| !entries.is_empty())
+        .map_err(|error| RemoteError::ConfigRead {
+            detail: error.to_string(),
+        })
+}
+
 async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
     if remote_exists(name).await? {
         Ok(())
@@ -829,6 +871,13 @@ mod tests {
             }
             .to_string(),
             "remote 'origin' already exists",
+        );
+        assert_eq!(
+            RemoteError::SshKeyNamespaceExists {
+                name: "upstream".to_string(),
+            }
+            .to_string(),
+            "SSH key namespace for remote 'upstream' already exists",
         );
         assert_eq!(
             RemoteError::NotFound {

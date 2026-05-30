@@ -13,7 +13,10 @@ use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         index::Index,
-        object::{ObjectTrait, blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+        object::{
+            ObjectTrait, blob::Blob, commit::Commit, tag::Tag as GitTag, tree::Tree,
+            types::ObjectType,
+        },
     },
 };
 use hex;
@@ -172,6 +175,29 @@ pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
     msg_id.causes_failure()
 }
 
+fn tag_parse_error_msg_id(error: &impl std::fmt::Display) -> FsckMsgId {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("missing object type")
+        || message.contains("invalid object type")
+        || message.contains("object type")
+    {
+        FsckMsgId::MissingType
+    } else if message.contains("missing object hash")
+        || message.contains("missing object")
+        || message.contains("invalid object hash")
+    {
+        FsckMsgId::MissingObject
+    } else if message.contains("missing tag name") {
+        FsckMsgId::MissingTagEntry
+    } else if message.contains("missing tagger") {
+        FsckMsgId::MissingTaggerEntry
+    } else if message.contains("tag name") {
+        FsckMsgId::BadTagName
+    } else {
+        FsckMsgId::BadObjectSha1
+    }
+}
+
 /// Convenience macro for reporting fsck messages
 #[macro_export]
 macro_rules! fsck_error {
@@ -189,16 +215,16 @@ Dangling objects are those that exist but are not referenced by any ref, index, 
 By default, only dangling commits are reported (matching git fsck behavior).
 Unreachable objects include all dangling objects plus those only reachable from other unreachable objects.";
 
-const FSCK_AFTER_HELP: &str = "Examples:
-  libra fsck
-  libra fsck --no-reflogs
-  libra fsck --unreachable
-  libra fsck --no-dangling
-  libra fsck --lost-found
-  libra fsck --root
-  libra fsck --tags
-  libra fsck --connectivity-only
-  libra fsck <object-id>";
+const FSCK_AFTER_HELP: &str = "EXAMPLES:
+    libra fsck                          Verify every object, ref, and reflog entry
+    libra fsck --no-reflogs             Skip reflog validation (faster on large repos)
+    libra fsck --unreachable            Report unreachable objects (not just dangling commits)
+    libra fsck --no-dangling            Suppress the default dangling-commit report
+    libra fsck --lost-found             Stage dangling objects under .libra/lost-found/
+    libra fsck --root                   Print root commit ids in the report
+    libra fsck --tags                   Print tag ids in the report
+    libra fsck --connectivity-only      Skip blob content checks; verify graph only
+    libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
 #[derive(Parser, Debug)]
@@ -315,32 +341,36 @@ pub struct IndexCheckResult {
 }
 
 pub async fn execute(args: FsckArgs) {
+    let exit_code = match run_fsck(&args).await {
+        Ok(fsck_result) => {
+            // Exit with failure code only for serious issues (not dangling/unreachable).
+            if fsck_result.has_errors { 1 } else { 0 }
+        }
+        Err(error) => {
+            error.print_stderr();
+            error.exit_code()
+        }
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     let storage = ClientStorage::init(path::objects());
 
-    let result = if let Some(ref object_id) = args.object {
+    if let Some(ref object_id) = args.object {
         check_single_object(object_id, &storage).await
     } else {
-        check_all_objects(&args, &storage).await
-    };
-
-    match result {
-        Ok(fsck_result) => {
-            // Exit with failure code only for serious issues (not dangling/unreachable)
-            if fsck_result.has_errors {
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            std::process::exit(1);
-        }
+        check_all_objects(args, &storage).await
     }
 }
 
 pub async fn execute_safe(args: FsckArgs, _output: &OutputConfig) -> CliResult<()> {
-    // execute_safe is called from cli.rs but currently just delegates to execute
-    // JSON output is not supported for fsck
-    execute(args).await;
+    let fsck_result = run_fsck(&args).await?;
+    if fsck_result.has_errors {
+        return Err(CliError::failure("fsck found repository integrity issues").with_exit_code(1));
+    }
     Ok(())
 }
 
@@ -1503,9 +1533,74 @@ async fn verify_object(
             }
         }
         ObjectType::Tag => {
-            // Tag objects are text-based, check UTF-8 validity
-            if String::from_utf8(data.clone()).is_err() {
-                // Tag object exists but cannot be parsed - data corruption
+            let tag = match GitTag::from_bytes(&data, *hash) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    let msg_id = tag_parse_error_msg_id(&error);
+                    if report_errors {
+                        has_error |= report(msg_id, "tag", &hash.to_string());
+                    }
+                    return Ok((
+                        ObjectCheckResult {
+                            object_id: hash.to_string(),
+                            object_type: obj_type.to_string(),
+                            status: CheckStatus::InvalidFormat,
+                            error_message: Some(format!(
+                                "Object {} has invalid tag format: {}",
+                                hash, error
+                            )),
+                            size,
+                        },
+                        has_error,
+                    ));
+                }
+            };
+
+            if tag.tag_name.trim().is_empty() {
+                if report_errors {
+                    has_error |= report(FsckMsgId::BadTagName, "tag", &hash.to_string());
+                }
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!(
+                            "Object {} has invalid tag format: empty tag name",
+                            hash
+                        )),
+                        size,
+                    },
+                    has_error,
+                ));
+            }
+
+            if !storage.exist(&tag.object_hash) {
+                if report_errors {
+                    has_error |= report(
+                        FsckMsgId::Missing,
+                        &tag.object_type.to_string(),
+                        &tag.object_hash.to_string(),
+                    );
+                }
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::Missing,
+                        error_message: Some(format!(
+                            "Tag {} points to missing {} {}",
+                            hash, tag.object_type, tag.object_hash
+                        )),
+                        size,
+                    },
+                    has_error,
+                ));
+            }
+
+            if let Ok(actual_type) = storage.get_object_type(&tag.object_hash)
+                && actual_type != tag.object_type
+            {
                 if report_errors {
                     has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
                 }
@@ -1514,13 +1609,15 @@ async fn verify_object(
                         object_id: hash.to_string(),
                         object_type: obj_type.to_string(),
                         status: CheckStatus::InvalidFormat,
-                        error_message: Some(format!("Object {} has invalid tag format", hash)),
+                        error_message: Some(format!(
+                            "Tag {} declares target type {} but target {} is {}",
+                            hash, tag.object_type, tag.object_hash, actual_type
+                        )),
                         size,
                     },
                     has_error,
                 ));
             }
-            // TODO: Parse tag and check for missing tagger, object, type, tag entry
         }
         _ => {
             if report_errors {
@@ -1713,4 +1810,25 @@ fn validate_index_entry(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FsckMsgId, tag_parse_error_msg_id};
+
+    #[test]
+    fn tag_parse_error_msg_id_keeps_object_type_errors_specific() {
+        assert_eq!(
+            tag_parse_error_msg_id(&"Missing object type"),
+            FsckMsgId::MissingType
+        );
+        assert_eq!(
+            tag_parse_error_msg_id(&"Invalid object type"),
+            FsckMsgId::MissingType
+        );
+        assert_eq!(
+            tag_parse_error_msg_id(&"Missing object hash"),
+            FsckMsgId::MissingObject
+        );
+    }
 }

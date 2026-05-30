@@ -214,7 +214,12 @@ impl LFSClient {
                     refs: Ref { name: refspec },
                     ..Default::default()
                 })
-                .await;
+                .await
+                .map_err(|e| LfsPushError {
+                    path: None,
+                    oid: None,
+                    detail: format!("LFS verify locks request failed: {e}"),
+                })?;
 
             if code == StatusCode::FORBIDDEN {
                 return Err(LfsPushError {
@@ -518,10 +523,16 @@ impl LFSClient {
         .await?;
 
         let text = response.text().await?;
-        tracing::debug!(
-            "LFS download response:\n {:#?}",
-            serde_json::from_str::<serde_json::Value>(&text)?
-        );
+        // Pre-fix this debug! macro called `serde_json::from_str::<Value>(&text)?`
+        // inline so the response was parsed twice (once for the pretty
+        // debug snapshot, once for the typed `LfsBatchResponse` two
+        // lines below). Worse, `?` inside a `debug!` macro is NOT
+        // gated by log-level — the closure is always evaluated, so a
+        // non-JSON body would fail the entire download with a "expected
+        // value" serde error even when `RUST_LOG` was at info or above.
+        // Log the raw text instead; the typed parse below is the real
+        // source of truth and surfaces its own error.
+        tracing::debug!("LFS download response: {}", text);
         let resp = serde_json::from_str::<LfsBatchResponse>(&text)?;
         let obj = resp.objects.first().ok_or_else(|| {
             anyhow!(
@@ -792,7 +803,7 @@ impl LFSClient {
 
     /// lock an LFS file
     /// - `refspec` is must in Mega Server, but optional in Git Doc
-    pub async fn lock(&self, path: String, refspec: String) -> StatusCode {
+    pub async fn lock(&self, path: String, refspec: String) -> Result<StatusCode, reqwest::Error> {
         // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
         // construction; joining a static relative URL onto a valid base URL
         // cannot fail.
@@ -808,17 +819,21 @@ impl LFSClient {
                 },
             })
         })
-        .await
-        .expect("LFS lock request failed after retries (callers receive StatusCode, not Result)");
+        .await?;
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
             tracing::warn!(status = %code, body = %body, "LFS lock failed");
         }
-        code
+        Ok(code)
     }
 
-    pub async fn unlock(&self, id: String, refspec: String, force: bool) -> StatusCode {
+    pub async fn unlock(
+        &self,
+        id: String,
+        refspec: String,
+        force: bool,
+    ) -> Result<StatusCode, reqwest::Error> {
         // INVARIANT: `id` comes from a prior `get_locks` response or
         // user-supplied `--id` argument and is treated as a single path
         // segment; if it contains URL-special characters, `Url::join`
@@ -836,21 +851,20 @@ impl LFSClient {
                 },
             })
         })
-        .await
-        .expect("LFS unlock request failed after retries (callers receive StatusCode, not Result)");
+        .await?;
         let code = resp.status();
         if !resp.status().is_success() && code != StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
             tracing::warn!(status = %code, body = %body, "LFS unlock failed");
         }
-        code
+        Ok(code)
     }
 
     /// List Locks for Verification
     pub async fn verify_locks(
         &self,
         query: VerifiableLockRequest,
-    ) -> (StatusCode, VerifiableLockList) {
+    ) -> Result<(StatusCode, VerifiableLockList), reqwest::Error> {
         // INVARIANT: `self.lfs_url` was parsed by `Url::parse` during client
         // construction; joining a static relative URL onto a valid base URL
         // cannot fail.
@@ -858,11 +872,7 @@ impl LFSClient {
             .lfs_url
             .join("locks/verify")
             .expect("'locks/verify' is a valid relative URL");
-        let resp = BasicAuth::send(|| async { self.client.post(url.clone()).json(&query) })
-            .await
-            .expect(
-                "LFS verify_locks request failed after retries (callers receive StatusCode pair)",
-            );
+        let resp = BasicAuth::send(|| async { self.client.post(url.clone()).json(&query) }).await?;
         let code = resp.status();
         // By default, an LFS server that doesn't implement any locking endpoints should return 404.
         // This response will not halt any Git pushes.
@@ -872,21 +882,17 @@ impl LFSClient {
                 code,
                 resp.text().await.unwrap_or_default()
             );
-            return (
+            return Ok((
                 code,
                 VerifiableLockList {
                     ours: Vec::new(),
                     theirs: Vec::new(),
                     next_cursor: String::default(),
                 },
-            );
+            ));
         }
-        (
-            code,
-            resp.json::<VerifiableLockList>().await.expect(
-                "LFS verify_locks: 2xx response body failed to decode as VerifiableLockList",
-            ),
-        )
+        let list = resp.json::<VerifiableLockList>().await?;
+        Ok((code, list))
     }
 }
 
@@ -1163,7 +1169,8 @@ mod tests {
         let client = test_lfs_client(&base_url);
         let code = client
             .lock("tracked.txt".to_string(), "refs/heads/main".to_string())
-            .await;
+            .await
+            .expect("lock should reach mock server and return a status");
         assert_eq!(code, StatusCode::CONFLICT);
     }
 
@@ -1185,8 +1192,77 @@ mod tests {
         let client = test_lfs_client(&base_url);
         let code = client
             .unlock("lock-1".to_string(), "refs/heads/main".to_string(), false)
-            .await;
+            .await
+            .expect("unlock should reach mock server and return a status");
         assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Pre-v0.17.1063 `LFSClient::lock` / `::unlock` called
+    /// `.expect("LFS … request failed after retries (...)")` on the
+    /// `BasicAuth::send` result, which panicked on any network error.
+    /// They now return `Result<StatusCode, reqwest::Error>` so callers
+    /// can propagate a typed CliError instead. Pinning the new contract
+    /// by pointing the client at a closed loopback port: the request
+    /// must surface as an `Err`, not a panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_returns_err_on_connection_refused_instead_of_panicking() {
+        // Bind, capture the port, then drop the listener so the port
+        // is closed before the request runs. This produces a clean
+        // ECONNREFUSED that reqwest surfaces as a `reqwest::Error`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+
+        let result = client
+            .lock("tracked.txt".to_string(), "refs/heads/main".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on closed port, got Ok({:?})",
+            result.ok()
+        );
+
+        let result = client
+            .unlock("lock-1".to_string(), "refs/heads/main".to_string(), false)
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on closed port, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    /// Same fix shape as `lock_returns_err_on_connection_refused_*` but
+    /// for `verify_locks`. Pre-v0.17.1064 `verify_locks` returned
+    /// `(StatusCode, VerifiableLockList)` and panicked on a network
+    /// error or a malformed JSON body via two separate `.expect(...)`s.
+    /// It now returns `Result<(...), reqwest::Error>` so `push_objects`
+    /// can surface a `LfsPushError` instead of crashing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_locks_returns_err_on_connection_refused_instead_of_panicking() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+
+        let result = client
+            .verify_locks(VerifiableLockRequest {
+                refs: Ref {
+                    name: "refs/heads/main".to_string(),
+                },
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "expected Err on closed port, got Ok({:?})",
+            result.ok()
+        );
     }
 
     /// Regression for v0.17.194: `LFSClient::download_object` previously
