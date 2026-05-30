@@ -10,7 +10,9 @@ libra prune [OPTIONS] [HEAD]...
 
 ## Description
 
-`libra prune` effectively runs `libra fsck --unreachable` using all the refs available in `refs/`, optionally with an additional set of objects specified on the command line, and prunes all unpacked objects unreachable from any of these head objects from the repository. In addition, it prunes the unpacked objects that are also found in packs.
+`libra prune` effectively runs `libra fsck --unreachable` using all the refs available in `refs/`, optionally with an additional set of heads specified on the command line, and prunes all unpacked objects unreachable from any of these head objects from the repository. In addition, it prunes the unpacked objects that are also found in packs.
+
+Specifically, unreachable objects found in pack will be kept. For more details about unreachable objects, refer to the `libra fsck --unreachable` documentation.
 
 ## Options
 
@@ -20,7 +22,7 @@ Report objects to be removed without actually removing anything.
 
 ```bash
 $ libra prune -n
-would prune d670460b4b4aece5915caf5c68d12f560a9fe3e4
+d670460b4b4aece5915caf5c68d12f560a9fe3e4 blob
 ```
 
 ### `-v, --verbose`
@@ -29,7 +31,7 @@ Report all removed objects.
 
 ```bash
 $ libra prune -v
-prune d670460b4b4aece5915caf5c68d12f560a9fe3e4
+d670460b4b4aece5915caf5c68d12f560a9fe3e4 blob
 ```
 
 ### `--expire <TIME>`
@@ -80,13 +82,13 @@ Normal prune (no flags):
 Verbose mode:
 
 ```text
-prune d670460b4b4aece5915caf5c68d12f560a9fe3e4
+d670460b4b4aece5915caf5c68d12f560a9fe3e4 blob
 ```
 
 Dry-run mode:
 
 ```text
-would prune d670460b4b4aece5915caf5c68d12f560a9fe3e4
+d670460b4b4aece5915caf5c68d12f560a9fe3e4 blob
 ```
 
 Global `--quiet` suppresses dry-run and verbose human output while keeping
@@ -111,9 +113,15 @@ Example:
     "heads": [
       "test"
     ],
-    "prunable": [
-      "b13c288e945d00a4d16f195b33bf003b53d73dac",
-      "74689c87fb53b6d666de95efea667d99ba2fa52a"
+    "objects": [
+      {
+        "object_id": "b13c288e945d00a4d16f195b33bf003b53d73dac",
+        "object_type": "blob"
+      },
+      {
+        "object_id": "74689c87fb53b6d666de95efea667d99ba2fa52a",
+        "object_type": "blob"
+      }
     ],
     "dry_run": true,
     "verbose": false

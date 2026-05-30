@@ -89,8 +89,14 @@ struct PrunePlan {
 }
 
 #[derive(Debug, Serialize)]
+struct PruneObjectInfo {
+    object_id: String,
+    object_type: String,
+}
+
+#[derive(Debug, Serialize)]
 struct PruneOutput {
-    prunable: Vec<String>,
+    objects: Vec<PruneObjectInfo>,
     expire: Option<String>,
     heads: Vec<String>,
     dry_run: bool,
@@ -101,6 +107,7 @@ struct PruneOutput {
 #[derive(Debug, Clone)]
 struct LooseObjectInfo {
     hash: ObjectHash,
+    obj_type: ObjectType,
     path: PathBuf,
     modified: Option<SystemTime>,
 }
@@ -134,14 +141,18 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
     let loose_objects = list_loose_objects(&storage, expire_before.is_some())?;
     let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
 
-    apply_prune_plan(&plan, &storage, args.dry_run, args.verbose || args.dry_run)?;
+    let should_report = (args.verbose || args.dry_run) && (!output.is_json() && !output.quiet);
+    apply_prune_plan(&plan, &storage, args.dry_run, should_report)?;
 
     if output.is_json() {
         let prune_output = PruneOutput {
-            prunable: plan
+            objects: plan
                 .prunable
                 .iter()
-                .map(|info| info.hash.to_string())
+                .map(|info| PruneObjectInfo {
+                    object_id: info.hash.to_string(),
+                    object_type: info.obj_type.to_string(),
+                })
                 .collect(),
             expire: args.expire,
             heads: args.heads,
@@ -185,7 +196,7 @@ async fn collect_reachable_objects(
     Ok(bfs_mark_reachable(&starting_points, storage))
 }
 
-// Collect duplicate objects already in packfiles.
+/// Collect objects already in packfiles.
 async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
     let mut packed_objects = HashSet::new();
     let pack_dir = storage.base_path().join("pack");
@@ -205,7 +216,7 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
     Ok(packed_objects)
 }
 
-// List all objects contained in a pack index file.
+/// List all objects contained in a pack index file.
 fn list_idx_objects(idx_path: &Path) -> io::Result<Vec<ObjectHash>> {
     let hash_size = get_hash_kind().size() as u64;
     let mut idx_file = fs::File::open(idx_path)?;
@@ -254,6 +265,7 @@ async fn collect_starting_points(
     let mut starting_points = HashSet::new();
     let db_conn = db::get_db_conn_instance().await;
 
+    // References
     let refs = reference::Entity::find()
         .all(&db_conn)
         .await
@@ -284,6 +296,7 @@ async fn collect_starting_points(
         starting_points.insert(hash);
     }
 
+    // Reflogs
     let reflogs = reflog::Entity::find()
         .all(&db_conn)
         .await
@@ -306,6 +319,7 @@ async fn collect_starting_points(
         }
     }
 
+    // Index
     let index_path = path::index();
     if index_path.exists()
         && let Ok(index) = Index::load(&index_path)
@@ -315,6 +329,7 @@ async fn collect_starting_points(
         }
     }
 
+    // Current head
     let head = Head::current_result().await.map_err(|error| {
         CliError::fatal(format!("failed to read HEAD: {error}"))
             .with_stable_code(StableErrorCode::RepoCorrupt)
@@ -329,6 +344,7 @@ async fn collect_starting_points(
         starting_points.insert(hash);
     }
 
+    // User-specified heads
     for head in heads {
         let commit = resolve_head_commit(head).await?;
         if !storage.exist(&commit) {
@@ -380,11 +396,7 @@ fn apply_prune_plan(
     let objects_dir = storage.base_path();
     for info in &plan.prunable {
         if report {
-            if dry_run {
-                println!("would prune {}", info.hash);
-            } else {
-                println!("prune {}", info.hash);
-            }
+            println!("{} {}", info.hash, info.obj_type);
         }
 
         if dry_run {
@@ -527,6 +539,11 @@ fn list_loose_objects(
                 continue;
             };
 
+            let obj_type = match storage.get_object_type(&hash) {
+                Ok(t) => t,
+                Err(_) => continue, // Skip files that don't parse as valid objects
+            };
+
             let modified = if needs_mtime {
                 let metadata = sub_entry.metadata().map_err(|error| {
                     CliError::fatal(format!(
@@ -548,6 +565,7 @@ fn list_loose_objects(
 
             objects.push(LooseObjectInfo {
                 hash,
+                obj_type,
                 path: sub_path,
                 modified,
             });

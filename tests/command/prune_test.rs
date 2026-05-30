@@ -202,7 +202,7 @@ fn test_prune_dry_run_reports_without_deleting() {
     let output = run_libra_command(&["prune", "--dry-run"], repo.path());
     assert_cli_success(&output, "prune --dry-run should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(&format!("would prune {blob}")));
+    assert!(stdout.contains(&format!("{blob} blob")));
     assert!(blob_path.exists());
 }
 
@@ -216,7 +216,7 @@ fn test_prune_verbose_reports_deletions() {
     let output = run_libra_command(&["prune", "--verbose"], repo.path());
     assert_cli_success(&output, "prune --verbose should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(&format!("prune {blob}")));
+    assert!(stdout.contains(&format!("{blob} blob")));
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +499,34 @@ fn test_prune_invalid_head_fails() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid head"));
+}
+
+#[test]
+#[serial]
+/// Tests prune fails when detached HEAD points to a missing object.
+fn test_prune_detached_head_missing_object_fails() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let add = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&add, "failed to add second.txt");
+    let commit = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "failed to create second commit");
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let first_commit = stdout.lines().nth(1).unwrap().trim();
+
+    let detach = run_libra_command(&["switch", "--detach", first_commit], repo.path());
+    assert_cli_success(&detach, "failed to detach HEAD");
+
+    let first_path = loose_object_path(repo.path(), first_commit);
+    fs::remove_file(&first_path).expect("remove detached head object");
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing object"));
 }
 
 #[test]
