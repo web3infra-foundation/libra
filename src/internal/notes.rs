@@ -5,6 +5,7 @@
 //! hash. The default notes ref is `refs/notes/commits`.
 
 use git_internal::hash::ObjectHash;
+use git_internal::internal::object::ObjectTrait;
 use sea_orm::{ConnectionTrait, DbErr, Statement};
 use std::str::FromStr;
 
@@ -71,18 +72,37 @@ pub enum NotesError {
 /// [`util::get_commit_base`].
 pub async fn resolve_object(object: Option<&str>) -> Result<ObjectHash, NotesError> {
     match object {
-        Some(s) if !s.is_empty() => util::get_commit_base(s)
-            .await
-            .map_err(|e| NotesError::InvalidObject(s.to_string(), e)),
-        _ => match crate::internal::head::Head::current_commit_result().await {
-            Ok(Some(hash)) => Ok(hash),
-            Ok(None) => Err(NotesError::HeadUnborn),
-            Err(e) => Err(NotesError::InvalidObject(
-                "HEAD".to_string(),
-                e.to_string(),
-            )),
-        },
+        Some(s) if !s.is_empty() => resolve_ref(s).await,
+        _ => resolve_head().await,
     }
+}
+
+async fn resolve_head() -> Result<ObjectHash, NotesError> {
+    match crate::internal::head::Head::current_commit_result().await {
+        Ok(Some(hash)) => Ok(hash),
+        Ok(None) => Err(NotesError::HeadUnborn),
+        Err(e) => Err(NotesError::InvalidObject("HEAD".to_string(), e.to_string())),
+    }
+}
+
+async fn resolve_ref(s: &str) -> Result<ObjectHash, NotesError> {
+    // When resolving HEAD explicitly, check for unborn HEAD via the Head API
+    // so we surface the correct HeadUnborn error instead of a generic invalid-object.
+    if s == "HEAD" {
+        match crate::internal::head::Head::current_commit_result().await {
+            Ok(Some(hash)) => return Ok(hash),
+            Ok(None) => return Err(NotesError::HeadUnborn),
+            Err(e) => {
+                return Err(NotesError::InvalidObject(
+                    "HEAD".to_string(),
+                    e.to_string(),
+                ))
+            }
+        }
+    }
+    util::get_commit_base(s)
+        .await
+        .map_err(|e| NotesError::InvalidObject(s.to_string(), e))
 }
 
 /// Add a note to an object.

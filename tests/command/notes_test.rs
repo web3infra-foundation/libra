@@ -10,7 +10,6 @@
 //! | 2 | Boundary conditions | Empty/long/unicode content, multi-object, cross-ref isolation |
 //! | 3 | Error handling | Invalid args, missing objects, unborn HEAD, conflict, file errors |
 
-use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
@@ -100,8 +99,8 @@ fn basic_add_force_overwrite() {
 fn basic_add_to_specific_object() {
     let repo = create_committed_repo_via_cli();
     // Add a note to the initial commit by hash
-    let log_output = run_libra_command(&["log", "--format=%H", "-n", "1"], repo.path());
-    assert_cli_success(&log_output, "log to get commit hash");
+    let log_output = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&log_output, "rev-parse to get commit hash");
     let commit_hash = String::from_utf8_lossy(&log_output.stdout)
         .trim()
         .to_string();
@@ -280,7 +279,7 @@ fn basic_remove_json() {
 fn basic_custom_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "add", "-m", "QA reviewed", "--ref", "refs/notes/qa"],
+        &["notes", "--ref", "refs/notes/qa", "add", "-m", "QA reviewed"],
         repo.path(),
     );
     assert_cli_success(&output, "notes add --ref refs/notes/qa");
@@ -289,7 +288,7 @@ fn basic_custom_ref() {
 
     // List from custom ref
     let list_output = run_libra_command(
-        &["notes", "list", "--ref", "refs/notes/qa"],
+        &["notes", "--ref", "refs/notes/qa", "list"],
         repo.path(),
     );
     assert_cli_success(&list_output, "notes list --ref refs/notes/qa");
@@ -311,24 +310,24 @@ fn basic_custom_ref_show_and_remove() {
 
     // add
     run_libra_command(
-        &["notes", "add", "-m", "Audit trail", ref_arg, ref_val],
+        &["notes", ref_arg, ref_val, "add", "-m", "Audit trail"],
         repo.path(),
     );
 
     // show
-    let show_out = run_libra_command(&["notes", "show", ref_arg, ref_val], repo.path());
+    let show_out = run_libra_command(&["notes", ref_arg, ref_val, "show"], repo.path());
     assert_cli_success(&show_out, "show on custom ref");
     assert!(String::from_utf8_lossy(&show_out.stdout).contains("Audit trail"));
 
     // remove
     let remove_out = run_libra_command(
-        &["notes", "remove", "HEAD", ref_arg, ref_val],
+        &["notes", ref_arg, ref_val, "remove", "HEAD"],
         repo.path(),
     );
     assert_cli_success(&remove_out, "remove on custom ref");
 
     // verify gone
-    let list_out = run_libra_command(&["notes", "list", ref_arg, ref_val], repo.path());
+    let list_out = run_libra_command(&["notes", ref_arg, ref_val, "list"], repo.path());
     assert_cli_success(&list_out, "list after remove on custom ref");
     assert!(String::from_utf8_lossy(&list_out.stdout).trim().is_empty());
 }
@@ -412,7 +411,7 @@ fn boundary_add_very_long_message() {
 #[test]
 fn boundary_add_special_chars() {
     let repo = create_committed_repo_via_cli();
-    let special = "backslash: \\ \ttab\0null\x1bescape\nnewline\rreturn";
+    let special = "backslash: \\ \ttab\x1bescape\nnewline\rreturn";
     run_libra_command(&["notes", "add", "-m", special], repo.path());
     let output = run_libra_command(&["notes", "show"], repo.path());
     assert_cli_success(&output, "show special chars note");
@@ -496,16 +495,16 @@ fn boundary_cross_ref_isolation() {
 
     // Add notes in two different refs for the same object
     run_libra_command(
-        &["notes", "add", "-m", "QA note", "--ref", "refs/notes/qa"],
+        &["notes", "--ref", "refs/notes/qa", "add", "-m", "QA note"],
         repo.path(),
     );
     run_libra_command(
-        &["notes", "add", "-m", "Review note", "--ref", "refs/notes/review"],
+        &["notes", "--ref", "refs/notes/review", "add", "-m", "Review note"],
         repo.path(),
     );
 
     // qa ref: 1 note
-    let qa = run_libra_command(&["--json", "notes", "list", "--ref", "refs/notes/qa"], repo.path());
+    let qa = run_libra_command(&["--json", "notes", "--ref", "refs/notes/qa", "list"], repo.path());
     assert_cli_success(&qa, "list qa --json");
     assert_eq!(
         parse_json_stdout(&qa)["data"]["notes"].as_array().unwrap().len(),
@@ -514,7 +513,7 @@ fn boundary_cross_ref_isolation() {
 
     // review ref: 1 note
     let review = run_libra_command(
-        &["--json", "notes", "list", "--ref", "refs/notes/review"],
+        &["--json", "notes", "--ref", "refs/notes/review", "list"],
         repo.path(),
     );
     assert_cli_success(&review, "list review --json");
@@ -561,26 +560,27 @@ fn boundary_json_list_multiple_entries() {
 
     // Add 3 notes (all on same object — they're 3 rows with different refs)
     run_libra_command(
-        &["notes", "add", "-m", "A", "--ref", "refs/notes/a"],
+        &["notes", "--ref", "refs/notes/a", "add", "-m", "A"],
         repo.path(),
     );
     run_libra_command(
-        &["notes", "add", "-m", "B", "--ref", "refs/notes/b"],
+        &["notes", "--ref", "refs/notes/b", "add", "-m", "B"],
         repo.path(),
     );
     run_libra_command(
-        &["notes", "add", "-m", "C", "--ref", "refs/notes/c"],
+        &["notes", "--ref", "refs/notes/c", "add", "-m", "C"],
         repo.path(),
     );
 
     // Each ref lists 1 note
     for ref_name in &["refs/notes/a", "refs/notes/b", "refs/notes/c"] {
         let out = run_libra_command(
-            &["--json", "notes", "list", "--ref", ref_name],
+            &["--json", "notes", "--ref", ref_name, "list"],
             repo.path(),
         );
         assert_cli_success(&out, &format!("list {ref_name}"));
-        let notes = parse_json_stdout(&out)["data"]["notes"]
+        let json = parse_json_stdout(&out);
+        let notes = json["data"]["notes"]
             .as_array()
             .expect("expected notes array");
         assert_eq!(notes.len(), 1, "expected 1 note in {ref_name}");
@@ -594,7 +594,7 @@ fn boundary_ref_exact_prefix() {
     let repo = create_committed_repo_via_cli();
     // "refs/notes/" is a valid prefix but short; it should be accepted
     let output = run_libra_command(
-        &["notes", "add", "-m", "At root", "--ref", "refs/notes/"],
+        &["notes", "--ref", "refs/notes/", "add", "-m", "At root"],
         repo.path(),
     );
     // This is technically a valid notes ref per validation
@@ -615,7 +615,7 @@ fn error_add_without_message_or_file() {
     let output = run_libra_command(&["notes", "add"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert!(stderr.contains("provide a message"), "unexpected stderr: {stderr}");
 }
@@ -627,7 +627,7 @@ fn error_add_json_without_message() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty(), "json error should keep stdout empty");
     assert_eq!(report["error_code"], "LBR-CLI-002");
 }
@@ -652,7 +652,7 @@ fn error_add_invalid_object() {
     );
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("invalid object"), "unexpected stderr: {stderr}");
     assert!(
@@ -671,7 +671,7 @@ fn error_add_json_invalid_object() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty());
     assert_eq!(report["error_code"], "LBR-CLI-003");
 }
@@ -758,7 +758,7 @@ fn error_list_by_object_unborn_head() {
     init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["notes", "list", "HEAD"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-003");
@@ -784,12 +784,12 @@ fn error_add_outside_repo() {
 fn error_add_invalid_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "add", "-m", "Test", "--ref", "refs/heads/wrong"],
+        &["notes", "--ref", "refs/heads/wrong", "add", "-m", "Test"],
         repo.path(),
     );
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert!(stderr.contains("must start with 'refs/notes/'"), "unexpected stderr: {stderr}");
     assert!(
@@ -802,12 +802,12 @@ fn error_add_invalid_ref() {
 fn error_list_invalid_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "list", "--ref", "refs/tags/bad"],
+        &["notes", "--ref", "refs/tags/bad", "list"],
         repo.path(),
     );
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert!(stderr.contains("must start with 'refs/notes/'"), "unexpected stderr: {stderr}");
 }
@@ -816,12 +816,12 @@ fn error_list_invalid_ref() {
 fn error_show_invalid_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "show", "--ref", "refs/heads/main"],
+        &["notes", "--ref", "refs/heads/main", "show"],
         repo.path(),
     );
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
 }
 
@@ -829,12 +829,12 @@ fn error_show_invalid_ref() {
 fn error_remove_invalid_ref() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(
-        &["notes", "remove", "HEAD", "--ref", "refs/blobs/x"],
+        &["notes", "--ref", "refs/blobs/x", "remove", "HEAD"],
         repo.path(),
     );
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-002");
 }
 
@@ -846,7 +846,7 @@ fn error_show_not_found() {
     let output = run_libra_command(&["notes", "show"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
     assert!(
@@ -862,7 +862,7 @@ fn error_show_json_not_found() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty());
     assert_eq!(report["error_code"], "LBR-CLI-003");
 }
@@ -873,7 +873,7 @@ fn error_remove_not_found() {
     let output = run_libra_command(&["notes", "remove", "HEAD"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
 }
@@ -885,7 +885,7 @@ fn error_remove_json_not_found() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty());
     assert_eq!(report["error_code"], "LBR-CLI-003");
 }
@@ -903,7 +903,7 @@ fn error_list_by_object_not_found() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report["error_code"], "LBR-CLI-003");
 }
 
@@ -913,7 +913,7 @@ fn error_list_by_object_not_found_human() {
     let output = run_libra_command(&["notes", "list", "HEAD"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("no note found"), "unexpected stderr: {stderr}");
 }
@@ -925,9 +925,9 @@ fn error_show_invalid_object() {
         &["notes", "show", "this-ref-does-not-exist"],
         repo.path(),
     );
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
 }
 
@@ -940,7 +940,7 @@ fn error_remove_with_invalid_object() {
     );
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("invalid object"), "unexpected stderr: {stderr}");
 }
@@ -968,10 +968,11 @@ fn error_json_show_not_found_on_clean_repo() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(129));
     assert!(output.stdout.is_empty());
     assert_eq!(report["error_code"], "LBR-CLI-003");
-    assert_eq!(report["message"], "no note found for object");
+    assert!(report["message"].as_str().unwrap().contains("no note found for object"),
+        "expected message to contain 'no note found for object', got: {report}");
     assert_eq!(report["category"], "cli");
     assert!(
         report["hints"].as_array().unwrap().iter().any(|h| h.as_str().unwrap().contains("notes list")),

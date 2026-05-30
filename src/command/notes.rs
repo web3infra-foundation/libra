@@ -241,7 +241,7 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
         NotesOutput::Add {
             notes_ref,
             object,
-            note_hash,
+            note_hash: _,
         } => {
             println!(
                 "Added note to {} in {}",
