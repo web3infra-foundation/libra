@@ -5625,9 +5625,9 @@ pub struct MockCompletionModel { /* scripted responses */ }
 | Phase 0 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 需验证 | 需验证 | 需验证 |
 | Phase 1 | `Plan(role=execution|test)` / `Task` / `Scheduler.selected_plan_ids` | 需验证 | 需验证 | 需验证 |
 | Phase 1 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 需验证 | 需验证 | 需验证 |
-| Phase 2 | `Run` / `PatchSet` / `Provenance` | 需验证 | 需验证 | 需验证 |
-| Phase 2 | `TaskEvent` / `RunEvent` / `PlanStepEvent` / `RunUsage` | 需验证 | 需验证 | 需验证 |
-| Phase 2 | `ToolInvocation` / `ContextFrame` / per-task `Evidence` | 需验证 | 需验证 | 需验证 |
+| Phase 2 | `Run` / `PatchSet` / `Provenance` | 共享 persistence 已验证；Codex `TaskExecutor` 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession::finalize`） | `execution_audit_session_persists_runtime_side_objects` pin 住 `PersistedExecution.run_id` / `provenance_id` / task `patchset_id` 可解析到 history |
+| Phase 2 | `TaskEvent` / `RunEvent` / `PlanStepEvent` / `RunUsage` | attempt lifecycle bridge 已验证；Codex `TaskExecutor` 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession` + Phase 2 bridge） | `phase2_session_bridge_persists_attempt_lifecycle_events` 覆盖 Patching→Completed / Running→Done / Progressing→Completed；`execution_audit_session_persists_runtime_side_objects` 覆盖 `run_usage_id` |
+| Phase 2 | `ToolInvocation` / `ContextFrame` / per-task `Evidence` | 共享 runtime-side object 持久化已验证；Codex provider path 仍待共享 Runtime cutover | 已验证（tool-loop observer + finalize） | `execution_audit_session_persists_runtime_side_objects` 覆盖 `ToolInvocation` id、assistant/context frames 不落原文尾巴、sandbox Evidence event |
 | Phase 3 | `ArtifactLedger` / `release_candidate patchset` / `ValidationReport` | 需验证 | 需验证 | 需验证 |
 | Phase 4 | `DecisionProposal` / final `Decision` / terminal `IntentEvent` | 需验证 | 需验证 | 需验证 |
 | Projection | `ThreadProjection` / `SchedulerState` / `live_context_window` | 需验证 | 需验证 | 需验证 |

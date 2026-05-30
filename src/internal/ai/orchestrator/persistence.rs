@@ -4494,9 +4494,19 @@ fn parse_created_id(kind: &str, result: &CallToolResult) -> Result<String, Orche
         if let Some(text) = content.as_text().map(|value| value.text.as_str())
             && let Some(id) = text.split("ID:").nth(1)
         {
-            let id = id.trim();
+            let id = id
+                .trim()
+                .split(|c: char| c.is_ascii_whitespace() || c == '|')
+                .next()
+                .unwrap_or("");
             if !id.is_empty() {
-                return Ok(id.to_string());
+                return parse_object_id(id)
+                    .map(|id| id.to_string())
+                    .map_err(|error| {
+                        OrchestratorError::ConfigError(format!(
+                            "failed to parse {kind} id from MCP response: {error}"
+                        ))
+                    });
             }
         }
     }
@@ -5466,10 +5476,36 @@ mod tests {
             .await
             .unwrap();
         assert!(!persisted.run_id.is_empty());
+        assert!(persisted.provenance_id.is_some());
         assert!(persisted.run_usage_id.is_some());
         assert!(persisted.derived_records.is_some());
+        assert_eq!(persisted.tasks.len(), 1);
+        let task_artifacts = &persisted.tasks[0];
+        assert_eq!(task_artifacts.task_id, impl_task_id);
+        assert!(task_artifacts.persisted_task_id.is_some());
+        assert_eq!(task_artifacts.tool_invocation_ids.len(), 1);
+        assert!(task_artifacts.patchset_id.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        for (object_type, object_id) in [
+            ("run", persisted.run_id.as_str()),
+            ("provenance", persisted.provenance_id.as_deref().unwrap()),
+            ("run_usage", persisted.run_usage_id.as_deref().unwrap()),
+            ("patchset", task_artifacts.patchset_id.as_deref().unwrap()),
+            ("invocation", task_artifacts.tool_invocation_ids[0].as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(
+                        object_type,
+                        &parse_object_id(object_id).unwrap().to_string()
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "expected persisted {object_type} id {object_id} to resolve in history",
+            );
+        }
         let db = history.database_connection();
         assert!(
             !ai_scheduler_selected_plan::Entity::find()
