@@ -231,7 +231,9 @@ Libra supports the same object types as Git:
 - **blob**: File content
 - **tree**: Directory listing with mode, name, and object references
 - **commit**: Snapshot metadata with tree, parents, author, committer
-- **tag**: Annotated tag with target, type, tagger, and message
+- **tag**: Annotated tag with required `object`, `type`, `tag`, and `tagger`
+  headers plus an optional message. Missing or malformed tag headers fail fsck
+  with tag-specific diagnostics such as `missing tagger`.
 
 ### Hash Algorithms
 

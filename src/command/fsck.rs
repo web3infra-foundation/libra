@@ -13,7 +13,10 @@ use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         index::Index,
-        object::{ObjectTrait, blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+        object::{
+            ObjectTrait, blob::Blob, commit::Commit, tag::Tag as GitTag, tree::Tree,
+            types::ObjectType,
+        },
     },
 };
 use hex;
@@ -170,6 +173,29 @@ pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
         println!("{}", output);
     }
     msg_id.causes_failure()
+}
+
+fn tag_parse_error_msg_id(error: &impl std::fmt::Display) -> FsckMsgId {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("missing object type")
+        || message.contains("invalid object type")
+        || message.contains("object type")
+    {
+        FsckMsgId::MissingType
+    } else if message.contains("missing object hash")
+        || message.contains("missing object")
+        || message.contains("invalid object hash")
+    {
+        FsckMsgId::MissingObject
+    } else if message.contains("missing tag name") {
+        FsckMsgId::MissingTagEntry
+    } else if message.contains("missing tagger") {
+        FsckMsgId::MissingTaggerEntry
+    } else if message.contains("tag name") {
+        FsckMsgId::BadTagName
+    } else {
+        FsckMsgId::BadObjectSha1
+    }
 }
 
 /// Convenience macro for reporting fsck messages
@@ -1503,9 +1529,74 @@ async fn verify_object(
             }
         }
         ObjectType::Tag => {
-            // Tag objects are text-based, check UTF-8 validity
-            if String::from_utf8(data.clone()).is_err() {
-                // Tag object exists but cannot be parsed - data corruption
+            let tag = match GitTag::from_bytes(&data, *hash) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    let msg_id = tag_parse_error_msg_id(&error);
+                    if report_errors {
+                        has_error |= report(msg_id, "tag", &hash.to_string());
+                    }
+                    return Ok((
+                        ObjectCheckResult {
+                            object_id: hash.to_string(),
+                            object_type: obj_type.to_string(),
+                            status: CheckStatus::InvalidFormat,
+                            error_message: Some(format!(
+                                "Object {} has invalid tag format: {}",
+                                hash, error
+                            )),
+                            size,
+                        },
+                        has_error,
+                    ));
+                }
+            };
+
+            if tag.tag_name.trim().is_empty() {
+                if report_errors {
+                    has_error |= report(FsckMsgId::BadTagName, "tag", &hash.to_string());
+                }
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!(
+                            "Object {} has invalid tag format: empty tag name",
+                            hash
+                        )),
+                        size,
+                    },
+                    has_error,
+                ));
+            }
+
+            if !storage.exist(&tag.object_hash) {
+                if report_errors {
+                    has_error |= report(
+                        FsckMsgId::Missing,
+                        &tag.object_type.to_string(),
+                        &tag.object_hash.to_string(),
+                    );
+                }
+                return Ok((
+                    ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::Missing,
+                        error_message: Some(format!(
+                            "Tag {} points to missing {} {}",
+                            hash, tag.object_type, tag.object_hash
+                        )),
+                        size,
+                    },
+                    has_error,
+                ));
+            }
+
+            if let Ok(actual_type) = storage.get_object_type(&tag.object_hash)
+                && actual_type != tag.object_type
+            {
                 if report_errors {
                     has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
                 }
@@ -1514,13 +1605,15 @@ async fn verify_object(
                         object_id: hash.to_string(),
                         object_type: obj_type.to_string(),
                         status: CheckStatus::InvalidFormat,
-                        error_message: Some(format!("Object {} has invalid tag format", hash)),
+                        error_message: Some(format!(
+                            "Tag {} declares target type {} but target {} is {}",
+                            hash, tag.object_type, tag.object_hash, actual_type
+                        )),
                         size,
                     },
                     has_error,
                 ));
             }
-            // TODO: Parse tag and check for missing tagger, object, type, tag entry
         }
         _ => {
             if report_errors {
@@ -1713,4 +1806,25 @@ fn validate_index_entry(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FsckMsgId, tag_parse_error_msg_id};
+
+    #[test]
+    fn tag_parse_error_msg_id_keeps_object_type_errors_specific() {
+        assert_eq!(
+            tag_parse_error_msg_id(&"Missing object type"),
+            FsckMsgId::MissingType
+        );
+        assert_eq!(
+            tag_parse_error_msg_id(&"Invalid object type"),
+            FsckMsgId::MissingType
+        );
+        assert_eq!(
+            tag_parse_error_msg_id(&"Missing object hash"),
+            FsckMsgId::MissingObject
+        );
+    }
 }
