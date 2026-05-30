@@ -9,6 +9,7 @@ C8（后续 Git surface P1）
 - [`docs/commands/push.md`](../../commands/push.md) 已同步 C8 surface：裸 `libra push`、多个 update refspec、delete syntax `:ref`、显式 tag refspec、`--tags`、`--mirror --dry-run` 与 JSON `updates[].kind`。
 - [`src/command/push.rs`](../../../src/command/push.rs) 的 CLI 参数已改为 `refspecs: Vec<String>`，新增 `--tags` / `--mirror`，并在任何网络写入前构建完整 ref update plan、拒绝非法 refname 和重复 destination。
 - receive-pack 请求现在一次发送完整 update set；delete 使用 zero oid；branch/tag 更新、mirror delete 和 dry-run 共享同一 `PushRefUpdate` schema。服务端逐 ref status 行会被校验，缺失/拒绝状态不会被渲染成全成功。
+- `validate_receive_pack_response` 已有回归契约覆盖：所有 expected refs 必须收到 `ok`，服务端 `ng` 会保留 ref 与原因，缺失 expected status 或未知 status 行会 fail closed。
 - 本地 file remote push 仍显式拒绝，并继续由 [`declined.md`](declined.md#d2-本地-file-remote-的-push) 记录为 intentionally-different。
 - [`COMPATIBILITY.md`](../../../COMPATIBILITY.md) 中 `push` 仍为 `partial`，notes 已更新为 C8 已支持的 branch/tag update、multi-refspec、delete、`--tags` 与 `--mirror`。
 
@@ -87,6 +88,7 @@ C8 落地后更新 `push` 行：
 - [x] `libra push --tags origin` 推送本地 tags，已存在且相同的 tag 不重复更新。
 - [x] `libra push --mirror --dry-run origin` 展示将新增、更新、强制更新和删除的 refs，不写远端。
 - [x] 服务端拒绝部分 ref update 时，错误信息列出被拒 ref 和原因，不产生误导性的全成功摘要。
+- [x] receive-pack parser 回归覆盖 `ok` 全量状态、`ng` 拒绝、缺失 expected status 与未知 status 行。
 - [x] 本地 file remote push 仍返回 documented intentional difference，不被新增 refspec parser 意外放开。
 - [x] `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && cargo test --test command_test push_test` 通过。
 

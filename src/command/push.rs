@@ -2045,6 +2045,35 @@ mod test {
         commit
     }
 
+    fn test_ref_update_plan(remote_ref: &str) -> RefUpdatePlan {
+        let old_oid = ObjectHash::from_str("1111111111111111111111111111111111111111")
+            .expect("test old oid should parse");
+        let new_oid = ObjectHash::from_str("2222222222222222222222222222222222222222")
+            .expect("test new oid should parse");
+        RefUpdatePlan {
+            update: PushRefUpdate {
+                kind: PushRefUpdateKind::Update,
+                local_ref: remote_ref.to_string(),
+                remote_ref: remote_ref.to_string(),
+                old_oid: Some(old_oid.to_string()),
+                new_oid: new_oid.to_string(),
+                forced: false,
+            },
+            old_oid,
+            new_oid: Some(new_oid),
+            local_kind: Some(LocalRefKind::Branch),
+        }
+    }
+
+    fn receive_pack_response(lines: &[&str]) -> Bytes {
+        let mut bytes = BytesMut::new();
+        for line in lines {
+            add_pkt_line_string(&mut bytes, (*line).to_string());
+        }
+        bytes.extend_from_slice(b"0000");
+        bytes.freeze()
+    }
+
     #[tokio::test]
     async fn incremental_objs_fast_forward_skips_unchanged_subtree_blobs() {
         let repo = tempfile::tempdir().expect("repo tempdir should be created");
@@ -2256,6 +2285,63 @@ mod test {
             .to_string(),
             "LFS upload failed for 'src/big.bin': remote did not provide an upload action",
         );
+    }
+
+    #[test]
+    fn validate_receive_pack_response_accepts_all_expected_ref_statuses() {
+        let plans = vec![
+            test_ref_update_plan("refs/heads/main"),
+            test_ref_update_plan("refs/heads/release"),
+        ];
+        let response = receive_pack_response(&[
+            "unpack ok\n",
+            "ok refs/heads/main\n",
+            "ok refs/heads/release\n",
+        ]);
+
+        validate_receive_pack_response(response, &plans).expect("all ref statuses should pass");
+    }
+
+    #[test]
+    fn validate_receive_pack_response_reports_remote_ng_status() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        let response = receive_pack_response(&[
+            "unpack ok\n",
+            "ng refs/heads/main protected branch hook declined\n",
+        ]);
+
+        assert!(matches!(
+            validate_receive_pack_response(response, &plans),
+            Err(PushError::RemoteRefUpdateFailed { refname, reason })
+                if refname == "refs/heads/main" && reason == "protected branch hook declined"
+        ));
+    }
+
+    #[test]
+    fn validate_receive_pack_response_rejects_missing_expected_ref_status() {
+        let plans = vec![
+            test_ref_update_plan("refs/heads/main"),
+            test_ref_update_plan("refs/heads/release"),
+        ];
+        let response = receive_pack_response(&["unpack ok\n", "ok refs/heads/main\n"]);
+
+        assert!(matches!(
+            validate_receive_pack_response(response, &plans),
+            Err(PushError::RemoteRefUpdateFailed { refname, reason })
+                if refname == "refs/heads/release" && reason == "missing status from remote"
+        ));
+    }
+
+    #[test]
+    fn validate_receive_pack_response_rejects_unexpected_status_line() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        let response = receive_pack_response(&["unpack ok\n", "ready refs/heads/main\n"]);
+
+        assert!(matches!(
+            validate_receive_pack_response(response, &plans),
+            Err(PushError::Network(message))
+                if message == "unexpected receive-pack status line: ready refs/heads/main"
+        ));
     }
 
     #[test]
