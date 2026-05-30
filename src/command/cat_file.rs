@@ -20,6 +20,7 @@ use std::{str::FromStr, sync::Arc};
 
 use clap::Parser;
 use git_internal::{
+    errors::GitError,
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
 };
@@ -31,7 +32,7 @@ use crate::{
     internal::{ai::history::HistoryManager, db, model::reference},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult, exit_with_legacy_stderr},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
         path,
         storage::local::LocalStorage,
@@ -53,13 +54,13 @@ Notes:
   - --ai on ai_session objects prints a unified session summary before full JSON.
   - --ai-list accepts built-in AI types as well as any type already present in the history branch.";
 
-const CAT_FILE_AFTER_HELP: &str = "Examples:
-  libra cat-file -p HEAD
-  libra cat-file -t 40d352ee7190f92dcf7883b8a81f2c730fd8a860
-  libra cat-file --ai-list intent
-  libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7zXjsskQ
-  libra cat-file --ai 5b878637-f852-4bff-adee-3354c42ae69f
-  libra cat-file --ai-type debug-local-1772707227";
+const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
+    libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
+    libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    libra cat-file --ai-list intent                         List all AI objects of a built-in type
+    libra cat-file --ai-list-types                          List every AI object type in the history branch
+    libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
+    libra cat-file --ai 5b878637-f852-4bff-adee-3354c42a…   Look up an AI object across all types by id";
 
 /// Provide content, type, or size information for repository objects (Git and AI).
 #[derive(Parser, Debug)]
@@ -182,6 +183,7 @@ async fn resolve_ai_object_with_history(
                     redact_uuid(object_id),
                     e
                 ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
             })?
             .map(|hash| (hash, type_name.to_string()))
             .ok_or_else(|| {
@@ -190,6 +192,7 @@ async fn resolve_ai_object_with_history(
                     type_name,
                     redact_uuid(object_id)
                 ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
             });
     }
 
@@ -199,22 +202,24 @@ async fn resolve_ai_object_with_history(
             redact_uuid(selector),
             e
         ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
 
     match matches.len() {
-        0 => Err(CliError::fatal(format!(
-            "AI object not found: {}",
-            redact_uuid(selector)
-        ))),
+        0 => Err(
+            CliError::fatal(format!("AI object not found: {}", redact_uuid(selector)))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        ),
         1 => Ok(matches[0].clone()),
         _ => {
             let mut kinds: Vec<String> = matches.into_iter().map(|(_, kind)| kind).collect();
             kinds.sort();
-            Err(CliError::fatal(format!(
+            Err(CliError::command_usage(format!(
                 "AI object ID {} is ambiguous across types: {}. Use TYPE:ID to disambiguate.",
                 redact_uuid(selector),
                 kinds.join(", ")
-            )))
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments))
         }
     }
 }
@@ -229,23 +234,25 @@ async fn ensure_ai_listable_type(hm: &HistoryManager, type_name: &str) -> CliRes
         return Ok(());
     }
 
-    let existing_types = hm
-        .list_object_types()
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to list AI object types: {e}")))?;
+    let existing_types = hm.list_object_types().await.map_err(|e| {
+        CliError::fatal(format!("failed to list AI object types: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
     if existing_types.iter().any(|existing| existing == type_name) {
         return Ok(());
     }
 
-    Err(CliError::fatal(format!(
+    Err(CliError::command_usage(format!(
         "unknown AI object type '{}'. Valid built-in types: {}",
         type_name,
         AI_OBJECT_TYPES.join(", ")
-    )))
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidTarget))
 }
 
-fn cat_file_exit(message: impl Into<String>) -> ! {
-    exit_with_legacy_stderr(message)
+fn cat_file_exit_error(error: CliError) -> ! {
+    error.print_stderr();
+    std::process::exit(error.exit_code())
 }
 
 pub async fn execute(args: CatFileArgs) {
@@ -270,7 +277,9 @@ pub async fn execute(args: CatFileArgs) {
     // ── Git modes (positional object arg required) ──────────────────────
     let object_ref = match args.object {
         Some(ref o) => o.as_str(),
-        None => cat_file_exit("fatal: <object> is required for Git object modes"),
+        None => cat_file_exit_error(CliError::command_usage(
+            "<object> is required for Git object modes",
+        )),
     };
 
     let storage = ClientStorage::init(path::objects());
@@ -283,7 +292,17 @@ pub async fn execute(args: CatFileArgs) {
 
     let obj_type = match storage.get_object_type(&hash) {
         Ok(t) => t,
-        Err(_) => cat_file_exit(format!("fatal: Not a valid object name {}", object_ref)),
+        Err(error) => match error {
+            GitError::ObjectNotFound(_) => {
+                cat_file_exit_error(invalid_object_name_error(object_ref))
+            }
+            _ => cat_file_exit_error(
+                CliError::fatal(format!(
+                    "could not resolve object type for {object_ref}: {error}"
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt),
+            ),
+        },
     };
 
     if args.show_type {
@@ -293,7 +312,9 @@ pub async fn execute(args: CatFileArgs) {
     } else if args.pretty_print {
         pretty_print_object(&hash, obj_type);
     } else {
-        cat_file_exit("fatal: one of '-t', '-s', '-p', '-e' or an --ai* flag is required");
+        cat_file_exit_error(CliError::command_usage(
+            "one of '-t', '-s', '-p', '-e' or an --ai* flag is required",
+        ));
     }
 }
 
@@ -391,7 +412,13 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
     let hash = resolve_object_safe(object_ref, &storage).await?;
     let obj_type = storage
         .get_object_type(&hash)
-        .map_err(|_| invalid_object_name_error(object_ref))?;
+        .map_err(|error| match error {
+            GitError::ObjectNotFound(_) => invalid_object_name_error(object_ref),
+            _ => CliError::fatal(format!(
+                "could not resolve object type for {object_ref}: {error}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+        })?;
 
     if args.show_type {
         if output.is_json() {
@@ -410,9 +437,10 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
     }
 
     if args.show_size {
-        let data = storage
-            .get(&hash)
-            .map_err(|e| CliError::fatal(format!("unable to read object {hash}: {e}")))?;
+        let data = storage.get(&hash).map_err(|e| {
+            CliError::fatal(format!("unable to read object {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         if output.is_json() {
             emit_json_data(
                 "cat-file",
@@ -438,7 +466,8 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
 }
 
 fn invalid_object_name_error(object_ref: &str) -> CliError {
-    CliError::from_legacy_string(format!("fatal: Not a valid object name {}", object_ref))
+    CliError::fatal(format!("Not a valid object name {}", object_ref))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
 }
 
 async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
@@ -458,16 +487,18 @@ async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliRe
         CliError::fatal(format!(
             "failed to search objects while resolving '{object_ref}': {error}"
         ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
     if results.len() == 1 {
         return Ok(results[0]);
     }
     if results.len() > 1 {
-        return Err(CliError::fatal(format!(
+        return Err(CliError::command_usage(format!(
             "ambiguous argument '{}': matched {} objects",
             object_ref,
             results.len()
-        )));
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
     Err(invalid_object_name_error(object_ref))
@@ -481,13 +512,16 @@ fn emit_pretty_print_json(
 ) -> CliResult<()> {
     match obj_type {
         ObjectType::Blob => {
-            let blob = load_object::<Blob>(hash)
-                .map_err(|e| CliError::fatal(format!("could not read blob {hash}: {e}")))?;
+            let blob = load_object::<Blob>(hash).map_err(|e| {
+                CliError::fatal(format!("could not read blob {hash}: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
             if output.is_json() {
                 let content = String::from_utf8(blob.data).map_err(|_| {
                     CliError::command_usage(
                         "`cat-file -p` does not yet support --json for binary blob content",
                     )
+                    .with_stable_code(StableErrorCode::Unsupported)
                 })?;
                 emit_json_data(
                     "cat-file",
@@ -504,8 +538,10 @@ fn emit_pretty_print_json(
             Ok(())
         }
         ObjectType::Tree => {
-            let tree = load_object::<Tree>(hash)
-                .map_err(|e| CliError::fatal(format!("could not read tree {hash}: {e}")))?;
+            let tree = load_object::<Tree>(hash).map_err(|e| {
+                CliError::fatal(format!("could not read tree {hash}: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
             if output.is_json() {
                 let entries: Vec<serde_json::Value> = tree
                     .tree_items
@@ -537,8 +573,10 @@ fn emit_pretty_print_json(
             Ok(())
         }
         ObjectType::Commit => {
-            let commit = load_object::<Commit>(hash)
-                .map_err(|e| CliError::fatal(format!("could not read commit {hash}: {e}")))?;
+            let commit = load_object::<Commit>(hash).map_err(|e| {
+                CliError::fatal(format!("could not read commit {hash}: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
             if output.is_json() {
                 let (message, _) = parse_commit_msg(&commit.message);
                 emit_json_data(
@@ -575,14 +613,16 @@ fn emit_pretty_print_json(
         }
         ObjectType::Tag => {
             let storage = ClientStorage::init(path::objects());
-            let data = storage
-                .get(hash)
-                .map_err(|e| CliError::fatal(format!("could not read tag {hash}: {e}")))?;
+            let data = storage.get(hash).map_err(|e| {
+                CliError::fatal(format!("could not read tag {hash}: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
             if output.is_json() {
                 let content = String::from_utf8(data).map_err(|_| {
                     CliError::command_usage(
                         "`cat-file -p` does not yet support --json for non-UTF-8 tag content",
                     )
+                    .with_stable_code(StableErrorCode::Unsupported)
                 })?;
                 emit_json_data(
                     "cat-file",
@@ -598,25 +638,24 @@ fn emit_pretty_print_json(
             }
             Ok(())
         }
-        _ => Err(CliError::fatal(format!(
-            "unsupported object type {:?}",
-            obj_type
-        ))),
+        _ => Err(
+            CliError::fatal(format!("unsupported object type {:?}", obj_type))
+                .with_stable_code(StableErrorCode::RepoCorrupt),
+        ),
     }
 }
 
 async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
     let hm = build_history_manager().await?;
     let mut types = Vec::new();
-    for type_name in hm
-        .list_object_types()
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to list AI object types: {e}")))?
-    {
-        let objects = hm
-            .list_objects(&type_name)
-            .await
-            .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
+    for type_name in hm.list_object_types().await.map_err(|e| {
+        CliError::fatal(format!("failed to list AI object types: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        let objects = hm.list_objects(&type_name).await.map_err(|e| {
+            CliError::fatal(format!("failed to list {type_name} objects: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         if !objects.is_empty() {
             types.push(serde_json::json!({
                 "object_type": type_name,
@@ -631,10 +670,10 @@ async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Valu
     let hm = build_history_manager().await?;
     ensure_ai_listable_type(&hm, type_name).await?;
     let canonical_type_name = canonical_ai_object_type(type_name);
-    let objects = hm
-        .list_objects(canonical_type_name)
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
+    let objects = hm.list_objects(canonical_type_name).await.map_err(|e| {
+        CliError::fatal(format!("failed to list {type_name} objects: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
 
     Ok(objects
         .into_iter()
@@ -651,9 +690,10 @@ async fn ai_pretty_print_data(uuid: &str) -> CliResult<serde_json::Value> {
     let (hash, type_name) = resolve_ai_object(uuid).await?;
 
     let storage = ClientStorage::init(path::objects());
-    let data = storage
-        .get(&hash)
-        .map_err(|e| CliError::fatal(format!("could not read AI object blob {hash}: {e}")))?;
+    let data = storage.get(&hash).map_err(|e| {
+        CliError::fatal(format!("could not read AI object blob {hash}: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
     let parsed = serde_json::from_slice::<serde_json::Value>(&data)
         .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&data).to_string()));
 
@@ -706,22 +746,23 @@ async fn resolve_object(object_ref: &str, storage: &ClientStorage) -> ObjectHash
     // Try abbreviated hash via storage search
     let results = match storage.search_result(object_ref).await {
         Ok(results) => results,
-        Err(error) => cat_file_exit(format!(
-            "fatal: failed to search objects while resolving '{}': {}",
-            object_ref, error
-        )),
+        Err(error) => cat_file_exit_error(
+            CliError::fatal(format!(
+                "failed to search objects while resolving '{object_ref}': {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     };
     if results.len() == 1 {
         return results[0];
     } else if results.len() > 1 {
-        cat_file_exit(format!(
-            "fatal: ambiguous argument '{}': matched {} objects",
-            object_ref,
+        cat_file_exit_error(CliError::command_usage(format!(
+            "ambiguous argument '{object_ref}': matched {} objects",
             results.len()
-        ));
+        )));
     }
 
-    cat_file_exit(format!("fatal: Not a valid object name {}", object_ref));
+    cat_file_exit_error(invalid_object_name_error(object_ref));
 }
 
 fn normalize_tag_ref_name(object_ref: &str) -> String {
@@ -758,7 +799,10 @@ fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
 fn print_object_size(storage: &ClientStorage, hash: &ObjectHash) {
     match storage.get(hash) {
         Ok(data) => println!("{}", data.len()),
-        Err(e) => cat_file_exit(format!("fatal: unable to read object {}: {}", hash, e)),
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("could not read object {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     }
 }
 
@@ -769,7 +813,10 @@ fn pretty_print_object(hash: &ObjectHash, obj_type: ObjectType) {
         ObjectType::Tree => print_tree(hash),
         ObjectType::Commit => print_commit(hash),
         ObjectType::Tag => print_tag(hash),
-        _ => cat_file_exit(format!("fatal: unsupported object type {:?}", obj_type)),
+        _ => cat_file_exit_error(
+            CliError::fatal(format!("unsupported object type {obj_type:?}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt),
+        ),
     }
 }
 
@@ -777,11 +824,16 @@ fn pretty_print_object(hash: &ObjectHash, obj_type: ObjectType) {
 fn print_blob(hash: &ObjectHash) {
     let blob: Blob = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(b)) => b,
-        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read blob {}: {}", hash, e)),
-        Err(_) => cat_file_exit(format!(
-            "fatal: failed to load blob object {}: internal error (panic)",
-            hash
-        )),
+        Ok(Err(e)) => cat_file_exit_error(
+            CliError::fatal(format!("could not read blob {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
+        Err(_) => cat_file_exit_error(
+            CliError::fatal(format!(
+                "failed to load blob object {hash}: internal error (panic)"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant),
+        ),
     };
     match String::from_utf8(blob.data.clone()) {
         Ok(text) => print!("{}", text),
@@ -791,7 +843,10 @@ fn print_blob(hash: &ObjectHash) {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             handle.write_all(&blob.data).unwrap_or_else(|e| {
-                cat_file_exit(format!("fatal: write error: {}", e));
+                cat_file_exit_error(
+                    CliError::fatal(format!("write error: {e}"))
+                        .with_stable_code(StableErrorCode::IoWriteFailed),
+                )
             });
         }
     }
@@ -801,11 +856,16 @@ fn print_blob(hash: &ObjectHash) {
 fn print_tree(hash: &ObjectHash) {
     let tree: Tree = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read tree {}: {}", hash, e)),
-        Err(_) => cat_file_exit(format!(
-            "fatal: failed to load tree object {}: internal error (panic)",
-            hash
-        )),
+        Ok(Err(e)) => cat_file_exit_error(
+            CliError::fatal(format!("could not read tree {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
+        Err(_) => cat_file_exit_error(
+            CliError::fatal(format!(
+                "failed to load tree object {hash}: internal error (panic)"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant),
+        ),
     };
     for item in &tree.tree_items {
         let type_name = match item.mode {
@@ -823,11 +883,16 @@ fn print_tree(hash: &ObjectHash) {
 fn print_commit(hash: &ObjectHash) {
     let commit: Commit = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(c)) => c,
-        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read commit {}: {}", hash, e)),
-        Err(_) => cat_file_exit(format!(
-            "fatal: failed to load commit object {}: internal error (panic)",
-            hash
-        )),
+        Ok(Err(e)) => cat_file_exit_error(
+            CliError::fatal(format!("could not read commit {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
+        Err(_) => cat_file_exit_error(
+            CliError::fatal(format!(
+                "failed to load commit object {hash}: internal error (panic)"
+            ))
+            .with_stable_code(StableErrorCode::InternalInvariant),
+        ),
     };
     println!("tree {}", commit.tree_id);
     for parent in &commit.parent_commit_ids {
@@ -857,12 +922,18 @@ fn print_tag(hash: &ObjectHash) {
     let storage = ClientStorage::init(path::objects());
     let data = match storage.get(hash) {
         Ok(d) => d,
-        Err(e) => cat_file_exit(format!("fatal: could not read tag {}: {}", hash, e)),
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("could not read tag {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     };
     // Tag objects are text-based, print raw content
     match String::from_utf8(data) {
         Ok(text) => print!("{}", text),
-        Err(_) => cat_file_exit(format!("fatal: invalid tag object encoding for {}", hash)),
+        Err(_) => cat_file_exit_error(
+            CliError::fatal(format!("invalid tag object encoding for {hash}"))
+                .with_stable_code(StableErrorCode::Unsupported),
+        ),
     }
 }
 
@@ -881,6 +952,7 @@ async fn build_history_manager() -> CliResult<HistoryManager> {
                 db_path.display(),
                 e
             ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
     let storage = Arc::new(LocalStorage::new(objects_dir));
     Ok(HistoryManager::new(storage, repo_path, Arc::new(db_conn)))
@@ -890,11 +962,14 @@ async fn build_history_manager() -> CliResult<HistoryManager> {
 async fn ai_list_types() {
     let hm = match build_history_manager().await {
         Ok(hm) => hm,
-        Err(err) => cat_file_exit(err.to_string()),
+        Err(err) => cat_file_exit_error(err),
     };
     let types = match hm.list_object_types().await {
         Ok(types) => types,
-        Err(e) => cat_file_exit(format!("fatal: failed to list AI object types: {}", e)),
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("failed to list AI object types: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     };
     for type_name in types {
         match hm.list_objects(&type_name).await {
@@ -902,10 +977,10 @@ async fn ai_list_types() {
                 println!("{}\t({} objects)", type_name, objects.len());
             }
             Ok(_) => {}
-            Err(e) => cat_file_exit(format!(
-                "fatal: failed to list {} objects: {}",
-                type_name, e
-            )),
+            Err(e) => cat_file_exit_error(
+                CliError::fatal(format!("failed to list {type_name} objects: {e}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed),
+            ),
         }
     }
 }
@@ -914,18 +989,18 @@ async fn ai_list_types() {
 async fn ai_list_objects(type_name: &str) {
     let hm = match build_history_manager().await {
         Ok(hm) => hm,
-        Err(err) => cat_file_exit(err.to_string()),
+        Err(err) => cat_file_exit_error(err),
     };
     if let Err(err) = ensure_ai_listable_type(&hm, type_name).await {
-        cat_file_exit(err.to_string());
+        cat_file_exit_error(err);
     }
     let canonical_type_name = canonical_ai_object_type(type_name);
     let objects = match hm.list_objects(canonical_type_name).await {
         Ok(o) => o,
-        Err(e) => cat_file_exit(format!(
-            "fatal: failed to list {} objects: {}",
-            type_name, e
-        )),
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("failed to list {type_name} objects: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     };
 
     if objects.is_empty() {
@@ -952,17 +1027,17 @@ fn redact_uuid(uuid: &str) -> String {
 async fn ai_pretty_print(uuid: &str) {
     let (hash, type_name) = match resolve_ai_object(uuid).await {
         Ok(resolved) => resolved,
-        Err(err) => cat_file_exit(err.to_string()),
+        Err(err) => cat_file_exit_error(err),
     };
 
     // Read raw blob JSON
     let storage = ClientStorage::init(path::objects());
     let data = match storage.get(&hash) {
         Ok(d) => d,
-        Err(e) => cat_file_exit(format!(
-            "fatal: could not read AI object blob {}: {}",
-            hash, e
-        )),
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("could not read AI object blob {hash}: {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     };
 
     // Try to pretty-print as JSON
@@ -1196,7 +1271,7 @@ fn evidence_input_summary_lines(value: &serde_json::Value) -> Vec<String> {
 async fn ai_show_type(uuid: &str) {
     match resolve_ai_object(uuid).await {
         Ok((_hash, type_name)) => println!("{}", type_name),
-        Err(err) => cat_file_exit(err.to_string()),
+        Err(err) => cat_file_exit_error(err),
     }
 }
 

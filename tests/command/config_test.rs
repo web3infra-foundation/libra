@@ -217,6 +217,13 @@ impl EnvVarGuard {
         unsafe { std::env::set_var(key, value) };
         Self { key, original }
     }
+
+    fn unset(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: test is #[serial], so no concurrent env access/mutation across tests.
+        unsafe { std::env::remove_var(key) };
+        Self { key, original }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -943,6 +950,68 @@ async fn test_config_generate_ssh_key_replaces_vault_generate_ssh_key_flow() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_generate_global_ssh_key_is_rejected_without_local_side_effects() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote = run_libra_command(
+        &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        temp_path.path(),
+    );
+    assert_cli_success(&remote, "remote add origin");
+
+    libra::internal::config::ConfigKv::unset_all("vault.ssh.origin.pubkey")
+        .await
+        .unwrap();
+    libra::internal::config::ConfigKv::unset_all("vault.ssh.origin.privkey")
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "--global",
+            "generate-ssh-key",
+            "--remote",
+            "origin",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("generate-ssh-key only supports local scope"),
+        "stderr should explain unsupported global SSH key generation, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run without --global"),
+        "stderr should tell users how to run the supported form, got: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "global generate-ssh-key should be a command usage error, got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.ssh.origin.pubkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-ssh-key must not write a local public key"
+    );
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.ssh.origin.privkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-ssh-key must not write a local private key"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_generate_ssh_key_rejects_invalid_remote_name_as_command_usage() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1049,6 +1118,64 @@ async fn test_config_generate_gpg_key_replaces_vault_generate_gpg_key_flow() {
 
 #[tokio::test]
 #[serial]
+async fn test_config_generate_global_gpg_key_is_rejected_without_local_side_effects() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::config::ConfigKv::unset_all("vault.gpg.pubkey")
+        .await
+        .unwrap();
+    libra::internal::config::ConfigKv::unset_all("vault.signing")
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &[
+            "config",
+            "--global",
+            "generate-gpg-key",
+            "--name",
+            "Global User",
+            "--email",
+            "global@example.com",
+        ],
+        temp_path.path(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("generate-gpg-key only supports local scope"),
+        "stderr should explain unsupported global GPG key generation, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run without --global"),
+        "stderr should tell users how to run the supported form, got: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "global generate-gpg-key should be a command usage error, got status: {:?}, stderr: {stderr}",
+        output.status,
+    );
+
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.gpg.pubkey")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-gpg-key must not write a local GPG public key"
+    );
+    assert!(
+        libra::internal::config::ConfigKv::get("vault.signing")
+            .await
+            .unwrap()
+            .is_none(),
+        "--global generate-gpg-key must not enable local vault signing"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_config_generate_gpg_key_rejects_invalid_usage() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1122,4 +1249,198 @@ async fn test_config_cross_platform_paths() {
             assert!(path.to_string_lossy().contains("/"));
         }
     }
+}
+
+/// Regression: a corrupted/incompatible `~/.libra/config.db` must not block
+/// identity resolution.
+///
+/// Reproduced from a real 0.17.500 user report: `libra clone` aborted with
+/// "fatal: vault initialization failed: failed to open config database
+/// '/home/eli/.libra/config.db'" because the global config DB existed but
+/// could not be opened (the only fix path was to delete the file). After
+/// v0.17.515 `resolve_user_identity_sources` downgrades that failure to a
+/// warning and returns `Ok` with `config_*` set to `None`, letting init
+/// fall back to env vars / "Libra User" defaults.
+#[tokio::test]
+#[serial]
+async fn resolve_user_identity_sources_tolerates_corrupt_global_db() {
+    use libra::internal::config::{LocalIdentityTarget, resolve_user_identity_sources};
+
+    let temp_dir = tempdir().unwrap();
+    let global_db_path = temp_dir.path().join("corrupt_config.db");
+    // A non-SQLite payload: opening this file as a sea-orm SQLite connection
+    // (or running the schema-compat check on it) is guaranteed to fail.
+    std::fs::write(&global_db_path, b"this is not a sqlite database").unwrap();
+
+    let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
+
+    // Ensure env-var fallbacks are empty so we can attribute the result to
+    // config-read tolerance, not env shadowing.
+    let _git_committer_name = EnvVarGuard::set("GIT_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _git_committer_email = EnvVarGuard::set("GIT_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+    let _git_author_name = EnvVarGuard::set("GIT_AUTHOR_NAME", std::ffi::OsStr::new(""));
+    let _git_author_email = EnvVarGuard::set("GIT_AUTHOR_EMAIL", std::ffi::OsStr::new(""));
+    let _email = EnvVarGuard::set("EMAIL", std::ffi::OsStr::new(""));
+    let _libra_committer_name = EnvVarGuard::set("LIBRA_COMMITTER_NAME", std::ffi::OsStr::new(""));
+    let _libra_committer_email =
+        EnvVarGuard::set("LIBRA_COMMITTER_EMAIL", std::ffi::OsStr::new(""));
+
+    let sources = resolve_user_identity_sources(LocalIdentityTarget::None)
+        .await
+        .expect("identity resolution must not propagate global DB read failures");
+
+    assert!(
+        sources.config_name.is_none(),
+        "expected config_name to be None when global DB is unreadable, got {:?}",
+        sources.config_name
+    );
+    assert!(
+        sources.config_email.is_none(),
+        "expected config_email to be None when global DB is unreadable, got {:?}",
+        sources.config_email
+    );
+}
+
+/// `resolve_env_for_target` is the shared secret resolver used by provider,
+/// D1, R2, and tool credential paths. Per the 12-Factor / docs/improvement/
+/// config.md spec, the priority is **process env > local vault > global vault**
+/// so a per-process override like `GEMINI_API_KEY=B libra push` always wins.
+/// Local vault is the fallback when env is unset.
+#[tokio::test]
+#[serial]
+async fn resolve_env_for_target_process_env_overrides_local_vault() {
+    use libra::internal::config::{ConfigKv, LocalIdentityTarget, resolve_env_for_target};
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _cwd = test::ChangeDirGuard::new(temp_path.path());
+
+    let _env = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_PRIORITY_KEY",
+        std::ffi::OsStr::new("env-value"),
+    );
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-priority-local.db"),
+    );
+
+    ConfigKv::set(
+        "vault.env.LIBRA_RESOLVE_ENV_PRIORITY_KEY",
+        "vault-value",
+        false,
+    )
+    .await
+    .unwrap();
+
+    // env wins; per-process override is sacred (12-Factor).
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_PRIORITY_KEY",
+        LocalIdentityTarget::CurrentRepo,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("env-value"));
+
+    // …and when the env is unset, the local vault fallback is used.
+    drop(_env);
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_PRIORITY_KEY",
+        LocalIdentityTarget::CurrentRepo,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("vault-value"));
+}
+
+/// Same priority chain in the `LocalIdentityTarget::None` mode used by
+/// commands that can run outside a Libra worktree (provider/bootstrap path).
+/// process env > global vault.
+#[tokio::test]
+#[serial]
+async fn resolve_env_for_target_process_env_overrides_global_vault() {
+    use libra::internal::{
+        config::{ConfigKv, LocalIdentityTarget, resolve_env_for_target},
+        db,
+    };
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
+        std::ffi::OsStr::new("env-value"),
+    );
+    let global_dir = tempdir().unwrap();
+    let global_db_path = global_dir.path().join("global-config.db");
+    let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
+    let global_conn = db::create_database(global_db_path.to_string_lossy().as_ref())
+        .await
+        .unwrap();
+    ConfigKv::set_with_conn(
+        &global_conn,
+        "vault.env.LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
+        "global-vault-value",
+        false,
+    )
+    .await
+    .unwrap();
+
+    // env wins.
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
+        LocalIdentityTarget::None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("env-value"));
+
+    // …and global vault is the fallback when env is unset.
+    drop(_guard);
+    let value = resolve_env_for_target(
+        "LIBRA_RESOLVE_ENV_GLOBAL_PRIORITY_KEY",
+        LocalIdentityTarget::None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.as_deref(), Some("global-vault-value"));
+}
+
+/// Process env remains the final fallback when neither local nor global Vault
+/// supplies the key.
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_falls_back_to_process_env_when_vault_missing() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::set(
+        "LIBRA_RESOLVE_ENV_SYNC_TEST_KEY",
+        std::ffi::OsStr::new("env-fallback"),
+    );
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-fallback-path.db"),
+    );
+
+    let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_TEST_KEY").unwrap();
+    assert_eq!(value.as_deref(), Some("env-fallback"));
+}
+
+/// Absence path: when no process env, no repo, and no global DB layer carries
+/// the key, the wrapper returns `Ok(None)` (not an error). A schema-mismatch
+/// on the global DB is treated as missing-value here (the underlying
+/// `resolve_env_for_target` already downgrades that to `tracing::warn!`),
+/// matching the v0.17.515 / v0.17.534 fallback contract.
+#[tokio::test]
+#[serial]
+async fn resolve_env_sync_returns_none_when_no_layer_supplies_value() {
+    use libra::internal::config::resolve_env_sync;
+
+    let _guard = EnvVarGuard::unset("LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY");
+    let _global = EnvVarGuard::set(
+        "LIBRA_CONFIG_GLOBAL_DB",
+        std::ffi::OsStr::new("/nonexistent/resolve-env-sync-absent-path.db"),
+    );
+
+    let value = resolve_env_sync("LIBRA_RESOLVE_ENV_SYNC_ABSENT_KEY").unwrap();
+    assert!(
+        value.is_none(),
+        "expected None for an unset key, got {value:?}"
+    );
 }

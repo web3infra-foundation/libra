@@ -296,7 +296,7 @@ pub enum TaskIntentClassifierError {
 
 #[cfg(test)]
 mod tests {
-    use super::TaskIntentClassifierError;
+    use super::*;
 
     #[test]
     fn task_intent_classifier_error_display_pins_owned_variants() {
@@ -307,6 +307,295 @@ mod tests {
         assert_eq!(
             TaskIntentClassifierError::InvalidResponse("trailing brace".to_string()).to_string(),
             "task intent classifier returned invalid JSON: trailing brace",
+        );
+    }
+
+    /// `parse_decision` is the boundary where untrusted classifier
+    /// model output enters the system. A model routinely returns a
+    /// `confidence` outside `0.0..=1.0`, omits it, or sends a
+    /// non-numeric value — pin the defensive handling so a refactor
+    /// can't let an out-of-range confidence through to downstream
+    /// routing / thresholding.
+    #[test]
+    fn parse_decision_clamps_and_defaults_confidence() {
+        // Over-range → clamped to 1.0.
+        let over = parse_decision(&serde_json::json!({
+            "intent": "bug_fix",
+            "confidence": 7.5,
+            "rationale": "very sure",
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(over.confidence, 1.0);
+        assert_eq!(over.intent, TaskIntent::BugFix);
+        assert_eq!(over.source, TaskIntentDecisionSource::Model);
+
+        // Negative → clamped to 0.0.
+        let under = parse_decision(&serde_json::json!({
+            "intent": "feature",
+            "confidence": -2.0,
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(under.confidence, 0.0);
+
+        // Missing confidence → default 0.0.
+        let missing = parse_decision(&serde_json::json!({ "intent": "review" }))
+            .expect("valid intent should parse");
+        assert_eq!(missing.confidence, 0.0);
+
+        // Non-numeric confidence → default 0.0 (not an error).
+        let non_numeric = parse_decision(&serde_json::json!({
+            "intent": "chore",
+            "confidence": "high",
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(non_numeric.confidence, 0.0);
+
+        // In-range confidence is preserved exactly.
+        let in_range = parse_decision(&serde_json::json!({
+            "intent": "test",
+            "confidence": 0.625,
+        }))
+        .expect("valid intent should parse");
+        assert_eq!(in_range.confidence, 0.625);
+    }
+
+    /// A response that is not a JSON object, or omits the required
+    /// `intent` string, is a structured `InvalidResponse` error rather
+    /// than a panic or a silent default.
+    #[test]
+    fn parse_decision_rejects_non_object_and_missing_intent() {
+        assert!(matches!(
+            parse_decision(&serde_json::json!("just a string")),
+            Err(TaskIntentClassifierError::InvalidResponse(_)),
+        ));
+        assert!(matches!(
+            parse_decision(&serde_json::json!({ "confidence": 0.9 })),
+            Err(TaskIntentClassifierError::InvalidResponse(_)),
+        ));
+    }
+
+    /// `TaskIntent::as_str` must produce snake_case identifiers matching
+    /// the serde tag for all 10 variants. Pin so a future enum rename
+    /// gets caught at this gate.
+    #[test]
+    fn task_intent_as_str_matches_serde_tag_for_all_variants() {
+        for (intent, expected) in [
+            (TaskIntent::BugFix, "bug_fix"),
+            (TaskIntent::Feature, "feature"),
+            (TaskIntent::Question, "question"),
+            (TaskIntent::Review, "review"),
+            (TaskIntent::Refactor, "refactor"),
+            (TaskIntent::Test, "test"),
+            (TaskIntent::Documentation, "documentation"),
+            (TaskIntent::Command, "command"),
+            (TaskIntent::Chore, "chore"),
+            (TaskIntent::Unknown, "unknown"),
+        ] {
+            assert_eq!(intent.as_str(), expected);
+            assert_eq!(
+                serde_json::to_string(&intent).unwrap(),
+                format!("\"{expected}\""),
+            );
+            // Display must match as_str.
+            assert_eq!(intent.to_string(), expected);
+        }
+    }
+
+    /// `FromStr` must accept the canonical snake_case names produced by
+    /// the classifier (`as_str`) for every variant. Round-trip via
+    /// `as_str().parse::<TaskIntent>()` must yield the same variant.
+    #[test]
+    fn task_intent_from_str_round_trips_canonical_names() {
+        for intent in [
+            TaskIntent::BugFix,
+            TaskIntent::Feature,
+            TaskIntent::Question,
+            TaskIntent::Review,
+            TaskIntent::Refactor,
+            TaskIntent::Test,
+            TaskIntent::Documentation,
+            TaskIntent::Command,
+            TaskIntent::Chore,
+            TaskIntent::Unknown,
+        ] {
+            let parsed: TaskIntent = intent.as_str().parse().expect("canonical name parses");
+            assert_eq!(parsed, intent);
+        }
+    }
+
+    /// `FromStr` must accept the documented alias set for every intent
+    /// — these are the variations a weak model might emit. Pin so a
+    /// future "tighten the matcher" refactor doesn't accidentally
+    /// drop one of the documented aliases.
+    #[test]
+    fn task_intent_from_str_accepts_documented_aliases() {
+        let cases = [
+            ("bug", TaskIntent::BugFix),
+            ("fix", TaskIntent::BugFix),
+            ("enhancement", TaskIntent::Feature),
+            ("ask", TaskIntent::Question),
+            ("research", TaskIntent::Question),
+            ("explain", TaskIntent::Question),
+            ("analysis", TaskIntent::Question),
+            ("codereview", TaskIntent::Review),
+            ("prreview", TaskIntent::Review),
+            ("cleanup", TaskIntent::Refactor),
+            ("simplify", TaskIntent::Refactor),
+            ("tests", TaskIntent::Test),
+            ("testing", TaskIntent::Test),
+            ("docs", TaskIntent::Documentation),
+            ("doc", TaskIntent::Documentation),
+            ("shell", TaskIntent::Command),
+            ("cli", TaskIntent::Command),
+            ("execute", TaskIntent::Command),
+            ("runcommand", TaskIntent::Command),
+            ("maintenance", TaskIntent::Chore),
+            ("config", TaskIntent::Chore),
+            ("build", TaskIntent::Chore),
+            ("unclear", TaskIntent::Unknown),
+            ("ambiguous", TaskIntent::Unknown),
+        ];
+        for (alias, expected) in cases {
+            let parsed: TaskIntent = alias.parse().expect("alias must parse");
+            assert_eq!(parsed, expected, "alias {alias:?}");
+        }
+    }
+
+    /// `FromStr` is normalization-insensitive: trims whitespace, strips
+    /// `-`/`_`/space separators, and lowercases. So "Bug-Fix", "BUG_FIX",
+    /// "bug fix", "  BugFix  " all parse to BugFix.
+    #[test]
+    fn task_intent_from_str_normalizes_case_separators_and_whitespace() {
+        for raw in ["Bug-Fix", "BUG_FIX", "bug fix", "  BugFix  ", "bug-fix"] {
+            let parsed: TaskIntent = raw.parse().expect(raw);
+            assert_eq!(parsed, TaskIntent::BugFix, "raw {raw:?}");
+        }
+    }
+
+    /// Unknown strings must surface as `InvalidIntent` with the
+    /// normalized form carried in the error.
+    #[test]
+    fn task_intent_from_str_rejects_unknown_strings() {
+        let err = "completely-made-up"
+            .parse::<TaskIntent>()
+            .expect_err("must reject unknown");
+        match err {
+            TaskIntentClassifierError::InvalidIntent(normalized) => {
+                assert_eq!(normalized, "completelymadeup");
+            }
+            other => panic!("expected InvalidIntent, got {other:?}"),
+        }
+    }
+
+    /// `ExplicitCodeContext::default_intent` maps the three CLI flags
+    /// to their canonical TaskIntent. Pin so a future addition of a
+    /// new context variant doesn't accidentally re-route an existing
+    /// one.
+    #[test]
+    fn explicit_code_context_default_intent_mapping() {
+        assert_eq!(
+            ExplicitCodeContext::Dev.default_intent(),
+            TaskIntent::Feature
+        );
+        assert_eq!(
+            ExplicitCodeContext::Review.default_intent(),
+            TaskIntent::Review,
+        );
+        assert_eq!(
+            ExplicitCodeContext::Research.default_intent(),
+            TaskIntent::Question,
+        );
+    }
+
+    /// `ExplicitCodeContext::as_str` produces snake_case identifiers
+    /// (`dev`/`review`/`research`) matching the CLI flag values.
+    #[test]
+    fn explicit_code_context_as_str_pins_cli_flag_values() {
+        for (ctx, expected) in [
+            (ExplicitCodeContext::Dev, "dev"),
+            (ExplicitCodeContext::Review, "review"),
+            (ExplicitCodeContext::Research, "research"),
+        ] {
+            assert_eq!(ctx.as_str(), expected);
+            assert_eq!(
+                serde_json::to_string(&ctx).unwrap(),
+                format!("\"{expected}\""),
+            );
+        }
+    }
+
+    /// `TaskIntentClassificationRequest::new` constructs with no
+    /// explicit context. `with_explicit_context` is a chainable
+    /// builder.
+    #[test]
+    fn classification_request_builder_threads_explicit_context() {
+        let plain = TaskIntentClassificationRequest::new("fix the build");
+        assert_eq!(plain.user_input, "fix the build");
+        assert!(plain.explicit_context.is_none());
+
+        let with_ctx = TaskIntentClassificationRequest::new("review the patch")
+            .with_explicit_context(ExplicitCodeContext::Review);
+        assert_eq!(with_ctx.explicit_context, Some(ExplicitCodeContext::Review));
+        // Original user_input must survive the builder chain.
+        assert_eq!(with_ctx.user_input, "review the patch");
+    }
+
+    /// `TaskIntentDecision::explicit_context` short-circuits with
+    /// confidence 1.0, source = ExplicitContext, and a rationale that
+    /// mentions the bypass reason.
+    #[test]
+    fn explicit_context_decision_skips_classifier() {
+        for ctx in [
+            ExplicitCodeContext::Dev,
+            ExplicitCodeContext::Review,
+            ExplicitCodeContext::Research,
+        ] {
+            let decision = TaskIntentDecision::explicit_context(ctx);
+            assert_eq!(decision.intent, ctx.default_intent());
+            assert_eq!(decision.confidence, 1.0);
+            assert_eq!(decision.source, TaskIntentDecisionSource::ExplicitContext);
+            assert!(
+                decision.rationale.contains(ctx.as_str()),
+                "rationale must reference the context that was supplied; got {}",
+                decision.rationale,
+            );
+        }
+    }
+
+    /// `TaskIntentClassifier::classifier_preamble` exposes the static
+    /// instruction text. The preamble must contain the expected JSON
+    /// shape so that audit consumers (and CEX-09 prompt wiring) can
+    /// validate the contract.
+    #[test]
+    fn classifier_preamble_contains_required_intents_and_json_shape() {
+        let preamble: &str = TaskIntentClassifier::<()>::classifier_preamble();
+        // All 10 intent identifiers must appear in the preamble so the
+        // model knows the full set.
+        for intent in [
+            "bug_fix",
+            "feature",
+            "question",
+            "review",
+            "refactor",
+            "test",
+            "documentation",
+            "command",
+            "chore",
+            "unknown",
+        ] {
+            assert!(
+                preamble.contains(intent),
+                "preamble missing intent label '{intent}'",
+            );
+        }
+        // JSON shape and key field must be documented.
+        assert!(preamble.contains("\"intent\""));
+        assert!(preamble.contains("\"confidence\""));
+        assert!(preamble.contains("\"rationale\""));
+        // Prompt-injection defence must remain.
+        assert!(
+            preamble.contains("untrusted"),
+            "preamble must declare the user input as untrusted",
         );
     }
 }

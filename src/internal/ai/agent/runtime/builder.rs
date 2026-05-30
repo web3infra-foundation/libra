@@ -190,4 +190,160 @@ mod tests {
         let tools = ToolSet::default();
         let _agent = AgentBuilder::new(model).tools(tools).build();
     }
+
+    /// Building with no configuration must yield an Agent with empty
+    /// optional fields and zero tools. Pin the "minimal Agent works"
+    /// contract.
+    #[test]
+    fn agent_builder_default_state_yields_empty_agent() {
+        let agent = AgentBuilder::new(MockModel).build();
+        assert!(
+            agent.preamble.is_none(),
+            "default builder must produce None preamble",
+        );
+        assert!(
+            agent.temperature.is_none(),
+            "default builder must produce None temperature",
+        );
+        assert!(
+            agent.tools.tools.is_empty(),
+            "default builder must produce empty tool list",
+        );
+    }
+
+    /// `preamble()` called twice must replace the value, not append to
+    /// it. Pin so a future "concatenate" refactor would fail this test.
+    #[test]
+    fn agent_builder_preamble_call_replaces_previous_value() {
+        let agent = AgentBuilder::new(MockModel)
+            .preamble("first system prompt")
+            .preamble("second system prompt")
+            .build();
+        assert_eq!(
+            agent.preamble.as_deref(),
+            Some("second system prompt"),
+            "second preamble() must replace the first",
+        );
+    }
+
+    /// `temperature()` error message must include the rejected value
+    /// verbatim so callers can render a useful error to the operator.
+    #[test]
+    fn agent_builder_temperature_error_message_includes_value() {
+        let err = AgentBuilder::new(MockModel)
+            .temperature(2.5)
+            .err()
+            .expect("2.5 must be rejected");
+        assert!(
+            err.contains("2.5"),
+            "error message must mention the rejected value; got: {err}",
+        );
+        assert!(
+            err.contains("0.0") && err.contains("2.0"),
+            "error message must describe the valid range; got: {err}",
+        );
+    }
+
+    /// `temperature(NaN)` must be rejected. `(0.0..=2.0).contains(&NaN)`
+    /// returns false because all NaN comparisons fail. Pin this so a
+    /// future refactor using e.g. `<= 2.0 && >= 0.0` (which would also
+    /// reject NaN but for a different reason) doesn't accidentally
+    /// admit NaN by writing `is_finite()` first.
+    #[test]
+    fn agent_builder_temperature_rejects_nan() {
+        let err = AgentBuilder::new(MockModel)
+            .temperature(f64::NAN)
+            .err()
+            .expect("NaN must be rejected");
+        assert!(err.contains("Temperature must be between"), "got: {err}",);
+    }
+
+    /// `temperature(±Inf)` must be rejected. Same range-check semantics
+    /// — `+Inf` is outside `0.0..=2.0` and `-Inf` is also outside.
+    #[test]
+    fn agent_builder_temperature_rejects_infinities() {
+        let pos = AgentBuilder::new(MockModel)
+            .temperature(f64::INFINITY)
+            .err()
+            .expect("+Inf must be rejected");
+        let neg = AgentBuilder::new(MockModel)
+            .temperature(f64::NEG_INFINITY)
+            .err()
+            .expect("-Inf must be rejected");
+        assert!(pos.contains("Temperature"));
+        assert!(neg.contains("Temperature"));
+    }
+
+    /// `tool()` appends to the existing tool set preserving order. Pin
+    /// so a future refactor using a HashSet or sorted Vec gets caught.
+    #[test]
+    fn agent_builder_tool_appends_preserving_insertion_order() {
+        use crate::internal::ai::tools::ToolDefinition;
+
+        #[derive(Debug)]
+        struct NamedTool {
+            name: &'static str,
+        }
+        impl crate::internal::ai::tools::Tool for NamedTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: self.name.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            fn call(
+                &self,
+                _args: serde_json::Value,
+            ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        let agent = AgentBuilder::new(MockModel)
+            .tool(NamedTool { name: "alpha" })
+            .tool(NamedTool { name: "beta" })
+            .tool(NamedTool { name: "gamma" })
+            .build();
+
+        let names: Vec<String> = agent.tools.tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// Calling `tools()` after `tool()` must replace the accumulated
+    /// tools (since `tools()` is wholesale replacement, not append).
+    /// Pin this asymmetry against any future "merge" refactor.
+    #[test]
+    fn agent_builder_tools_after_tool_replaces_not_appends() {
+        use crate::internal::ai::tools::ToolDefinition;
+
+        #[derive(Debug)]
+        struct NamedTool;
+        impl crate::internal::ai::tools::Tool for NamedTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "x".to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            fn call(
+                &self,
+                _args: serde_json::Value,
+            ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        let agent = AgentBuilder::new(MockModel)
+            .tool(NamedTool)
+            .tool(NamedTool)
+            .tools(ToolSet::default())
+            .build();
+        // tools(default) must wipe the per-tool accumulation.
+        assert!(
+            agent.tools.tools.is_empty(),
+            "tools(ToolSet::default()) must replace the accumulated tools",
+        );
+    }
 }

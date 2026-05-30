@@ -193,4 +193,114 @@ mod tests {
         chat_agent.clear_history();
         assert!(chat_agent.history().is_empty());
     }
+
+    #[derive(Clone)]
+    struct AlwaysErrorModel;
+    impl CompletionModel for AlwaysErrorModel {
+        type Response = ();
+        async fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse<()>, CompletionError> {
+            Err(CompletionError::ProviderError("simulated".to_string()))
+        }
+    }
+
+    /// Documented error-path contract: when the underlying agent returns a
+    /// `CompletionError`, the user message must remain in the history (no
+    /// assistant turn appended). Pin this so a future refactor that pops the
+    /// user message on error gets caught here.
+    #[tokio::test]
+    async fn chat_error_retains_user_message_but_appends_no_assistant_turn() {
+        let agent = Agent::new(AlwaysErrorModel);
+        let mut chat_agent = ChatAgent::new(agent);
+
+        let result = chat_agent.chat("first attempt").await;
+        assert!(result.is_err());
+        assert_eq!(
+            chat_agent.history().len(),
+            1,
+            "history must contain exactly the retained user message; got {:?}",
+            chat_agent.history(),
+        );
+        match &chat_agent.history()[0] {
+            Message::User {
+                content: OneOrMany::One(UserContent::Text(t)),
+            } => assert_eq!(t.text, "first attempt"),
+            other => panic!("expected User text message, got {other:?}"),
+        }
+    }
+
+    /// `clone_agent()` returns an independent agent handle (the inner model
+    /// holds via Arc, so the underlying state is shared, but the cloned
+    /// agent does not carry the chat history). Pin so callers can spawn
+    /// background tasks without contaminating the foreground history.
+    #[tokio::test]
+    async fn clone_agent_returns_independent_handle_without_history() {
+        let agent = Agent::new(MockModel);
+        let mut chat_agent = ChatAgent::new(agent);
+
+        chat_agent.chat("seed").await.unwrap();
+        assert_eq!(chat_agent.history().len(), 2);
+
+        let cloned = chat_agent.clone_agent();
+        // The cloned agent has no notion of the foreground chat history —
+        // it's a fresh Agent handle ready for background dispatch.
+        // We can't directly inspect its private state but we can verify
+        // it produces an independent response.
+        let response = cloned
+            .run_with_history(vec![Message::user("hello")])
+            .await
+            .unwrap();
+        assert_eq!(response, "Echo: hello");
+
+        // The foreground chat history must be unaffected by the clone +
+        // background dispatch.
+        assert_eq!(chat_agent.history().len(), 2);
+    }
+
+    /// `update_history(user, assistant)` appends both messages in order.
+    /// This is the contract a background task uses to commit its result
+    /// back into the foreground chat after completing via `clone_agent()`.
+    #[tokio::test]
+    async fn update_history_appends_user_and_assistant_in_order() {
+        let agent = Agent::new(MockModel);
+        let mut chat_agent = ChatAgent::new(agent);
+
+        chat_agent.update_history(
+            "background prompt".to_string(),
+            "background response".to_string(),
+        );
+
+        assert_eq!(chat_agent.history().len(), 2);
+        match &chat_agent.history()[0] {
+            Message::User {
+                content: OneOrMany::One(UserContent::Text(t)),
+            } => assert_eq!(t.text, "background prompt"),
+            other => panic!("expected User, got {other:?}"),
+        }
+        match &chat_agent.history()[1] {
+            Message::Assistant { content, .. } => match content {
+                OneOrMany::One(AssistantContent::Text(t)) => {
+                    assert_eq!(t.text, "background response");
+                }
+                other => panic!("expected One(Text), got {other:?}"),
+            },
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    /// `history()` returns a borrowed slice. The caller can read but not
+    /// mutate the underlying buffer; pin so a future refactor doesn't
+    /// accidentally surface `&mut [Message]`.
+    #[tokio::test]
+    async fn history_returns_borrowed_slice_for_read_only_access() {
+        let agent = Agent::new(MockModel);
+        let mut chat_agent = ChatAgent::new(agent);
+
+        chat_agent.chat("hi").await.unwrap();
+        // The returned slice must support .len() and indexing.
+        let slice: &[Message] = chat_agent.history();
+        assert_eq!(slice.len(), 2);
+    }
 }

@@ -8,16 +8,22 @@ mod derived_records;
 pub mod environment;
 pub mod event;
 pub mod hardening;
+pub mod phase0;
+pub mod phase1;
+pub mod phase2;
 pub mod phase3;
 pub mod phase4;
 pub mod prompt_builders;
+pub mod revision;
 pub mod snapshot;
+pub mod task_executors;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
 pub use event::{Event, audit_action_for};
 pub use hardening::{
     AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
-    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, TracingAuditSink,
+    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, ToolOperationDetails,
+    TracingAuditSink,
 };
 pub use phase3::{
     ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,

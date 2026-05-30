@@ -419,3 +419,36 @@ fn test_rev_parse_machine_returns_single_json_line() {
     assert_eq!(parsed["command"], "rev-parse");
     assert_eq!(parsed["data"]["mode"], "resolve");
 }
+
+/// `libra rev-parse --help` surfaces the EXAMPLES banner so users see
+/// the four mutually-exclusive modes (resolve / --short / --abbrev-ref
+/// / --show-toplevel) plus the JSON variant for agents. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_rev_parse_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for rev-parse --help");
+    let output = run_libra_command(&["rev-parse", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "rev-parse --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rev-parse --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra rev-parse HEAD",
+        "libra rev-parse main~3",
+        "libra rev-parse --short HEAD",
+        "libra rev-parse --abbrev-ref HEAD",
+        "libra rev-parse --show-toplevel",
+        "libra rev-parse --json HEAD",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "rev-parse --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

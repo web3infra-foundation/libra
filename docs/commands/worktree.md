@@ -2,7 +2,7 @@
 
 Manage multiple working trees attached to this repository.
 
-**Alias:** `libra wt`
+**Alias:** `wt`
 
 ## Synopsis
 

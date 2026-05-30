@@ -12,12 +12,12 @@ C4（Audit P2）；同时承担 bisect 模块"首次入计划"职责。
 - [`tests/command/bisect_test.rs`](../../../tests/command/bisect_test.rs) 已覆盖人工 bisect、`view` 无状态错误、`run` 边界和 help banner。
 - [`tests/compat/bisect_subcommand_surface.rs`](../../../tests/compat/bisect_subcommand_surface.rs) 已固定 `bisect --help` 必须列出 `run` / `view` 并包含 EXAMPLES banner。
 - [`docs/commands/bisect.md`](../../commands/bisect.md) 已记录 `bisect run` 的 0 / 1..124 / 125 / 128+ 退出码语义和 `bisect view` 契约。
-- bisect 仍未进入完整 CLIG 现代化批次：没有 `BisectOutput` JSON schema、没有全量 `BisectError` typed enum、没有 `run_bisect()` / `render_bisect_output()` 完整拆分。这部分已从 C4 surface 补齐中剥离，归 README 后续 `reflog / checkout` 之后的跨命令 error/render 收口处理。
+- bisect 已完成本轮 CLIG 现代化收口：`BisectOutput` JSON schema、bisect 专属 `BisectError`（`LBR-BISECT-*` 稳定错误码）、`run_bisect()` / `render_bisect_output()` 执行/渲染拆分已接入所有子命令；`--json` / `--machine` 成功路径不再混入 human progress。通用 repo / IO / revision 失败继续复用现有 `CliError` 稳定错误码，不作为 C4 剩余阻塞。
 
 ### 基于当前代码的 Review 结论
 - C4 的自动化 surface 已落地：`bisect run` 可驱动脚本并按 Git-compatible exit code 自动标记 good/bad/skip，`bisect view` 可查看当前状态。
 - `bisect replay` / `bisect terms` 仍按 [declined.md](declined.md) 的显式延后项处理，不属于当前交付缺口。
-- 完整 CLIG JSON / machine / typed error modernization 仍是后续内部一致性工作；它不能反向把 C4 的 `run` / `view` surface 重新标成未落地。
+- CLIG JSON / machine 与 bisect 专属 typed-error modernization 已落地；后续只保留 additive schema 扩展和兼容性维护。
 
 ## 目标与非目标
 
@@ -37,7 +37,7 @@ C4（Audit P2）；同时承担 bisect 模块"首次入计划"职责。
 **非目标：**
 - 不实现 `bisect replay`（从日志重放历史 bisect）；登记到 [declined.md](declined.md)，重启条件：用户明确请求且 `bisect log` 已稳定。
 - 不实现 `bisect terms`（自定义 good/bad 别名，如 fast/slow）；登记到 [declined.md](declined.md)。
-- 不在本批做 bisect 完整 CLIG 现代化（`run_bisect()` / `render_bisect_output()` 大改造、JSON 完整 envelope、所有错误路径 typed）。这部分留给 README 后续批次。
+- 本批已完成 bisect CLIG 现代化（`run_bisect()` / `render_bisect_output()`、JSON/machine envelope、`LBR-BISECT-*` 专属错误码）。通用 repo / IO / revision 失败沿用共享 `CliError` 体系；后续不再把成功路径 JSON/machine 和 bisect 专属错误码列为未完成。
 - 不引入 `bisect visualize` 调外部 GUI（Git 的 visualize 走 gitk / Tk）；`view` 仅文本输出。
 
 ## 设计要点
@@ -184,7 +184,7 @@ Skipped: (none)
 - [x] `bisect view` 在 active bisect 中显示当前状态；不在 bisect 中时返回 `NOT_IN_BISECT`。
 - [x] `docs/commands/bisect.md` 与命令实际输出一致。
 - [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test bisect_test`。
-- Deferred：完整 JSON / machine schema 归后续 CLIG error/render 收口，不属于 C4 `run` / `view` surface gate，也不作为本批未完成 checkbox 追踪。
+- [x] 完整 JSON / machine schema 已由 `BisectOutput` 和 `render_bisect_output()` 收口，覆盖 start / mark / skip / reset / log / view / run 成功路径；`bisect run` 内部多步 mark 不污染 machine stdout。
 
 ## 风险与缓解
 

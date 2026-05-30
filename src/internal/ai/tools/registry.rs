@@ -145,6 +145,11 @@ impl ToolRegistry {
         self
     }
 
+    /// Runtime boundary policy and audit channel attached to this registry.
+    pub fn hardening(&self) -> Option<&ToolBoundaryRuntime> {
+        self.hardening.as_ref()
+    }
+
     /// Register a tool handler with the given name.
     pub fn register(&mut self, name: impl Into<String>, handler: Arc<dyn ToolHandler>) {
         let name = name.into();
@@ -285,11 +290,7 @@ impl ToolRegistry {
         let requires_network = handler.requires_network(&invocation).await;
 
         if let Some(hardening) = &self.hardening {
-            let operation = ToolOperation {
-                tool_name: tool_name.clone(),
-                mutates_state,
-                requires_network,
-            };
+            let operation = ToolOperation::tool(tool_name.clone(), mutates_state, requires_network);
             let decision = hardening.decide(&operation);
             hardening
                 .append_audit(

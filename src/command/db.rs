@@ -13,7 +13,23 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra db --help` output.
+///
+/// `db` exposes two sub-commands (`status` / `upgrade`) for inspecting
+/// and migrating the repository SQLite schema. The banner pins the
+/// canonical invocation per sub-command plus a JSON variant for agents
+/// so users see all supported forms without reading the design doc.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const DB_EXAMPLES: &str = "\
+EXAMPLES:
+    libra db status                 Show the repository schema version (no writes)
+    libra db --json status          Structured JSON output with current/latest version + state
+    libra db upgrade                Apply pending migrations to bring the schema to this Libra version
+    libra db --json upgrade         Structured JSON output with applied_versions[] for the upgrade";
+
 #[derive(Parser, Debug)]
+#[command(after_help = DB_EXAMPLES)]
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbSubcommand,
@@ -78,6 +94,37 @@ async fn upgrade(output: &OutputConfig) -> CliResult<()> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
+
+    // v0.17.801 also upgrade the global config DB (`~/.libra/config.db`)
+    // so a Libra binary that adds a new migration doesn't leave the
+    // global identity / vault config out of sync with the repo DB.
+    // Soft-failure: a missing or corrupt global config DB should not
+    // block the repo upgrade since the repo upgrade is what the
+    // user invoked.
+    if let Some(global_path) = dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
+        && global_path.is_file()
+    {
+        match db::upgrade_database_schema(&global_path).await {
+            Ok(global_report) if !global_report.applied_versions.is_empty() => {
+                tracing::info!(
+                    path = %global_path.display(),
+                    previous = ?global_report.previous_version,
+                    current = ?global_report.current_version,
+                    applied = ?global_report.applied_versions,
+                    "upgraded global config database schema",
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    path = %global_path.display(),
+                    "failed to upgrade global config database; repo upgrade succeeded",
+                );
+            }
+        }
+    }
+
     render_upgrade(report, output)
 }
 

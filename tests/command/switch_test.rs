@@ -3,7 +3,13 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use git_internal::internal::index::Index;
-use libra::utils::{client_storage::ClientStorage, path};
+use libra::{
+    internal::{
+        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        head::Head,
+    },
+    utils::{client_storage::ClientStorage, path, test::ChangeDirGuard},
+};
 
 use super::*;
 
@@ -15,6 +21,70 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
 
     assert_eq!(output.status.code(), Some(129));
     assert!(String::from_utf8_lossy(&output.stderr).contains("branch 'no-such' not found"));
+}
+
+/// opencode.md OC-Phase 3 acceptance criterion 5 requires that
+/// `switch` refuse to create a branch named `intent` or
+/// `agent-traces`. The runtime guard at
+/// `src/command/switch.rs::is_locked_branch` covers both, but the
+/// `switch_test` suite previously had no coverage at all for the
+/// locked-name refusal — a regression that dropped the guard could
+/// have shipped silently.
+#[test]
+fn test_switch_create_intent_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "intent"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("intent"),
+        "expected the locked branch name in the message, got: {stderr}"
+    );
+}
+
+/// Companion to `test_switch_create_intent_branch_is_blocked` for the
+/// `agent-traces` locked name. Without the guard, `switch -c
+/// agent-traces` could shadow the reserved capture ref locally and
+/// then propagate via `push`.
+#[test]
+fn test_switch_create_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "-c", "agent-traces"], repo.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent-traces"),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_existing_agent_traces_branch_is_blocked() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit()
+            .await
+            .expect("committed repo should have HEAD");
+        InternalBranch::update_branch(AGENT_TRACES_BRANCH, &head.to_string(), None)
+            .await
+            .expect("seed agent-traces branch");
+    }
+
+    let output = run_libra_command(&["switch", AGENT_TRACES_BRANCH], repo.path());
+
+    assert!(!output.status.success());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains(AGENT_TRACES_BRANCH),
+        "expected the agent-traces branch name in the message, got: {stderr}"
+    );
 }
 
 #[test]

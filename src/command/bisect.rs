@@ -23,6 +23,7 @@
 
 use std::{
     collections::{HashSet, VecDeque},
+    process::Command,
     str::FromStr,
 };
 
@@ -31,6 +32,7 @@ use git_internal::{
     internal::object::{commit::Commit, tree::Tree},
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
+use serde::Serialize;
 
 use crate::{
     cli::Bisect,
@@ -38,7 +40,6 @@ use crate::{
         load_object, restore,
         status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
     },
-    info_println,
     internal::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
@@ -49,7 +50,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::IgnorePolicy,
         object_ext::TreeExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -370,7 +371,9 @@ impl BisectState {
 /// `--help` examples shown in `libra bisect --help` output.
 pub const BISECT_EXAMPLES: &str = "\
 EXAMPLES:
-    libra bisect start <bad> <good>            Begin a session with explicit bounds
+    libra bisect start                         Begin a session; mark bad/good in subsequent steps
+    libra bisect start <bad>                   Begin a session with the bad commit pre-marked
+    libra bisect start <bad> --good <good>     Begin a session with both bounds pre-marked
     libra bisect bad                           Mark the current HEAD as bad
     libra bisect good                          Mark the current HEAD as good
     libra bisect skip                          Skip the current commit and continue
@@ -380,6 +383,132 @@ EXAMPLES:
     libra bisect log                           Print full session log
     libra bisect reset                         End the session and restore HEAD";
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum BisectOutput {
+    Start {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bad: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        good: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_bad: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        steps: Option<usize>,
+    },
+    Mark {
+        mark: String,
+        commit: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_bad: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        steps: Option<usize>,
+    },
+    Skip {
+        commit: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        steps: Option<usize>,
+    },
+    Reset {
+        restored: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    Log {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bad: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        good: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        steps: Option<usize>,
+        completed: bool,
+    },
+    View {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        good: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bad: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+        remaining: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<String>,
+        completed: bool,
+    },
+    Run {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_bad: Option<String>,
+        steps: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining: Option<usize>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BisectError {
+    #[error("not in an active bisect; run `libra bisect start` first")]
+    NotActive,
+    #[error("bisect run requires bad and good bounds before automation can start")]
+    RunBoundsMissing,
+    #[error("bisect run command failed with non-recoverable exit code {exit_code}")]
+    RunCommandFailed { exit_code: i32 },
+    #[error("bisect run command terminated by signal")]
+    RunCommandSignaled,
+    #[error("no more candidate commits; bisect already converged")]
+    NoMoreCandidates,
+}
+
+impl From<BisectError> for CliError {
+    fn from(error: BisectError) -> Self {
+        match error {
+            BisectError::NotActive => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::BisectNotActive)
+                .with_hint("start a bisect session before calling this subcommand"),
+            BisectError::RunBoundsMissing => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("run 'libra bisect start <bad> --good <good>' before automation"),
+            BisectError::RunCommandFailed { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::BisectRunFailed)
+                .with_hint("re-run with a script that returns 0 (good) / 1-127 (bad) / 125 (skip)"),
+            BisectError::RunCommandSignaled => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::BisectRunFailed)
+                .with_hint("ensure the script exits cleanly; signals abort the bisect"),
+            BisectError::NoMoreCandidates => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::BisectNoCandidates)
+                .with_hint("run `libra bisect view` to inspect remaining candidates"),
+        }
+    }
+}
+
 /// Entry point for the bisect command — dispatches the [`Bisect`] subvariant
 /// to the matching `handle_*` function.
 ///
@@ -387,16 +516,212 @@ EXAMPLES:
 /// - All variants forward their errors as `Err(CliError::fatal)` derived from
 ///   either DB failures, missing state, or rev-resolution failures.
 pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResult<()> {
+    let result = run_bisect(bisect_cmd).await?;
+    render_bisect_output(&result, output)
+}
+
+async fn run_bisect(bisect_cmd: Bisect) -> CliResult<BisectOutput> {
     match bisect_cmd {
-        Bisect::Start { bad, good } => handle_start(bad, good, output).await,
-        Bisect::Bad { rev } => handle_bad(rev, output).await,
-        Bisect::Good { rev } => handle_good(rev, output).await,
-        Bisect::Reset { rev } => handle_reset(rev, output).await,
-        Bisect::Skip { rev } => handle_skip(rev, output).await,
-        Bisect::Log => handle_log(output).await,
-        Bisect::Run { cmd } => handle_run(cmd, output).await,
-        Bisect::View => handle_view(output).await,
+        Bisect::Start { bad, good } => run_bisect_start(bad, good).await,
+        Bisect::Bad { rev } => run_bisect_bad(rev).await,
+        Bisect::Good { rev } => run_bisect_good(rev).await,
+        Bisect::Reset { rev } => run_bisect_reset(rev).await,
+        Bisect::Skip { rev } => run_bisect_skip(rev).await,
+        Bisect::Log => run_bisect_log().await,
+        Bisect::Run { cmd } => run_bisect_run(cmd).await,
+        Bisect::View => run_bisect_view().await,
     }
+}
+
+fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("bisect", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    match result {
+        BisectOutput::Start {
+            status,
+            current,
+            first_bad,
+            subject,
+            remaining,
+            ..
+        } => {
+            println!("Bisect session started");
+            render_bisect_progress(status, current, first_bad, subject, *remaining);
+        }
+        BisectOutput::Mark {
+            mark,
+            commit,
+            status,
+            current,
+            first_bad,
+            subject,
+            remaining,
+            ..
+        } => {
+            println!("Marked {} as {mark}", short_hash_str(commit));
+            render_bisect_progress(status, current, first_bad, subject, *remaining);
+        }
+        BisectOutput::Skip {
+            commit,
+            status,
+            current,
+            remaining,
+            ..
+        } => {
+            println!("Skipped {}", short_hash_str(commit));
+            render_bisect_progress(status, current, &None, &None, *remaining);
+        }
+        BisectOutput::Reset {
+            restored,
+            commit,
+            branch,
+        } => {
+            if !restored {
+                println!("No bisect in progress");
+            } else if let Some(commit) = commit {
+                if let Some(branch) = branch {
+                    println!(
+                        "HEAD is now at {} (on branch {})",
+                        short_hash_str(commit),
+                        branch
+                    );
+                } else {
+                    println!("HEAD is now at {}", short_hash_str(commit));
+                }
+                println!(
+                    "Bisect session ended, HEAD restored to {}",
+                    short_hash_str(commit)
+                );
+            }
+        }
+        BisectOutput::Log {
+            bad,
+            good,
+            current,
+            skipped,
+            steps,
+            ..
+        } => {
+            println!("Bisect log:");
+            println!(
+                "  Bad: {}",
+                bad.as_deref().map(short_hash_str).unwrap_or("not set")
+            );
+            let good = if good.is_empty() {
+                String::new()
+            } else {
+                good.iter()
+                    .map(|hash| short_hash_str(hash).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!("  Good: {good}");
+            println!(
+                "  Current: {}",
+                current.as_deref().map(short_hash_str).unwrap_or("not set")
+            );
+            println!("  Skipped: {} commits", skipped.len());
+            println!("  Steps remaining: {steps:?}");
+        }
+        BisectOutput::View {
+            head,
+            good,
+            bad,
+            remaining,
+            skipped,
+            ..
+        } => {
+            let good = good
+                .first()
+                .map(|hash| short_hash_str(hash).to_string())
+                .unwrap_or_else(|| "(unset)".to_string());
+            let bad = bad
+                .as_deref()
+                .map(short_hash_str)
+                .unwrap_or("(unset)")
+                .to_string();
+            println!("Bisecting between {good} (good) and {bad} (bad)");
+            println!(
+                "HEAD: {}",
+                head.as_deref().map(short_hash_str).unwrap_or("(none)")
+            );
+            println!("Remaining: {remaining} candidate(s)");
+            if skipped.is_empty() {
+                println!("Skipped: (none)");
+            } else {
+                let skipped = skipped
+                    .iter()
+                    .map(|hash| short_hash_str(hash).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("Skipped: {skipped}");
+            }
+        }
+        BisectOutput::Run {
+            first_bad,
+            steps,
+            skipped,
+            ..
+        } => {
+            if let Some(first_bad) = first_bad {
+                println!(
+                    "Converged: first bad commit is {}",
+                    short_hash_str(first_bad)
+                );
+            }
+            println!("{steps} steps, {} skipped", skipped.len());
+        }
+    }
+
+    Ok(())
+}
+
+fn render_bisect_progress(
+    status: &str,
+    current: &Option<String>,
+    first_bad: &Option<String>,
+    subject: &Option<String>,
+    remaining: Option<usize>,
+) {
+    match status {
+        "waiting_for_good" => println!("Status: waiting for good commit(s)"),
+        "waiting_for_bad" => println!("Status: waiting for bad commit"),
+        "testing" => {
+            if let Some(current) = current {
+                println!("HEAD is now at {}", short_hash_str(current));
+            }
+            if let Some(remaining) = remaining {
+                println!("Bisecting: {remaining} revisions left to test after this");
+            }
+        }
+        "converged" => {
+            if let Some(first_bad) = first_bad {
+                println!("{} is the first bad commit", short_hash_str(first_bad));
+            }
+            if let Some(subject) = subject {
+                println!("{subject}");
+            }
+        }
+        "all_skipped" => println!("Cannot narrow down further - all commits have been skipped"),
+        _ => {}
+    }
+}
+
+fn short_hash_str(hash: &str) -> &str {
+    &hash[..hash.len().min(7)]
+}
+
+fn hash_to_string_opt(hash: Option<ObjectHash>) -> Option<String> {
+    hash.map(|hash| hash.to_string())
+}
+
+fn hashes_to_strings(hashes: &[ObjectHash]) -> Vec<String> {
+    hashes.iter().map(ToString::to_string).collect()
 }
 
 /// Read `core.bare` and decide whether the repository has a working tree.
@@ -467,11 +792,7 @@ async fn is_bare_repository() -> CliResult<bool> {
 /// tests/command/bisect_test.rs:115;
 /// tests::test_bisect_start_already_in_progress_fails in
 /// tests/command/bisect_test.rs:370.
-async fn handle_start(
-    bad: Option<String>,
-    good: Option<String>,
-    output: &OutputConfig,
-) -> CliResult<()> {
+async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResult<BisectOutput> {
     // Bare repositories have no working tree - bisect requires checkout operations
     if is_bare_repository().await? {
         return Err(CliError::fatal("bisect cannot be run in a bare repository")
@@ -547,18 +868,31 @@ async fn handle_start(
 
     state.save().await.map_err(CliError::fatal)?;
 
-    info_println!(output, "Bisect session started");
-
-    // If bad is provided but no good, wait for good
     if bad_hash.is_some() && good_hash.is_none() {
-        info_println!(output, "Status: waiting for good commit(s)");
-        return Ok(());
+        return Ok(BisectOutput::Start {
+            status: "waiting_for_good".to_string(),
+            bad: hash_to_string_opt(state.bad),
+            good: hashes_to_strings(&state.good),
+            current: hash_to_string_opt(state.current),
+            first_bad: None,
+            subject: None,
+            remaining: None,
+            steps: state.steps,
+        });
     }
 
     // If good is provided but no bad, wait for bad
     if good_hash.is_some() && bad_hash.is_none() {
-        info_println!(output, "Status: waiting for bad commit");
-        return Ok(());
+        return Ok(BisectOutput::Start {
+            status: "waiting_for_bad".to_string(),
+            bad: hash_to_string_opt(state.bad),
+            good: hashes_to_strings(&state.good),
+            current: hash_to_string_opt(state.current),
+            first_bad: None,
+            subject: None,
+            remaining: None,
+            steps: state.steps,
+        });
     }
 
     // If both bad and good are provided, find the first bisect point (already validated above)
@@ -568,7 +902,17 @@ async fn handle_start(
             .map_err(CliError::fatal)?
         {
             BisectNext::Next(next) => {
-                checkout_to_bisect_point(next, &mut state, output).await?;
+                let remaining = checkout_to_bisect_point(next, &mut state).await?;
+                return Ok(BisectOutput::Start {
+                    status: "testing".to_string(),
+                    bad: hash_to_string_opt(state.bad),
+                    good: hashes_to_strings(&state.good),
+                    current: hash_to_string_opt(state.current),
+                    first_bad: None,
+                    subject: None,
+                    remaining,
+                    steps: state.steps,
+                });
             }
             BisectNext::Converged => {
                 // Only one commit between bad and good - it's the culprit
@@ -576,31 +920,50 @@ async fn handle_start(
                 let commit = load_object::<Commit>(&bad_commit)
                     .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
                 let subject = commit.message.lines().next().unwrap_or("");
-                info_println!(
-                    output,
-                    "{} is the first bad commit\n{}",
-                    &bad_commit.to_string()[..7],
-                    subject
-                );
                 // Move HEAD to the culprit commit, mark completed but keep state for reset
-                checkout_to_commit(bad_commit, output).await?;
+                checkout_to_commit(bad_commit).await?;
                 state.current = Some(bad_commit);
                 state.completed = true;
                 state.save().await.map_err(CliError::fatal)?;
+                return Ok(BisectOutput::Start {
+                    status: "converged".to_string(),
+                    bad: hash_to_string_opt(state.bad),
+                    good: hashes_to_strings(&state.good),
+                    current: hash_to_string_opt(state.current),
+                    first_bad: Some(bad_commit.to_string()),
+                    subject: Some(subject.to_string()),
+                    remaining: Some(0),
+                    steps: state.steps,
+                });
             }
             BisectNext::AllSkipped => {
                 // This shouldn't happen on start since we haven't skipped anything yet
                 // But handle gracefully just in case
-                info_println!(
-                    output,
-                    "Cannot narrow down further - all commits have been skipped"
-                );
                 state.save().await.map_err(CliError::fatal)?;
+                return Ok(BisectOutput::Start {
+                    status: "all_skipped".to_string(),
+                    bad: hash_to_string_opt(state.bad),
+                    good: hashes_to_strings(&state.good),
+                    current: hash_to_string_opt(state.current),
+                    first_bad: None,
+                    subject: None,
+                    remaining: Some(0),
+                    steps: state.steps,
+                });
             }
         }
     }
 
-    Ok(())
+    Ok(BisectOutput::Start {
+        status: "started".to_string(),
+        bad: hash_to_string_opt(state.bad),
+        good: hashes_to_strings(&state.good),
+        current: hash_to_string_opt(state.current),
+        first_bad: None,
+        subject: None,
+        remaining: None,
+        steps: state.steps,
+    })
 }
 
 /// Handle `bisect bad` — mark `rev` (or HEAD) as containing the bug.
@@ -619,7 +982,7 @@ async fn handle_start(
 /// tests/command/bisect_test.rs:172;
 /// tests::test_bisect_find_first_bad_commit in
 /// tests/command/bisect_test.rs:211.
-async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
     // Block operations on completed sessions - user must reset first
@@ -644,9 +1007,16 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
     if state.good.is_empty() {
         // No good commits yet - just save and wait for good
         state.save().await.map_err(CliError::fatal)?;
-        info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
-        info_println!(output, "Status: waiting for good commit(s)");
-        return Ok(());
+        return Ok(BisectOutput::Mark {
+            mark: "bad".to_string(),
+            commit: bad_hash.to_string(),
+            status: "waiting_for_good".to_string(),
+            current: hash_to_string_opt(state.current),
+            first_bad: None,
+            subject: None,
+            remaining: None,
+            steps: state.steps,
+        });
     }
 
     // Validate bounds before printing mark message (ensures output matches actual state)
@@ -655,43 +1025,57 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
         .map_err(CliError::fatal)?
     {
         BisectNext::Next(next) => {
-            // Mark is valid - print confirmation and continue
-            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
-            checkout_to_bisect_point(next, &mut state, output).await?;
+            let remaining = checkout_to_bisect_point(next, &mut state).await?;
+            Ok(BisectOutput::Mark {
+                mark: "bad".to_string(),
+                commit: bad_hash.to_string(),
+                status: "testing".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: None,
+                subject: None,
+                remaining,
+                steps: state.steps,
+            })
         }
         BisectNext::Converged => {
             // We found the culprit!
-            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
             let commit = load_object::<Commit>(&bad)
                 .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
             let subject = commit.message.lines().next().unwrap_or("");
-            info_println!(
-                output,
-                "{} is the first bad commit\n{}",
-                &bad.to_string()[..7],
-                subject
-            );
             // Move HEAD to the culprit commit, mark completed but keep state for reset
-            checkout_to_commit(bad, output).await?;
+            checkout_to_commit(bad).await?;
             state.current = Some(bad);
             state.completed = true;
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Mark {
+                mark: "bad".to_string(),
+                commit: bad_hash.to_string(),
+                status: "converged".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: Some(bad.to_string()),
+                subject: Some(subject.to_string()),
+                remaining: Some(0),
+                steps: state.steps,
+            })
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
-            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
-            info_println!(
-                output,
-                "Cannot narrow down further - all commits have been skipped"
-            );
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Mark {
+                mark: "bad".to_string(),
+                commit: bad_hash.to_string(),
+                status: "all_skipped".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: None,
+                subject: None,
+                remaining: Some(0),
+                steps: state.steps,
+            })
         }
     }
-
-    Ok(())
 }
 
 /// Handle `bisect good` — push `rev` (or HEAD) onto the known-good list.
@@ -702,7 +1086,7 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
 ///
 /// Boundary conditions:
 /// - Refuses to run on a completed session (the user must `bisect reset`).
-async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
     // Block operations on completed sessions - user must reset first
@@ -727,9 +1111,16 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
     if state.bad.is_none() {
         // No bad commit yet - just save and wait for bad
         state.save().await.map_err(CliError::fatal)?;
-        info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
-        info_println!(output, "Status: waiting for bad commit");
-        return Ok(());
+        return Ok(BisectOutput::Mark {
+            mark: "good".to_string(),
+            commit: good_hash.to_string(),
+            status: "waiting_for_bad".to_string(),
+            current: hash_to_string_opt(state.current),
+            first_bad: None,
+            subject: None,
+            remaining: None,
+            steps: state.steps,
+        });
     }
 
     // Validate bounds before printing mark message (ensures output matches actual state)
@@ -738,43 +1129,57 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
         .map_err(CliError::fatal)?
     {
         BisectNext::Next(next) => {
-            // Mark is valid - print confirmation and continue
-            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
-            checkout_to_bisect_point(next, &mut state, output).await?;
+            let remaining = checkout_to_bisect_point(next, &mut state).await?;
+            Ok(BisectOutput::Mark {
+                mark: "good".to_string(),
+                commit: good_hash.to_string(),
+                status: "testing".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: None,
+                subject: None,
+                remaining,
+                steps: state.steps,
+            })
         }
         BisectNext::Converged => {
             // We found the culprit!
-            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
             let commit = load_object::<Commit>(&bad)
                 .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
             let subject = commit.message.lines().next().unwrap_or("");
-            info_println!(
-                output,
-                "{} is the first bad commit\n{}",
-                &bad.to_string()[..7],
-                subject
-            );
             // Move HEAD to the culprit commit, mark completed but keep state for reset
-            checkout_to_commit(bad, output).await?;
+            checkout_to_commit(bad).await?;
             state.current = Some(bad);
             state.completed = true;
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Mark {
+                mark: "good".to_string(),
+                commit: good_hash.to_string(),
+                status: "converged".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: Some(bad.to_string()),
+                subject: Some(subject.to_string()),
+                remaining: Some(0),
+                steps: state.steps,
+            })
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
-            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
-            info_println!(
-                output,
-                "Cannot narrow down further - all commits have been skipped"
-            );
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Mark {
+                mark: "good".to_string(),
+                commit: good_hash.to_string(),
+                status: "all_skipped".to_string(),
+                current: hash_to_string_opt(state.current),
+                first_bad: None,
+                subject: None,
+                remaining: Some(0),
+                steps: state.steps,
+            })
         }
     }
-
-    Ok(())
 }
 
 /// Handle `bisect reset` — terminate the session and restore HEAD.
@@ -791,13 +1196,16 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 ///   `Ok(())` — `reset` is the supported escape hatch for stale state.
 ///
 /// See: tests::test_bisect_reset in tests/command/bisect_test.rs:264.
-async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_reset(rev: Option<String>) -> CliResult<BisectOutput> {
     // Use has_state to check if there's any bisect state (active or completed)
     let has_state = BisectState::has_state().await.map_err(CliError::fatal)?;
 
     if !has_state {
-        info_println!(output, "No bisect in progress");
-        return Ok(());
+        return Ok(BisectOutput::Reset {
+            restored: false,
+            commit: None,
+            branch: None,
+        });
     }
 
     let state = BisectState::load().await.map_err(CliError::fatal)?;
@@ -822,22 +1230,20 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     };
 
     // Restore original HEAD - use branch if available to avoid detached state
-    if let Some(branch_name) = target_branch {
-        restore_to_branch(branch_name, target_hash, output).await?;
+    if let Some(branch_name) = target_branch.clone() {
+        restore_to_branch(branch_name, target_hash).await?;
     } else {
-        checkout_to_commit(target_hash, output).await?;
+        checkout_to_commit(target_hash).await?;
     }
 
     // Clean up bisect state
     BisectState::cleanup().await.map_err(CliError::fatal)?;
 
-    info_println!(
-        output,
-        "Bisect session ended, HEAD restored to {}",
-        &target_hash.to_string()[..7]
-    );
-
-    Ok(())
+    Ok(BisectOutput::Reset {
+        restored: true,
+        commit: Some(target_hash.to_string()),
+        branch: target_branch,
+    })
 }
 
 fn map_bisect_branch_store_error(branch_name: &str, error: BranchStoreError) -> CliError {
@@ -875,11 +1281,7 @@ fn map_bisect_branch_store_error(branch_name: &str, error: BranchStoreError) -> 
 /// Boundary conditions:
 /// - Transaction begin/commit failures and HEAD-mismatch detection both
 ///   return fatal `CliError`s with diagnostic messages.
-async fn restore_to_branch(
-    branch_name: String,
-    commit_hash: ObjectHash,
-    output: &OutputConfig,
-) -> CliResult<()> {
+async fn restore_to_branch(branch_name: String, commit_hash: ObjectHash) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     let txn = db
@@ -905,14 +1307,7 @@ async fn restore_to_branch(
     }
 
     // Restore working directory to the commit's tree
-    restore_to_commit(commit_hash, output).await?;
-
-    info_println!(
-        output,
-        "HEAD is now at {} (on branch {})",
-        &commit_hash.to_string()[..7],
-        branch_name
-    );
+    restore_to_commit(commit_hash).await?;
     Ok(())
 }
 
@@ -929,7 +1324,7 @@ async fn restore_to_branch(
 ///   skipped — the search reports the deadlock and saves state for `reset`.
 ///
 /// See: tests::test_bisect_skip in tests/command/bisect_test.rs:309.
-async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_skip(rev: Option<String>) -> CliResult<BisectOutput> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
     // Block operations on completed sessions - user must reset first
@@ -950,35 +1345,44 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 
     state.skipped.push(skip_hash);
 
-    info_println!(output, "Skipped {}", &skip_hash.to_string()[..7]);
-
     // Find next bisect point
     match find_next_bisect_point(&state)
         .await
         .map_err(CliError::fatal)?
     {
         BisectNext::Next(next) => {
-            checkout_to_bisect_point(next, &mut state, output).await?;
+            let remaining = checkout_to_bisect_point(next, &mut state).await?;
+            Ok(BisectOutput::Skip {
+                commit: skip_hash.to_string(),
+                status: "testing".to_string(),
+                current: hash_to_string_opt(state.current),
+                remaining,
+                steps: state.steps,
+            })
         }
         BisectNext::Converged => {
             // Should not happen in skip - no single culprit when skipping
             // But handle gracefully if all but one were skipped
-            info_println!(
-                output,
-                "Cannot narrow down further after skip - only one candidate remains"
-            );
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Skip {
+                commit: skip_hash.to_string(),
+                status: "converged".to_string(),
+                current: hash_to_string_opt(state.current),
+                remaining: Some(1),
+                steps: state.steps,
+            })
         }
         BisectNext::AllSkipped => {
-            info_println!(
-                output,
-                "Cannot narrow down further - all commits have been skipped"
-            );
             state.save().await.map_err(CliError::fatal)?;
+            Ok(BisectOutput::Skip {
+                commit: skip_hash.to_string(),
+                status: "all_skipped".to_string(),
+                current: hash_to_string_opt(state.current),
+                remaining: Some(0),
+                steps: state.steps,
+            })
         }
     }
-
-    Ok(())
 }
 
 /// Handle `bisect log` — print a human-readable status of the active session.
@@ -988,34 +1392,17 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 ///   the only handler that intentionally lacks a "no-state" early return.
 ///
 /// See: tests::test_bisect_log in tests/command/bisect_test.rs:347.
-async fn handle_log(output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_log() -> CliResult<BisectOutput> {
     let state = BisectState::load().await.map_err(CliError::fatal)?;
 
-    let bad_str = state
-        .bad
-        .map(|h| h.to_string()[..7].to_string())
-        .unwrap_or_else(|| "not set".to_string());
-
-    let good_strs = state
-        .good
-        .iter()
-        .map(|h| h.to_string()[..7].to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let current_str = state
-        .current
-        .map(|h| h.to_string()[..7].to_string())
-        .unwrap_or_else(|| "not set".to_string());
-
-    info_println!(output, "Bisect log:");
-    info_println!(output, "  Bad: {}", bad_str);
-    info_println!(output, "  Good: {}", good_strs);
-    info_println!(output, "  Current: {}", current_str);
-    info_println!(output, "  Skipped: {} commits", state.skipped.len());
-    info_println!(output, "  Steps remaining: {:?}", state.steps);
-
-    Ok(())
+    Ok(BisectOutput::Log {
+        bad: hash_to_string_opt(state.bad),
+        good: hashes_to_strings(&state.good),
+        current: hash_to_string_opt(state.current),
+        skipped: hashes_to_strings(&state.skipped),
+        steps: state.steps,
+        completed: state.completed,
+    })
 }
 
 /// Handle `bisect view` — print the current bisect state in the same shape
@@ -1026,50 +1413,24 @@ async fn handle_log(output: &OutputConfig) -> CliResult<()> {
 ///   (the user must `bisect start` first).
 /// - When a session is in progress (or completed), prints the current HEAD,
 ///   good/bad bounds, remaining-candidate count, and skipped commits.
-async fn handle_view(output: &OutputConfig) -> CliResult<()> {
+async fn run_bisect_view() -> CliResult<BisectOutput> {
     if !BisectState::has_state().await.map_err(CliError::fatal)? {
-        return Err(
-            CliError::fatal("not in an active bisect; run `libra bisect start` first")
-                .with_stable_code(crate::utils::error::StableErrorCode::BisectNotActive)
-                .with_hint("start a bisect session before calling `bisect view`"),
-        );
+        return Err(BisectError::NotActive.into());
     }
 
     let state = BisectState::load().await.map_err(CliError::fatal)?;
-    let head = Head::current_commit()
-        .await
-        .map(|h| h.to_string())
-        .unwrap_or_else(|| "(none)".to_string());
-    let good = state
-        .good
-        .first()
-        .map(|h| h.to_string()[..7].to_string())
-        .unwrap_or_else(|| "(unset)".to_string());
-    let bad = state
-        .bad
-        .map(|h| h.to_string()[..7].to_string())
-        .unwrap_or_else(|| "(unset)".to_string());
+    let head = Head::current_commit().await.map(|h| h.to_string());
     let remaining = count_commits_to_test(&state).await.unwrap_or(0);
-    let skipped = state
-        .skipped
-        .iter()
-        .map(|h| h.to_string()[..7].to_string())
-        .collect::<Vec<_>>();
 
-    info_println!(
-        output,
-        "Bisecting between {} (good) and {} (bad)",
-        good,
-        bad
-    );
-    info_println!(output, "HEAD: {}", &head[..head.len().min(7)]);
-    info_println!(output, "Remaining: {} candidate(s)", remaining);
-    if skipped.is_empty() {
-        info_println!(output, "Skipped: (none)");
-    } else {
-        info_println!(output, "Skipped: {}", skipped.join(", "));
-    }
-    Ok(())
+    Ok(BisectOutput::View {
+        head,
+        good: hashes_to_strings(&state.good),
+        bad: hash_to_string_opt(state.bad),
+        current: hash_to_string_opt(state.current),
+        remaining,
+        skipped: hashes_to_strings(&state.skipped),
+        completed: state.completed,
+    })
 }
 
 /// Handle `bisect run <cmd> [args...]` — execute the script for each commit
@@ -1081,18 +1442,20 @@ async fn handle_view(output: &OutputConfig) -> CliResult<()> {
 /// - `1..=127`      → mark bad
 /// - `128..`        → fatal: terminate the bisect with `BISECT_RUN_FAILED`
 /// - signal / `None`→ fatal: same as 128+
-async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
-    use std::process::Command;
-
+async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
     if !BisectState::is_in_progress()
         .await
         .map_err(CliError::fatal)?
     {
-        return Err(
-            CliError::fatal("not in an active bisect; run `libra bisect start` first")
-                .with_stable_code(crate::utils::error::StableErrorCode::BisectNotActive)
-                .with_hint("start a bisect session and mark good/bad bounds before `bisect run`"),
-        );
+        return Err(BisectError::NotActive.into());
+    }
+
+    let initial_state = BisectState::load().await.map_err(CliError::fatal)?;
+    if initial_state.bad.is_none()
+        || initial_state.good.is_empty()
+        || initial_state.current.is_none()
+    {
+        return Err(BisectError::RunBoundsMissing.into());
     }
 
     let (executable, args) = cmd
@@ -1106,93 +1469,60 @@ async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
         let state = BisectState::load().await.map_err(CliError::fatal)?;
         if state.completed {
             // Already converged before we got to act this iteration.
-            let first_bad = state.bad.map(|h| h.to_string()).unwrap_or_default();
-            info_println!(
-                output,
-                "Converged: first bad commit is {}",
-                if first_bad.len() >= 7 {
-                    &first_bad[..7]
-                } else {
-                    &first_bad
-                }
-            );
-            info_println!(output, "{} steps, {} skipped", steps, session_skipped.len());
-            return Ok(());
+            return Ok(BisectOutput::Run {
+                first_bad: hash_to_string_opt(state.bad),
+                steps,
+                skipped: session_skipped,
+                remaining: Some(0),
+            });
         }
 
         let head_short = Head::current_commit()
             .await
             .map(|h| h.to_string()[..7].to_string())
             .unwrap_or_else(|| "(no HEAD)".to_string());
-        info_println!(
-            output,
-            "Bisecting: running `{} {}` at {}",
-            executable,
-            args.join(" "),
-            head_short
-        );
 
         let status = Command::new(executable).args(args).status().map_err(|e| {
             CliError::fatal(format!("failed to spawn `{executable}`: {e}"))
-                .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed)
+                .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
 
         match status.code() {
             Some(0) => {
                 steps += 1;
-                handle_good(None, output).await?;
+                run_bisect_good(None).await?;
             }
             Some(125) => {
                 steps += 1;
                 session_skipped.push(head_short.clone());
-                handle_skip(None, output).await?;
+                run_bisect_skip(None).await?;
             }
             Some(code) if (1..=127).contains(&code) => {
                 steps += 1;
-                handle_bad(None, output).await?;
+                run_bisect_bad(None).await?;
             }
             Some(code) => {
-                return Err(CliError::fatal(format!(
-                    "bisect run command failed with non-recoverable exit code {code}"
-                ))
-                .with_stable_code(crate::utils::error::StableErrorCode::BisectRunFailed)
-                .with_hint(
-                    "re-run with a script that returns 0 (good) / 1-127 (bad) / 125 (skip)",
-                ));
+                return Err(BisectError::RunCommandFailed { exit_code: code }.into());
             }
             None => {
-                return Err(
-                    CliError::fatal("bisect run command terminated by signal".to_string())
-                        .with_stable_code(crate::utils::error::StableErrorCode::BisectRunFailed)
-                        .with_hint("ensure the script exits cleanly; signals abort the bisect"),
-                );
+                return Err(BisectError::RunCommandSignaled.into());
             }
         }
 
         // After the mark, check if the session converged or all candidates skipped.
         let next_state = BisectState::load().await.map_err(CliError::fatal)?;
         if next_state.completed {
-            let first_bad = next_state.bad.map(|h| h.to_string()).unwrap_or_default();
-            info_println!(
-                output,
-                "Converged: first bad commit is {}",
-                if first_bad.len() >= 7 {
-                    &first_bad[..7]
-                } else {
-                    &first_bad
-                }
-            );
-            info_println!(output, "{} steps, {} skipped", steps, session_skipped.len());
-            return Ok(());
+            return Ok(BisectOutput::Run {
+                first_bad: hash_to_string_opt(next_state.bad),
+                steps,
+                skipped: session_skipped,
+                remaining: Some(0),
+            });
         }
 
         let remaining = count_commits_to_test(&next_state).await.unwrap_or(0);
         if remaining == 0 {
-            return Err(CliError::fatal(
-                "no more candidate commits; bisect already converged".to_string(),
-            )
-            .with_stable_code(crate::utils::error::StableErrorCode::BisectNoCandidates)
-            .with_hint("run `libra bisect view` to inspect remaining candidates"));
+            return Err(BisectError::NoMoreCandidates.into());
         }
     }
 }
@@ -1213,7 +1543,7 @@ async fn resolve_ref(ref_str: &str) -> CliResult<ObjectHash> {
 /// - The HEAD update happens inside a SQLite transaction. The worktree
 ///   restore runs after commit, so a partial failure between them leaves the
 ///   worktree out of sync until `bisect reset`.
-async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> CliResult<()> {
+async fn checkout_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     let txn = db
@@ -1229,9 +1559,7 @@ async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> C
         .map_err(|e| CliError::fatal(format!("Failed to commit transaction: {e}")))?;
 
     // Restore working directory
-    restore_to_commit(commit_hash, output).await?;
-
-    info_println!(output, "HEAD is now at {}", &commit_hash.to_string()[..7]);
+    restore_to_commit(commit_hash).await?;
     Ok(())
 }
 
@@ -1244,9 +1572,8 @@ async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> C
 async fn checkout_to_bisect_point(
     commit_hash: ObjectHash,
     state: &mut BisectState,
-    output: &OutputConfig,
-) -> CliResult<()> {
-    checkout_to_commit(commit_hash, output).await?;
+) -> CliResult<Option<usize>> {
+    checkout_to_commit(commit_hash).await?;
 
     state.current = Some(commit_hash);
 
@@ -1260,15 +1587,7 @@ async fn checkout_to_bisect_point(
 
     state.save().await.map_err(CliError::fatal)?;
 
-    if let Some(steps) = state.steps {
-        info_println!(
-            output,
-            "Bisecting: {} revisions left to test after this",
-            steps
-        );
-    }
-
-    Ok(())
+    Ok(state.steps)
 }
 
 /// Repaint the worktree from the tree of `commit_hash`.
@@ -1285,7 +1604,7 @@ async fn checkout_to_bisect_point(
 /// - Calling this function effectively *deletes* every file under the
 ///   working tree that is not part of `commit_hash`'s tree, including
 ///   ignored files. `start` therefore guards against dirty worktrees.
-async fn restore_to_commit(commit_hash: ObjectHash, _output: &OutputConfig) -> CliResult<()> {
+async fn restore_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
     let commit = load_object::<Commit>(&commit_hash)
         .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
 

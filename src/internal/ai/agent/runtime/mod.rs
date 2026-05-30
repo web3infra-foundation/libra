@@ -29,27 +29,32 @@ pub mod builder;
 pub mod tool_loop;
 pub use builder::AgentBuilder;
 pub use tool_loop::{
-    ToolLoopConfig, ToolLoopObserver, run_tool_loop, run_tool_loop_with_history_and_observer,
+    ToolLoopConfig, ToolLoopObserver, ToolLoopTurn, run_tool_loop,
+    run_tool_loop_with_history_and_observer,
 };
 
 pub mod chat;
 pub use chat::ChatAgent;
 
-// OC-Phase 3 P3.2: SubAgentDispatcher trait + DispatchContext + TaskFailure
-// vocabulary. Schema-only — no runtime implementation, no tool-loop wiring.
+// OC-Phase 3: SubAgentDispatcher trait + DispatchContext + TaskFailure
+// vocabulary, plus the owned tool-loop runtime bundle used to intercept
+// `task` calls when multi-agent mode is enabled.
 pub mod sub_agent;
 pub use sub_agent::{
-    AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
-    DispatchContext, MessageId, PermissionAskRequest, PermissionAskSource, PermissionAsker,
-    PermissionReply, PermissionService, SafetyDecisionDenial, SubAgentDispatcher, TaskEntryKind,
-    TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
+    AbortToken, BudgetExceededReason, CancellationSource, ChannelPermissionAsk,
+    ChannelPermissionAsker, ContextFrameLoader, ContextHandoffError, DefaultSubAgentChildRunner,
+    DenyByDefaultPermissionAsker, DispatchContext, MessageId, PermissionAskRequest,
+    PermissionAskSource, PermissionAsker, PermissionReply, PermissionService,
+    ProviderBuildOptionsResolver, SafetyDecisionDenial, SubAgentChildRunRequest,
+    SubAgentChildRunner, SubAgentDispatcher, SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure,
+    TaskInvocation, TaskResult, ToolLoopError, WorkspaceIsolationConfig,
 };
 
-// OC-Phase 3 P3.3 + P3.4: DefaultSubAgentDispatcher gate + ask
-// implementation (steps 1-8 minus the safety-policy hook in step 5,
-// which stays a TODO until a `SubAgentSpawn` ToolOperation variant
-// lands). Steps 9-13 (handoff, model build, child loop, events,
-// AgentRunEvent::Spawned wiring) follow in P3.4+ sub-PRs.
+// OC-Phase 3 P3.3 + P3.4 + P3.6 + P3.7:
+// DefaultSubAgentDispatcher gate + ask implementation, child
+// tool-loop tail, user-initiated dispatch entrypoints, and
+// parent-cancel propagation, SafetyDecision checks, AgentRunEvent
+// Spawned/Completed/Failed wiring, timeout caps, and budget caps.
 pub mod sub_agent_dispatcher;
 pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
 

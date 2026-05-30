@@ -8,7 +8,7 @@
 - Cloudflare 下载/恢复不作为 `libra publish` 的命令或参数设计；实现本 publish 方案时，必须同步完成 [clone.md](clone.md) 中新增的 Cloudflare source scheme（例如 `libra clone libra+cloud://<clone-domain>/<slug>`），让 `publish` 只负责发布展示，`clone` 负责恢复仓库。
 - v1 必须发布所有本地分支和 tag：`libra publish sync` 默认提交 `refs/heads/*` 与 `refs/tags/*` 指向的所有可达发布快照；`--ref <branch|tag|full-ref>` 进入 v1 作为定向同步/调试入口，但不能替代完整发布验收。
 - 不再要求“SQL 与代码一字不差”这种脆弱约束。改为提供单一 schema 源文件和一致性测试。
-- Claude Design 前端实现已按 Phase 7 handoff 落地，当前 `worker/` 模板就是 accepted baseline；设计偏差和无独立设计包的交接记录见 [publish-worker-design-handoff.md](publish-worker-design-handoff.md)。
+- Claude Design 前端实现已按 Phase 7 handoff 落地，当前 `worker/` 模板就是 accepted baseline；设计偏差和无独立设计包的交接记录已内联在本文 Phase 7。
 - v1 的 “所有 AI 版本信息”以 [docs/agent/ai-object-model-reference.md](../agent/ai-object-model-reference.md) 为完整对象契约：snapshot objects、event objects 和 Libra projection/runtime objects 都必须发布；visibility 只决定字段级 redaction，不改变对象类型覆盖范围。
 - Worker 随 Libra 分发：源码仓库根目录 `worker/` 是 Worker 模板来源，Libra release 必须把该模板作为 source-only 资源嵌入或打包；`libra publish init` 从该模板生成目标仓库根目录 `worker/`，不依赖用户本机存在 Libra 源码 checkout。
 
@@ -919,12 +919,13 @@ v1 使用 gitignore 子集：
 
 ### Phase 7：Claude Design 前端实现和 deploy/init
 
-**Description:** 将已接收的前端 baseline 落地为 Next.js + React on Cloudflare Workers，并把 `init/deploy` 接入 Wrangler/OpenNext。前端实现是 v1 必交付任务包，不作为验收后的补充工作；无独立 Claude Design 包时以 [publish-worker-design-handoff.md](publish-worker-design-handoff.md) 记录的 `worker/` 模板为 accepted baseline。
+**Description:** 将已接收的前端 baseline 落地为 Next.js + React on Cloudflare Workers，并把 `init/deploy` 接入 Wrangler/OpenNext。前端实现是 v1 必交付任务包，不作为验收后的补充工作；无独立 Claude Design 包时以本节记录的 `worker/` 模板为 accepted baseline。
 
 **Acceptance criteria:**
 
-- [x] (v0.17.143) 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差记录在 [publish-worker-design-handoff.md](publish-worker-design-handoff.md)，作为无 PR 上下文时的 durable handoff。
+- [x] (v0.17.143) 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差记录在本节的 Worker accepted baseline handoff，作为无 PR 上下文时的 durable handoff。
 - [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
+- [x] (v0.17.1133) `libra publish init` 物化的 `worker/wrangler.jsonc` 使用 `REPLACE_WITH_D1_DATABASE_ID` 和 `REPLACE_WITH_R2_BUCKET_NAME` 占位符，不再携带仓库/账号专用 Cloudflare 资源 id；`publish deploy` 在 build 前拒绝这两个占位符。
 - [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；云端 D1 refs/status 对比已由 Phase 4 落地。
 - [x] (v0.17.14) Next.js + React 前端能展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
 - [x] (v0.17.60) 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。
@@ -941,6 +942,31 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.60) `pnpm --dir worker e2e`
 - [x] (v0.17.61) `cargo test --test command_test publish_deploy`
 - [x] (v0.17.62) `cargo test --test command_test publish_unpublish`
+
+#### Worker accepted baseline handoff
+
+本小节是 Phase 7 Claude Design acceptance item 的 durable handoff record。仓库不再维护独立的 Claude Design package 或单独 handoff 文档；accepted implementation baseline 是当前根目录 `worker/` 模板，以及下列偏差记录。
+
+**Accepted Worker surface:**
+
+- Routes: `worker/app/page.tsx`, `worker/app/sites/[slug]/page.tsx`, `worker/app/sites/[slug]/tree/[[...path]]/page.tsx`, `worker/app/sites/[slug]/blob/[...path]/page.tsx`, `worker/app/sites/[slug]/refs/page.tsx`, `worker/app/sites/[slug]/ai/page.tsx`, `worker/app/sites/[slug]/status/page.tsx`, `worker/app/sites/[slug]/publish/page.tsx`, and `worker/app/sites/repo/[repoId]/page.tsx`.
+- API routes: `worker/app/api/sites/[slug]/**` covers site metadata, refs, revisions, tree, file, AI versions, AI objects, AI graph, and status.
+- Components: `SiteShell`, `RefPicker`, `TreeListing`, `FileViewer`, `AiBrowser`, `ClonePanel`, `Breadcrumbs`, and `EmptyState`.
+- Styling and static assets: `worker/app/globals.css`, `worker/app/fonts/*.woff2`, `worker/app/error.tsx`, `worker/app/forbidden.tsx`, `worker/app/not-found.tsx`, and `worker/public/robots.txt`.
+- State and data flow: server routes load D1/R2-backed site context through `worker/lib/server/*`; client interactions use `worker/lib/client/api.ts` and typed wire contracts from `worker/lib/wire-types.ts`.
+
+**Recorded deviations:**
+
+- The Worker is an operational repository browser, not a marketing landing page. The first screen prioritizes site metadata, refs, code browsing, AI model browsing, publish status, and clone commands.
+- The Worker remains read-only. Repository restore stays in the local CLI through `libra clone libra+cloud://...`; the Worker does not expose a download endpoint or writable operations.
+- Public/private behavior follows the publish access contract. Private pages require Cloudflare Access validation; public pages still use redacted AI payloads.
+- AI browsing uses the published AI object model, graph, versions, and object endpoints rather than provider raw payloads or local-only mock data.
+
+**Handoff verification:**
+
+- `worker/tests/e2e/site-pages.spec.ts` covers the core browser pages.
+- `worker/tests/miniflare-api-routes.test.ts` covers the Worker API routes against D1/R2 fixtures.
+- `worker/tests/publish-overview.test.ts` covers the page data aggregation used by the publish overview surface.
 
 **Dependencies:** Phase 4, Phase 6
 
@@ -959,7 +985,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.90) public visibility 下 secret/redaction fixture 无泄漏；Worker public AI object/bundle responses strip known sensitive fields, secret-like values and local absolute paths, with API + page fixture coverage.
 - [x] (v0.17.147) `publish_live` 过滤器已具备非空 live gate 测试入口；启用 `LIBRA_ENABLE_TEST_LIVE_CLOUD=1` 时会先校验真实 D1/R2 凭据，并在提供 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 后复用本次 live gate 创建的 slug 执行已部署 Worker refs/tree/file API smoke；`LIBRA_PUBLISH_LIVE_CLONE_DOMAIN` 和 `LIBRA_PUBLISH_LIVE_SLUG` 仅作为覆盖项使用；该入口不启动 MCP Server。
 - [x] (v0.17.146) live cloud gate 在真实 D1/R2 环境中能完成唯一 test repo/site 的 `cloud sync` Git object baseline + all-refs `publish sync` -> `libra clone libra+cloud://<clone-domain>/<slug>` restore，并验证恢复后的文件和 tag ref；该入口不启动 MCP Server。
-- [ ] live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke。
+- [x] (v0.17.147) live cloud gate 能完成已部署 Worker API refs/tree/file -> deploy smoke：`tests/publish_live_test.rs::smoke_deployed_worker_api` 在 `LIBRA_PUBLISH_LIVE_WORKER_ORIGIN` 提供时依次调用 `/api/sites/<slug>/refs` / `/tree` / `/file` 并断言返回的 `data.refs` / `data.entries` / `data.path` 与本次 live gate 同步内容一致，缺失变量时打印 `skipped Worker deploy/API smoke` 而非伪通过。
 - [x] (v0.17.63) `docs/commands/publish.md` 更新为用户可读文档，覆盖当前 init/status/sync dry-run/deploy/unpublish 能力和剩余边界。
 - [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
 

@@ -52,12 +52,46 @@ pub enum ValidationOutcome {
     InfrastructureFailed,
 }
 
+impl ValidationOutcome {
+    /// `true` only for `Passed`. Used to roll per-stage outcomes up into
+    /// the report-level [`ValidationStatus`] in
+    /// [`validation_status`](self::validation_status); also useful for
+    /// quick "did this stage clear?" checks at observer call sites.
+    pub fn is_passing(self) -> bool {
+        matches!(self, ValidationOutcome::Passed)
+    }
+
+    /// `true` for the non-recoverable infrastructure-failed category.
+    /// Distinguished from `BlockingFailed` because infrastructure
+    /// failures cannot be auto-retried by Phase 3 routing — they
+    /// require a Phase 5 diagnostic loop instead.
+    pub fn is_infrastructure_failure(self) -> bool {
+        matches!(self, ValidationOutcome::InfrastructureFailed)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStatus {
     Passed,
     BlockingFailed,
     InfrastructureFailed,
+}
+
+impl ValidationStatus {
+    /// `true` only for `Passed`. The Phase 4 decision pipeline
+    /// (see `phase4.rs:101..`) branches on this when computing the
+    /// auto-accept gate.
+    pub fn is_passing(self) -> bool {
+        matches!(self, ValidationStatus::Passed)
+    }
+
+    /// `true` for the non-recoverable infrastructure-failed category.
+    /// Phase 4 escalates these to a Phase 5 diagnostic loop instead of
+    /// the standard retry path.
+    pub fn is_infrastructure_failure(self) -> bool {
+        matches!(self, ValidationStatus::InfrastructureFailed)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +122,16 @@ pub struct ValidationReport {
     pub summary: ValidationReportSummary,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl ValidationReport {
+    /// Convenience: `true` when the report's roll-up status is
+    /// [`ValidationStatus::Passed`]. Useful for callers that only need
+    /// the report-level pass/fail signal and don't want to drill into
+    /// `report.summary.status` themselves.
+    pub fn is_passing(&self) -> bool {
+        self.summary.status.is_passing()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,4 +304,150 @@ pub(crate) fn timestamp_from_row(raw: i64, label: &str) -> Result<DateTime<Utc>>
 
 pub(crate) fn bool_to_row(value: bool) -> i64 {
     i64::from(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ValidationOutcome::is_passing` must return `true` only for
+    /// `Passed`. The two failure variants are *not* passing and Phase 3
+    /// rollup logic relies on that.
+    #[test]
+    fn validation_outcome_is_passing_only_for_passed() {
+        assert!(ValidationOutcome::Passed.is_passing());
+        assert!(!ValidationOutcome::BlockingFailed.is_passing());
+        assert!(!ValidationOutcome::InfrastructureFailed.is_passing());
+    }
+
+    /// `is_infrastructure_failure` must distinguish the non-recoverable
+    /// infrastructure-failed category from `BlockingFailed` so Phase 3
+    /// routing escalates them differently.
+    #[test]
+    fn validation_outcome_is_infrastructure_failure_only_for_infra() {
+        assert!(!ValidationOutcome::Passed.is_infrastructure_failure());
+        assert!(!ValidationOutcome::BlockingFailed.is_infrastructure_failure());
+        assert!(ValidationOutcome::InfrastructureFailed.is_infrastructure_failure());
+    }
+
+    /// `ValidationStatus::is_passing` must return `true` only for
+    /// `Passed` — mirrors the per-stage `ValidationOutcome::is_passing`
+    /// semantics at the report-level rollup.
+    #[test]
+    fn validation_status_is_passing_only_for_passed() {
+        assert!(ValidationStatus::Passed.is_passing());
+        assert!(!ValidationStatus::BlockingFailed.is_passing());
+        assert!(!ValidationStatus::InfrastructureFailed.is_passing());
+    }
+
+    /// Mirror of the per-stage predicate at the report-level enum.
+    #[test]
+    fn validation_status_is_infrastructure_failure_only_for_infra() {
+        assert!(!ValidationStatus::Passed.is_infrastructure_failure());
+        assert!(!ValidationStatus::BlockingFailed.is_infrastructure_failure());
+        assert!(ValidationStatus::InfrastructureFailed.is_infrastructure_failure());
+    }
+
+    /// `validation_status` rollup priority: Infrastructure > Blocking >
+    /// Passed. A single Infrastructure failure dominates everything; a
+    /// single BlockingFailed (without any Infrastructure) dominates
+    /// passed stages.
+    #[test]
+    fn validation_status_rollup_honours_failure_priority() {
+        // All-passed → Passed.
+        let stages = vec![ValidationStageResult {
+            stage: ValidationStage::Integration,
+            outcome: ValidationOutcome::Passed,
+            evidence: vec![],
+            summary: None,
+        }];
+        assert_eq!(validation_status(&stages), ValidationStatus::Passed);
+
+        // BlockingFailed dominates Passed.
+        let stages = vec![
+            ValidationStageResult {
+                stage: ValidationStage::Integration,
+                outcome: ValidationOutcome::Passed,
+                evidence: vec![],
+                summary: None,
+            },
+            ValidationStageResult {
+                stage: ValidationStage::Security,
+                outcome: ValidationOutcome::BlockingFailed,
+                evidence: vec![],
+                summary: None,
+            },
+        ];
+        assert_eq!(validation_status(&stages), ValidationStatus::BlockingFailed);
+
+        // InfrastructureFailed dominates BlockingFailed.
+        let stages = vec![
+            ValidationStageResult {
+                stage: ValidationStage::Integration,
+                outcome: ValidationOutcome::BlockingFailed,
+                evidence: vec![],
+                summary: None,
+            },
+            ValidationStageResult {
+                stage: ValidationStage::Security,
+                outcome: ValidationOutcome::InfrastructureFailed,
+                evidence: vec![],
+                summary: None,
+            },
+        ];
+        assert_eq!(
+            validation_status(&stages),
+            ValidationStatus::InfrastructureFailed
+        );
+
+        // Empty stages → Passed (vacuously, no failure observed).
+        assert_eq!(validation_status(&[]), ValidationStatus::Passed);
+    }
+
+    /// `ValidatorEngine::build_report` + `ValidationReport::is_passing`:
+    /// engine rolls up per-stage outcomes; report-level convenience
+    /// helper matches the rolled-up status.
+    #[test]
+    fn validation_report_is_passing_matches_summary_status() {
+        let engine = ValidatorEngine::new("test-policy");
+        let thread_id = Uuid::new_v4();
+
+        let passing = engine.build_report(
+            thread_id,
+            None,
+            vec![ValidationStageResult {
+                stage: ValidationStage::Integration,
+                outcome: ValidationOutcome::Passed,
+                evidence: vec![],
+                summary: None,
+            }],
+        );
+        assert!(passing.is_passing());
+        assert_eq!(passing.summary.status, ValidationStatus::Passed);
+        assert_eq!(passing.policy_version, "test-policy");
+
+        let failing = engine.build_report(
+            thread_id,
+            None,
+            vec![ValidationStageResult {
+                stage: ValidationStage::Security,
+                outcome: ValidationOutcome::BlockingFailed,
+                evidence: vec![],
+                summary: None,
+            }],
+        );
+        assert!(!failing.is_passing());
+        assert_eq!(failing.summary.status, ValidationStatus::BlockingFailed);
+    }
+
+    /// `ValidatorEngine::default_policy` must use the
+    /// `DEFAULT_VALIDATION_POLICY_VERSION` constant so policy-version
+    /// drift between code and reports is detected at compile time.
+    #[test]
+    fn validator_engine_default_policy_uses_pinned_constant() {
+        let engine = ValidatorEngine::default_policy();
+        let report = engine.build_report(Uuid::new_v4(), None, vec![]);
+        assert_eq!(report.policy_version, DEFAULT_VALIDATION_POLICY_VERSION);
+        assert_eq!(report.policy_version, "validation:v1");
+    }
 }

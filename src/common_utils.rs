@@ -128,3 +128,113 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    //! `format_commit_msg` is used as a fixture builder in several
+    //! command integration tests, but its exact output contract, the
+    //! `parse_commit_msg` round-trip, and `check_conventional_commits_message`
+    //! (which has no test references at all) were never directly
+    //! asserted. These pins guard the commit-object byte format — the
+    //! leading-newline / blank-line separators are load-bearing
+    //! (a missing separator makes remote `git unpack` reject the
+    //! object).
+
+    use super::*;
+
+    /// Without a signature the body is exactly `"\n{msg}"` — the
+    /// leading blank line is required by the Git object format; remote
+    /// `git unpack` fails without it.
+    #[test]
+    fn format_commit_msg_unsigned_prepends_blank_line() {
+        assert_eq!(format_commit_msg("hello", None), "\nhello");
+        // Inner / trailing whitespace in the message is preserved.
+        assert_eq!(format_commit_msg("a\nb ", None), "\na\nb ");
+    }
+
+    /// With a signature the body is exactly `"{gpg}\n\n{msg}"` — the
+    /// blank line separates the signature trailer from the message.
+    #[test]
+    fn format_commit_msg_signed_places_sig_then_blank_line() {
+        assert_eq!(
+            format_commit_msg("subject", Some("gpgsig BLOCK")),
+            "gpgsig BLOCK\n\nsubject",
+        );
+    }
+
+    /// A plain (unsigned) body parses back to the trimmed message and
+    /// `None`; leading whitespace is stripped but inner content is kept.
+    #[test]
+    fn parse_commit_msg_plain_message_has_no_signature() {
+        assert_eq!(parse_commit_msg("  hello\nworld"), ("hello\nworld", None));
+        assert_eq!(parse_commit_msg("subject"), ("subject", None));
+    }
+
+    /// A `gpgsig`-prefixed PGP signature block round-trips: the parsed
+    /// signature is the BEGIN..END block (without the `gpgsig ` prefix)
+    /// and the message is the trimmed remainder. Built via
+    /// `format_commit_msg` so the format⇄parse pair is exercised
+    /// together.
+    #[test]
+    fn parse_commit_msg_round_trips_pgp_signature() {
+        let sig = "-----BEGIN PGP SIGNATURE-----\nabcDEF123\n-----END PGP SIGNATURE-----";
+        let body = format_commit_msg("the subject", Some(&format!("gpgsig {sig}")));
+        let (msg, parsed_sig) = parse_commit_msg(&body);
+        assert_eq!(msg, "the subject");
+        assert_eq!(parsed_sig, Some(sig));
+    }
+
+    /// SSH signature blocks are recognised the same way as PGP.
+    #[test]
+    fn parse_commit_msg_recognises_ssh_signature() {
+        let sig = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----";
+        let body = format!("gpgsig {sig}\n\nssh-signed subject");
+        let (msg, parsed_sig) = parse_commit_msg(&body);
+        assert_eq!(msg, "ssh-signed subject");
+        assert_eq!(parsed_sig, Some(sig));
+    }
+
+    /// Conventional-commit subjects: accept `type: desc`, optional
+    /// `(scope)` and breaking `!`.
+    #[test]
+    fn conventional_commits_accepts_valid_subjects() {
+        for ok in [
+            "feat: add a thing",
+            "fix(parser): handle empty input",
+            "feat!: breaking change",
+            "chore(api)!: drop field",
+            "refactor: tidy module",
+            // Only the first line matters; body is ignored.
+            "docs: update readme\n\nlong body here",
+            // Non-recommended type tokens are still accepted (spec only
+            // *recommends* the eight canonical types).
+            "wibble: custom type allowed",
+        ] {
+            assert!(
+                check_conventional_commits_message(ok),
+                "expected `{ok}` to be a valid conventional-commit subject",
+            );
+        }
+    }
+
+    /// Rejects subjects that break the grammar: empty, no `: `
+    /// separator, empty description, or a leading space before the
+    /// type.
+    #[test]
+    fn conventional_commits_rejects_invalid_subjects() {
+        for bad in [
+            "",
+            "just a plain message",
+            "feat:no space after colon",
+            "feat: ",            // empty description
+            "feat",              // no colon at all
+            " feat: leading sp", // leading space before type
+            ": no type",         // empty type
+        ] {
+            assert!(
+                !check_conventional_commits_message(bad),
+                "expected `{bad}` to be rejected as a conventional-commit subject",
+            );
+        }
+    }
+}

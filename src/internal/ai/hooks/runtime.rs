@@ -720,7 +720,14 @@ async fn write_session_end_checkpoint(
     // contains a leaked secret. Extending to the full session transcript is
     // adapter-specific work (Phase 2 follow-up — `read_transcript` on
     // ObservedAgent).
-    let transcript_bytes = redacted_prompt.unwrap_or("").as_bytes().to_vec();
+    // Wrap in `RedactedBytes` so the agent-traces write path enforces the
+    // entire.md §8.1 / §13 P0 contract at the type level: the bytes were
+    // already scrubbed by the upsert path (see above), so this uses the
+    // sanctioned in-crate `new_unchecked` "already-redacted input"
+    // constructor rather than passing raw `&[u8]`.
+    let transcript_redacted = crate::internal::ai::observed_agents::RedactedBytes::new_unchecked(
+        redacted_prompt.unwrap_or("").as_bytes().to_vec(),
+    );
 
     let provider_name = envelope_provider_slug(agent_kind);
 
@@ -775,7 +782,7 @@ async fn write_session_end_checkpoint(
             scope: CheckpointScope::Committed,
             tool_use_id: None,
             metadata_json: &metadata_bytes,
-            transcript_redacted: &transcript_bytes,
+            transcript_redacted: &transcript_redacted,
             provider_name,
             events_jsonl: None,
         })
@@ -1755,6 +1762,87 @@ mod tests {
         let _ = tree_oid; // silence unused warning — assertions above
         // already verified the root tree is indexed
         // via the reachability walker
+    }
+
+    /// entire.md §8.1 / §13 (P0) end-to-end: a SessionEnd prompt carrying
+    /// a known secret must land in the `agent-traces` transcript blob
+    /// REDACTED — the raw secret never reaches durable storage. Guards the
+    /// `RedactedBytes` write-path contract: the transcript blob is produced
+    /// only via `RedactedBytes`, and the upstream redactor scrubbed the
+    /// secret before it was wrapped. A regression that bypassed redaction
+    /// (or the type) would surface here as the literal key in the blob.
+    #[tokio::test]
+    async fn session_end_checkpoint_transcript_blob_is_redacted() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+
+        let start = ingest_envelope("SessionStart", "S-cp-redact", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        // SessionEnd whose prompt carries a known AWS-key-shaped secret.
+        let end = ingest_envelope(
+            "SessionEnd",
+            "S-cp-redact",
+            json!({ "prompt": "deploy with AKIAIOSFODNN7EXAMPLE please" }),
+        );
+        ingest_agent_traces_payload(
+            &end,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("end ok");
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+
+        // Locate the transcript blob via its distinguished o_type, then
+        // read + zlib-decode it and strip the `blob <len>\0` header.
+        let backend = conn.get_database_backend();
+        let blob_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_id FROM object_index WHERE o_type = 'agent_transcript' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query transcript blob")
+            .expect("a transcript blob must be indexed");
+        let blob_oid: String = blob_row.try_get_by("o_id").unwrap();
+
+        let object_path = repo_path
+            .join("objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        let raw = std::fs::read(&object_path).expect("read transcript blob object");
+        let mut decoder = flate2::read::ZlibDecoder::new(&raw[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        let header_end = decoded
+            .iter()
+            .position(|&b| b == 0)
+            .expect("blob object has a header terminator");
+        let body = String::from_utf8_lossy(&decoded[header_end + 1..]);
+
+        assert!(
+            !body.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked into the persisted transcript blob: {body}",
+        );
+        assert!(
+            body.contains("deploy with") && body.contains("please"),
+            "the redacted transcript must retain the non-secret text, got: {body}",
+        );
     }
 
     /// Walk every object reachable from the checkpoint commit (commit →

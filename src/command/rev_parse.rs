@@ -20,7 +20,25 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra rev-parse --help` output.
+///
+/// `rev-parse` is the canonical script bridge: resolve a revision spec
+/// to a commit hash, a short hash, a branch name, or print the
+/// repository top-level. The banner pins the four mutually-exclusive
+/// modes plus a JSON variant for agents so users see all supported
+/// forms without reading the design doc. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REV_PARSE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra rev-parse HEAD                Print the full 40-char hash for HEAD
+    libra rev-parse main~3              Resolve any revision spec to a full hash
+    libra rev-parse --short HEAD        Print a non-ambiguous short hash
+    libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
+    libra rev-parse --show-toplevel     Print the absolute path of the repository root
+    libra rev-parse --json HEAD         Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = REV_PARSE_EXAMPLES)]
 pub struct RevParseArgs {
     /// Show a non-ambiguous short object name.
     #[clap(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]

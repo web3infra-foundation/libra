@@ -8,12 +8,21 @@ const storeState = vi.hoisted(() => ({
   snapshot: null as unknown,
   connection: { kind: "ready" },
 }));
+const diagnosticsState = vi.hoisted(() => ({
+  value: null as unknown,
+}));
 
 vi.mock("@/lib/code-ui/store", () => ({
   useCodeUiStore: () => storeState,
 }));
+vi.mock("@/lib/code-ui/client", () => ({
+  getDiagnostics: vi.fn(() => {
+    if (diagnosticsState.value) return Promise.resolve(diagnosticsState.value);
+    return Promise.reject(new Error("diagnostics unavailable"));
+  }),
+}));
 
-import type { CodeUiSessionSnapshot } from "@/lib/code-ui/types";
+import type { CodeUiDiagnostics, CodeUiSessionSnapshot } from "@/lib/code-ui/types";
 import { TERMINAL_OUTPUT_PREVIEW_CHARS } from "@/lib/code-ui/view-model";
 
 import { Terminal } from "./terminal";
@@ -66,6 +75,7 @@ function render(node: React.ReactNode) {
 beforeEach(() => {
   storeState.snapshot = null;
   storeState.connection = { kind: "ready" };
+  diagnosticsState.value = null;
 });
 
 afterEach(() => {
@@ -104,6 +114,37 @@ describe("Terminal", () => {
 
     expect(container.textContent).toContain(tail);
     expect(container.textContent).toContain("Show less");
+
+    unmount();
+  });
+
+  it("renders diagnostics as best-effort agent rows", async () => {
+    storeState.snapshot = baseSnapshot();
+    diagnosticsState.value = {
+      pid: 4321,
+      provider: "test",
+      model: "fixture",
+      threadId: "thread-1",
+      status: "running",
+      controller: { kind: "browser", canWrite: true, loopbackOnly: true },
+      ports: { web: 3867, mcp: 3868 },
+      logFile: "/tmp/libra-code.log",
+      activeInteractionId: "approval-1",
+      lastError: "tool failed",
+    } satisfies CodeUiDiagnostics;
+
+    const { container, unmount } = render(<Terminal height={240} onClose={() => {}} />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("diagnostics: pid 4321");
+    expect(container.textContent).toContain("web 3867");
+    expect(container.textContent).toContain("mcp 3868");
+    expect(container.textContent).toContain("log /tmp/libra-code.log");
+    expect(container.textContent).toContain("active interaction approval-1");
+    expect(container.textContent).toContain("last error: tool failed");
 
     unmount();
   });

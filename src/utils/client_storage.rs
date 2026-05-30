@@ -229,7 +229,7 @@ impl ClientStorage {
         };
         if bucket.is_empty() {
             eprintln!(
-                "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
             );
             return Arc::new(LocalStorage::new(base_path));
         }
@@ -253,7 +253,7 @@ impl ClientStorage {
                 if let Some(endpoint) = endpoint {
                     if url::Url::parse(&endpoint).is_err() {
                         eprintln!(
-                            "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
+                            "Warning: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
                             endpoint
                         );
                         return Arc::new(LocalStorage::new(base_path));
@@ -286,7 +286,7 @@ impl ClientStorage {
                 if let Some(key) = key {
                     if key.is_empty() {
                         eprintln!(
-                            "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
+                            "Warning: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
                         );
                         return Arc::new(LocalStorage::new(base_path));
                     }
@@ -305,7 +305,7 @@ impl ClientStorage {
                 if let Some(secret) = secret {
                     if secret.is_empty() {
                         eprintln!(
-                            "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
+                            "Warning: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
                         );
                         return Arc::new(LocalStorage::new(base_path));
                     }
@@ -335,7 +335,7 @@ impl ClientStorage {
             }
             _ => {
                 eprintln!(
-                    "Error: Unsupported storage type: {}. Falling back to local storage.",
+                    "Warning: Unsupported storage type: {}. Falling back to local storage.",
                     storage_type
                 );
                 return Arc::new(LocalStorage::new(base_path));
@@ -381,16 +381,22 @@ impl ClientStorage {
         ))
     }
 
-    /// Emit a stderr error and degrade to `LocalStorage` when a storage env var
-    /// cannot be resolved. Centralised so every fallback prints the same message
-    /// shape and ensures CLI commands keep working when remote storage is broken.
+    /// Emit a stderr warning and degrade to `LocalStorage` when a storage env
+    /// var cannot be resolved. Centralised so every fallback prints the same
+    /// message shape and ensures CLI commands keep working when remote storage
+    /// is broken — the `Warning:` prefix mirrors the recovered, non-fatal
+    /// nature of the degrade path so users do not mistake it for a fatal
+    /// command failure (e.g. an outdated `~/.libra/config.db` schema still
+    /// surfaces a chain like "Repository database schema is out of date... Run
+    /// 'libra db upgrade'", but the clone/init operation itself still
+    /// succeeds via `LocalStorage`).
     fn storage_config_resolution_fallback(
         base_path: &Path,
         name: &str,
         error: &str,
     ) -> Arc<dyn Storage> {
         eprintln!(
-            "Error: failed to resolve {}: {}. Falling back to local storage.",
+            "Warning: failed to resolve {}: {}. Falling back to local storage.",
             name, error
         );
         Arc::new(LocalStorage::new(base_path.to_path_buf()))

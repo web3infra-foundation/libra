@@ -11,7 +11,7 @@
 **已确认落地的基线（基于 init 改造后的实际代码）：**
 
 - `init` 已完成执行层与渲染层拆分：
-  - 纯执行入口 `run_init(args: InitArgs) -> Result<InitOutput, InitError>` 已交付（`init.rs:447`），内部调用 `run_init_internal()`（`init.rs:463`）并禁用 progress
+  - 纯执行入口 `run_init(args: InitArgs) -> Result<InitOutput, InitError>` 已交付（`init.rs:448`），内部调用 `run_init_internal()`（`init.rs:464`）并禁用 progress
   - 顶层渲染入口 `execute_safe(args, output) -> CliResult<()>` 负责 human / JSON / machine 渲染
   - `render_init_result()` 独立处理 human 模式的 stdout 输出
 - **clone 已完成 `run_init()` 切换**：[src/command/clone.rs](../../src/command/clone.rs) 已调用 `command::init::run_init()`，不再调用 `init::execute_safe()`
@@ -152,6 +152,11 @@ struct CloneOutput {
     ssh_key_detected: Option<String>, // 从 InitOutput.ssh_key_detected 透传
     shallow: bool,                    // --depth 是否生效
     warnings: Vec<String>,            // 非致命警告（如 empty remote / init warning）
+    gitignore_converted: Vec<String>, // 由 .gitignore 转换写入的 .libraignore worktree 相对路径；始终序列化，bare 恒为空
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_kind: Option<String>,      // 附加 clone 源类型；普通 Git 源时省略
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_site: Option<CloudCloneSiteOutput>, // libra+cloud:// 源的 Cloudflare publish 元数据；其余源省略
 }
 ```
 
@@ -192,7 +197,7 @@ clone 已调用 `run_init()` 并捕获返回值，用于填充 `CloneOutput`。
 **`run_init()` 函数签名（已存在）：**
 
 ```rust
-// src/command/init.rs:447 — current location of `run_init`
+// src/command/init.rs:448 — current location of `run_init`
 pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError>
 ```
 
@@ -321,10 +326,13 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "vault_signing": true,
     "ssh_key_detected": "/Users/eli/.ssh/id_ed25519",
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": [".libraignore", "src/.libraignore"]
   }
 }
 ```
+
+> **`gitignore_converted`**：克隆时把源仓库的 `.gitignore` 转换为 `.libraignore` 所写入的 worktree 相对路径列表。始终存在（无 `skip_serializing_if`）：无转换时为空数组 `[]`，bare 克隆恒为 `[]`。
 
 **`--bare` 场景：**
 
@@ -342,7 +350,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "vault_signing": true,
     "ssh_key_detected": null,
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": []
   }
 }
 ```
@@ -366,7 +375,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
 >     "shallow": false,
 >     "warnings": [
 >       "You appear to have cloned an empty repository."
->     ]
+>     ],
+>     "gitignore_converted": []
 >   }
 > }
 > ```
@@ -393,7 +403,8 @@ clone 再基于 `RestoreError` 做显式映射。**只有 remote/ref 配置和 c
     "shallow": false,
     "warnings": [
       "You appear to have cloned an empty repository."
-    ]
+    ],
+    "gitignore_converted": []
   }
 }
 ```

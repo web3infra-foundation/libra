@@ -91,10 +91,19 @@ fn build_ollama_client(base_url: &str, api_key: Option<String>) -> Client {
 }
 
 fn api_key_for_base_url(base_url: &str) -> Option<String> {
-    is_ollama_cloud_base_url(base_url)
-        .then(|| std::env::var("OLLAMA_API_KEY").ok())
+    if !is_ollama_cloud_base_url(base_url) {
+        return None;
+    }
+    crate::internal::config::resolve_optional_env_sync("OLLAMA_API_KEY")
+        .map_err(|error| {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "failed to resolve OLLAMA_API_KEY from Vault or environment"
+            );
+            error
+        })
+        .ok()
         .flatten()
-        .filter(|key| !key.trim().is_empty())
 }
 
 fn is_ollama_cloud_base_url(base_url: &str) -> bool {
@@ -118,15 +127,72 @@ fn compact_tool_schema_from_env() -> bool {
 }
 
 impl Client {
-    /// Creates an Ollama client from environment variables.
+    /// Creates an Ollama client from Vault or environment variables.
     ///
-    /// Reads the optional `OLLAMA_BASE_URL` environment variable (defaults to
-    /// `http://127.0.0.1:11434/v1`). When the base URL points at
-    /// `https://ollama.com`, `OLLAMA_API_KEY` is used as a bearer token.
+    /// Reads optional `vault.env.OLLAMA_BASE_URL` / `OLLAMA_BASE_URL`
+    /// (defaults to `http://127.0.0.1:11434/v1`). When the base URL points at
+    /// `https://ollama.com`, `vault.env.OLLAMA_API_KEY` / `OLLAMA_API_KEY` is
+    /// used as a bearer token.
+    ///
+    /// New call sites should prefer [`Client::from_resolved_env`], which
+    /// performs the same lookup chain asynchronously and accepts an
+    /// explicit `LocalIdentityTarget<'_>` so vault values from a specific
+    /// repository are honored. `from_env` is retained for backward
+    /// compatibility and currently delegates to the same vault-aware
+    /// resolver.
     pub fn from_env() -> Self {
-        let base_url =
-            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = crate::internal::config::resolve_optional_env_sync("OLLAMA_BASE_URL")
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "failed to resolve OLLAMA_BASE_URL from Vault or environment"
+                );
+                error
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         build_ollama_client(&base_url, api_key_for_base_url(&base_url))
+    }
+
+    /// Vault-aware async constructor: resolves `OLLAMA_BASE_URL` and
+    /// (when the base URL points at `https://ollama.com`) `OLLAMA_API_KEY`
+    /// through the libra-aware lookup chain: local `.libra/libra.db`
+    /// (`vault.env.<name>`, when `local_target` selects a repo) → global
+    /// `~/.libra/config.db` → process env.
+    ///
+    /// Differs from the other migrated providers in two ways:
+    ///
+    /// 1. **Never fails on a missing key** — Ollama defaults to local
+    ///    `http://127.0.0.1:11434/v1`, which doesn't require an API key.
+    ///    Returns `Self` directly, not `Result<Self>`, so `local_target`
+    ///    can route a repo-level base URL override (e.g. a teamwide
+    ///    `vault.env.OLLAMA_BASE_URL=http://internal-ollama:11434/v1`)
+    ///    without forcing a CLI flag.
+    /// 2. **API-key resolution is gated on the resolved base URL** — only
+    ///    consults `OLLAMA_API_KEY` when the resolved base URL is
+    ///    `https://ollama.com` (matching `from_env`'s behaviour). Empty
+    ///    or whitespace-only keys are dropped.
+    pub async fn from_resolved_env(
+        local_target: crate::internal::config::LocalIdentityTarget<'_>,
+    ) -> Self {
+        use crate::internal::config::resolve_env_for_target;
+
+        let base_url = resolve_env_for_target("OLLAMA_BASE_URL", local_target)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let api_key = if is_ollama_cloud_base_url(&base_url) {
+            resolve_env_for_target("OLLAMA_API_KEY", local_target)
+                .await
+                .ok()
+                .flatten()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+        build_ollama_client(&base_url, api_key)
     }
 
     /// Creates an Ollama client pointing to the default local instance.
@@ -259,5 +325,109 @@ mod tests {
 
         assert!(client.is_cloud_api());
         assert!(client.missing_required_cloud_api_key());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_resolved_env_defaults_to_local_base_url_when_unset() {
+        let base_guard = TestEnvGuard::set("OLLAMA_BASE_URL", None);
+        let key_guard = TestEnvGuard::set("OLLAMA_API_KEY", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/ollama-from-resolved-env-test.db"),
+        );
+
+        let client =
+            Client::from_resolved_env(crate::internal::config::LocalIdentityTarget::None).await;
+        // Local base URL never needs an API key, so missing_required_cloud_api_key
+        // must return false (it's a localhost endpoint).
+        assert!(!client.is_cloud_api(), "default base URL must not be cloud");
+        assert!(
+            !client.missing_required_cloud_api_key(),
+            "local endpoint never demands an API key"
+        );
+
+        drop(base_guard);
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_resolved_env_picks_up_ollama_cloud_api_key_when_base_is_cloud() {
+        let base_guard = TestEnvGuard::set("OLLAMA_BASE_URL", Some("https://ollama.com"));
+        let key_guard = TestEnvGuard::set("OLLAMA_API_KEY", Some("oll-test-cloud-key"));
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/ollama-from-resolved-env-test.db"),
+        );
+
+        let client =
+            Client::from_resolved_env(crate::internal::config::LocalIdentityTarget::None).await;
+        assert!(
+            client.is_cloud_api(),
+            "https://ollama.com base must be classified as cloud"
+        );
+        assert!(
+            !client.missing_required_cloud_api_key(),
+            "cloud endpoint with API key must not flag missing-key"
+        );
+
+        drop(base_guard);
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_resolved_env_flags_missing_key_for_cloud_base_url() {
+        let base_guard = TestEnvGuard::set("OLLAMA_BASE_URL", Some("https://ollama.com"));
+        let key_guard = TestEnvGuard::set("OLLAMA_API_KEY", None);
+        let global_guard = TestEnvGuard::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            Some("/nonexistent/ollama-from-resolved-env-test.db"),
+        );
+
+        let client =
+            Client::from_resolved_env(crate::internal::config::LocalIdentityTarget::None).await;
+        assert!(client.is_cloud_api());
+        assert!(
+            client.missing_required_cloud_api_key(),
+            "cloud endpoint without OLLAMA_API_KEY must surface the missing-key flag"
+        );
+
+        drop(base_guard);
+        drop(key_guard);
+        drop(global_guard);
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests are serialized via `#[serial_test::serial]`.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 }

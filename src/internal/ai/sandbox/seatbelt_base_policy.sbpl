@@ -78,6 +78,11 @@
 (allow sysctl-write
   (sysctl-name "kern.grade_cputype"))
 
+; Block terminal user clients before the narrow IOKit allowlist below so a
+; sandboxed process cannot inject input back into the caller's TTY.
+(deny iokit-open
+  (iokit-user-client-class "IOTTYClient"))
+
 ; IOKit
 (allow iokit-open
   (iokit-registry-entry-class "RootDomainUserClient")

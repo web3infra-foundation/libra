@@ -15,15 +15,26 @@ use super::{Storage, local::LocalStorage, remote::RemoteStorage};
 #[derive(Debug)]
 struct CachedFile {
     path: PathBuf,
-    /// Size of the file on disk in bytes
+    /// LRU accounting size in bytes — the **uncompressed** object
+    /// length (`data.len()` at insert time), used as the resource cost
+    /// for the `LruCache` budget.
+    ///
+    /// NOTE: this is *not* the literal on-disk byte count.
+    /// [`LocalStorage::put`] writes zlib-compressed loose objects, so
+    /// the actual file is typically smaller than `disk_size`. Using the
+    /// uncompressed length makes the LRU budget a **conservative
+    /// (over-estimating) upper bound** on real disk use — the cache
+    /// evicts at or before the configured limit, never after, so the
+    /// disk footprint stays bounded. Switching to the true compressed
+    /// size would require stat-ing the file after each write.
     disk_size: usize,
 }
 
 impl HeapSize for CachedFile {
     fn heap_size(&self) -> usize {
-        // We use the LRU cache to limit disk usage, so we return the file size here.
-        // This is technically "heap size" in the context of the LRU cache (resource size),
-        // even though it tracks disk bytes, not memory bytes.
+        // The LRU cache bounds cached-object resource cost; we report
+        // `disk_size` (the uncompressed object length — see the field
+        // doc) as that cost, not the struct's in-memory size.
         self.disk_size
     }
 }
@@ -160,5 +171,95 @@ impl Storage for TieredStorage {
         results.extend(remote_res);
 
         results.into_iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    /// Create a real file of `size` bytes and wrap it in a `CachedFile`
+    /// whose `disk_size` matches. Returns the file path so the test can
+    /// assert presence/deletion.
+    fn cached_file(dir: &std::path::Path, name: &str, size: usize) -> (PathBuf, CachedFile) {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create cache file");
+        f.write_all(&vec![0u8; size]).expect("write cache file");
+        (
+            path.clone(),
+            CachedFile {
+                path,
+                disk_size: size,
+            },
+        )
+    }
+
+    /// `HeapSize::heap_size` MUST report the `disk_size` accounting
+    /// field (the uncompressed object length — see the field doc) so
+    /// the `LruCache`'s budget bounds cached-object resource cost. If
+    /// this returned the struct's in-memory size instead, the cache
+    /// would never evict on the intended threshold and the local cache
+    /// dir would grow unbounded. (`disk_size` over-estimates the true
+    /// compressed on-disk size, making the bound conservative.)
+    #[test]
+    fn cached_file_heap_size_reports_disk_size() {
+        let dir = tempdir().expect("tempdir");
+        let (_path, cf) = cached_file(dir.path(), "obj", 4096);
+        assert_eq!(cf.heap_size(), 4096);
+    }
+
+    /// Dropping a `CachedFile` MUST delete its backing file — this is
+    /// how an LRU eviction reclaims disk. Without it, evicted cache
+    /// entries leak on disk forever.
+    #[test]
+    fn dropping_cached_file_deletes_backing_file() {
+        let dir = tempdir().expect("tempdir");
+        let (path, cf) = cached_file(dir.path(), "obj", 16);
+        assert!(path.exists());
+        drop(cf);
+        assert!(
+            !path.exists(),
+            "CachedFile drop must delete its backing file",
+        );
+    }
+
+    /// The combined resource-bounding contract: inserting past the
+    /// `LruCache` disk budget evicts the least-recently-used entry AND
+    /// its `Drop` deletes that entry's file, while the retained entry's
+    /// file survives. This is what keeps the local large-object cache
+    /// bounded on disk.
+    #[test]
+    fn lru_eviction_deletes_evicted_cache_file() {
+        let dir = tempdir().expect("tempdir");
+        // `LruCache` charges key + value + struct overhead per entry
+        // (not just `heap_size`), so an entry for a 1000-byte file is
+        // ~1096 bytes. A 1500-byte budget therefore holds exactly one
+        // such entry but not two — the headroom keeps the test robust
+        // against the exact per-entry overhead.
+        let mut lru: LruCache<ObjectHash, CachedFile> = LruCache::new(1500);
+
+        let key_a = ObjectHash::new(&[1; 20]);
+        let key_b = ObjectHash::new(&[2; 20]);
+        let (path_a, cf_a) = cached_file(dir.path(), "a", 1000);
+        let (path_b, cf_b) = cached_file(dir.path(), "b", 1000);
+
+        lru.insert(key_a, cf_a).expect("insert a within budget");
+        assert!(path_a.exists());
+
+        // Inserting B exceeds the budget (two ~1096-byte entries), so
+        // the LRU evicts A; A's CachedFile drop deletes A's file.
+        lru.insert(key_b, cf_b).expect("insert b evicts a");
+
+        assert!(
+            !path_a.exists(),
+            "evicted entry A's backing file must be deleted on eviction",
+        );
+        assert!(path_b.exists(), "retained entry B's file must survive");
+        assert!(lru.get(&key_b).is_some(), "B must remain cached");
+        assert!(lru.get(&key_a).is_none(), "A must have been evicted");
     }
 }

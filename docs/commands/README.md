@@ -63,7 +63,7 @@ Every Libra command accepts the following global flags:
 | `libra branch` | `br` | Create, delete, rename, list, and inspect branches | [branch.md](branch.md) |
 | `libra tag` | | Create, list, or delete lightweight and annotated tags | [tag.md](tag.md) |
 | `libra switch` | `sw` | Switch branches, create new branches, or detach HEAD with fuzzy suggestions | [switch.md](switch.md) |
-| `libra checkout` | | Branch compatibility surface; prefer `switch` for branches and `restore` for files | [checkout.md](checkout.md) |
+| `libra checkout` | | Branch compatibility surface and explicit `--` path-restore alias; prefer `switch` / `restore` | [checkout.md](checkout.md) |
 
 ### History Manipulation
 
@@ -120,6 +120,7 @@ Every Libra command accepts the following global flags:
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |
+| `libra hooks` | | External AI agent (Claude Code / Gemini) hook entry point; called by configs installed by `libra agent enable` (hidden) | [hooks.md](hooks.md) |
 
 ## Structured Output Envelope
 

@@ -33,8 +33,8 @@
 - **脏工作树检查已委托给 `switch::ensure_clean_status(output)`** / `ensure_clean_status_for_commit()`（`checkout.rs:267-268`）
 - `create_and_switch_new_branch()` 仍复用 `branch::create_branch_safe()` + `switch_branch_with_output()`（`checkout.rs:371`）
 - 远程自动跟踪路径 `get_remote()` 仍复用 `branch::set_upstream_safe_with_output()` + `pull::execute_safe()`（`checkout.rs:381`），并通过 `CheckoutError::RemoteSyncFailed { stage, source }` 把 `set_upstream` / `pull` 的代理失败分类到具体阶段
-- quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:708-741`）
-- `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:746-766`）
+- quiet / machine 下的人类文本抑制已有回归测试覆盖（`output_flags_test.rs:773`/`:792`/`:817`/`:852`，分别覆盖 `quiet_checkout_existing_branch_suppresses_output` / `machine_checkout_existing_branch_suppresses_human_output` / `quiet_checkout_dirty_repo_suppresses_status_summary` / `machine_checkout_dirty_repo_returns_only_json_error`）
+- `checkout_invalid_index_preserves_status_error()` 已验证状态损坏错误不会被折叠成“local changes would be overwritten”脏树消息（`output_flags_test.rs:892`）
 
 **当前代码中已确认的跨命令依赖：**
 
@@ -83,9 +83,9 @@
 ### 设计原则
 
 1. **switch 联动优先，checkout 行为稳定优先**：`switch` 改 helper 签名时，`checkout` 必须同步，但不能借机改掉现有命令行为
-2. **只替换脆弱实现，不扩大本批范围**：本次只把字符串匹配换成 `SwitchError` 变体匹配，不顺手做 JSON / typed error 全量重构
+2. **只替换脆弱实现，不扩大兼容收口范围**：第二批先把字符串匹配换成 `SwitchError` 变体匹配；第 30 批再独立完成 JSON / typed error 全量重构
 3. **checkout 保持自己的对外文案**：即使内部依赖 `switch`，外部仍是 `checkout` 语义，不和 `switch` 强行统一
-4. **剩余完整现代化边界**：当前文档必须显式给未来 `CheckoutError` typed enum 与更细代理错误分层留边界，避免与已落地的 JSON/render split 混淆
+4. **现代化边界已关闭**：`CheckoutError` typed enum 与 remote auto-track 代理错误分层已落地；后续新增 checkout 语义时再同步扩展文档和测试
 
 ### 特性 1：`switch::ensure_clean_status()` 新返回类型适配
 
@@ -160,11 +160,11 @@ EXAMPLES:
 - `switch.md` 负责定义 `SwitchError`、`ensure_clean_status()` 的新签名，以及 `switch` 自身输出/错误契约
 - `checkout.md` 负责定义 `checkout` 如何消费这个新接口，并保持 `checkout` 的既有对外行为
 - `run_switch()` 仍保持私有；`checkout` 不复用 `switch` 的执行层结果结构
-- `checkout` 的 JSON 成功输出与 render split 已落地；typed `CheckoutError` enum 仍不在本次联动范围内
+- `checkout` 的 JSON 成功输出、render split 与 typed `CheckoutError` enum 均已落地；本文保留边界说明以避免未来改动把 `switch` 和 `checkout` 的对外契约混在一起
 
-### 特性 4：第 30 批完整现代化的预留边界
+### 特性 4：第 30 批完整现代化的完成边界
 
-按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造仍留在第 30 批。届时再单独推进：
+按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造已在第 30 批单独推进并完成：
 
 - `CheckoutError` typed enum
 - 更细的代理错误分层（remote auto-track / pull）
@@ -174,8 +174,9 @@ EXAMPLES:
 - checkout-owned 显式 `StableErrorCode`
 - `run_checkout()` + `render_checkout_output()` 执行/渲染拆分
 - `checkout --json` / `--machine` 成功输出（覆盖 show-current / already-on / switch-local / create / remote-track）
+- `RemoteSyncFailed { stage, source }` 包裹 remote auto-track 中 `set_upstream` / `pull` 的代理失败，并保留内部 stable code
 
-本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第 30 批未来落地。
+当前仍**不新增 detach / commit / tag checkout 语义**，也不把 `checkout` 与 `switch` 抽成共用执行层；后续如果扩展 checkout 语义，需要同步扩展 `CheckoutOutput`、`CheckoutError` 和 JSON/machine 合约测试。
 
 ### 本次联动中的 Cross-Cutting Improvements 约束
 

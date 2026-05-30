@@ -247,7 +247,7 @@ fn push_required(required: &mut Vec<String>, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenApiToolSpecError;
+    use super::*;
 
     #[test]
     fn openapi_tool_spec_error_display_pins_owned_variants() {
@@ -272,5 +272,144 @@ mod tests {
             rendered.starts_with("failed to parse OpenAPI fixture: "),
             "got: {rendered}",
         );
+    }
+
+    /// `sanitise_tool_name` converts camelCase into snake_case so OpenAPI
+    /// `operationId` values like `getUsers` become tool names like
+    /// `get_users`.
+    #[test]
+    fn sanitise_tool_name_converts_camel_case_to_snake_case() {
+        assert_eq!(sanitise_tool_name("getUsers"), "get_users");
+        assert_eq!(
+            sanitise_tool_name("listAllUsersById"),
+            "list_all_users_by_id"
+        );
+        // Already snake_case stays unchanged.
+        assert_eq!(sanitise_tool_name("get_users"), "get_users");
+    }
+
+    /// Non-alphanumeric chars (slash, dash, dot, brace, etc.) collapse
+    /// to a single underscore. Note: uppercase runs are split between
+    /// every adjacent uppercase pair (the rule is "uppercase after
+    /// non-separator inserts `_`"), so `GET` itself becomes `g_e_t`
+    /// — `operationId` values like `getUsers` work cleanly because
+    /// only the camel-hump `U` triggers the split.
+    #[test]
+    fn sanitise_tool_name_replaces_non_alphanumeric_with_underscore() {
+        assert_eq!(sanitise_tool_name("user-name"), "user_name");
+        assert_eq!(sanitise_tool_name("v1.0.api"), "v1_0_api");
+        // Path-style separators collapse but uppercase runs split too.
+        // `GET /users/{id}` → "g_e_t_users_id" (each uppercase letter
+        // is treated as a new word boundary).
+        assert_eq!(sanitise_tool_name("GET /users/{id}"), "g_e_t_users_id");
+    }
+
+    /// Consecutive separators collapse to a single underscore via the
+    /// `__` → `_` loop. Pin the dedup so a future "split-and-rejoin"
+    /// refactor preserves the invariant.
+    #[test]
+    fn sanitise_tool_name_collapses_consecutive_separators() {
+        assert_eq!(sanitise_tool_name("user__name"), "user_name");
+        assert_eq!(sanitise_tool_name("a---b---c"), "a_b_c");
+        // Mixed separator chars collapse the same way.
+        assert_eq!(sanitise_tool_name("a-_-_b"), "a_b");
+    }
+
+    /// Trailing separators / non-alphanumeric chars are stripped so
+    /// the tool name never ends with `_`.
+    #[test]
+    fn sanitise_tool_name_strips_trailing_separators() {
+        assert_eq!(sanitise_tool_name("trailing___"), "trailing");
+        assert_eq!(sanitise_tool_name("name-"), "name");
+        assert_eq!(sanitise_tool_name("name/"), "name");
+    }
+
+    /// Leading separators are dropped because the loop's
+    /// `name.is_empty()` guard prevents emitting an underscore
+    /// before the first alphanumeric char.
+    #[test]
+    fn sanitise_tool_name_drops_leading_separators() {
+        assert_eq!(sanitise_tool_name("/users"), "users");
+        assert_eq!(sanitise_tool_name("-foo"), "foo");
+        assert_eq!(sanitise_tool_name("_already"), "already");
+    }
+
+    /// Empty / non-alphanumeric-only input → empty string. Callers
+    /// must check for empty before treating the result as a valid
+    /// tool name (the production code surfaces
+    /// `InvalidOperationName` when this happens).
+    #[test]
+    fn sanitise_tool_name_empty_for_empty_or_non_alphanumeric_input() {
+        assert_eq!(sanitise_tool_name(""), "");
+        assert_eq!(sanitise_tool_name("///"), "");
+        assert_eq!(sanitise_tool_name("---"), "");
+        assert_eq!(sanitise_tool_name("..."), "");
+    }
+
+    /// Uppercase at start does NOT get a leading underscore (the
+    /// `!name.is_empty()` guard). The first character is lowercased
+    /// without a leading `_`; subsequent uppercase letters DO trigger
+    /// a split because the rule is "every uppercase after a non-
+    /// separator inserts `_`", not "only camel-hump uppercase".
+    #[test]
+    fn sanitise_tool_name_first_char_does_not_emit_separator() {
+        // Single char: "G" → "g" (no leading underscore).
+        assert_eq!(sanitise_tool_name("G"), "g");
+        // Subsequent uppercase letters split each one off:
+        // GET → g_e_t. Useful for camelCase splitting; the per-letter
+        // split for ALL-CAPS is a documented quirk.
+        assert_eq!(sanitise_tool_name("GET"), "g_e_t");
+        assert_eq!(sanitise_tool_name("UPPERCASE"), "u_p_p_e_r_c_a_s_e",);
+    }
+
+    /// `push_required` adds names that aren't already present and
+    /// silently skips duplicates — the helper dedups by linear scan.
+    #[test]
+    fn push_required_dedupes_repeat_inserts() {
+        let mut required = Vec::new();
+        push_required(&mut required, "foo");
+        push_required(&mut required, "bar");
+        push_required(&mut required, "foo"); // duplicate
+        push_required(&mut required, "baz");
+        push_required(&mut required, "bar"); // duplicate
+        assert_eq!(required, vec!["foo", "bar", "baz"]);
+    }
+
+    /// `push_required` preserves insertion order (it's not a sorted
+    /// set). Pin so a future "convert to BTreeSet" refactor breaks
+    /// here — the OpenAPI schema's `required` array is order-sensitive
+    /// when rendered for the model's view.
+    #[test]
+    fn push_required_preserves_insertion_order() {
+        let mut required = Vec::new();
+        push_required(&mut required, "zebra");
+        push_required(&mut required, "alpha");
+        push_required(&mut required, "middle");
+        assert_eq!(required, vec!["zebra", "alpha", "middle"]);
+    }
+
+    /// `operation_description` uses "Call <METHOD> <path>" when the
+    /// operation has neither summary nor description (the canonical
+    /// fallback). Pin the `Call ` prefix so a future "drop the
+    /// prefix" refactor breaks here — the prefix differentiates the
+    /// auto-generated description from a user-supplied summary in
+    /// audit logs.
+    #[test]
+    fn operation_description_falls_back_to_method_and_path() {
+        let operation = OpenApiOperation::default();
+        let desc = operation_description("GET", "/users", &operation);
+        assert_eq!(desc, "Call GET /users");
+    }
+
+    /// When the operation has a `summary`, it's preferred over the
+    /// "<METHOD> <path>" fallback.
+    #[test]
+    fn operation_description_prefers_summary_over_fallback() {
+        let operation = OpenApiOperation {
+            summary: Some("List all users".to_string()),
+            ..OpenApiOperation::default()
+        };
+        let desc = operation_description("GET", "/users", &operation);
+        assert_eq!(desc, "List all users");
     }
 }

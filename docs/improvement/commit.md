@@ -28,8 +28,8 @@
 - **JSON 向后兼容扩展已交付**：`pub struct CommitOutput`（`commit.rs:257`）含 11 个字段：`head`（保留）+ `branch: Option<String>`（新增）+ `commit` / `short_id` / `subject` / `root_commit` / `amend` / `files_changed` / `signoff` / `conventional: Option<bool>` / `signed`。**采用增量扩展策略**：旧字段（`head` / `commit` / `short_id` / `subject` / `root_commit` / `files_changed.total/new/modified/deleted`）保留名称、类型、语义不变；新元数据全部以新增字段形式追加，不破坏已有 JSON consumer
 - **hook I/O 隔离已交付**：`run_pre_commit_hook(output: &OutputConfig) -> Result<(), CommitError>`（`commit.rs:618`）接受 `OutputConfig`，在 `--json` / `--machine` 模式下对 hook 子进程使用 `Stdio::piped()`，确保结构化 stdout/stderr 不被污染；human 模式仍透传 hook 输出
 - **核心 helper 全部返回 typed `CommitError`**：`save_commit_object`（`commit.rs:674`）、`auto_stage_tracked_changes`（`commit.rs:961`）、`update_head`（`commit.rs:1029`）、`update_head_and_reflog`（`commit.rs:1049`）、`run_pre_commit_hook`（`commit.rs:618`）等关键 helper 全部以 `CommitError` 为错误载体，统一传播路径
-- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:57-68` 区域）含 9 条 EXAMPLES（`-m` / `-m --conventional` / `--amend` / `--amend --no-edit` / `-a -m` / `-F message.txt` / `-s -m` / `--allow-empty -m` / `--json -m`），通过 clap `#[command]` 注解挂载
-- **`missing_identity_error()` 已显式映射**：`commit.rs:313` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:187` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
+- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:54-62` 区域）含 9 条 EXAMPLES（`-m` / `-m --conventional` / `--amend` / `--amend --no-edit` / `-a -m` / `-F message.txt` / `-s -m` / `--allow-empty -m` / `--json -m`），通过 clap `#[command]` 注解挂载
+- **`missing_identity_error()` 已显式映射**：`commit.rs:321` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:194` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
 - **测试覆盖已交付**：JSON schema 稳定性测试、CommitError 全变体单元映射测试、CLI 级集成测试均已就绪（详见 README 第 67-68 行 commit 已落地说明）
 
 **保留的兼容面（不阻断验收）：**

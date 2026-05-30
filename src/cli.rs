@@ -16,6 +16,7 @@ use clap::{
     error::{ContextKind, ContextValue, ErrorKind},
 };
 use git_internal::hash::{HashKind, set_hash_kind};
+use sea_orm::{ConnectionTrait, Statement};
 
 use crate::{
     command,
@@ -35,14 +36,19 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, notes, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, cat-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
 
 Output Examples:
-  libra --json status
-  libra --json branch
+  libra --json status                  Pretty JSON envelope on stdout
+  libra --json=ndjson log              One-line-per-event newline-delimited JSON
+  libra --machine status               Compact JSON; suppresses progress/decoration
+  libra --quiet --exit-code-on-warning Silent run; non-zero exit (9) if warnings occurred
+  libra --color=never log              Force-disable colors (also via NO_COLOR=1)
+
+For per-command flags, see `libra <cmd> --help`.
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -84,11 +90,94 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
         })?;
     let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
         .map(|e| e.value)
         .unwrap_or_else(|| "sha1".to_string());
 
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn set_local_hash_kind_for_storage_without_schema_guard(storage: &Path) -> CliResult<()> {
+    let db_path = storage.join(utils::util::DATABASE);
+    if !db_path.exists() {
+        return Err(CliError::fatal(format!(
+            "repository database not found at '{}'",
+            db_path.display()
+        )));
+    }
+
+    let db_conn = db::open_database_without_migrations(&db_path)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+    let object_format = read_schema_free_object_format(&db_conn, &db_path).await?;
+
+    set_hash_kind_from_object_format(object_format)
+}
+
+async fn read_schema_free_object_format(
+    db_conn: &sea_orm::DatabaseConnection,
+    db_path: &Path,
+) -> CliResult<String> {
+    let has_config_kv = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
+            ["table".into(), "config_kv".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to inspect repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?
+        .is_some();
+
+    if !has_config_kv {
+        return Ok("sha1".to_string());
+    }
+
+    let row = db_conn
+        .query_one(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT value FROM config_kv WHERE key = ? ORDER BY id DESC LIMIT 1",
+            ["core.objectformat".into()],
+        ))
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to read core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+
+    match row {
+        Some(row) => row.try_get_by_index(0).map_err(|e| {
+            CliError::fatal(format!(
+                "failed to decode core.objectformat from repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        }),
+        None => Ok("sha1".to_string()),
+    }
+}
+
+fn set_hash_kind_from_object_format(object_format: String) -> CliResult<()> {
     let hash_kind = match object_format.as_str() {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
@@ -215,7 +304,11 @@ enum Commands {
         after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
-    #[command(subcommand, about = "Large File Storage")]
+    #[command(
+        subcommand,
+        about = "Large File Storage",
+        after_help = command::lfs::LFS_EXAMPLES
+    )]
     Lfs(command::lfs::LfsCmds),
     #[command(
         about = "Manage multiple working trees attached to this repository",
@@ -226,7 +319,7 @@ enum Commands {
 
     #[command(about = "Show commit logs", alias = "hist", alias = "history")]
     Log(command::log::LogArgs),
-    #[command(about = "Summarize 'git log' output", alias = "slog")]
+    #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
@@ -302,7 +395,11 @@ enum Commands {
     )]
     Bisect(Bisect),
 
-    #[command(subcommand, about = "Manage set of tracked repositories")]
+    #[command(
+        subcommand,
+        about = "Manage set of tracked repositories",
+        after_help = command::remote::REMOTE_EXAMPLES
+    )]
     Remote(command::remote::RemoteCmds),
     #[command(about = "Open the repository in the browser")]
     Open(command::open::OpenArgs),
@@ -770,7 +867,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
-                Ok(storage) => Ok(CommandPreflight::repo(storage)),
+                Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                    storage,
+                )),
                 Err(_) => Ok(CommandPreflight::sha1_without_repo()),
             }
         }
@@ -984,7 +1083,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             check_database_schema_for_storage(storage).await?;
         }
         if preflight.set_hash_kind {
-            set_local_hash_kind_for_storage(storage).await?;
+            if preflight.check_schema {
+                set_local_hash_kind_for_storage(storage).await?;
+            } else {
+                set_local_hash_kind_for_storage_without_schema_guard(storage).await?;
+            }
         }
     } else if preflight.set_hash_kind {
         set_hash_kind(HashKind::Sha1);
@@ -1196,6 +1299,56 @@ mod tests {
         assert!(preflight.storage.is_none());
         assert!(!preflight.check_schema);
         assert!(!preflight.set_hash_kind);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn hash_object_read_only_preflight_skips_schema_guard() {
+        let repo = tempfile::tempdir().expect("failed to create test repo");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let cli = Cli::try_parse_from(["libra", "hash-object", "hello.txt"]).unwrap();
+
+        let preflight = command_preflight(&cli.command).unwrap();
+        assert!(preflight.storage.is_some());
+        assert!(!preflight.check_schema);
+        assert!(preflight.set_hash_kind);
+    }
+
+    /// Scenario: every visible command in [`Commands`] must appear in the
+    /// `Command Groups:` section of `ROOT_AFTER_HELP`. Hidden commands
+    /// (e.g. `index-pack`, `hooks`) are intentionally excluded. This
+    /// guards against new visible commands being added without an
+    /// accompanying group entry, which would make them invisible in
+    /// scenario-grouped `libra --help` output even though they remain
+    /// callable.
+    #[test]
+    fn root_after_help_lists_every_visible_command() {
+        use clap::CommandFactory;
+
+        // Curated allowlist of hidden commands (mirrors `hide = true`
+        // attributes on `Commands::*` variants in this file).
+        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks"];
+
+        let cli = Cli::command();
+        for subcommand in cli.get_subcommands() {
+            let name = subcommand.get_name();
+            if HIDDEN_COMMANDS.contains(&name) || subcommand.is_hide_set() {
+                continue;
+            }
+            // `--help` is registered as an alias; skip it.
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                ROOT_AFTER_HELP.contains(name),
+                "ROOT_AFTER_HELP must list every visible command in some \
+                 'Command Groups:' row; missing: `{name}`. Either add it to \
+                 the appropriate group in src/cli.rs:ROOT_AFTER_HELP or, if \
+                 it should be hidden, mark it `hide = true` and add it to \
+                 HIDDEN_COMMANDS in this test."
+            );
+        }
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

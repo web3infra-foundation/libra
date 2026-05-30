@@ -8,7 +8,7 @@ C4（Audit P2）
 
 ### 已确认落地的基线
 - 第 4 批 [stash.md](../stash.md) 已落地：`StashError` typed enum（14 变体）、`run_stash()` / `render_stash_output()` 拆分、JSON / machine / human 三套渲染共用同一份 `StashOutput`、`STASH_EXAMPLES` `--help` 接入。
-- [`src/command/stash.rs`](../../../src/command/stash.rs) 与 [`src/cli.rs`](../../../src/cli.rs) 中的 `Stash` enum 已实现 `Push` / `Pop` / `List` / `Apply` / `Drop` / `Show` / `Branch` / `Clear` 八个 variant；C4 计划的 `show` / `branch` / `clear` 扩展已经在主分支落地（参见 src/cli.rs:335-382）。`StashOutput` 是 `#[serde(tag = "action")]` enum，扩展时直接加新 variant。
+- [`src/command/stash.rs`](../../../src/command/stash.rs) 与 [`src/cli.rs`](../../../src/cli.rs) 中的 `Stash` enum 已实现 `Push` / `Pop` / `List` / `Apply` / `Drop` / `Show` / `Branch` / `Clear` 八个 variant；C4 计划的 `show` / `branch` / `clear` 扩展已经在主分支落地（参见 src/cli.rs:425-472）。`StashOutput` 是 `#[serde(tag = "action")]` enum，扩展时直接加新 variant。
 - [`tests/command/stash_test.rs`](../../../tests/command/stash_test.rs) 已覆盖八个子命令的 happy path / error path / JSON 输出（含 `BranchExists` / `BranchLookupFailed` / `ClearRequiresForce` 三个新增 typed-error 变体）。
 
 ### 基于当前代码的 Review 结论

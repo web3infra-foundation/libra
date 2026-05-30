@@ -56,6 +56,7 @@ use super::{
         GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalEvent, GoalEventEnvelope,
         GoalProgressRecord,
     },
+    prompt::{GoalContinuationPromptBuilder, trimmed_excerpt},
     spec::GoalActor,
     state::GoalState,
     verifier::{GoalVerifier, GoalVerifierContext, GoalVerifyOutcome},
@@ -188,135 +189,6 @@ pub enum GoalLoopDecision {
 pub struct GoalSupervisorStep {
     pub events: Vec<GoalEventEnvelope>,
     pub decision: GoalLoopDecision,
-}
-
-/// Continuation-prompt formatter. Default implementation
-/// [`DefaultGoalContinuationPromptBuilder`] is sufficient for
-/// OC-Phase 6; the trait shape lets P6.7 E2E tests plug a fake
-/// builder for byte-stable golden assertions, and lets future
-/// localisation work (CN/EN bilingual prompts) layer in without
-/// touching the supervisor.
-pub trait GoalContinuationPromptBuilder {
-    fn build(&self, state: &GoalState, outcome: &GoalTurnOutcome) -> String;
-}
-
-/// Default continuation-prompt builder. The wording is opinionated
-/// but stable: it lists the objective, the still-missing required
-/// criteria, recent context (rejection reason / failed tool / final
-/// text the model just gave), and the minimum next step. Phrased so
-/// the model is nudged back into the completion protocol rather
-/// than told what to do verbatim.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultGoalContinuationPromptBuilder;
-
-impl GoalContinuationPromptBuilder for DefaultGoalContinuationPromptBuilder {
-    fn build(&self, state: &GoalState, outcome: &GoalTurnOutcome) -> String {
-        let mut out = String::new();
-        out.push_str("Goal still active.\n");
-        out.push_str(&format!("Objective: {}\n", state.spec.objective));
-
-        // Missing required criteria — the verifier will reject any
-        // claim that doesn't cover these, so surface them every turn.
-        let missing_required: Vec<&str> = state
-            .spec
-            .acceptance_criteria
-            .iter()
-            .filter(|c| c.required && !state.completed_criteria.contains(c.id.as_str()))
-            .map(|c| c.id.as_str())
-            .collect();
-        if missing_required.is_empty() {
-            out.push_str("All required criteria already satisfied; ");
-            out.push_str("call `submit_goal_complete` when the workspace evidence is in place.\n");
-        } else {
-            out.push_str("Required criteria still pending: ");
-            out.push_str(&missing_required.join(", "));
-            out.push('\n');
-        }
-
-        // Outcome-specific nudge.
-        match outcome {
-            GoalTurnOutcome::Progressing {
-                last_assistant_text,
-            } => {
-                if let Some(text) = last_assistant_text
-                    && !text.trim().is_empty()
-                {
-                    out.push_str(&format!("Last assistant note: {}\n", trimmed_excerpt(text)));
-                }
-                out.push_str(
-                    "Continue the work — call tools or `update_goal_progress` to record \
-                     progress, then `submit_goal_complete` when you have evidence for every \
-                     required criterion.\n",
-                );
-            }
-            GoalTurnOutcome::FinalTextWithoutClaim { text } => {
-                out.push_str(&format!("Last assistant text: {}\n", trimmed_excerpt(text)));
-                out.push_str(
-                    "Final text alone does not complete a Goal. Call `submit_goal_complete` \
-                     with the full evidence list, or `update_goal_progress` if work remains.\n",
-                );
-            }
-            GoalTurnOutcome::ProgressUpdate { record } => {
-                out.push_str(&format!(
-                    "Recorded progress: {}\n",
-                    trimmed_excerpt(&record.summary)
-                ));
-                out.push_str("Drive the next step toward the remaining criteria.\n");
-            }
-            GoalTurnOutcome::CompletionClaim { .. } => {
-                // Verifier rejected — `step()` already appended the
-                // CompletionRejected event, so the missing list and
-                // reason live in `state.blockers`.
-                if let Some(blocker) = state.blockers.last()
-                    && let GoalBlockReason::CompletionRejected { missing, reason } = &blocker.reason
-                {
-                    out.push_str(&format!(
-                        "Verifier rejected the last claim: {}\nMissing: {}\n",
-                        reason,
-                        missing.join(", "),
-                    ));
-                }
-                out.push_str(
-                    "Address the missing items, then call `submit_goal_complete` again \
-                     with the full evidence list.\n",
-                );
-            }
-            // The remaining variants either lead to AwaitUser /
-            // Cancelled / Completed (where no continuation prompt
-            // is built) or are caller-internal signals that hit a
-            // Blocked event the supervisor records. The
-            // continuation prompt for the *next* turn (after the
-            // user resolves the blocker) is built from the new
-            // `state.blockers` and lands on the `Progressing` arm
-            // above. Default to a generic nudge here so a caller
-            // that asks for a prompt anyway gets something useful.
-            _ => {
-                if let Some(blocker) = state.blockers.last() {
-                    out.push_str(&format!("Outstanding blocker: {:?}\n", blocker.reason,));
-                }
-                out.push_str("Resume by addressing the outstanding blocker.\n");
-            }
-        }
-
-        out
-    }
-}
-
-/// Trim and excerpt a long piece of text so the continuation prompt
-/// stays bounded. The doc forbids stuffing raw transcripts back into
-/// Goal events / prompts (opencode.md:619-625), and the supervisor's
-/// generated prompt counts as one of those entry points.
-fn trimmed_excerpt(text: &str) -> String {
-    const MAX_EXCERPT_BYTES: usize = 320;
-    let trimmed = text.trim();
-    if trimmed.len() <= MAX_EXCERPT_BYTES {
-        return trimmed.to_string();
-    }
-    let mut end = MAX_EXCERPT_BYTES;
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &trimmed[..end])
 }
 
 /// Goal-mode supervisor. Holds the stop policy + verifier + prompt
@@ -676,9 +548,9 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::goal::{
-        DeterministicGoalVerifier, GoalActor, GoalBudget, GoalCompletionClaim, GoalCriterion,
-        GoalEvidencePolicy, GoalEvidenceRef, GoalEvidenceTarget, GoalSpec, GoalStatus,
-        GoalVerificationRecord, RecentToolCall,
+        DefaultGoalContinuationPromptBuilder, DeterministicGoalVerifier, GoalActor, GoalBudget,
+        GoalCompletionClaim, GoalCriterion, GoalEvidencePolicy, GoalEvidenceRef,
+        GoalEvidenceTarget, GoalSpec, GoalStatus, GoalVerificationRecord, RecentToolCall,
     };
 
     fn fixture_now() -> DateTime<Utc> {

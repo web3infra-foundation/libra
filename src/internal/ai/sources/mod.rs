@@ -388,6 +388,12 @@ pub struct SourceCallRecord {
 #[derive(Clone, Default)]
 pub struct SourceCallLog {
     records: Arc<Mutex<Vec<SourceCallRecord>>>,
+    /// Optional SeaORM connection for persistent row writes (v0.17.803).
+    /// `None` keeps the v0.16.x in-memory-only behaviour for tests
+    /// and ad-hoc constructions; production session bootstrap calls
+    /// `with_persistence(conn)` to attach the per-session DB so a
+    /// crash no longer drops the audit trail.
+    db: Option<Arc<sea_orm::DatabaseConnection>>,
 }
 
 impl SourceCallLog {
@@ -395,12 +401,72 @@ impl SourceCallLog {
         Self::default()
     }
 
+    /// Attach a SeaORM connection so every `record(...)` also lands
+    /// a `source_call_log` row (v0.17.800 migration `2026052301`).
+    /// Returns `self` for fluent construction.
+    pub fn with_persistence(mut self, db: Arc<sea_orm::DatabaseConnection>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
     fn record(&self, record: SourceCallRecord) -> Result<(), SourcePoolError> {
+        let in_memory_copy = record.clone();
         let mut records = self
             .records
             .lock()
             .map_err(|_| SourcePoolError::Internal("source call log lock poisoned".to_string()))?;
         records.push(record);
+        drop(records);
+        if let Some(db) = self.db.clone() {
+            // v0.17.803 producer wire-up: spawn the SeaORM Insert
+            // off the hot path so the source call itself stays
+            // sync. Failures degrade silently via `tracing::warn!`
+            // — the in-memory copy is the authoritative shape for
+            // the rest of the session; a DB write failure should
+            // not surface as a tool-call error to the caller.
+            tokio::spawn(async move {
+                let active = crate::internal::model::source_call_log::ActiveModel {
+                    id: sea_orm::ActiveValue::Set(uuid::Uuid::new_v4().to_string()),
+                    session_id: sea_orm::ActiveValue::Set(in_memory_copy.session_id.clone()),
+                    source_slug: sea_orm::ActiveValue::Set(in_memory_copy.source_slug.clone()),
+                    tool_name: sea_orm::ActiveValue::Set(in_memory_copy.tool_name.clone()),
+                    registered_tool_name: sea_orm::ActiveValue::Set(
+                        in_memory_copy.registered_tool_name.clone(),
+                    ),
+                    tool_call_id: sea_orm::ActiveValue::Set(in_memory_copy.tool_call_id.clone()),
+                    credential_ref: sea_orm::ActiveValue::Set(
+                        in_memory_copy.credential_ref.clone(),
+                    ),
+                    latency_ms: sea_orm::ActiveValue::Set(
+                        in_memory_copy
+                            .latency_ms
+                            .map(|ms| ms.min(i64::MAX as u128) as i64),
+                    ),
+                    input_bytes: sea_orm::ActiveValue::Set(in_memory_copy.input_bytes as i64),
+                    output_bytes: sea_orm::ActiveValue::Set(in_memory_copy.output_bytes as i64),
+                    cost_estimate_micros: sea_orm::ActiveValue::Set(
+                        in_memory_copy.cost_estimate_micros.map(|c| c as i64),
+                    ),
+                    approval_decision: sea_orm::ActiveValue::Set(
+                        in_memory_copy.approval_decision.clone(),
+                    ),
+                    state_namespace: sea_orm::ActiveValue::Set(
+                        in_memory_copy.state_namespace.clone(),
+                    ),
+                    success: sea_orm::ActiveValue::Set(if in_memory_copy.success { 1 } else { 0 }),
+                    created_at: sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339()),
+                };
+                use sea_orm::ActiveModelTrait;
+                if let Err(err) = active.insert(db.as_ref()).await {
+                    tracing::warn!(
+                        %err,
+                        source_slug = %in_memory_copy.source_slug,
+                        tool_call_id = %in_memory_copy.tool_call_id,
+                        "failed to persist source_call_log row; in-memory log retained",
+                    );
+                }
+            });
+        }
         Ok(())
     }
 
@@ -647,6 +713,21 @@ impl SourcePool {
         Self::default()
     }
 
+    /// Construct a pool whose `call_log` is wired to persist each
+    /// `SourceCallRecord` to the supplied `DatabaseConnection` via
+    /// the v0.17.800 `source_call_log` migration. See
+    /// [`SourceCallLog::with_persistence`] for the underlying
+    /// semantics; this is the convenience entry the libra-code
+    /// session bootstrap calls so the call_log replaces the
+    /// `Mutex<Vec>` in-memory-only behaviour with the durable
+    /// SeaORM-backed shape (v0.17.804).
+    pub fn with_persistence(db: Arc<sea_orm::DatabaseConnection>) -> Self {
+        Self {
+            registrations: Arc::default(),
+            call_log: SourceCallLog::new().with_persistence(db),
+        }
+    }
+
     pub fn register_source(&self, source: Arc<dyn Source>) -> Result<(), SourcePoolError> {
         let enablement = SourceEnablement::default_for_trust_tier(source.manifest().trust_tier);
         self.register_source_with_enablement(source, enablement)
@@ -803,7 +884,123 @@ impl SourceToolHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestValidationError, SourceEnablement, SourcePoolError, TrustTier};
+    use super::{
+        ManifestValidationError, SourceCallLog, SourceCallRecord, SourceEnablement,
+        SourcePoolError, TrustTier,
+    };
+
+    /// v0.17.803 producer wire-up regression: a `SourceCallLog`
+    /// configured with `with_persistence(conn)` inserts a row into
+    /// the `source_call_log` table on every successful `record(...)`,
+    /// while the in-memory `records()` snapshot continues to track
+    /// the same entries.
+    #[tokio::test]
+    async fn record_with_persistence_writes_seaorm_row_and_keeps_in_memory_copy() {
+        use std::sync::Arc;
+
+        use sea_orm::{Database, EntityTrait};
+
+        use crate::internal::db::migration::run_builtin_migrations;
+
+        let conn = Database::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory db");
+        run_builtin_migrations(&conn)
+            .await
+            .expect("migrations must apply on fresh DB");
+
+        let log = SourceCallLog::new().with_persistence(Arc::new(conn.clone()));
+        let record = SourceCallRecord {
+            session_id: "sess-1".to_string(),
+            source_slug: "mcp:git-tools".to_string(),
+            tool_name: "git_log".to_string(),
+            registered_tool_name: "git_log".to_string(),
+            tool_call_id: "call_abc".to_string(),
+            credential_ref: None,
+            latency_ms: Some(42),
+            input_bytes: 100,
+            output_bytes: 200,
+            cost_estimate_micros: None,
+            approval_decision: Some("auto".to_string()),
+            state_namespace: "mcp:git-tools".to_string(),
+            success: true,
+        };
+
+        log.record(record.clone()).expect("record must succeed");
+
+        // The in-memory copy is immediate.
+        let snapshot = log.records().expect("records snapshot must succeed");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].tool_call_id, "call_abc");
+
+        // The SeaORM Insert is spawned off the hot path; poll a few
+        // times to give it a chance to land before asserting the row
+        // count. Bounded to 1 second so a regression that breaks the
+        // insert path fails the test instead of hanging it.
+        use crate::internal::model::source_call_log;
+        let mut rows = source_call_log::Entity::find()
+            .all(&conn)
+            .await
+            .expect("query must succeed");
+        for _ in 0..10 {
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            rows = source_call_log::Entity::find()
+                .all(&conn)
+                .await
+                .expect("re-query must succeed");
+        }
+        assert_eq!(
+            rows.len(),
+            1,
+            "SeaORM Insert must land a row in source_call_log within 1 second",
+        );
+        let row = &rows[0];
+        assert_eq!(row.session_id, "sess-1");
+        assert_eq!(row.source_slug, "mcp:git-tools");
+        assert_eq!(row.tool_name, "git_log");
+        assert_eq!(row.registered_tool_name, "git_log");
+        assert_eq!(row.tool_call_id, "call_abc");
+        assert_eq!(row.credential_ref, None);
+        assert_eq!(row.latency_ms, Some(42));
+        assert_eq!(row.input_bytes, 100);
+        assert_eq!(row.output_bytes, 200);
+        assert_eq!(row.cost_estimate_micros, None);
+        assert_eq!(row.approval_decision.as_deref(), Some("auto"));
+        assert_eq!(row.state_namespace, "mcp:git-tools");
+        assert_eq!(row.success, 1);
+    }
+
+    /// Default `SourceCallLog::new()` (no persistence) keeps the
+    /// v0.16.x in-memory-only behaviour. A regression that always
+    /// required a DB connection would break tests and ad-hoc
+    /// constructions.
+    #[test]
+    fn record_without_persistence_falls_back_to_in_memory_only() {
+        let log = SourceCallLog::new();
+        let record = SourceCallRecord {
+            session_id: "sess-2".to_string(),
+            source_slug: "openapi:weather".to_string(),
+            tool_name: "forecast".to_string(),
+            registered_tool_name: "forecast".to_string(),
+            tool_call_id: "call_xyz".to_string(),
+            credential_ref: Some("vault:weather-api-key".to_string()),
+            latency_ms: None,
+            input_bytes: 0,
+            output_bytes: 0,
+            cost_estimate_micros: None,
+            approval_decision: None,
+            state_namespace: "openapi:weather".to_string(),
+            success: false,
+        };
+        log.record(record).expect("record must succeed without DB");
+        let snapshot = log.records().expect("snapshot must succeed");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].tool_call_id, "call_xyz");
+        assert!(!snapshot[0].success);
+    }
 
     #[test]
     fn manifest_validation_error_display_pins_each_variant() {

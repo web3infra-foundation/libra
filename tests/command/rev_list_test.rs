@@ -201,3 +201,36 @@ fn test_rev_list_quiet_suppresses_stdout() {
         output.stdout
     );
 }
+
+/// `libra rev-list --help` surfaces the EXAMPLES banner so users see
+/// the default HEAD walk, an explicit branch walk, a relative ref walk,
+/// the JSON variant, and the quiet form without reading the design doc.
+/// Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+#[test]
+fn test_rev_list_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for rev-list --help");
+    let output = run_libra_command(&["rev-list", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "rev-list --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "rev-list --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra rev-list",
+        "libra rev-list main",
+        "libra rev-list HEAD~5",
+        "libra rev-list --json HEAD",
+        "libra rev-list --quiet HEAD",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "rev-list --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

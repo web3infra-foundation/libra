@@ -22,11 +22,12 @@ use libra::{
             history::HistoryManager,
             projection::{
                 LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef,
-                ProjectionRebuilder, ProjectionResolver, SchedulerState, SchedulerStateCasError,
-                SchedulerStateRepository, ThreadIntentLinkReason, ThreadIntentRef,
-                ThreadParticipant, ThreadParticipantRole, ThreadProjection,
+                ProjectionRebuilder, ProjectionResolver, ResumeAction, ResumeBundle, ResumeReason,
+                SchedulerState, SchedulerStateCasError, SchedulerStateRepository, ThreadBundle,
+                ThreadIntentLinkReason, ThreadIntentRef, ThreadParticipant, ThreadParticipantRole,
+                ThreadProjection,
             },
-            runtime::contracts::ProjectionFreshness,
+            runtime::contracts::{ProjectionFreshness, WorkflowPhase},
         },
         db,
     },
@@ -239,6 +240,77 @@ async fn projection_resolver_returns_stale_read_only_when_scheduler_row_is_missi
     assert!(bundle.scheduler.selected_plan_ids.is_empty());
 }
 
+/// Scenario: the query-index read contract must degrade the same way as the
+/// thread bundle. If the thread projection exists but the scheduler row is
+/// missing, index reads are allowed for diagnostics/UI display but must be
+/// marked `StaleReadOnly` so callers do not advance runtime state from them.
+#[tokio::test]
+async fn projection_resolver_returns_stale_read_only_query_indexes_when_scheduler_row_is_missing() {
+    let db = setup_db().await;
+    let thread_id = id("abababab-abab-4aba-8aba-abababababab");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.thread_id, thread_id);
+    assert_eq!(indexes.freshness, ProjectionFreshness::StaleReadOnly);
+    assert!(indexes.intent_plan_index.is_empty());
+    assert!(indexes.intent_task_index.is_empty());
+}
+
+/// Scenario: query-index reads must diagnose when the scheduler references
+/// plans/tasks/runs that the denormalized indexes cannot resolve. Without this,
+/// a resume or diagnostics surface can look "fresh" while silently losing the
+/// links needed to rebuild the ready queue.
+#[tokio::test]
+async fn projection_resolver_query_indexes_diagnose_missing_scheduler_links() {
+    let db = setup_db().await;
+    let thread_id = id("acacacac-acac-4aca-8aca-acacacacacac");
+    let active_task_id = id("adadadad-adad-4ada-8ada-adadadadadad");
+    let active_run_id = id("aeaeaeae-aeae-4aea-8aea-aeaeaeaeaeae");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(active_task_id);
+    scheduler.active_run_id = Some(active_run_id);
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    let codes = indexes
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"missing_intent_plan_index"),
+        "expected missing plan index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+    assert!(
+        codes.contains(&"missing_active_task_index"),
+        "expected missing task index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+    assert!(
+        codes.contains(&"missing_active_run_index"),
+        "expected missing run index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+}
+
 /// Scenario: when neither projection nor scheduler rows exist but the underlying
 /// history has Intent + Task objects, `load_or_rebuild_thread_bundle` reconstructs a
 /// `Fresh` bundle from the AI history. Confirms the rebuild path is reachable end to
@@ -277,4 +349,334 @@ async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {
     assert_eq!(bundle.thread.thread_id, intent.header().object_id());
     assert_eq!(bundle.thread.intents.len(), 1);
     assert_eq!(bundle.scheduler.thread_id, intent.header().object_id());
+}
+
+/// Scenario: when query-index projections are missing but the immutable history
+/// contains an Intent + Task pair, the resolver must run the same targeted rebuild
+/// path before exposing the denormalized rows. This is the read-side contract for
+/// consumers that need cheap `intent -> task` lookups without treating stale rows as
+/// writable runtime state.
+#[tokio::test]
+#[serial]
+async fn projection_resolver_rebuilds_and_loads_thread_query_indexes() {
+    let (_dir, storage, history, db_conn) = setup_projection_history().await;
+    let actor = ActorRef::human("projection-query-index").unwrap();
+    let intent = Intent::new(actor.clone(), "Rebuild query indexes").unwrap();
+    storage.put_tracked(&intent, &history).await.unwrap();
+    let mut task = Task::new(actor, "Indexed task", None).unwrap();
+    task.set_intent(Some(intent.header().object_id()));
+    let task_id = task.header().object_id();
+    storage.put_tracked(&task, &history).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db_conn.as_ref().clone());
+    assert!(
+        resolver
+            .load_query_indexes(intent.header().object_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let indexes = resolver
+        .load_or_rebuild_query_indexes(intent.header().object_id(), &rebuilder)
+        .await
+        .unwrap()
+        .expect("rebuilt query indexes");
+
+    assert_eq!(indexes.thread_id, intent.header().object_id());
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    assert!(indexes.intent_plan_index.is_empty());
+    assert_eq!(indexes.intent_task_index.len(), 1);
+    assert!(indexes.plan_step_task_index.is_empty());
+    assert!(indexes.task_run_index.is_empty());
+    assert!(indexes.run_event_index.is_empty());
+    assert!(indexes.run_patchset_index.is_empty());
+    assert!(indexes.intent_context_frame_index.is_empty());
+    let intent_task = &indexes.intent_task_index[0];
+    assert_eq!(intent_task.intent_id, intent.header().object_id());
+    assert_eq!(intent_task.task_id, task_id);
+
+    let direct = resolver
+        .load_query_indexes(intent.header().object_id())
+        .await
+        .unwrap()
+        .expect("materialized query indexes");
+    assert_eq!(direct, indexes);
+}
+
+/// Scenario: the resume entrypoint must do the rebuild/freshness step before
+/// returning phase-specific resume metadata. A thread rebuilt from an Intent + Task
+/// history has no selected plan yet, so resume must reopen the planning review rather
+/// than advancing the scheduler on an implicit stale bundle.
+#[tokio::test]
+#[serial]
+async fn projection_resolver_load_for_resume_rebuilds_and_classifies_planning_review() {
+    let (_dir, storage, history, db_conn) = setup_projection_history().await;
+    let actor = ActorRef::human("projection-resume").unwrap();
+    let intent = Intent::new(actor.clone(), "Resume missing projection").unwrap();
+    storage.put_tracked(&intent, &history).await.unwrap();
+    let mut task = Task::new(actor, "Recovered resume task", None).unwrap();
+    task.set_intent(Some(intent.header().object_id()));
+    storage.put_tracked(&task, &history).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db_conn.as_ref().clone());
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let resume = resolver
+        .load_for_resume(intent.header().object_id(), &rebuilder)
+        .await
+        .unwrap()
+        .expect("resume bundle");
+
+    assert_eq!(resume.thread.thread_id, intent.header().object_id());
+    assert_eq!(resume.scheduler.thread_id, intent.header().object_id());
+    assert_eq!(resume.freshness, ProjectionFreshness::Fresh);
+    assert_eq!(resume.phase_at_resume, WorkflowPhase::Planning);
+    assert_eq!(resume.resume_reason, ResumeReason::FreshThread);
+    assert_eq!(
+        resume.resume_actions,
+        vec![ResumeAction::ReopenPlanningReview]
+    );
+}
+
+/// Scenario: if the scheduler already has an active task/run, resume must surface
+/// the interrupted execution state explicitly. This guards the phase-aware contract
+/// from regressing into a generic "fresh thread" resume action.
+#[test]
+fn resume_bundle_marks_active_scheduler_as_interrupted_execution() {
+    let thread_id = id("88888888-8888-4888-8888-888888888888");
+    let active_task_id = id("99999999-9999-4999-8999-999999999999");
+    let active_run_id = id("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(active_task_id);
+    scheduler.active_run_id = Some(active_run_id);
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Fresh,
+    });
+
+    assert_eq!(resume.phase_at_resume, WorkflowPhase::Execution);
+    assert_eq!(resume.resume_reason, ResumeReason::InterruptedRun);
+    assert_eq!(
+        resume.resume_actions,
+        vec![
+            ResumeAction::ResumeScheduler,
+            ResumeAction::RequeueInterruptedRun
+        ]
+    );
+}
+
+/// Scenario: stale projection rows must request a targeted rebuild and only expose
+/// a read-only view. This keeps `--resume` from advancing the scheduler against a
+/// degraded projection.
+#[test]
+fn resume_bundle_routes_stale_projection_to_rebuild_and_read_only() {
+    let thread_id = id("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler: sample_scheduler(thread_id),
+        freshness: ProjectionFreshness::StaleReadOnly,
+    });
+
+    assert_eq!(resume.resume_reason, ResumeReason::ProjectionStale);
+    assert_eq!(
+        resume.resume_actions,
+        vec![
+            ResumeAction::TriggerTargetedRebuild,
+            ResumeAction::OpenReadOnly
+        ]
+    );
+}
+
+/// Scenario: unavailable projections must block automatic resume even when the
+/// scheduler shape looks executable. A rebuild failure is a diagnostics problem,
+/// not permission to continue with a stale active run.
+#[test]
+fn resume_bundle_blocks_unavailable_projection() {
+    let thread_id = id("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_run_id = Some(id("dddddddd-dddd-4ddd-8ddd-dddddddddddd"));
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Unavailable,
+    });
+
+    assert_eq!(resume.resume_reason, ResumeReason::ProjectionUnavailable);
+    assert_eq!(
+        resume.resume_actions,
+        vec![ResumeAction::BlockAutomaticResume]
+    );
+}
+
+/// Scenario: `ResumeBundle` is a read-side contract that can be exposed to UI /
+/// MCP / diagnostics. Pin the wire spelling for the phase, reason, and action list.
+#[test]
+fn resume_bundle_serializes_stable_contract_fields() {
+    let thread_id = id("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+    let mut scheduler = sample_scheduler(thread_id);
+    scheduler.active_task_id = Some(id("ffffffff-ffff-4fff-8fff-ffffffffffff"));
+
+    let resume = ResumeBundle::from_thread_bundle(ThreadBundle {
+        thread: sample_thread(thread_id),
+        scheduler,
+        freshness: ProjectionFreshness::Fresh,
+    });
+    let value = serde_json::to_value(&resume).unwrap();
+
+    assert_eq!(value["phase_at_resume"], json!("execution"));
+    assert_eq!(value["resume_reason"], json!("interrupted_run"));
+    assert_eq!(
+        value["resume_actions"],
+        json!(["resume_scheduler", "requeue_interrupted_run"])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// advance_scheduler (v0.17.592): async wrapper around apply_scheduler_mutation
+// ---------------------------------------------------------------------------
+
+use libra::internal::ai::runtime::{
+    contracts::{ProjectionVersions, SchedulerMutation},
+    phase1::{AdvanceSchedulerError, advance_scheduler},
+};
+
+/// Scenario: an initial `SchedulerState` is inserted at version 1; an
+/// `advance_scheduler` call with a `MarkTaskActive` mutation loads it,
+/// applies the mutation, and CAS-saves the resulting state. Asserts
+/// the persisted state has the new task / run ids and bumped version.
+#[tokio::test]
+async fn advance_scheduler_marks_task_active_end_to_end() {
+    let db = setup_db().await;
+    let thread_id = id("22222222-2222-4222-8222-222222222222");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&sample_scheduler(thread_id))
+        .await
+        .unwrap();
+
+    let task_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let next = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 1,
+                live_context_window: 0,
+            },
+            task_id,
+            run_id: Some(run_id),
+        },
+    )
+    .await
+    .expect("advance_scheduler should apply and CAS-save");
+
+    assert_eq!(next.active_task_id, Some(task_id));
+    assert_eq!(next.active_run_id, Some(run_id));
+    assert_eq!(next.version, 2);
+
+    // Reload to confirm the CAS actually persisted.
+    let reloaded = repo
+        .load(thread_id)
+        .await
+        .unwrap()
+        .expect("state should still exist after advance");
+    assert_eq!(reloaded.active_task_id, Some(task_id));
+    assert_eq!(reloaded.active_run_id, Some(run_id));
+    assert_eq!(reloaded.version, 2);
+}
+
+/// Scenario: advance_scheduler against a thread with no scheduler state
+/// row must surface `AdvanceSchedulerError::StateMissing { thread_id }`
+/// so callers know to `SeedThread` first.
+#[tokio::test]
+async fn advance_scheduler_returns_state_missing_when_thread_has_no_row() {
+    let db = setup_db().await;
+    let thread_id = id("33333333-3333-4333-8333-333333333333");
+    sample_thread(thread_id).create(&db).await.unwrap();
+    // NOTE: no `repo.insert_initial(...)` — the scheduler row is
+    // deliberately absent.
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let error = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 0,
+                live_context_window: 0,
+            },
+            task_id: Uuid::new_v4(),
+            run_id: None,
+        },
+    )
+    .await
+    .expect_err("advance_scheduler must error when no scheduler row exists");
+
+    match error {
+        AdvanceSchedulerError::StateMissing { thread_id: tid } => {
+            assert_eq!(tid, thread_id);
+        }
+        other => panic!("expected StateMissing, got {other:?}"),
+    }
+}
+
+/// Scenario: when the mutation's `expected.scheduler` doesn't match the
+/// loaded state's `version`, advance_scheduler must surface the
+/// pure-function `ApplySchedulerMutationError::VersionMismatch` through
+/// the `AdvanceSchedulerError::Apply` transparent wrapper — before
+/// hitting the CAS path. This proves the pure-function precondition
+/// check fires before the DB CAS would.
+#[tokio::test]
+async fn advance_scheduler_surfaces_version_mismatch_before_cas() {
+    use libra::internal::ai::runtime::phase1::ApplySchedulerMutationError;
+
+    let db = setup_db().await;
+    let thread_id = id("44444444-4444-4444-8444-444444444444");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&sample_scheduler(thread_id))
+        .await
+        .unwrap();
+    // sample_scheduler installs version=1; we ask for expected=99.
+
+    let error = advance_scheduler(
+        &repo,
+        thread_id,
+        SchedulerMutation::MarkTaskActive {
+            expected: ProjectionVersions {
+                thread: 0,
+                scheduler: 99,
+                live_context_window: 0,
+            },
+            task_id: Uuid::new_v4(),
+            run_id: None,
+        },
+    )
+    .await
+    .expect_err("version mismatch must fail-closed before CAS");
+
+    match error {
+        AdvanceSchedulerError::Apply(ApplySchedulerMutationError::VersionMismatch {
+            expected,
+            actual,
+        }) => {
+            assert_eq!(expected, 99);
+            assert_eq!(actual, 1);
+        }
+        other => panic!("expected Apply(VersionMismatch), got {other:?}"),
+    }
+
+    // Reload — version must NOT have advanced (no CAS happened).
+    let reloaded = repo.load(thread_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.version, 1, "no CAS should have run");
 }

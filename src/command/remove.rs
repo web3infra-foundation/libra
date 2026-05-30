@@ -19,7 +19,27 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra rm --help` output.
+///
+/// `rm` (aliased to `remove` / `delete`) removes paths from the index
+/// and (unless `--cached`) the working tree. The banner pins single-file
+/// removal, recursive directory removal, `--cached` for "keep file but
+/// untrack", `--force` for overriding the conflicting-state safety
+/// rules, `--dry-run` for previewing, pathspec-from-file for scripts,
+/// and a JSON variant for agents. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const REMOVE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra rm stale.txt                      Remove a single tracked file from index and working tree
+    libra rm -r logs/                       Recursively remove a tracked directory
+    libra rm --cached secrets.env           Untrack the file but keep it on disk
+    libra rm -f conflicted.txt              Force removal even if the file has unstaged changes
+    libra rm --dry-run --cached '*.tmp'     Preview what would be untracked without applying
+    libra rm --pathspec-from-file=todo.txt  Read NUL- or newline-separated pathspecs from a file
+    libra rm --json stale.txt               Structured JSON output for agents";
+
 #[derive(Parser, Debug, Clone)]
+#[command(after_help = REMOVE_EXAMPLES)]
 pub struct RemoveArgs {
     /// file or dir to remove
     pub pathspec: Vec<String>,

@@ -79,7 +79,7 @@ use rmcp::transport::streamable_http_server::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::connect_async;
@@ -99,7 +99,7 @@ use crate::{
         ai::{
             agent::{
                 TaskIntent, ToolLoopConfig,
-                profile::{AgentProfileRouter, load_profiles},
+                profile::{AgentProfileRouter, AgentsConfig, load_profiles},
             },
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
@@ -120,8 +120,8 @@ use crate::{
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
                 ApprovalCachePolicy, ApprovalStore, AskForApproval, DEFAULT_APPROVAL_TTL,
-                ExecApprovalRequest, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
-                ToolRuntimeContext, ToolSandboxContext,
+                ExecApprovalRequest, NetworkAccess, SandboxPermissions, SandboxPolicy,
+                ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
             },
             session::{SessionState, SessionStore},
             skills::{SkillDispatcher, load_skills},
@@ -141,12 +141,15 @@ use crate::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle,
-                    CodeUiRuntimeOptions, CodeUiSession, CodeUiSessionStatus,
-                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiInteractionStatus, CodeUiProviderAdapter, CodeUiProviderInfo,
+                    CodeUiRuntimeHandle, CodeUiRuntimeOptions, CodeUiSession,
+                    CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTranscriptEntry,
+                    CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter, initial_snapshot,
+                    snapshot_from_thread_bundle,
                 },
-                headless::{HeadlessCodeRuntime, headless_capabilities},
+                headless::{
+                    HeadlessCodeRuntime, HeadlessSessionPersistence, headless_capabilities,
+                },
                 start as start_web_server,
             },
         },
@@ -419,12 +422,40 @@ impl From<CodeApprovalPolicy> for AskForApproval {
 // CLI argument definition
 // ---------------------------------------------------------------------------
 
+/// `--help` examples shown in `libra code --help` output.
+///
+/// `code` launches the interactive Libra Code session in one of three
+/// modes: TUI (the default), web-only (`--web` / `--web-only`), or
+/// stdio. The banner pins the most common invocations across modes
+/// (TUI default, web-only with a specific provider, `--browser-control
+/// loopback`, `--control write` for local automation write control,
+/// resume by thread id, plan mode, and `--env-file` for vault-less
+/// provider bootstrap) so users see the right entry point without
+/// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const CODE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra code                                       Launch the default TUI session
+    libra code --provider deepseek --model deepseek-reasoner
+                                                     Pick a provider/model at startup
+    libra code --web                                 Run the web server only (no TUI); alias for --web-only
+    libra code --web-only --provider ollama --port 4400
+                                                     Browser-driven session against a local Ollama
+    libra code --web-only --provider codex --browser-control loopback
+                                                     Allow browser write control over loopback
+    libra code --control write                       Enable local automation write control (token + controller checks)
+    libra code --resume <thread-uuid>                Resume a prior canonical thread
+    libra code --plan-mode                           Start in plan-only mode (no apply)
+    libra code --env-file .env.test                  Load provider keys from a dotenv-style file
+    libra code --stdio                               Pipe-driven session for embedding";
+
 /// Command-line arguments for `libra code`.
 ///
 /// This struct is parsed by `clap` and drives all three operating modes
 /// (TUI, web-only, stdio). Many flags are mode-specific and validated
 /// at runtime by [`validate_mode_args`].
 #[derive(Parser, Debug)]
+#[command(after_help = CODE_EXAMPLES)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
     #[arg(long, alias = "web", conflicts_with = "stdio")]
@@ -438,13 +469,12 @@ pub struct CodeArgs {
     #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
-    /// Working directory for the code session.
-    #[arg(long)]
+    /// Working directory for the code session (default: current directory)
+    #[arg(long, value_name = "PATH")]
     pub cwd: Option<PathBuf>,
 
-    /// Path to a libra repository. When specified, the code session uses this
-    /// repository instead of discovering one from the current working directory.
-    #[arg(long)]
+    /// Path to a Libra repository (default: discover from current directory)
+    #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 
     /// Load provider environment variables from a dotenv-style file.
@@ -470,12 +500,12 @@ pub struct CodeArgs {
     #[arg(long = "browser-control", value_enum, conflicts_with = "stdio")]
     pub browser_control: Option<BrowserControlMode>,
 
-    /// Path to the local automation control token file.
-    #[arg(long)]
+    /// Path to the local automation control token file
+    #[arg(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 
-    /// Path to the local automation control discovery info file.
-    #[arg(long)]
+    /// Path to the local automation control discovery info file
+    #[arg(long, value_name = "PATH")]
     pub control_info_file: Option<PathBuf>,
 
     /// AI provider backend
@@ -486,8 +516,8 @@ pub struct CodeArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Sampling temperature
-    #[arg(long)]
+    /// Sampling temperature (provider-specific range, typically 0.0–2.0)
+    #[arg(long, value_name = "FLOAT")]
     pub temperature: Option<f64>,
 
     /// Ollama thinking mode: auto, off, on, low, medium, or high.
@@ -522,7 +552,7 @@ pub struct CodeArgs {
 
     /// Select an agent profile by name. When the profile carries a structured
     /// `model: provider/model[@variant]` binding, the agent's binding wins
-    /// **atomically** — provider, model id, and variant all come from the
+    /// atomically — provider, model id, and variant all come from the
     /// agent's spec, and a separately-supplied `--model` is ignored to avoid
     /// hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles
     /// without a structured binding fall back to the CLI defaults verbatim.
@@ -540,8 +570,8 @@ pub struct CodeArgs {
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
 
-    /// Resume a canonical Libra thread by thread_id.
-    #[arg(long, value_name = "THREAD_ID")]
+    /// Resume a canonical Libra thread by UUID
+    #[arg(long, value_name = "THREAD_UUID")]
     pub resume: Option<String>,
 
     /// Tool approval policy:
@@ -561,8 +591,8 @@ pub struct CodeArgs {
     #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
     pub network_access: CodeNetworkAccess,
 
-    /// Port to listen on (MCP server)
-    #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
+    /// Port for the embedded MCP server to listen on
+    #[arg(long, value_name = "PORT", default_value_t = DEFAULT_MCP_PORT)]
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
@@ -574,20 +604,20 @@ pub struct CodeArgs {
     /// For Ollama, use a local/remote daemon URL such as
     /// `http://remote-host:11434/v1`, or `https://ollama.com` for direct
     /// Ollama Cloud API access with `OLLAMA_API_KEY`.
-    #[arg(long)]
+    #[arg(long, value_name = "URL")]
     pub api_base: Option<String>,
 
-    /// Codex executable used to launch the managed app-server.
-    #[arg(long, default_value = DEFAULT_CODEX_BIN)]
+    /// Codex executable used to launch the managed app-server
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_CODEX_BIN)]
     pub codex_bin: String,
 
-    /// Override the Codex app-server port. Omit to use a random local free port.
-    #[arg(long)]
+    /// Override the Codex app-server port (default: random local free port)
+    #[arg(long, value_name = "PORT")]
     pub codex_port: Option<u16>,
 
     /// Codex plan-first mode: require an approved plan before execution.
     ///
-    /// When `--provider=codex`, this defaults to **on** so the session
+    /// When `--provider=codex`, this defaults to ON so the session
     /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
     /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
     /// opt out for a single session. For non-Codex providers, omit the flag —
@@ -757,12 +787,18 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
         )
         .await?
     } else {
+        let storage_root = resolve_storage_root(&working_dir);
+        let session_store = Arc::new(SessionStore::from_storage_path(&storage_root));
+        let session_state =
+            load_or_create_headless_web_session_state(args, &working_dir, &session_store)?;
         // Phase 3 v0 routes the supported providers through the new
         // headless runtime. Anything not yet hooked up keeps the read-only
         // placeholder so we fail closed rather than panicking on attach.
         match build_non_codex_headless_runtime(
             args,
             &working_dir,
+            session_store,
+            session_state,
             browser_control == BrowserControlMode::Loopback,
         )
         .await?
@@ -1047,7 +1083,30 @@ fn build_any_completion_model_for_args(
     String,
 )> {
     build_any_completion_model_for_args_with_lookup(args, env_file, working_dir, |key| {
-        std::env::var(key).ok()
+        // Vault-aware fallback chain: try process env first (cheap), then
+        // fall back to the libra config DB (repo-local + global
+        // `vault.env.<name>`) via the sync resolver. Phase 5 from_env →
+        // resolve_env call-site cutover: users who configured an API key
+        // once via `libra config --global add vault.env.GEMINI_API_KEY <…>`
+        // no longer need to re-export it in every shell.
+        //
+        // The DB read may fail (e.g. stale global config schema); we treat
+        // any error as "value not present" here so the provider bootstrap
+        // path falls through to its existing "API key not set" error,
+        // matching the v0.17.534 fallback semantics. Hard schema-mismatch
+        // chains are still surfaced via `tracing::warn!` inside
+        // `resolve_env_for_target`.
+        match crate::internal::config::resolve_env_sync(key) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    key = key,
+                    error = %format!("{error:#}"),
+                    "vault-aware env resolution failed; falling back to None"
+                );
+                None
+            }
+        }
     })
 }
 
@@ -1464,6 +1523,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         mcp_server,
         control_runtime,
         browser_control,
+        initial_goal: args.goal.clone(),
     };
 
     // Create agent based on provider. Every non-Codex provider funnels
@@ -1793,6 +1853,106 @@ fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>>
         .map_err(CliError::command_usage)
 }
 
+const HEADLESS_CODE_UI_SNAPSHOT_METADATA_KEY: &str = "code_ui_snapshot";
+
+struct HeadlessWebSessionBootstrap {
+    store: Arc<SessionStore>,
+    state: SessionState,
+}
+
+struct HeadlessApprovalChannels {
+    exec_approval_tx: mpsc::UnboundedSender<ExecApprovalRequest>,
+    exec_approval_rx: mpsc::UnboundedReceiver<ExecApprovalRequest>,
+}
+
+fn load_or_create_headless_web_session_state(
+    args: &CodeArgs,
+    working_dir: &Path,
+    session_store: &Arc<SessionStore>,
+) -> CliResult<SessionState> {
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+    let mut session = if let Some(thread_id) = args.resume.as_deref() {
+        if thread_id.trim().is_empty() {
+            return Err(CliError::command_usage(
+                "--resume requires a non-empty thread_id",
+            ));
+        }
+        match session_store.load_for_thread_id(thread_id, &working_dir_str) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Err(CliError::fatal(format!(
+                    "no Libra Code session found for thread_id '{thread_id}' in working directory '{working_dir_str}'"
+                )));
+            }
+            Err(error) => {
+                return Err(CliError::io(format!(
+                    "failed to load Libra Code session for thread_id '{thread_id}': {error}"
+                )));
+            }
+        }
+    } else {
+        SessionState::new(&working_dir_str)
+    };
+
+    let thread_id = session_canonical_thread_id(&session).unwrap_or_else(|| session.id.clone());
+    session
+        .metadata
+        .entry("thread_id".to_string())
+        .or_insert_with(|| serde_json::json!(thread_id));
+    Ok(session)
+}
+
+fn build_headless_web_code_ui_snapshot(
+    working_dir: &Path,
+    provider: CodeUiProviderInfo,
+    capabilities: CodeUiCapabilities,
+    session: &SessionState,
+) -> CodeUiSessionSnapshot {
+    let working_dir = working_dir.to_string_lossy().to_string();
+    let mut snapshot = session
+        .metadata
+        .get(HEADLESS_CODE_UI_SNAPSHOT_METADATA_KEY)
+        .and_then(|value| serde_json::from_value::<CodeUiSessionSnapshot>(value.clone()).ok())
+        .unwrap_or_else(|| {
+            initial_snapshot(working_dir.clone(), provider.clone(), capabilities.clone())
+        });
+
+    snapshot.session_id = session.id.clone();
+    snapshot.thread_id =
+        Some(session_canonical_thread_id(session).unwrap_or_else(|| session.id.clone()));
+    snapshot.working_dir = working_dir;
+    snapshot.provider = provider;
+    snapshot.capabilities = capabilities;
+    if snapshot.transcript.is_empty() {
+        snapshot.transcript = build_tui_code_ui_transcript(session);
+    }
+
+    let now = Utc::now();
+    for entry in &mut snapshot.transcript {
+        if entry.streaming {
+            entry.streaming = false;
+            if !matches!(
+                entry.status.as_deref(),
+                Some("completed" | "error" | "cancelled")
+            ) {
+                entry.status = Some("cancelled".to_string());
+            }
+            entry.updated_at = now;
+        }
+    }
+    let has_pending_interaction = snapshot
+        .interactions
+        .iter()
+        .any(|interaction| interaction.status == CodeUiInteractionStatus::Pending);
+    snapshot.status = if has_pending_interaction {
+        CodeUiSessionStatus::AwaitingInteraction
+    } else {
+        CodeUiSessionStatus::Idle
+    };
+    snapshot.updated_at = now;
+    snapshot
+}
+
 /// Build a headless Code UI runtime for `--web-only` non-Codex providers.
 ///
 /// Constructs a minimal local-read-only [`ToolRegistry`]
@@ -1805,11 +1965,13 @@ fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>>
 /// [`BrowserControlMode::Loopback`] so the runtime advertises browser writes
 /// in the snapshot capabilities. The initial controller is `Unclaimed` —
 /// the browser is the only writer in headless mode, no TUI to hand off from.
-pub async fn build_headless_web_code_ui_runtime<M>(
+async fn build_headless_web_code_ui_runtime<M>(
     args: &CodeArgs,
     working_dir: &Path,
+    session_bootstrap: HeadlessWebSessionBootstrap,
     model: M,
     model_name: String,
+    approval_channels: HeadlessApprovalChannels,
     browser_write_enabled: bool,
 ) -> CliResult<Arc<CodeUiRuntimeHandle>>
 where
@@ -1818,6 +1980,14 @@ where
 {
     use crate::internal::ai::agent::runtime::tool_loop::ToolLoopConfig;
 
+    let HeadlessWebSessionBootstrap {
+        store: session_store,
+        state: session_state,
+    } = session_bootstrap;
+    let HeadlessApprovalChannels {
+        exec_approval_tx,
+        exec_approval_rx,
+    } = approval_channels;
     let provider_name = format!("{:?}", args.provider).to_lowercase();
     let provider = CodeUiProviderInfo {
         provider: provider_name.clone(),
@@ -1826,16 +1996,37 @@ where
         managed: false,
     };
     let capabilities = headless_capabilities();
-
-    let mut snapshot = initial_snapshot(
-        working_dir.to_string_lossy().to_string(),
+    let initial_history = session_state.to_history();
+    let snapshot = build_headless_web_code_ui_snapshot(
+        working_dir,
         provider,
         capabilities.clone(),
+        &session_state,
     );
-    snapshot.status = CodeUiSessionStatus::Idle;
     let session = CodeUiSession::new(snapshot);
+    let persistence = HeadlessSessionPersistence::new(session_store, session_state);
 
-    let registry = build_headless_tool_registry(working_dir);
+    let approval_config = approval_config_from_project_config(working_dir);
+    let approval_ttl = args
+        .approval_ttl
+        .map(Duration::from_secs)
+        .or(approval_config.ttl)
+        .unwrap_or(DEFAULT_APPROVAL_TTL);
+    let (user_input_tx, user_input_rx) = mpsc::unbounded_channel::<UserInputRequest>();
+    let runtime_context = Some(default_tui_runtime_context(
+        working_dir,
+        args.context,
+        DefaultTuiApprovalConfig {
+            policy: args.approval_policy.into(),
+            allow_all_commands: args.approval_policy.allows_all_commands(),
+            ttl: approval_ttl,
+            cache_policy: approval_config.cache_policy,
+        },
+        args.network_access.is_allowed(),
+        exec_approval_tx,
+    ));
+
+    let registry = build_headless_tool_registry(working_dir, user_input_tx);
     let preamble = system_preamble(working_dir, args.context, args.provider, Some(&model_name));
     let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
     let temperature = args.temperature;
@@ -1851,10 +2042,21 @@ where
             reasoning_effort,
             stream,
             preserve_reasoning_content,
+            runtime_context: runtime_context.clone(),
             ..Default::default()
         });
 
-    let adapter = HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory);
+    let adapter = HeadlessCodeRuntime::new_with_persistence(
+        session,
+        capabilities,
+        model,
+        registry,
+        user_input_rx,
+        exec_approval_rx,
+        config_factory,
+        initial_history,
+        Some(persistence),
+    );
 
     let mut runtime_options = CodeUiRuntimeOptions::new(
         browser_write_enabled,
@@ -1865,25 +2067,16 @@ where
     Ok(CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await)
 }
 
-fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
-    // Headless v0 ships **local-read-only** tools.
-    //
-    // The TUI flow attaches a `ToolRuntimeContext` (sandbox policy, approval
-    // store, network policy, user-input channel) to every `ToolLoopConfig`
-    // so `apply_patch` / `shell` invocations route through `LibraSandbox`
-    // and the approval queues, and so `web_search` honors `--network-access
-    // deny`. The headless runtime does not yet wire any of those into the
-    // browser `CodeUiInteractionRequest` surface, so:
-    //
-    // - `apply_patch` / `shell`: registering would let the agent mutate the
-    //   workspace without any sandbox or approval prompt — a security
-    //   regression vs. the TUI path.
-    // - `web_search`: `WebSearchHandler` allows network access whenever no
-    //   runtime context is present, which would silently bypass any
-    //   `--network-access deny` posture set on the CLI.
-    //
-    // Until the interaction-routing follow-up lands, headless mode exposes
-    // local-read-only tools only.
+fn build_headless_tool_registry(
+    working_dir: &Path,
+    user_input_tx: mpsc::UnboundedSender<UserInputRequest>,
+) -> Arc<ToolRegistry> {
+    // Headless web mode now reuses the same ToolRuntimeContext path as TUI:
+    // shell/apply_patch route through sandbox + exec approval, web_search sees
+    // the CLI network policy, and pending approvals surface through
+    // CodeUiInteractionRequest. `submit_plan_draft` is exposed because
+    // headless projects it into plans[]; workflow tools that require a
+    // session driver (`task`, `submit_intent_draft`) remain gated.
     let trace_id = uuid::Uuid::new_v4();
     let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
         .hardening(ToolBoundaryRuntime::system(
@@ -1893,7 +2086,16 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
-        .register("search_files", Arc::new(SearchFilesHandler));
+        .register("search_files", Arc::new(SearchFilesHandler))
+        .register("web_search", Arc::new(WebSearchHandler))
+        .register("apply_patch", Arc::new(ApplyPatchHandler))
+        .register("shell", Arc::new(ShellHandler))
+        .register("update_plan", Arc::new(PlanHandler))
+        .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
+        .register(
+            "request_user_input",
+            Arc::new(RequestUserInputHandler::new(user_input_tx)),
+        );
     Arc::new(register_semantic_handlers(builder).build())
 }
 
@@ -1902,29 +2104,46 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
 /// provider is not yet wired into the headless path so the caller can fall
 /// back to the read-only placeholder gracefully.
 ///
-/// v0 supports `--provider ollama` (the canonical Phase 3 verification path
-/// in `docs/improvement/web.md`). Other non-Codex providers continue to
-/// receive the placeholder runtime until each provider's client is wired in.
+/// v0 now routes several non-Codex providers through the same provider-factory
+/// bootstrap used by TUI. This keeps API-key/base-URL resolution centralized and
+/// ensures `--web-only` behavior stays aligned with existing provider construction.
 ///
-/// Ollama now reuses the same [`ProviderFactory`] bootstrap as TUI mode, so
-/// API-key/base-URL resolution stays in one place. Other non-Codex providers
-/// still fall back to the placeholder until the headless runtime has the
-/// provider-specific product contract and tests for them.
+/// The placeholder path is still available for providers that are not in this
+/// dispatch arm or fail during bootstrap for other reasons.
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
+    session_store: Arc<SessionStore>,
+    session_state: SessionState,
     browser_write_enabled: bool,
 ) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
+    let (exec_approval_tx, exec_approval_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
+
     match args.provider {
-        CodeProvider::Ollama => {
+        CodeProvider::Gemini
+        | CodeProvider::Openai
+        | CodeProvider::Anthropic
+        | CodeProvider::Deepseek
+        | CodeProvider::Kimi
+        | CodeProvider::Zhipu
+        | CodeProvider::Ollama => {
             let (model, model_name, _) =
                 build_any_completion_model_for_args(args, &CodeEnvFile::default(), working_dir)?;
             Ok(Some(
                 build_headless_web_code_ui_runtime(
                     args,
                     working_dir,
+                    HeadlessWebSessionBootstrap {
+                        store: session_store,
+                        state: session_state,
+                    },
                     model,
                     model_name,
+                    HeadlessApprovalChannels {
+                        exec_approval_tx,
+                        exec_approval_rx,
+                    },
                     browser_write_enabled,
                 )
                 .await?,
@@ -1933,11 +2152,29 @@ async fn build_non_codex_headless_runtime(
         // Codex is handled by `start_codex_code_ui_runtime` in `execute_web_only`;
         // it must never enter this dispatcher.
         CodeProvider::Codex => Ok(None),
-        // Other providers (Gemini, OpenAI, Anthropic, DeepSeek, Kimi, Zhipu)
-        // can be added incrementally — each needs a `with_api_key`/`from_env`
-        // construction matching the TUI path. Until then, fall back to the
-        // placeholder.
-        _ => Ok(None),
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => {
+            let (model, model_name, _) =
+                build_any_completion_model_for_args(args, &CodeEnvFile::default(), working_dir)?;
+            Ok(Some(
+                build_headless_web_code_ui_runtime(
+                    args,
+                    working_dir,
+                    HeadlessWebSessionBootstrap {
+                        store: session_store,
+                        state: session_state,
+                    },
+                    model,
+                    model_name,
+                    HeadlessApprovalChannels {
+                        exec_approval_tx,
+                        exec_approval_rx,
+                    },
+                    browser_write_enabled,
+                )
+                .await?,
+            ))
+        }
     }
 }
 
@@ -2296,6 +2533,10 @@ struct TuiLaunchConfig {
     mcp_server: Arc<LibraMcpServer>,
     control_runtime: ControlRuntimeConfig,
     browser_control: BrowserControlMode,
+    /// Goal objective passed via `libra code --goal`. The TUI app
+    /// uses this to bootstrap a `GoalSpec` and seed
+    /// [`AppConfig::initial_goal`] before the first turn.
+    initial_goal: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2603,6 +2844,13 @@ where
     } else {
         SessionState::new(&working_dir_str)
     };
+    // v0.17.791 session-bootstrap usage auto-prune: if the
+    // operator configured `[usage] retention_days = N` in
+    // `config.toml`, drop usage rows older than N days at session
+    // start. Soft-failure (logs warn + continues) so a malformed
+    // config or DB error doesn't block startup.
+    crate::command::usage::auto_prune_at_session_start(&storage_root).await;
+
     if let Some(usage_recorder) = build_usage_recorder(&storage_root).await {
         config.usage_recorder = Some(usage_recorder);
         config.usage_context = Some(UsageContext {
@@ -2792,7 +3040,47 @@ where
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
-    let source_pool = SourcePool::new();
+    // OC-Phase 5 P5.1 session bootstrap (v0.17.775): read the
+    // operator's `.libra/agents.toml` if present so
+    // `code.sub_agents.enabled` / `code.multi_agent.enabled` /
+    // `[code.budget]` / `[code.agents.*]` etc. actually take
+    // effect. Missing file degrades to `AgentsConfig::default()`
+    // (the previous hardcoded behavior) per `load_or_default`'s
+    // contract. Parse errors are surfaced as a warning rather than
+    // failing the session — a malformed config should not block an
+    // operator from starting `libra code` to fix it.
+    let agents_config_path = registry.working_dir().join(".libra").join("agents.toml");
+    let agents_config = AgentsConfig::load_or_default(&agents_config_path).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            path = %agents_config_path.display(),
+            "failed to load agents.toml; falling back to AgentsConfig::default()",
+        );
+        AgentsConfig::default()
+    });
+    // v0.17.804 source_call_log persistence wire-up: build the
+    // pool with the per-session SeaORM connection so every
+    // SourcePool tool call lands a `source_call_log` row. Soft
+    // fallback to `SourcePool::new()` (in-memory only) if the DB
+    // path can't be resolved or the connection fails — same
+    // posture as `build_usage_recorder` further down so session
+    // bootstrap never blocks on a telemetry-layer issue.
+    let source_pool = {
+        let db_path = storage_root.join(DATABASE);
+        let db_path_str = db_path.to_string_lossy();
+        match establish_connection(&db_path_str).await {
+            Ok(conn) => SourcePool::with_persistence(Arc::new(conn)),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    path = %db_path.display(),
+                    "failed to open repo DB for SourcePool persistence; \
+                     falling back to in-memory-only source call log",
+                );
+                SourcePool::new()
+            }
+        }
+    };
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
         params.mcp_server.clone(),
@@ -2802,6 +3090,92 @@ where
     }
     config.source_pool = Some(source_pool.clone());
     config.source_session_id = Some(session.id.clone());
+
+    // OC-Phase 3 P3.4 session bootstrap (v0.17.776): when the
+    // operator's agents.toml flips `code.sub_agents.enabled =
+    // true`, build the full `SubAgentToolLoopRuntime` so the
+    // `task` tool actually routes through the dispatcher.
+    //
+    // Required parent context fields are sourced as:
+    //   - dispatcher: DefaultSubAgentDispatcher::new(registry, cfg)
+    //     .with_default_child_runner()
+    //   - permission_service: a `DenyByDefaultPermissionAsker`
+    //     fallback (interactive prompt wiring is a follow-up).
+    //     `UserInitiated{bypass_permission_ask:true}` /task
+    //     paths work; LlmInitiated paths that need escalation
+    //     get rejected with an actionable feedback message.
+    //   - parent_model_binding: ModelBinding from CLI flags.
+    //   - parent_agent: minimal `AgentExecutionSpec` with the
+    //     CLI-resolved model — enough for dispatcher gates
+    //     (depth/concurrency/feature flag) which never reach
+    //     into the parent_agent's tool/permission spec.
+    //   - All other Arc'd state is sourced from values already
+    //     constructed earlier in this function.
+    //
+    // Failure-to-build is logged and the runtime stays None —
+    // `code.sub_agents.enabled = true` with a malformed agents
+    // block degrades to the same "task tool not available" UX
+    // an operator sees with the flag off.
+    //
+    // OC-Phase 4 P4.4 diagnostic (v0.17.783): if the operator
+    // configured `[code.compaction]`, log the resolved model
+    // binding so an operator can confirm the binding round-trip
+    // works before the dispatcher-side integration lands. A
+    // future commit consumes this binding in
+    // `build_subagent_runtime_for_session` to route parent
+    // frames through `run_compaction(...)` before feeding the
+    // child via `ContextHandoff::to_handoff_messages`.
+    if let Some(binding) = agents_config.compaction_model_binding() {
+        tracing::info!(
+            provider = %binding.provider_id,
+            model = %binding.model_id,
+            "compaction model binding resolved from [code.compaction]; \
+             dispatcher integration is a v0.17.783+ follow-up",
+        );
+    }
+    if agents_config.sub_agents.enabled {
+        match build_subagent_runtime_for_session(
+            &agents_config,
+            registry.clone(),
+            &session,
+            &session_store,
+            &storage_root,
+            &model_name,
+            &provider_name,
+            &agent_router,
+            config.hook_runner.clone(),
+            // Hand the dispatcher the parent tool loop's resolved
+            // runtime context (sandbox / approval / file-history)
+            // so dispatched sub-agents inherit the parent's authority
+            // rather than running unsandboxed (S2-INV-06).
+            config.runtime_context.clone(),
+        )
+        .await
+        {
+            Ok(runtime) => {
+                tracing::info!(
+                    enabled = true,
+                    max_depth = agents_config.multi_agent.max_subagent_depth,
+                    // Log the EFFECTIVE concurrency (CEX-S2-12 caps it to
+                    // 1), not the configured value, so the diagnostic
+                    // matches what the dispatcher actually enforces.
+                    max_concurrent = cex_s2_12_subagent_concurrency_cap(
+                        agents_config.multi_agent.max_concurrent_subagents,
+                    ),
+                    "sub-agent dispatcher attached to tool_loop config",
+                );
+                config.subagent_runtime = Some(runtime);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to build SubAgentToolLoopRuntime; the `task` tool will surface \
+                     'sub_agents.enabled = true required' until this is resolved",
+                );
+            }
+        }
+    }
+
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
     let auto_classify_first_user_message =
         params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
@@ -2817,6 +3191,7 @@ where
             command_dispatcher,
             skill_dispatcher,
             agent_router,
+            agents_config,
             session,
             session_store,
             user_input_rx: params.user_input_rx,
@@ -2830,6 +3205,7 @@ where
             managed_code_ui_runtime,
             default_network_access: params.network_access,
             auto_classify_first_user_message,
+            initial_goal: params.initial_goal.clone(),
             source_pool,
         },
     );
@@ -3038,7 +3414,7 @@ fn default_tui_runtime_context(
         Some(CodeContext::Review | CodeContext::Research) => SandboxPolicy::ReadOnly,
         Some(CodeContext::Dev) | None => SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![working_dir.to_path_buf()],
-            network_access,
+            network_access: NetworkAccess::from_legacy_bool(network_access),
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         },
@@ -3238,6 +3614,257 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
     try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
+}
+
+/// CEX-S2-12 "single sub-agent behind flag" concurrency cap.
+///
+/// While the `code.sub_agents.enabled` gate is the only path that
+/// builds a [`SubAgentToolLoopRuntime`], CEX-S2-12 must run at most one
+/// concurrent sub-agent regardless of the operator-configured
+/// `code.multi_agent.max_concurrent_subagents` (and the
+/// `code.sub_agents.max_parallel` schema default of `2`). Real
+/// parallelism stays locked until CEX-S2-14 wires the scheduler-side
+/// observer budget — at which point this returns `configured` instead
+/// of the forced `1`.
+///
+/// Kept as a named pure function (rather than a literal `1` at the call
+/// site) so the cap is documented, greppable, and pinned by a unit test
+/// against a silent regression to passing the operator value through.
+const fn cex_s2_12_subagent_concurrency_cap(_configured: u32) -> u32 {
+    1
+}
+
+/// Construct a [`SubAgentToolLoopRuntime`] from the libra-code
+/// session's resolved state. Called from the session bootstrap
+/// when `agents_config.sub_agents.enabled = true`; failures
+/// degrade to "task tool unavailable" rather than blocking
+/// session startup.
+///
+/// The runtime is shared (cloned by `Option<...>::clone()` since
+/// every field is `Arc`-wrapped or trivially copyable inside its
+/// own owning newtype). Per-call `dispatch_context(call_id)`
+/// captures a fresh `parent_message_id` for each `task` tool
+/// invocation; the rest of the parent context is stable for the
+/// session.
+#[allow(clippy::too_many_arguments)]
+async fn build_subagent_runtime_for_session(
+    agents_config: &AgentsConfig,
+    registry: std::sync::Arc<ToolRegistry>,
+    session: &SessionState,
+    session_store: &SessionStore,
+    storage_root: &Path,
+    model_name: &str,
+    provider_name: &str,
+    agent_router: &AgentProfileRouter,
+    hook_runner: Option<std::sync::Arc<crate::internal::ai::hooks::HookRunner>>,
+    runtime_context: Option<ToolRuntimeContext>,
+) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
+    use crate::internal::ai::{
+        agent::{
+            profile::{AgentExecutionSpec, AgentMode, ModelBinding},
+            runtime::{
+                AbortToken, ChannelPermissionAsker, ContextFrameLoader, DefaultSubAgentDispatcher,
+                MultiAgentConfig, PermissionAsker, PermissionReply, PermissionService,
+                SubAgentToolLoopRuntime,
+            },
+        },
+        providers::{ProviderBuildOptions, ProviderFactory},
+        session::jsonl::SessionJsonlStore,
+    };
+
+    let agent_spec_registry = agents_config
+        .build_agent_registry()
+        .map_err(|err| anyhow::anyhow!("agents.toml validation failed: {err}"))?;
+
+    let dispatcher = DefaultSubAgentDispatcher::new(
+        agent_spec_registry,
+        MultiAgentConfig {
+            enabled: agents_config.multi_agent.enabled,
+            // `agents_config.multi_agent` carries u32 for both
+            // limits to preserve TOML round-trip; the runtime's
+            // `MultiAgentConfig` narrows depth to u8 (a depth of
+            // 256+ is meaningless — that's a recursion bug not a
+            // legitimate config). Saturating cast keeps the
+            // semantics safe when an operator sets a huge u32.
+            max_subagent_depth: agents_config
+                .multi_agent
+                .max_subagent_depth
+                .min(u8::MAX as u32) as u8,
+            // CEX-S2-12 "single sub-agent behind flag": force the
+            // dispatcher concurrency to 1 regardless of the configured
+            // value; CEX-S2-14 unlocks the operator's real budget.
+            max_concurrent_subagents: cex_s2_12_subagent_concurrency_cap(
+                agents_config.multi_agent.max_concurrent_subagents,
+            ),
+        },
+    )
+    .with_default_child_runner()
+    // CEX-S2-12 / S2-INV-03: confine each dispatched sub-agent to a
+    // materialized per-run workspace so its writes never touch the main
+    // worktree. `sessions_root` = the `.libra/sessions` dir the per-run
+    // `AgentRunEventStore` records the `WorkspaceMaterialized` event
+    // under (transcript path `sessions_root/{thread}/agents/{run}.jsonl`).
+    .with_workspace_isolation(
+        crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+            fuse_state: crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+            sessions_root: storage_root.join("sessions"),
+            allow_full_copy: agents_config.multi_agent.allow_full_copy,
+        },
+    );
+
+    // OC-Phase 3 P3.4 / P3.7 interactive permission asker (v0.17.788):
+    // construct a ChannelPermissionAsker + spawn a background
+    // consumer task that auto-rejects each ask while emitting a
+    // structured tracing event with the full ask context. This is
+    // the channel-plumbing wire-up that proves the path end-to-end;
+    // the follow-up replaces the auto-reject consumer with a real
+    // TUI prompt widget that surfaces each ask interactively.
+    //
+    // The consumer task lives for the entire session — when the
+    // session exits, the sender drops, the receiver's `recv()`
+    // returns None, and the task ends cleanly.
+    let (permission_ask_tx, mut permission_ask_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::internal::ai::agent::runtime::ChannelPermissionAsk,
+    >();
+    tokio::spawn(async move {
+        while let Some(ask) = permission_ask_rx.recv().await {
+            tracing::warn!(
+                permission = %ask.permission,
+                patterns = ?ask.patterns,
+                thread_id = %ask.thread_id,
+                session_id = %ask.session_id,
+                source = ?ask.source,
+                "permission ask received via ChannelPermissionAsker; \
+                 auto-rejecting until interactive TUI prompt widget lands",
+            );
+            // Send may fail if the dispatcher dropped its
+            // oneshot receiver (e.g. cancelled mid-await). Ignore
+            // the send error — the dispatcher already handles a
+            // closed reply channel by surfacing Reject.
+            let _ = ask.reply_tx.send(PermissionReply::Reject {
+                feedback: Some(
+                    "permission ask auto-rejected by the v0.17.788 channel consumer; \
+                     pre-grant the permission via [code.agents.<name>.permission] in \
+                     .libra/agents.toml or wait for the interactive TUI widget"
+                        .to_string(),
+                ),
+            });
+        }
+    });
+    let permission_service = PermissionService::new(std::sync::Arc::new(
+        ChannelPermissionAsker::new(permission_ask_tx),
+    ) as std::sync::Arc<dyn PermissionAsker>);
+
+    let parent_model_binding = ModelBinding::parse(&format!("{provider_name}/{model_name}"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to parse parent ModelBinding from provider={provider_name} model={model_name}"
+            )
+        })?;
+
+    // OC-Phase 3 P3.4 router-resolved parent_agent (v0.17.780):
+    // if the operator has authored a `.libra/agents/primary.md`
+    // (or any `.md` profile named "primary"), use it as the
+    // sub-agent dispatcher's parent_agent. The CLI flags still
+    // win for the model binding because the operator's `libra
+    // code --model <X>` should override the profile's default
+    // model — sub-agents inherit the session's actual model, not
+    // the profile's static one. Falls back to the v0.17.776
+    // placeholder when no profile is found.
+    let parent_agent = match agent_router.execution_spec("primary") {
+        Some(mut spec) => {
+            // The router-supplied spec carries the profile's
+            // declared model binding, but the session's actual
+            // model is what the CLI resolved — sub-agents should
+            // see the same model the parent is talking to, not
+            // the profile's default.
+            spec.model = Some(parent_model_binding.clone());
+            spec
+        }
+        None => AgentExecutionSpec {
+            name: "parent".to_string(),
+            description: "libra-code primary agent (session bootstrap default)".to_string(),
+            mode: AgentMode::Primary,
+            model: Some(parent_model_binding.clone()),
+            ..AgentExecutionSpec::default()
+        },
+    };
+
+    let session_jsonl_store = SessionJsonlStore::new(session_store.session_root(&session.id));
+    let usage_recorder =
+        std::sync::Arc::new(build_usage_recorder(storage_root).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "usage recorder unavailable; sub-agent dispatcher requires the SQLite DB \
+                 — check storage_root permissions"
+            )
+        })?);
+    let context_frame_loader = std::sync::Arc::new(ContextFrameLoader::default());
+
+    // OC-Phase 4 P4.4 compaction model (v0.17.784): when the
+    // operator configured `[code.compaction]`, build a
+    // `CompletionModel` for it so the dispatcher tail can route
+    // parent frames through `run_compaction(...)`. Failures
+    // here degrade to None — the v0.17.773 raw-segment handoff
+    // path stays operational. We log + warn on failure rather
+    // than aborting the whole runtime construction so a
+    // misconfigured compaction model doesn't break operators
+    // who have correctly configured sub-agents.
+    let compaction_model = match agents_config.compaction_model_binding() {
+        Some(binding) => match ProviderFactory.build(&binding, ProviderBuildOptions::default()) {
+            Ok(model) => Some(std::sync::Arc::new(model)),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    provider = %binding.provider_id,
+                    model = %binding.model_id,
+                    "failed to build compaction model from [code.compaction]; \
+                     falling back to raw-segment handoff",
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    Ok(SubAgentToolLoopRuntime {
+        dispatcher: std::sync::Arc::new(dispatcher),
+        parent_thread_id: session_canonical_thread_id(session)
+            .unwrap_or_else(|| session.id.clone()),
+        parent_session_id: session.id.clone(),
+        parent_agent,
+        parent_ruleset: Vec::new(),
+        parent_model_binding,
+        permission_service: std::sync::Arc::new(permission_service),
+        session_store: session_jsonl_store,
+        provider_factory: std::sync::Arc::new(ProviderFactory),
+        provider_build_options: ProviderBuildOptions::default(),
+        provider_build_options_resolver: None,
+        tool_registry: (*registry).clone(),
+        // S2-INV-06: hand the child the parent session's resolved
+        // runtime sandbox / approval / file-history authority so its
+        // tool invocations run under the same gates the parent does.
+        // `DefaultSubAgentChildRunner::run` forwards this into the
+        // child's `ToolLoopConfig.runtime_context`; before it was
+        // populated here the child ran every tool call with `None`
+        // (no sandbox, approval defaulting to `Skip`) — strictly more
+        // permissive than the parent. This is authority *inheritance*,
+        // not workspace *isolation* (S2-INV-03): the child still shares
+        // the parent's `writable_roots`; rebasing those onto a
+        // materialized per-run workspace is a separate follow-on.
+        runtime_context,
+        compaction_model,
+        usage_recorder,
+        context_frame_loader,
+        abort_token: AbortToken::new(),
+        depth: 0,
+        // v0.17.807 S2-INV-13 hook dispatch: the parent's
+        // `HookRunner` (loaded at `code.rs:2554` via
+        // `HookRunner::load(...)`) is now threaded through here
+        // so child sub-agents inherit the same PreToolUse /
+        // PostToolUse hook surface as the parent. Sub-agents
+        // cannot disable or supersede the parent's runner.
+        hook_runner,
+    })
 }
 
 async fn build_usage_recorder(storage_root: &Path) -> Option<UsageRecorder> {
@@ -3557,6 +4184,23 @@ mod tests {
 
     use super::*;
 
+    /// CEX-S2-12 "single sub-agent behind flag": the dispatcher
+    /// concurrency cap is forced to 1 for every configured value —
+    /// including the `sub_agents.max_parallel` schema default of 2 and
+    /// larger operator settings — until CEX-S2-14 unlocks real
+    /// parallelism. Pins the cap against a silent regression to passing
+    /// the operator value through.
+    #[test]
+    fn s2_12_concurrency_cap_forces_single_sub_agent() {
+        for configured in [0_u32, 1, 2, 4, 16, u32::MAX] {
+            assert_eq!(
+                cex_s2_12_subagent_concurrency_cap(configured),
+                1,
+                "CEX-S2-12 must cap concurrency to 1, not {configured}",
+            );
+        }
+    }
+
     fn base_args() -> CodeArgs {
         CodeArgs {
             web_only: false,
@@ -3723,6 +4367,130 @@ mod tests {
         assert!(args.web_only);
         assert_eq!(args.control, ControlMode::Write);
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn browser_control_resolution_matrix_pins_mode_provider_and_host_contract() {
+        #[derive(Copy, Clone)]
+        struct BrowserControlCase {
+            name: &'static str,
+            web_only: bool,
+            provider: CodeProvider,
+            explicit: Option<BrowserControlMode>,
+            host: &'static str,
+            expected: Result<BrowserControlMode, &'static str>,
+        }
+
+        let cases = [
+            BrowserControlCase {
+                name: "tui default stays off even on non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "tui explicit off allows non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Off),
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "tui explicit loopback allows loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "127.0.0.1",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+            BrowserControlCase {
+                name: "tui explicit loopback rejects non-loopback host",
+                web_only: false,
+                provider: CodeProvider::Gemini,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "non-codex web-only default stays off on non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Ollama,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "non-codex web-only explicit loopback rejects non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Ollama,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "codex web-only defaults to loopback on loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: None,
+                host: "localhost",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+            BrowserControlCase {
+                name: "codex web-only default loopback rejects non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: None,
+                host: "0.0.0.0",
+                expected: Err("loopback"),
+            },
+            BrowserControlCase {
+                name: "codex web-only explicit off allows non-loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: Some(BrowserControlMode::Off),
+                host: "0.0.0.0",
+                expected: Ok(BrowserControlMode::Off),
+            },
+            BrowserControlCase {
+                name: "codex web-only explicit loopback allows ipv6 loopback host",
+                web_only: true,
+                provider: CodeProvider::Codex,
+                explicit: Some(BrowserControlMode::Loopback),
+                host: "::1",
+                expected: Ok(BrowserControlMode::Loopback),
+            },
+        ];
+
+        for case in cases {
+            let mut args = base_args();
+            args.web_only = case.web_only;
+            args.provider = case.provider;
+            args.browser_control = case.explicit;
+            args.host = case.host.to_string();
+
+            match (resolve_browser_control_mode(&args), case.expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(actual, expected, "case: {}", case.name);
+                }
+                (Err(error), Err(expected_text)) => {
+                    let rendered = error.to_string();
+                    assert!(
+                        rendered.contains(expected_text),
+                        "case: {}; expected error containing {expected_text:?}, got {rendered}",
+                        case.name
+                    );
+                }
+                (actual, expected) => {
+                    panic!(
+                        "case: {}; browser-control resolution mismatch; actual={actual:?}, expected={expected:?}",
+                        case.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -4321,7 +5089,7 @@ no_cache_unknown_network = true
                 writable_roots,
                 network_access,
                 ..
-            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && !network_access
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access.is_denied()
         ));
     }
 
@@ -4348,7 +5116,7 @@ no_cache_unknown_network = true
                 writable_roots,
                 network_access,
                 ..
-            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access.is_full()
         ));
     }
 
@@ -4564,7 +5332,8 @@ no_cache_unknown_network = true
     #[test]
     fn build_headless_tool_registry_omits_task_tool_in_flag_off_default() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let registry = build_headless_tool_registry(tmp.path());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let registry = build_headless_tool_registry(tmp.path(), tx);
         let names = registry.tool_names();
         assert!(
             !names.contains(&"task".to_string()),
@@ -4572,6 +5341,32 @@ no_cache_unknown_network = true
              headless registry until the dispatcher lands and is gated; \
              got tool_names = {names:?}"
         );
+    }
+
+    /// Scenario: headless web mode now has a browser approval channel, a
+    /// ToolRuntimeContext, and snapshot projection for direct plan updates, so
+    /// the registry may expose the same guarded network/mutating/basic plan
+    /// tools as TUI without bypassing sandbox, approval, or `--network-access
+    /// deny`.
+    #[test]
+    fn build_headless_tool_registry_exposes_runtime_guarded_tools() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let registry = build_headless_tool_registry(tmp.path(), tx);
+        let names = registry.tool_names();
+
+        for tool in [
+            "web_search",
+            "apply_patch",
+            "shell",
+            "update_plan",
+            "submit_plan_draft",
+        ] {
+            assert!(
+                names.iter().any(|name| name == tool),
+                "headless registry must expose guarded tool `{tool}` after runtime context wiring; got {names:?}"
+            );
+        }
     }
 
     /// Scenario: an agent binding whose `provider_id` does NOT match any
@@ -4699,16 +5494,59 @@ no_cache_unknown_network = true
         let mut args = base_args();
         args.provider = CodeProvider::Ollama;
         args.model = Some("llama3.2".to_string());
+        let session_store = Arc::new(SessionStore::from_storage_path(&tmp.path().join(".libra")));
+        let session_state = SessionState::new(&tmp.path().to_string_lossy());
 
-        let runtime = build_non_codex_headless_runtime(&args, tmp.path(), false)
-            .await
-            .expect("headless Ollama should build through ProviderFactory")
-            .expect("Ollama is the supported non-Codex headless provider");
+        let runtime = build_non_codex_headless_runtime(
+            &args,
+            tmp.path(),
+            session_store,
+            session_state,
+            false,
+        )
+        .await
+        .expect("headless Ollama should build through ProviderFactory")
+        .expect("Ollama is the supported non-Codex headless provider");
         let snapshot = runtime.snapshot().await;
 
         assert_eq!(snapshot.provider.provider, "ollama");
         assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
         assert_eq!(snapshot.provider.model.as_deref(), Some("llama3.2"));
+    }
+
+    #[cfg(feature = "test-provider")]
+    #[tokio::test]
+    async fn headless_non_ollama_provider_reuses_provider_factory_bootstrap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.provider = CodeProvider::Fake;
+        let fixture_path = tmp.path().join("fake-fixture.json");
+        args.fake_fixture = Some({
+            std::fs::write(
+                &fixture_path,
+                r#"{"responses":[],"fallback":{"type":"text","text":"ok"}}"#,
+            )
+            .expect("fixture payload should be written");
+            fixture_path
+        });
+        let session_store = Arc::new(SessionStore::from_storage_path(&tmp.path().join(".libra")));
+        let session_state = SessionState::new(&tmp.path().to_string_lossy());
+
+        let runtime = build_non_codex_headless_runtime(
+            &args,
+            tmp.path(),
+            session_store,
+            session_state,
+            false,
+        )
+        .await
+        .expect("headless Fake should build through ProviderFactory")
+        .expect("Fake provider is now supported in headless provider factory path");
+        let snapshot = runtime.snapshot().await;
+
+        assert_eq!(snapshot.provider.provider, "fake");
+        assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
+        assert_eq!(snapshot.provider.model.as_deref(), Some("fake-local"));
     }
 
     /// Scenario: `--provider gemini --model gpt-foo --agent planner`

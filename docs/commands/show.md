@@ -5,7 +5,7 @@ Show a commit, tag, tree, blob, or the blob referenced by `REV:path`.
 ## Synopsis
 
 ```
-libra show [OPTIONS] [<OBJECT>] [-- <PATHS>...]
+libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 ```
 
 ## Description

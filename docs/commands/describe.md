@@ -8,7 +8,7 @@ version description.
 ## Synopsis
 
 ```
-libra describe [OPTIONS] [<COMMIT>]
+libra describe [OPTIONS] [COMMIT]
 ```
 
 ## Description

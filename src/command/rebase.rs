@@ -12,7 +12,11 @@ use anyhow::Context;
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{blob::Blob, commit::Commit, tree::Tree},
+    internal::object::{
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItem, TreeItemMode},
+    },
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
 use serde::Serialize;
@@ -493,8 +497,24 @@ impl ReplayResult {
     }
 }
 
+/// `--help` examples shown in `libra rebase --help` output.
+///
+/// Rebase exposes a small four-mode state machine: start (positional
+/// upstream), `--continue`, `--abort`, `--skip`. The banner pins one
+/// example per mode plus a JSON variant so users see all transitions
+/// without reading `docs/improvement/rebase.md`. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+pub const REBASE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra rebase main             Replay current branch on top of main
+    libra rebase --continue       Resume an in-progress rebase after fixing conflicts
+    libra rebase --skip           Drop the current conflicting commit and continue
+    libra rebase --abort          Restore the original branch and clear rebase state
+    libra rebase --json main      Structured JSON output for agents";
+
 /// Command-line arguments for the rebase operation
 #[derive(Parser, Debug)]
+#[command(after_help = REBASE_EXAMPLES)]
 pub struct RebaseArgs {
     /// The upstream branch to rebase the current branch onto.
     /// This can be a branch name, commit hash, or other Git reference.
@@ -555,7 +575,7 @@ struct RebaseReplaySummary {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum RebaseError {
+pub(crate) enum RebaseError {
     #[error("no rebase in progress")]
     NoRebaseInProgress,
     #[error("failed to check rebase state: {0}")]
@@ -1175,6 +1195,51 @@ async fn run_rebase_start(upstream: &str) -> Result<RebaseOutput, RebaseError> {
     })
 }
 
+/// Slim summary returned to `libra pull --rebase`. The full
+/// [`RebaseOutput`] carries fields that only make sense for the
+/// rebase subcommand (e.g. `restored`, `applied_commits`,
+/// `skipped_subject`); pull only needs to render the integration
+/// outcome alongside its fetch summary.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PullRebaseSummary {
+    /// One of `"fast-forwarded"`, `"already-up-to-date"`,
+    /// `"completed"`, or `"no-commits"`.
+    pub status: String,
+    /// The branch that was rebased.
+    pub branch: String,
+    /// HEAD before the rebase.
+    pub old_commit: String,
+    /// HEAD after the rebase (== `old_commit` for the no-op cases).
+    pub commit: String,
+    /// The upstream tip the branch was rebased onto.
+    pub onto: String,
+    /// Number of commits replayed during the rebase. `0` for the
+    /// fast-forward / already-up-to-date / no-commits branches.
+    pub replay_count: usize,
+}
+
+/// Run `run_rebase_start` and project the result down to the
+/// [`PullRebaseSummary`] that `libra pull --rebase` renders. Failure
+/// modes (conflict, dirty worktree, etc.) propagate via
+/// [`RebaseError`] which already has a `From<…> for CliError` impl
+/// with structured hints — pull just wraps it in its own error
+/// variant so the `phase=rebase` detail can be attached.
+pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
+    let output = run_rebase_start(upstream).await?;
+    let old_commit = output
+        .previous_commit
+        .clone()
+        .unwrap_or_else(|| output.commit.clone());
+    Ok(PullRebaseSummary {
+        status: output.status,
+        branch: output.branch,
+        old_commit,
+        commit: output.commit,
+        onto: output.onto.unwrap_or_else(|| upstream.to_string()),
+        replay_count: output.replay_count.unwrap_or(0),
+    })
+}
+
 /// Continue replaying commits from the current state
 async fn continue_replay(
     state: &mut RebaseState,
@@ -1670,11 +1735,17 @@ fn has_unmerged_entries(index: &git_internal::internal::index::Index) -> bool {
 fn create_tree_from_index(
     index: &git_internal::internal::index::Index,
 ) -> Result<ObjectHash, String> {
-    let mut items: HashMap<PathBuf, ObjectHash> = HashMap::new();
+    let mut items: HashMap<PathBuf, RebaseTreeEntry> = HashMap::new();
     for path in index.tracked_files() {
-        let path_str = path.to_string_lossy();
-        if let Some(entry) = index.get(&path_str, 0) {
-            items.insert(path.clone(), entry.hash);
+        let path_str = path_to_index_key(&path)?;
+        if let Some(entry) = index.get(path_str, 0) {
+            items.insert(
+                path.clone(),
+                RebaseTreeEntry {
+                    hash: entry.hash,
+                    mode: index_mode_to_tree_item_mode(entry.mode)?,
+                },
+            );
         }
     }
     create_tree_from_items_map(&items)
@@ -1686,8 +1757,95 @@ fn write_workdir_file(workdir: &Path, path: &Path, content: &[u8]) -> Result<(),
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
     }
+    if let Ok(metadata) = fs::symlink_metadata(&file_path)
+        && metadata.file_type().is_symlink()
+    {
+        fs::remove_file(&file_path)
+            .map_err(|e| format!("failed to replace symlink {}: {}", file_path.display(), e))?;
+    }
     fs::write(&file_path, content)
         .map_err(|e| format!("failed to write {}: {}", file_path.display(), e))
+}
+
+fn write_rebase_workdir_entry(
+    workdir: &Path,
+    path: &Path,
+    entry: RebaseTreeEntry,
+) -> Result<(), String> {
+    let blob: Blob = load_object(&entry.hash).map_err(|error| {
+        format!(
+            "failed to load blob {} for worktree path '{}': {error}",
+            entry.hash,
+            path.display()
+        )
+    })?;
+    write_workdir_blob(workdir, path, entry.mode, &blob.data)
+}
+
+fn write_workdir_blob(
+    workdir: &Path,
+    path: &Path,
+    mode: TreeItemMode,
+    content: &[u8],
+) -> Result<(), String> {
+    match mode {
+        TreeItemMode::Blob => write_workdir_file(workdir, path, content),
+        TreeItemMode::BlobExecutable => {
+            write_workdir_file(workdir, path, content)?;
+            set_executable_workdir_mode(&workdir.join(path))
+        }
+        TreeItemMode::Link => write_workdir_symlink(workdir, path, content),
+        TreeItemMode::Tree => Err(format!(
+            "tree entry cannot be written as a file: {}",
+            path.display()
+        )),
+        TreeItemMode::Commit => Err(format!(
+            "gitlink entries are not supported by rebase: {}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn set_executable_workdir_mode(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|error| {
+        format!(
+            "failed to set executable mode on {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn set_executable_workdir_mode(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_workdir_symlink(workdir: &Path, path: &Path, target: &[u8]) -> Result<(), String> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let file_path = workdir.join(path);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    if fs::symlink_metadata(&file_path).is_ok() {
+        fs::remove_file(&file_path)
+            .map_err(|error| format!("failed to replace {}: {error}", file_path.display()))?;
+    }
+    std::os::unix::fs::symlink(
+        PathBuf::from(OsString::from_vec(target.to_vec())),
+        &file_path,
+    )
+    .map_err(|error| format!("failed to create symlink {}: {error}", file_path.display()))
+}
+
+#[cfg(not(unix))]
+fn write_workdir_symlink(workdir: &Path, path: &Path, target: &[u8]) -> Result<(), String> {
+    write_workdir_file(workdir, path, target)
 }
 
 fn write_conflict_file(workdir: &Path, path: &Path, content: &str) -> Result<(), String> {
@@ -1706,13 +1864,29 @@ fn conflict_payload(content: &[u8]) -> Cow<'_, str> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RebaseTreeEntry {
+    hash: ObjectHash,
+    mode: TreeItemMode,
+}
+
 fn collect_tree_items_and_paths<'a>(
     trees: impl IntoIterator<Item = &'a Tree>,
-) -> (Vec<HashMap<PathBuf, ObjectHash>>, HashSet<PathBuf>) {
+) -> (Vec<HashMap<PathBuf, RebaseTreeEntry>>, HashSet<PathBuf>) {
     let mut items = Vec::new();
     let mut all_paths = HashSet::new();
     for tree in trees {
-        let map: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+        let map: HashMap<PathBuf, RebaseTreeEntry> = tree
+            .get_plain_items_with_mode()
+            .into_iter()
+            .filter_map(|(path, hash, mode)| {
+                if mode == TreeItemMode::Commit {
+                    None
+                } else {
+                    Some((path, RebaseTreeEntry { hash, mode }))
+                }
+            })
+            .collect();
         all_paths.extend(map.keys().cloned());
         items.push(map);
     }
@@ -1730,14 +1904,29 @@ mod tests {
         hash::ObjectHash,
         internal::object::tree::{Tree, TreeItem, TreeItemMode},
     };
+    use tempfile::tempdir;
 
     #[cfg(unix)]
     use super::path_to_index_key;
     use super::{
-        RebaseError, ReplayErrorKind, classify_relative_to_base, collect_tree_items_and_paths,
-        resolve_three_way, tree_item_name,
+        RebaseError, RebaseTreeEntry, ReplayErrorKind, classify_relative_to_base,
+        collect_tree_items_and_paths, create_tree_from_items_map, index_mode_to_tree_item_mode,
+        resolve_three_way, tree_item_mode_to_index_mode, tree_item_name, write_workdir_blob,
     };
-    use crate::utils::error::{CliError, StableErrorCode};
+    use crate::{
+        command::load_object,
+        utils::{
+            error::{CliError, StableErrorCode},
+            test::{ChangeDirGuard, setup_with_new_libra_in},
+        },
+    };
+
+    fn rebase_entry(byte: u8, mode: TreeItemMode) -> RebaseTreeEntry {
+        RebaseTreeEntry {
+            hash: ObjectHash::new(&[byte; 20]),
+            mode,
+        }
+    }
 
     #[test]
     fn replay_error_kind_stable_codes_route_distinct_failures() {
@@ -1868,6 +2057,179 @@ mod tests {
         );
     }
 
+    /// Pin the `From<RebaseError> for CliError` stable_code mapping
+    /// for every RebaseError variant. RebaseError itself has no
+    /// `stable_code()` method — the routing lives in the `From`
+    /// impl at `:623-722`, so this is the only place where the
+    /// wire surface ("which StableErrorCode does each variant
+    /// produce in --json envelopes?") can be locked down.
+    ///
+    /// The 25 variants collapse into 6 stable codes via a match
+    /// with many alternations. A future refactor that re-routed
+    /// any variant — e.g. flipping `OriginalTreeLoad` from
+    /// `RepoCorrupt` to `IoReadFailed`, or accidentally landing
+    /// `IndexLoad` in the IoWriteFailed group with its siblings —
+    /// would silently change client retry classification unless
+    /// every variant has its own guard.
+    ///
+    /// `ReplayInternal` delegates to `ReplayErrorKind::stable_code()`
+    /// which has its own enumeration in
+    /// `replay_error_kind_stable_codes_route_distinct_failures`; we
+    /// pin one representative kind (`CommitSave`) here to lock the
+    /// delegation itself.
+    ///
+    /// Continuation of the v0.17.701..v0.17.708 surface-contract
+    /// sweep (TuiControlError / CherryPickError / RevertError /
+    /// RestoreError / StashError / ResetError / FuseUmountError /
+    /// WorktreeError). Per the prioritised backlog, rebase.rs was
+    /// the last HIGH-priority pin gap.
+    #[test]
+    fn rebase_error_stable_code_pins_each_variant() {
+        fn code_of(err: RebaseError) -> StableErrorCode {
+            CliError::from(err).stable_code()
+        }
+
+        assert_eq!(
+            code_of(RebaseError::NoRebaseInProgress),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::StateCheck("ignored".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::StateLoad("ignored".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::NotOnBranch),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::BranchHasNoCommits {
+                branch: "ignored".to_string(),
+            }),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::UpstreamResolve {
+                upstream: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(RebaseError::NoCommonAncestor),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            code_of(RebaseError::WorktreeStatus("ignored".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::WorktreeDirty {
+                action: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::UntrackedOverwrite {
+                path: "ignored".to_string(),
+            }),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        assert_eq!(
+            code_of(RebaseError::UnresolvedConflicts),
+            StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            code_of(RebaseError::NoCommitToSkip),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            code_of(RebaseError::ReplayConflict {
+                commit: "ignored".to_string(),
+                subject: "ignored".to_string(),
+                paths: Vec::new(),
+                message: None,
+            }),
+            StableErrorCode::ConflictUnresolved,
+        );
+        // ReplayInternal delegates to ReplayErrorKind::stable_code();
+        // exhaustive ReplayErrorKind routing is pinned by
+        // replay_error_kind_stable_codes_route_distinct_failures.
+        assert_eq!(
+            code_of(RebaseError::ReplayInternal {
+                commit: "ignored".to_string(),
+                subject: "ignored".to_string(),
+                kind: ReplayErrorKind::CommitSave,
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::BranchRestore {
+                branch: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::CommitLoad {
+                commit: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(RebaseError::OriginalCommitLoad {
+                commit: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(RebaseError::OriginalTreeLoad {
+                tree: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            code_of(RebaseError::IndexLoad("ignored".to_string())),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::TreeCreate("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::CommitSave("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::IndexRebuild("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::IndexSave("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::WorkdirReset("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::StateSave("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            code_of(RebaseError::Finalize("ignored".to_string())),
+            StableErrorCode::IoWriteFailed,
+        );
+    }
+
     #[test]
     fn replay_internal_error_maps_to_typed_cli_error() {
         let rebase_err = RebaseError::ReplayInternal {
@@ -1956,26 +2318,50 @@ mod tests {
 
         let tree1 = Tree::from_tree_items(vec![
             TreeItem::new(TreeItemMode::Blob, a_hash, "a.txt".to_string()),
-            TreeItem::new(TreeItemMode::Blob, b_hash, "b.txt".to_string()),
+            TreeItem::new(TreeItemMode::BlobExecutable, b_hash, "b.txt".to_string()),
         ])
         .expect("tree1");
 
         let tree2 = Tree::from_tree_items(vec![
             TreeItem::new(TreeItemMode::Blob, b2_hash, "b.txt".to_string()),
-            TreeItem::new(TreeItemMode::Blob, c_hash, "c.txt".to_string()),
+            TreeItem::new(TreeItemMode::Link, c_hash, "c.txt".to_string()),
         ])
         .expect("tree2");
 
         let (items, all_paths) = collect_tree_items_and_paths([&tree1, &tree2]);
         assert_eq!(items.len(), 2);
 
-        let expected_first: HashMap<PathBuf, ObjectHash> = HashMap::from([
-            (PathBuf::from("a.txt"), a_hash),
-            (PathBuf::from("b.txt"), b_hash),
+        let expected_first: HashMap<PathBuf, RebaseTreeEntry> = HashMap::from([
+            (
+                PathBuf::from("a.txt"),
+                RebaseTreeEntry {
+                    hash: a_hash,
+                    mode: TreeItemMode::Blob,
+                },
+            ),
+            (
+                PathBuf::from("b.txt"),
+                RebaseTreeEntry {
+                    hash: b_hash,
+                    mode: TreeItemMode::BlobExecutable,
+                },
+            ),
         ]);
-        let expected_second: HashMap<PathBuf, ObjectHash> = HashMap::from([
-            (PathBuf::from("b.txt"), b2_hash),
-            (PathBuf::from("c.txt"), c_hash),
+        let expected_second: HashMap<PathBuf, RebaseTreeEntry> = HashMap::from([
+            (
+                PathBuf::from("b.txt"),
+                RebaseTreeEntry {
+                    hash: b2_hash,
+                    mode: TreeItemMode::Blob,
+                },
+            ),
+            (
+                PathBuf::from("c.txt"),
+                RebaseTreeEntry {
+                    hash: c_hash,
+                    mode: TreeItemMode::Link,
+                },
+            ),
         ]);
         assert_eq!(items[0], expected_first);
         assert_eq!(items[1], expected_second);
@@ -1990,17 +2376,17 @@ mod tests {
 
     #[test]
     fn classify_relative_to_base_tracks_state() {
-        let base = ObjectHash::new(&[1; 20]);
+        let base = rebase_entry(1, TreeItemMode::Blob);
         let same = base;
-        let modified = ObjectHash::new(&[2; 20]);
+        let modified = rebase_entry(2, TreeItemMode::BlobExecutable);
 
         match classify_relative_to_base(Some(&base), Some(&same)) {
-            super::RelativeState::Same(hash) => assert_eq!(hash, base),
+            super::RelativeState::Same(entry) => assert_eq!(entry, base),
             other => panic!("expected Same, got {:?}", other),
         }
 
         match classify_relative_to_base(Some(&base), Some(&modified)) {
-            super::RelativeState::Modified(hash) => assert_eq!(hash, modified),
+            super::RelativeState::Modified(entry) => assert_eq!(entry, modified),
             other => panic!("expected Modified, got {:?}", other),
         }
 
@@ -2010,7 +2396,7 @@ mod tests {
         }
 
         match classify_relative_to_base(None, Some(&modified)) {
-            super::RelativeState::Added(hash) => assert_eq!(hash, modified),
+            super::RelativeState::Added(entry) => assert_eq!(entry, modified),
             other => panic!("expected Added, got {:?}", other),
         }
 
@@ -2022,22 +2408,22 @@ mod tests {
 
     #[test]
     fn resolve_three_way_merges_and_conflicts() {
-        let base = ObjectHash::new(&[1; 20]);
-        let ours = ObjectHash::new(&[2; 20]);
-        let theirs = ObjectHash::new(&[3; 20]);
+        let base = rebase_entry(1, TreeItemMode::Blob);
+        let ours = rebase_entry(2, TreeItemMode::BlobExecutable);
+        let theirs = rebase_entry(3, TreeItemMode::Link);
 
         match resolve_three_way(Some(&base), Some(&base), Some(&base)) {
-            super::MergeResolution::Use(hash) => assert_eq!(hash, base),
+            super::MergeResolution::Use(entry) => assert_eq!(entry, base),
             other => panic!("expected Use(base), got {:?}", other),
         }
 
         match resolve_three_way(Some(&base), Some(&base), Some(&ours)) {
-            super::MergeResolution::Use(hash) => assert_eq!(hash, ours),
+            super::MergeResolution::Use(entry) => assert_eq!(entry, ours),
             other => panic!("expected Use(ours), got {:?}", other),
         }
 
         match resolve_three_way(Some(&base), Some(&theirs), Some(&base)) {
-            super::MergeResolution::Use(hash) => assert_eq!(hash, theirs),
+            super::MergeResolution::Use(entry) => assert_eq!(entry, theirs),
             other => panic!("expected Use(theirs), got {:?}", other),
         }
 
@@ -2046,8 +2432,8 @@ mod tests {
                 ours: o,
                 theirs: t,
             }) => {
-                assert_eq!(o, ours);
-                assert_eq!(t, theirs);
+                assert_eq!(o, ours.hash);
+                assert_eq!(t, theirs.hash);
             }
             other => panic!("expected BothChanged conflict, got {:?}", other),
         }
@@ -2057,8 +2443,8 @@ mod tests {
                 ours: o,
                 theirs: t,
             }) => {
-                assert_eq!(o, ours);
-                assert_eq!(t, theirs);
+                assert_eq!(o, ours.hash);
+                assert_eq!(t, theirs.hash);
             }
             other => panic!("expected BothChanged conflict (add/add), got {:?}", other),
         }
@@ -2066,7 +2452,7 @@ mod tests {
         match resolve_three_way(Some(&base), None, Some(&ours)) {
             super::MergeResolution::Conflict(super::ConflictKind::OursModifiedTheirsDeleted {
                 ours: o,
-            }) => assert_eq!(o, ours),
+            }) => assert_eq!(o, ours.hash),
             other => panic!(
                 "expected ours-modified/theirs-deleted conflict, got {:?}",
                 other
@@ -2076,12 +2462,106 @@ mod tests {
         match resolve_three_way(Some(&base), Some(&theirs), None) {
             super::MergeResolution::Conflict(super::ConflictKind::TheirsModifiedOursDeleted {
                 theirs: t,
-            }) => assert_eq!(t, theirs),
+            }) => assert_eq!(t, theirs.hash),
             other => panic!(
                 "expected theirs-modified/ours-deleted conflict, got {:?}",
                 other
             ),
         }
+    }
+
+    #[test]
+    fn rebase_index_tree_mode_conversions_pin_supported_modes() {
+        assert_eq!(
+            tree_item_mode_to_index_mode(TreeItemMode::Blob).expect("regular blob"),
+            0o100644
+        );
+        assert_eq!(
+            tree_item_mode_to_index_mode(TreeItemMode::BlobExecutable).expect("executable blob"),
+            0o100755
+        );
+        assert_eq!(
+            tree_item_mode_to_index_mode(TreeItemMode::Link).expect("symlink"),
+            0o120000
+        );
+
+        assert_eq!(
+            index_mode_to_tree_item_mode(0o100644).expect("regular blob"),
+            TreeItemMode::Blob
+        );
+        assert_eq!(
+            index_mode_to_tree_item_mode(0o100755).expect("executable blob"),
+            TreeItemMode::BlobExecutable
+        );
+        assert_eq!(
+            index_mode_to_tree_item_mode(0o120000).expect("symlink"),
+            TreeItemMode::Link
+        );
+        assert!(tree_item_mode_to_index_mode(TreeItemMode::Commit).is_err());
+        assert!(index_mode_to_tree_item_mode(0o160000).is_err());
+    }
+
+    #[tokio::test]
+    async fn create_tree_from_items_map_preserves_blob_modes() {
+        let repo = tempdir().expect("temp repo");
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let executable = rebase_entry(1, TreeItemMode::BlobExecutable);
+        let symlink = rebase_entry(2, TreeItemMode::Link);
+        let regular = rebase_entry(3, TreeItemMode::Blob);
+        let items = HashMap::from([
+            (PathBuf::from("run.sh"), executable),
+            (PathBuf::from("link"), symlink),
+            (PathBuf::from("plain.txt"), regular),
+        ]);
+
+        let tree_id = create_tree_from_items_map(&items).expect("create tree");
+        let tree: Tree = load_object(&tree_id).expect("load created tree");
+        let modes: HashMap<_, _> = tree
+            .tree_items
+            .iter()
+            .map(|item| (item.name.as_str(), item.mode))
+            .collect();
+
+        assert_eq!(modes.get("run.sh"), Some(&TreeItemMode::BlobExecutable));
+        assert_eq!(modes.get("link"), Some(&TreeItemMode::Link));
+        assert_eq!(modes.get("plain.txt"), Some(&TreeItemMode::Blob));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_workdir_blob_replaces_existing_symlink() {
+        let repo = tempdir().expect("temp repo");
+        let target = repo.path().join("outside-target.txt");
+        std::fs::write(&target, "outside\n").expect("write target");
+        let link = repo.path().join("path.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        write_workdir_blob(
+            repo.path(),
+            Path::new("path.txt"),
+            TreeItemMode::Blob,
+            b"regular\n",
+        )
+        .expect("write regular blob");
+
+        assert!(
+            !std::fs::symlink_metadata(&link)
+                .expect("path metadata")
+                .file_type()
+                .is_symlink(),
+            "regular blob write must replace an existing symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&link).expect("read rewritten path"),
+            "regular\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read symlink target"),
+            "outside\n",
+            "regular blob write must not follow and overwrite the old symlink target"
+        );
     }
 
     #[test]
@@ -2155,7 +2635,7 @@ async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String>
 
 #[derive(Debug, Copy, Clone)]
 enum MergeResolution {
-    Use(ObjectHash),
+    Use(RebaseTreeEntry),
     Delete,
     Conflict(ConflictKind),
 }
@@ -2176,16 +2656,16 @@ enum ConflictKind {
 
 #[derive(Debug, Copy, Clone)]
 enum RelativeState {
-    Same(ObjectHash),
-    Modified(ObjectHash),
+    Same(RebaseTreeEntry),
+    Modified(RebaseTreeEntry),
     Deleted,
-    Added(ObjectHash),
+    Added(RebaseTreeEntry),
     Missing,
 }
 
 fn classify_relative_to_base(
-    base: Option<&ObjectHash>,
-    side: Option<&ObjectHash>,
+    base: Option<&RebaseTreeEntry>,
+    side: Option<&RebaseTreeEntry>,
 ) -> RelativeState {
     match (base, side) {
         (Some(b), Some(s)) if b == s => RelativeState::Same(*s),
@@ -2197,9 +2677,9 @@ fn classify_relative_to_base(
 }
 
 fn resolve_three_way(
-    base: Option<&ObjectHash>,
-    theirs: Option<&ObjectHash>,
-    ours: Option<&ObjectHash>,
+    base: Option<&RebaseTreeEntry>,
+    theirs: Option<&RebaseTreeEntry>,
+    ours: Option<&RebaseTreeEntry>,
 ) -> MergeResolution {
     let base_present = base.is_some();
     let theirs_state = classify_relative_to_base(base, theirs);
@@ -2213,7 +2693,10 @@ fn resolve_three_way(
             if o == t {
                 MergeResolution::Use(t)
             } else {
-                MergeResolution::Conflict(ConflictKind::BothChanged { ours: o, theirs: t })
+                MergeResolution::Conflict(ConflictKind::BothChanged {
+                    ours: o.hash,
+                    theirs: t.hash,
+                })
             }
         }
         (true, RelativeState::Same(o), RelativeState::Same(_)) => MergeResolution::Use(o),
@@ -2223,17 +2706,20 @@ fn resolve_three_way(
             if o == t {
                 MergeResolution::Use(t)
             } else {
-                MergeResolution::Conflict(ConflictKind::BothChanged { ours: o, theirs: t })
+                MergeResolution::Conflict(ConflictKind::BothChanged {
+                    ours: o.hash,
+                    theirs: t.hash,
+                })
             }
         }
         (true, RelativeState::Deleted, RelativeState::Same(_)) => MergeResolution::Delete,
         (true, RelativeState::Same(_), RelativeState::Deleted) => MergeResolution::Delete,
         (true, RelativeState::Deleted, RelativeState::Deleted) => MergeResolution::Delete,
         (true, RelativeState::Deleted, RelativeState::Modified(t)) => {
-            MergeResolution::Conflict(ConflictKind::TheirsModifiedOursDeleted { theirs: t })
+            MergeResolution::Conflict(ConflictKind::TheirsModifiedOursDeleted { theirs: t.hash })
         }
         (true, RelativeState::Modified(o), RelativeState::Deleted) => {
-            MergeResolution::Conflict(ConflictKind::OursModifiedTheirsDeleted { ours: o })
+            MergeResolution::Conflict(ConflictKind::OursModifiedTheirsDeleted { ours: o.hash })
         }
         _ => {
             debug_assert!(false, "unexpected three-way merge state");
@@ -2346,7 +2832,7 @@ async fn replay_commit_with_conflict_detection(
     let their_items = &tree_items[1];
     let our_items = &tree_items[2];
 
-    let mut merged_items: HashMap<PathBuf, ObjectHash> = HashMap::new();
+    let mut merged_items: HashMap<PathBuf, RebaseTreeEntry> = HashMap::new();
     let mut conflict_items: Vec<(PathBuf, ConflictKind)> = Vec::new();
     let workdir = util::working_dir();
     let commit_abbrev = commit_to_replay_id.to_string();
@@ -2358,13 +2844,13 @@ async fn replay_commit_with_conflict_detection(
     };
 
     for path in all_paths {
-        let base_hash = base_items.get(&path);
-        let their_hash = their_items.get(&path);
-        let our_hash = our_items.get(&path);
+        let base_entry = base_items.get(&path);
+        let their_entry = their_items.get(&path);
+        let our_entry = our_items.get(&path);
 
-        match resolve_three_way(base_hash, their_hash, our_hash) {
-            MergeResolution::Use(hash) => {
-                merged_items.insert(path, hash);
+        match resolve_three_way(base_entry, their_entry, our_entry) {
+            MergeResolution::Use(entry) => {
+                merged_items.insert(path, entry);
             }
             MergeResolution::Delete => {}
             MergeResolution::Conflict(kind) => {
@@ -2413,54 +2899,33 @@ async fn replay_commit_with_conflict_detection(
         let mut index = git_internal::internal::index::Index::new();
 
         // Add non-conflicting files at stage 0
-        for (path, hash) in &merged_items {
-            let blob = Blob::load(hash);
-            let entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                path.to_string_lossy().to_string(),
-                *hash,
-                blob.data.len() as u32,
-            );
-            index.add(entry);
+        for (path, entry) in &merged_items {
+            if let Err(e) = add_rebase_index_entry(&mut index, path, *entry, 0) {
+                return ReplayResult::internal(ReplayErrorKind::IndexSave, e);
+            }
         }
 
         // Add conflicting files at stages 1, 2, 3
         for path in &conflicts {
-            let path_str = path.to_string_lossy().to_string();
-
             // Stage 1: base version
-            if let Some(base_hash) = base_items.get(path) {
-                let blob = Blob::load(base_hash);
-                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                    path_str.clone(),
-                    *base_hash,
-                    blob.data.len() as u32,
-                );
-                entry.flags.stage = 1;
-                index.add(entry);
+            if let Some(base_entry) = base_items.get(path)
+                && let Err(e) = add_rebase_index_entry(&mut index, path, *base_entry, 1)
+            {
+                return ReplayResult::internal(ReplayErrorKind::IndexSave, e);
             }
 
             // Stage 2: ours version
-            if let Some(our_hash) = our_items.get(path) {
-                let blob = Blob::load(our_hash);
-                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                    path_str.clone(),
-                    *our_hash,
-                    blob.data.len() as u32,
-                );
-                entry.flags.stage = 2;
-                index.add(entry);
+            if let Some(our_entry) = our_items.get(path)
+                && let Err(e) = add_rebase_index_entry(&mut index, path, *our_entry, 2)
+            {
+                return ReplayResult::internal(ReplayErrorKind::IndexSave, e);
             }
 
             // Stage 3: theirs version
-            if let Some(their_hash) = their_items.get(path) {
-                let blob = Blob::load(their_hash);
-                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                    path_str.clone(),
-                    *their_hash,
-                    blob.data.len() as u32,
-                );
-                entry.flags.stage = 3;
-                index.add(entry);
+            if let Some(their_entry) = their_items.get(path)
+                && let Err(e) = add_rebase_index_entry(&mut index, path, *their_entry, 3)
+            {
+                return ReplayResult::internal(ReplayErrorKind::IndexSave, e);
             }
         }
 
@@ -2480,9 +2945,8 @@ async fn replay_commit_with_conflict_detection(
 
         let conflict_set: HashSet<PathBuf> = conflicts.iter().cloned().collect();
 
-        for (path, hash) in &merged_items {
-            let blob = Blob::load(hash);
-            if let Err(e) = write_workdir_file(&workdir, path, &blob.data) {
+        for (path, entry) in &merged_items {
+            if let Err(e) = write_rebase_workdir_entry(&workdir, path, *entry) {
                 return ReplayResult::Conflict {
                     paths: conflicts,
                     message: Some(e),
@@ -2632,17 +3096,17 @@ async fn collect_commits_to_replay(
 /// - Recursively building the tree structure from root to leaves
 ///
 /// Returns the ObjectHash hash of the root tree object.
-fn create_tree_from_items_map(items: &HashMap<PathBuf, ObjectHash>) -> Result<ObjectHash, String> {
+fn create_tree_from_items_map(
+    items: &HashMap<PathBuf, RebaseTreeEntry>,
+) -> Result<ObjectHash, String> {
     // Group files by their parent directories
-    let mut entries_map: HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>> =
-        HashMap::new();
-    for (path, hash) in items {
-        let item = git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
+    let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
+    for (path, entry) in items {
+        let item = TreeItem {
+            mode: entry.mode,
             name: tree_item_name(path)?,
-            id: *hash,
+            id: entry.hash,
         };
-        // TODO: Handle file modes properly - currently assumes all files are blobs
         let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
         entries_map.entry(parent_dir).or_default().push(item);
     }
@@ -2661,7 +3125,7 @@ fn create_tree_from_items_map(items: &HashMap<PathBuf, ObjectHash>) -> Result<Ob
 /// combining them into parent trees.
 fn build_tree_recursively(
     current_path: &Path,
-    entries_map: &mut HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>>,
+    entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
 ) -> Result<ObjectHash, String> {
     // Get all files/items in the current directory
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
@@ -2680,13 +3144,14 @@ fn build_tree_recursively(
         let subtree_hash = build_tree_recursively(&subdir_path, entries_map)?;
 
         // Add the subdirectory as a tree item
-        current_items.push(git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Tree,
+        current_items.push(TreeItem {
+            mode: TreeItemMode::Tree,
             name: subdir_name,
             id: subtree_hash,
         });
     }
 
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
     // Create and save the tree object for this directory
     let tree = Tree::from_tree_items(current_items).map_err(|e| e.to_string())?;
     save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
@@ -2720,13 +3185,15 @@ fn reset_workdir_tracked_only(
     for path_buf in new_index.tracked_files() {
         let path_str = path_to_index_key(&path_buf)?;
         if let Some(entry) = new_index.get(path_str, 0) {
-            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
-            let target_path = workdir.join(&path_buf);
-
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            fs::write(&target_path, &blob.data).map_err(|e| e.to_string())?;
+            let mode = index_mode_to_tree_item_mode(entry.mode)?;
+            write_rebase_workdir_entry(
+                &workdir,
+                &path_buf,
+                RebaseTreeEntry {
+                    hash: entry.hash,
+                    mode,
+                },
+            )?;
         }
     }
 
@@ -2745,6 +3212,53 @@ fn tree_item_name(path: &Path) -> Result<String, String> {
 fn path_to_index_key(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
+fn add_rebase_index_entry(
+    index: &mut git_internal::internal::index::Index,
+    path: &Path,
+    item: RebaseTreeEntry,
+    stage: u8,
+) -> Result<(), String> {
+    let blob: Blob = load_object(&item.hash).map_err(|error| {
+        format!(
+            "failed to load blob {} for index entry '{}': {error}",
+            item.hash,
+            path.display()
+        )
+    })?;
+    let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+        path_to_index_key(path)?.to_string(),
+        item.hash,
+        blob.data.len() as u32,
+    );
+    entry.mode = tree_item_mode_to_index_mode(item.mode)?;
+    entry.flags.stage = stage;
+    index.add(entry);
+    Ok(())
+}
+
+fn tree_item_mode_to_index_mode(mode: TreeItemMode) -> Result<u32, String> {
+    match mode {
+        TreeItemMode::Blob => Ok(0o100644),
+        TreeItemMode::BlobExecutable => Ok(0o100755),
+        TreeItemMode::Link => Ok(0o120000),
+        TreeItemMode::Tree => {
+            Err("tree entry cannot be represented as a file index entry".to_string())
+        }
+        TreeItemMode::Commit => Err("gitlink entries are not supported by rebase".to_string()),
+    }
+}
+
+fn index_mode_to_tree_item_mode(mode: u32) -> Result<TreeItemMode, String> {
+    match mode {
+        0o100644 => Ok(TreeItemMode::Blob),
+        0o100755 => Ok(TreeItemMode::BlobExecutable),
+        0o120000 => Ok(TreeItemMode::Link),
+        other => Err(format!(
+            "unsupported index mode {other:o} while creating rebase tree"
+        )),
+    }
 }
 
 /// Rebuild an index from a tree object by recursively adding all files
@@ -2767,22 +3281,140 @@ fn rebuild_index_from_tree(
             format!("{}/{}", prefix, item.name)
         };
 
-        if let git_internal::internal::object::tree::TreeItemMode::Tree = item.mode {
-            // Recursively process subdirectory
-            let subtree: Tree = load_object(&item.id).map_err(|e| e.to_string())?;
-            rebuild_index_from_tree(&subtree, index, &full_path)?;
-        } else {
-            // Add file to index
-            let blob = git_internal::internal::object::blob::Blob::load(&item.id);
-            let entry = git_internal::internal::index::IndexEntry::new_from_blob(
-                full_path,
-                item.id,
-                blob.data.len() as u32,
-            );
-            // TODO: Handle different file modes (executable, symlinks, etc.)
-            // TODO: Add proper error handling for corrupted blob objects
-            index.add(entry);
-        }
+        let index_mode = match item.mode {
+            git_internal::internal::object::tree::TreeItemMode::Tree => {
+                let subtree: Tree = load_object(&item.id).map_err(|e| {
+                    format!(
+                        "failed to load tree {} for rebase index entry '{}': {e}",
+                        item.id, full_path
+                    )
+                })?;
+                rebuild_index_from_tree(&subtree, index, &full_path)?;
+                continue;
+            }
+            git_internal::internal::object::tree::TreeItemMode::Blob => 0o100644,
+            git_internal::internal::object::tree::TreeItemMode::BlobExecutable => 0o100755,
+            git_internal::internal::object::tree::TreeItemMode::Link => 0o120000,
+            git_internal::internal::object::tree::TreeItemMode::Commit => {
+                return Err(format!(
+                    "unsupported gitlink tree entry '{}' while rebuilding rebase index",
+                    full_path
+                ));
+            }
+        };
+
+        let blob: git_internal::internal::object::blob::Blob =
+            load_object(&item.id).map_err(|e| {
+                format!(
+                    "failed to load blob {} for rebase index entry '{}': {e}",
+                    item.id, full_path
+                )
+            })?;
+        let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+            full_path,
+            item.id,
+            blob.data.len() as u32,
+        );
+        entry.mode = index_mode;
+        index.add(entry);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rebuild_index_tests {
+    use std::str::FromStr;
+
+    use git_internal::{
+        hash::ObjectHash,
+        internal::{
+            index::Index,
+            object::{
+                blob::Blob,
+                tree::{Tree, TreeItem, TreeItemMode},
+            },
+        },
+    };
+    use tempfile::tempdir;
+
+    use super::rebuild_index_from_tree;
+    use crate::{
+        command::save_object,
+        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    };
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_preserves_executable_and_symlink_modes() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let executable_blob = Blob::from_content("run\n");
+        save_object(&executable_blob, &executable_blob.id).unwrap();
+        let symlink_blob = Blob::from_content("target.txt");
+        save_object(&symlink_blob, &symlink_blob.id).unwrap();
+        let regular_blob = Blob::from_content("plain\n");
+        save_object(&regular_blob, &regular_blob.id).unwrap();
+
+        let tree = Tree::from_tree_items(vec![
+            TreeItem::new(
+                TreeItemMode::BlobExecutable,
+                executable_blob.id,
+                "run.sh".to_string(),
+            ),
+            TreeItem::new(TreeItemMode::Link, symlink_blob.id, "link".to_string()),
+            TreeItem::new(TreeItemMode::Blob, regular_blob.id, "plain.txt".to_string()),
+        ])
+        .unwrap();
+        let mut index = Index::new();
+
+        rebuild_index_from_tree(&tree, &mut index, "").unwrap();
+
+        assert_eq!(index.get("run.sh", 0).unwrap().mode, 0o100755);
+        assert_eq!(index.get("link", 0).unwrap().mode, 0o120000);
+        assert_eq!(index.get("plain.txt", 0).unwrap().mode, 0o100644);
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_returns_path_context_for_missing_blob() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let missing_blob =
+            ObjectHash::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Blob,
+            missing_blob,
+            "missing.txt".to_string(),
+        )])
+        .unwrap();
+        let mut index = Index::new();
+
+        let err = rebuild_index_from_tree(&tree, &mut index, "").unwrap_err();
+
+        assert!(err.contains("failed to load blob"));
+        assert!(err.contains("missing.txt"));
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_from_tree_rejects_gitlink_entries() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let gitlink = ObjectHash::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let tree = Tree::from_tree_items(vec![TreeItem::new(
+            TreeItemMode::Commit,
+            gitlink,
+            "vendor".to_string(),
+        )])
+        .unwrap();
+        let mut index = Index::new();
+
+        let err = rebuild_index_from_tree(&tree, &mut index, "").unwrap_err();
+
+        assert!(err.contains("unsupported gitlink tree entry"));
+        assert!(err.contains("vendor"));
+    }
 }

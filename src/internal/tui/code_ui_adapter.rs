@@ -118,6 +118,14 @@ impl CodeUiCommandAdapter for TuiCodeUiAdapter {
         Self::wait_for_ack(ack_rx).await
     }
 
+    async fn task_dispatch(&self, agent: String, prompt: String) -> anyhow::Result<String> {
+        let (ack, ack_rx) = oneshot::channel();
+        self.control_tx
+            .send(TuiControlCommand::TaskDispatch { agent, prompt, ack })
+            .map_err(|_| anyhow!("TUI control channel is closed"))?;
+        Self::wait_for_typed_ack(ack_rx).await
+    }
+
     async fn goal_start(&self, objective: String) -> anyhow::Result<String> {
         let (ack, ack_rx) = oneshot::channel();
         self.control_tx
@@ -245,6 +253,30 @@ mod tests {
         let rendered = goal_start.await.unwrap().unwrap();
         assert!(rendered.contains("ship feature X"));
         assert!(rendered.contains("Active"));
+    }
+
+    #[tokio::test]
+    async fn task_dispatch_sends_control_command_and_returns_result() {
+        let (adapter, mut rx) = test_adapter();
+        let task_dispatch = tokio::spawn(async move {
+            adapter
+                .task_dispatch("explorer".to_string(), "grep TODO src/".to_string())
+                .await
+        });
+
+        let command = rx.recv().await.expect("control command should be sent");
+        match command {
+            TuiControlCommand::TaskDispatch { agent, prompt, ack } => {
+                assert_eq!(agent, "explorer");
+                assert_eq!(prompt, "grep TODO src/");
+                ack.send(Ok("Task `task-1` completed".to_string()))
+                    .expect("ack receiver should be live");
+            }
+            _ => panic!("unexpected command — expected TaskDispatch"),
+        }
+
+        let rendered = task_dispatch.await.unwrap().unwrap();
+        assert!(rendered.contains("task-1"));
     }
 
     #[tokio::test]

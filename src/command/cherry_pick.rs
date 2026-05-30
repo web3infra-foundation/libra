@@ -473,6 +473,7 @@ fn build_tree_recursively(
         });
     }
 
+    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
     let tree = Tree::from_tree_items(current_items)
         .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to create tree: {e}")))?;
     save_object(&tree, &tree.id).map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;
@@ -611,6 +612,60 @@ mod tests {
         assert_eq!(
             CherryPickError::SaveFailed("disk full".to_string()).to_string(),
             "failed to update cherry-pick state: disk full",
+        );
+    }
+
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`CherryPickError`]. This is the second public surface contract:
+    /// the [`StableErrorCode`] value is what `--json` consumers read
+    /// from the `code` field of the error envelope and branch on
+    /// (e.g. retry on `IoReadFailed`, surface a typed hint on
+    /// `ConflictUnresolved`). A future refactor that re-routes a
+    /// variant — for example flipping `MultipleWithNoCommit` from
+    /// `CliInvalidArguments` to `CliInvalidTarget` — silently changes
+    /// the wire surface unless every variant has its own guard.
+    ///
+    /// Enumerate all 8 variants explicitly so adding a new variant
+    /// trips the exhaustive match below (the compiler enforces it
+    /// alongside the `stable_code()` match in the impl), and silently
+    /// changing an existing variant's code trips the assertion.
+    #[test]
+    fn cherry_pick_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            CherryPickError::NotInRepo.stable_code(),
+            StableErrorCode::RepoNotFound,
+        );
+        assert_eq!(
+            CherryPickError::DetachedHead.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            CherryPickError::InvalidCommit("deadbeef".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            CherryPickError::MultipleWithNoCommit.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            CherryPickError::MergeCommitUnsupported.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            CherryPickError::Conflict {
+                commit: "abc123".to_string(),
+                reason: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            CherryPickError::LoadObject("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            CherryPickError::SaveFailed("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
         );
     }
 }

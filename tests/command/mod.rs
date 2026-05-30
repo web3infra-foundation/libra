@@ -67,6 +67,7 @@ pub(crate) struct CliErrorReport {
 fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
+    let global_db = home.join(".libra").join("config.db");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
@@ -78,6 +79,7 @@ fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_db)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env(LIBRA_TEST_ENV, "1");
@@ -261,6 +263,10 @@ fn skip_permission_denied_test_if_root(test_name: &str) -> bool {
 mod add_cli_test;
 mod add_json_test;
 mod add_test;
+mod agent_clean_test;
+mod agent_help_test;
+mod agent_push_test;
+mod automation_help_test;
 mod bisect_test;
 mod blame_test;
 mod branch_test;
@@ -272,7 +278,9 @@ mod cli_error_test;
 mod clone_cli_test;
 mod clone_test;
 mod cloud_test;
+mod code_control_help_test;
 mod code_test;
+mod code_thread_id_test;
 mod commit_error_test;
 mod commit_json_test;
 mod commit_test;
@@ -284,6 +292,7 @@ mod fsck_test;
 mod graph_test;
 mod grep_test;
 mod hash_object_test;
+mod hooks_help_test;
 mod index_pack_test;
 mod init_from_git_test;
 mod init_json_test;
@@ -326,6 +335,7 @@ mod switch_json_test;
 mod switch_test;
 mod symbolic_ref_test;
 mod tag_test;
+mod usage_help_test;
 mod verify_pack_test;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 mod worktree_fuse_test;

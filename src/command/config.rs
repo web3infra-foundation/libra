@@ -45,6 +45,8 @@ const EXAMPLES: &str = r#"EXAMPLES:
     echo "$SECRET" | libra config set --stdin vault.env.KEY  Set from stdin (CI/CD)
     libra config set --encrypt custom.key "value"      Force-encrypt a value
     libra config list --vault                          List vault env entries
+    libra config generate-ssh-key --remote origin      Generate SSH key for remote
+    libra config generate-gpg-key                      Generate GPG signing key
     libra config list --name-only                      List all key names
     libra config path                                  Show config DB path"#;
 
@@ -376,20 +378,20 @@ pub enum ConfigCommand {
     Edit,
     /// Generate SSH key for a remote
     GenerateSshKey {
-        /// Remote name to generate key for
-        #[clap(long)]
+        /// Remote name to bind the new SSH key to
+        #[clap(long, value_name = "NAME")]
         remote: String,
     },
     /// Generate GPG key for signing
     GenerateGpgKey {
-        /// User name for the key
-        #[clap(long)]
+        /// User name for the key (default: from `user.name` config)
+        #[clap(long, value_name = "NAME")]
         name: Option<String>,
-        /// User email for the key
-        #[clap(long)]
+        /// User email for the key (default: from `user.email` config)
+        #[clap(long, value_name = "EMAIL")]
         email: Option<String>,
-        /// Key usage (signing or encrypt)
-        #[clap(long)]
+        /// Key usage: `signing` (default) or `encrypt`
+        #[clap(long, value_name = "KIND")]
         usage: Option<String>,
     },
 }
@@ -1654,9 +1656,11 @@ async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()>
 
 async fn handle_generate_ssh_key(
     remote: &str,
-    _scope: ConfigScope,
+    scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_global_key_generation(scope, "generate-ssh-key")?;
+
     // Validate remote name. config.md "generate-ssh-key" spec classifies
     // this as a CLI usage error (`error: invalid remote name '<name>': only
     // [a-zA-Z0-9_-] allowed`), so we must surface it via
@@ -1769,15 +1773,17 @@ async fn handle_generate_gpg_key(
     name: Option<&str>,
     email: Option<&str>,
     usage: Option<&str>,
-    _scope: ConfigScope,
+    scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    reject_global_key_generation(scope, "generate-gpg-key")?;
+
     let usage = match usage.unwrap_or("signing") {
         "signing" => "signing",
         "encrypt" => "encrypt",
         other => {
             return Err(CliError::from_legacy_string(format!(
-                "error: invalid value '{other}' for '--usage <USAGE>' (expected 'signing' or 'encrypt')"
+                "error: invalid value '{other}' for '--usage <KIND>' (expected 'signing' or 'encrypt')"
             )));
         }
     };
@@ -1860,6 +1866,17 @@ async fn handle_generate_gpg_key(
         }
     }
     Ok(())
+}
+
+fn reject_global_key_generation(scope: ConfigScope, command: &str) -> CliResult<()> {
+    if scope == ConfigScope::Local {
+        return Ok(());
+    }
+
+    Err(CliError::command_usage(format!(
+        "{command} only supports local scope; --global key generation is not supported yet"
+    ))
+    .with_hint("run without --global to generate a repository-local key"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

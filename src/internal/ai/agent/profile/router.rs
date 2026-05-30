@@ -24,6 +24,7 @@ const MAX_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
 /// Holds an immutable list of profiles. Selection is purely lexical: the description
 /// of each profile is tokenized into keywords, and the user input is scored by how
 /// many of those keywords appear (case-insensitively).
+#[derive(Clone)]
 pub struct AgentProfileRouter {
     profiles: Vec<AgentProfile>,
 }
@@ -392,6 +393,7 @@ mod tests {
                 name: "agent_a".to_string(),
                 description: "review code quality".to_string(),
                 tools: vec![],
+                permission: super::super::spec::AgentPermissionSpec::default(),
                 model_preference: "default".to_string(),
                 system_prompt: "A".to_string(),
                 mode: AgentMode::Primary,
@@ -405,6 +407,7 @@ mod tests {
                 name: "agent_b".to_string(),
                 description: "review code quality".to_string(),
                 tools: vec![],
+                permission: super::super::spec::AgentPermissionSpec::default(),
                 model_preference: "default".to_string(),
                 system_prompt: "B".to_string(),
                 mode: AgentMode::Primary,
@@ -436,6 +439,7 @@ mod tests {
             name: "planner".to_string(),
             description: "Implementation planner".to_string(),
             tools: vec!["read_file".to_string()],
+            permission: super::super::spec::AgentPermissionSpec::default(),
             model_preference: "anthropic/claude-3-5-sonnet-latest".to_string(),
             system_prompt: "You plan.".to_string(),
             mode: AgentMode::Primary,

@@ -50,6 +50,7 @@ pub struct TagArgs {
     #[clap(short, long)]
     pub message: Option<String>,
 
+    /// Replace an existing tag with the same name instead of failing
     #[clap(short, long, group = "action")]
     pub force: bool,
 

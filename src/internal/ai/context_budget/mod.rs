@@ -37,7 +37,8 @@ pub use frame::{
     ContextFrameSource, ContextFrameSourceKind, ContextTrustLevel,
 };
 pub use handoff::{
-    ContextHandoff, ContextHandoffParseError, ParsedSection, ParsedSummary, parse_handoff_template,
+    ContextHandoff, ContextHandoffBuilder, ContextHandoffParseError, ParsedSection, ParsedSummary,
+    parse_handoff_template,
 };
 pub use memory_anchor::{
     MemoryAnchor, MemoryAnchorAction, MemoryAnchorConfidence, MemoryAnchorDraft, MemoryAnchorEvent,

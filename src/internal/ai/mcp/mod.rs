@@ -34,6 +34,7 @@
 //!
 //! See `resource.rs` for detailed parameter structures.
 
+pub mod authz;
 pub mod resource;
 pub mod server;
 #[cfg(test)]

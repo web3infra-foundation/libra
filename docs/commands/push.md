@@ -2,20 +2,23 @@
 
 Send local commits and objects to a remote repository, updating remote refs.
 Supports SSH and HTTPS transports, LFS file uploads (HTTP only), fast-forward detection,
-force push, dry-run preview, and refspec mapping.
+force push, dry-run preview, multi-refspec updates, remote ref deletion, tag pushing,
+and mirror previews.
 
 ## Synopsis
 
 ```
-libra push [OPTIONS] [<repository> <refspec>]
+libra push [OPTIONS] [<repository> [<refspec>...]]
 ```
 
 ## Description
 
 `libra push` transfers commits, trees, blobs, and tags from the local repository to a
 remote. When invoked without arguments it pushes the current branch to its configured
-upstream remote. When a `repository` and `refspec` are given, the specified local ref
-is pushed to the named remote ref.
+upstream remote. When a `repository` and one or more `refspec` values are given, all
+refspecs are validated before any network write and then sent in one receive-pack
+request. `--tags` pushes all local tags, and `--mirror` mirrors local branch/tag refs
+to the remote, including deletion of remote-only refs.
 
 The command negotiates with the remote to determine which objects are missing, packs them
 into a single pack file, and sends the pack along with a ref-update request. If the remote
@@ -28,11 +31,13 @@ separate `lfs push` step.
 
 | Flag / Argument | Description | Example |
 |-----------------|-------------|---------|
-| `<repository>` | Remote name (e.g. `origin`). Required when `<refspec>` is given. | `libra push origin main` |
-| `<refspec>` | Local ref or `<src>:<dst>` mapping. Required when `<repository>` is given. | `libra push origin feature:release` |
-| `-u`, `--set-upstream` | Set the upstream tracking branch after a successful push. Requires both `<repository>` and `<refspec>`. | `libra push -u origin feature-x` |
+| `<repository>` | Remote name (e.g. `origin`). Required when `<refspec>`, `--tags`, or `--mirror` is used. | `libra push origin main` |
+| `<refspec>...` | Local ref, `<src>:<dst>` mapping, or `:<dst>` deletion. Multiple values are sent as one update set. | `libra push origin main feature:release` |
+| `-u`, `--set-upstream` | Set the upstream tracking branch after a successful single branch push. | `libra push -u origin feature-x` |
 | `-f`, `--force` | Allow non-fast-forward updates that overwrite remote history. | `libra push --force origin main` |
 | `-n`, `--dry-run` | Perform negotiation and object collection but skip the actual upload. Reports what would be pushed. | `libra push --dry-run` |
+| `--tags` | Push all local `refs/tags/*` refs. Existing identical remote tags are skipped. | `libra push --tags origin` |
+| `--mirror` | Mirror local `refs/heads/*` and `refs/tags/*` to the remote, deleting remote-only branch/tag refs. Use with `--dry-run` to preview. | `libra push --mirror --dry-run origin` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra push --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra push --machine` |
 | `--quiet` | Suppress stdout summary; warnings still go to stderr. | `libra push --quiet` |
@@ -46,6 +51,11 @@ libra push -u origin feature-x
 libra push --force origin main
 libra push --dry-run
 libra push origin local_branch:release
+libra push origin main feature:release
+libra push origin :stale-branch
+libra push origin refs/tags/v1.0:refs/tags/v1.0
+libra push --tags origin
+libra push --mirror --dry-run origin
 libra push --json
 ```
 
@@ -67,6 +77,20 @@ New branch:
 To git@github.com:user/repo.git
  * [new branch]      feature-x -> feature-x
  12 objects pushed (48.0 KiB)
+```
+
+Delete remote ref:
+
+```text
+To git@github.com:user/repo.git
+ - [deleted]         stale-branch
+```
+
+New tag:
+
+```text
+To git@github.com:user/repo.git
+ * [new tag]      v1.0 -> v1.0
 ```
 
 Up-to-date:
@@ -123,6 +147,7 @@ Example:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -173,6 +198,7 @@ Dry-run:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -202,6 +228,7 @@ Force push:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -231,6 +258,7 @@ Set upstream:
     "url": "git@github.com:user/repo.git",
     "updates": [
       {
+        "kind": "update",
         "local_ref": "refs/heads/main",
         "remote_ref": "refs/heads/main",
         "old_oid": "abc1234...",
@@ -252,6 +280,8 @@ Set upstream:
 ### Schema Notes
 
 - `updates` lists each ref update; empty when up-to-date
+- `kind` is `update` for branch/tag updates and `delete` for remote ref deletion
+- delete updates use an empty `local_ref` and the all-zero object id as `new_oid`
 - `old_oid` is `null` for new branches (no previous remote ref)
 - `forced` is `true` when the update required `--force` (non-fast-forward)
 - `bytes_pushed` is the pack data size in bytes; `0` for dry-run
@@ -261,15 +291,21 @@ Set upstream:
 
 ## Refspec Semantics
 
-Three forms are supported in this version:
+The following forms are supported:
 
 | Invocation | Meaning |
 |-----------|---------|
 | `libra push` | Push current branch to its configured tracking remote |
 | `libra push origin main` | Push local `refs/heads/main` to remote `refs/heads/main` |
 | `libra push origin local:release` | Push local `refs/heads/local` to remote `refs/heads/release` |
+| `libra push origin main feature:release` | Validate and send multiple ref updates together |
+| `libra push origin :feature` | Delete remote `refs/heads/feature` |
+| `libra push origin refs/tags/v1.0:refs/tags/v1.0` | Push a tag ref |
+| `libra push --tags origin` | Push all local tag refs |
+| `libra push --mirror --dry-run origin` | Preview mirroring branch/tag refs and deleting remote-only refs |
 
-Delete syntax (`:ref`), empty source (`src:`), and multi-refspec are not supported.
+Empty destination syntax (`src:`), malformed ref names, duplicate destination refs,
+and `--mirror` combined with explicit refspecs are rejected before any network write.
 Invalid forms return `InvalidRefspec` with exit 129.
 
 ## Design Rationale
@@ -285,14 +321,11 @@ restrictive stance: when you name a remote you must also name the ref. The bare
 This eliminates an entire class of "I accidentally pushed to production" mistakes without
 reducing the expressiveness of the command for scripted or agent-driven workflows.
 
-### Why no --tags?
+### Why keep local file remotes rejected?
 
-`git push --tags` pushes all local tags to the remote, which is a frequent source of
-namespace pollution in monorepos. Tags in Libra are intended to be managed explicitly
-via `libra tag` and pushed as part of normal refspec operations. A dedicated `--tags`
-flag would encourage bulk-pushing every local tag, conflicting with Libra's design goal
-of deliberate, minimal ref updates. If tag pushing is needed, the refspec syntax
-(`libra push origin v1.0:v1.0`) provides explicit control.
+Libra still treats local file remote push as an intentionally different surface. The
+C8 ref update expansion applies to network receive-pack transports; local-path remotes
+continue to fail closed to avoid undefined concurrent filesystem mutation semantics.
 
 ### Why integrated LFS push?
 
@@ -314,8 +347,10 @@ or configure a separate LFS tool.
 | Force push | `libra push --force` | `git push --force` | `jj git push --allow-new` |
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |
-| Delete remote branch | Not supported | `git push origin :branch` | `jj git push --delete branch` |
-| Push tags | Not supported | `git push --tags` | N/A |
+| Multiple refspecs | `libra push origin main feature:release` | `git push origin main feature:release` | N/A |
+| Delete remote branch | `libra push origin :branch` | `git push origin :branch` | `jj git push --delete branch` |
+| Push tags | `libra push --tags origin` | `git push --tags origin` | N/A |
+| Mirror preview | `libra push --mirror --dry-run origin` | `git push --mirror --dry-run origin` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Remote name suggestion | Fuzzy match "did you mean?" | No | No |
 | Error hints | Every error type has an actionable hint | Minimal | Minimal |

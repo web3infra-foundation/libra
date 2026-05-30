@@ -9,7 +9,7 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::{Required, PreferStrict, BestEffort}`、Seatbelt 策略拼装、macOS 敏感路径拒读、Linux 外部 helper、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort 兼容模式，`Required` 会拒绝降级，`PreferStrict` 会在 helper 缺失时要求审批确认后才允许裸跑**、**Linux bwrap 敏感路径遮蔽尚未落地**、**内建 bwrap `--new-session` 尚未落地**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::{Required, PreferStrict, BestEffort}`、Seatbelt 策略拼装、macOS 敏感路径拒读、macOS `IOTTYClient` 终端注入拒绝（v0.17.1085）、Linux 外部 helper + **内建 bwrap 直调（v0.17.724）**、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理、`libra sandbox status` 自检与 `SandboxEvidenceSink` 结构化审计（v0.17.720..v0.17.726）（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），并已接入 runtime 的网络三态路由：`NetworkAccess::Allowlist` 会启动本地 HTTP/CONNECT allowlist 代理，按 Host / CONNECT target 对 `NetworkService` 的 host / port / protocol 规则过滤；`PreferStrict/BestEffort` 仍在代理不可用时降级为 `DENY`（写入 `LIBRA_SANDBOX_NETWORK_DISABLED`）。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
@@ -22,30 +22,30 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 审计结论
 
-- **阶段 1 已收口，阶段 2、3、4 继续收口，阶段 5 与阶段 6 已收口，阶段 7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + Linux bwrap 参数构造层 + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
-- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读、Linux bwrap 参数构造层与 per-command tmp 已进入主干；内建 bwrap 执行选择、seccomp 注入、网络三态仍未进入主干实现。
+- **阶段 1、阶段 2 已收口（v0.17.724 内建 bwrap 真实执行 + v0.17.725 `--seccomp <fd>` wiring），阶段 3 / 4 继续收口，阶段 5 与阶段 6 已收口，阶段 7 三态 `NetworkAccess` 枚举迁移（v0.17.723）+ per-allowlist 代理后端 `AllowlistProxy`（v0.17.737）+ 本地 HTTP/CONNECT allowlist 代理 runtime 均已落地**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + Linux 外部 helper / 内建 bwrap 双路径 + seccomp `--seccomp <fd>` wiring + 危险挂载拒绝 + per-command tmp + Phase 7 完整链（`NetworkProtocol`/`NetworkService` schema + `NetworkProxy` trait + `NoopProxy`/`LoopbackOnlyProxy` + `AllowlistProxy` + 本地 CONNECT proxy runtime + `NetworkEnforcementFailed` transform variant + `select_network_proxy` + `allowlist_proxy_from_policy` 决策树）+ 结构化 `SandboxEvidenceSink`（v0.17.720..v0.17.726）已具备；默认 seccomp BPF 回退策略（`~/.libra/seccomp.bpf`）已可提供”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS `IOTTYClient` 终端注入拒绝、macOS 敏感路径拒读、Linux bwrap 参数构造层、内建 bwrap 真实执行、`--seccomp <fd>` 参数注入、`NetworkAccess` 三态枚举、per-command tmp、结构化 Evidence sink、per-allowlist 代理后端均已进入主干；默认 seccomp BPF 回退策略文件支持（`~/.libra/seccomp.bpf`）已补齐。
 
 ### 分阶段状态（当前代码）
 
 | 阶段 | 目标 | 现状 |
 |---|---|---|
 | 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 已落地：`sandbox status`、`Required` 拒绝降级、`PreferStrict` 降级审批确认均已接线；默认仍保持 `BestEffort` 兼容模式 |
-| 阶段 2 | 内建 bwrap 直调 + seccomp | 部分落地：`create_bwrap_command_args()` 已构造 bwrap 参数；真实执行选择、bwrap 探测缓存与 seccomp 注入仍待实现 |
-| 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；bwrap 参数构造已包含 `--new-session` / `--die-with-parent`，真实 bwrap 执行验收仍待阶段 2 |
-| 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 参数构造已把 `deny_read` 映射为 `--tmpfs` 遮蔽，真实 bwrap 执行验收仍待阶段 2 |
+| 阶段 2 | 内建 bwrap 直调 + seccomp | 已落地：v0.17.724 接入真实执行选择（`locate_bwrap_binary` 探测 `PATH` + `LIBRA_BWRAP_BINARY` 覆盖），v0.17.725 接入 `--seccomp <fd>` 参数 + `seccomp_policy_path` 配置位与 `pre_exec` FD 注入；默认策略回退到 `~/.libra/seccomp.bpf`（文件存在时生效） |
+| 阶段 3 | `setsid` / `--new-session` | 已落地：sandbox 子进程 Unix `setsid()` 已落地；macOS Seatbelt 已显式拒绝 `IOTTYClient`；bwrap 参数构造已包含 `--new-session` / `--die-with-parent`，内建 bwrap 真实执行路径（v0.17.724）下两者均在生效路径中 |
+| 阶段 4 | 敏感路径拒读（`deny_read`） | 已落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 参数构造已把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效；剩余风险是默认 deny_read 清单仍较保守 |
 | 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
 | 阶段 6 | 危险挂载拒绝清单 | 已落地（0.17.25） |
-| 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
+| 阶段 7 | 网络三态 + allowlist/proxy | Runtime 与 `select_network_proxy` 已接线：`Allowlist + Required` 使用本地 HTTP/CONNECT allowlist 代理，`BestEffort/PreferStrict` 在代理不可用时下降级为禁网并设置 `LIBRA_SANDBOX_NETWORK_DISABLED`；`NetworkProtocol`/`NetworkService`/`NetworkServiceValidationError` schema、`NetworkProxy` trait + `NoopProxy`/`LoopbackOnlyProxy`、`AllowlistProxy`、`NetworkEnforcementFailed`、代理环境注入和 CONNECT allow/deny 转发测试均已落地。剩余：更细的 TLS ClientHello SNI 观测、连接池与 metrics（非本阶段阻塞项） |
 
 ### 关键证据（代码锚点）
 
 - Linux helper 缺失时，默认 `best_effort` 仍会 `warn` 并回退到无沙箱；`LIBRA_SANDBOX_ENFORCEMENT=required` 或 runtime config 设为 `Required` 时，`SandboxManager::transform()` 会返回 `SandboxTransformError::EnforcementFailed`；`prefer_strict` 在 shell approval 路径会先要求确认降级。
-- `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed` 仍需随阶段 7 网络三态一起引入。
+- `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed { reason: String }` transform error variant 已在 v0.17.670 落地（Display 模板 `"network enforcement failed: {reason}"`，与 `EnforcementFailed` 唯一区分以便 audit 消费者按子串过滤）。`Runtime::transform` 已接线 `allowlist` 分支到 network decision，并把已验证的 allowlist 服务清单传给执行层启动本地代理。
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、当前 enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；`required` 模式会把内部沙箱缺失报告为将失败，而不是描述为可接受降级。
-- Linux 执行路径仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`）；`src/internal/ai/sandbox/runtime.rs` 已新增内建 `create_bwrap_command_args()` 参数构造层，但尚未接入真实执行选择。
+- Linux 执行路径已支持双路：外部 `libra-linux-sandbox` helper（`--sandbox-policy` / `--use-bwrap-sandbox` 参数转发）+ 内建 bwrap 直调（`locate_bwrap_binary()` 探测 `PATH`，未设 `LIBRA_LINUX_SANDBOX_EXE` 时自动 fallback；v0.17.724）。`SandboxManager::transform` 在 `LinuxSeccomp` 分支内按"外部 helper → 内建 bwrap → EnforcementFailed/裸跑"三段决策。
 - macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 参数构造层已把 `deny_read` 映射为 `--tmpfs` 遮蔽。
 - `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
-- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs::NetworkAccess`（当前位于 policy.rs:81-87）、`src/internal/ai/sandbox/mod.rs` 内部 `effective_network_access()`、以及 `src/command/code.rs` 中传递 `--network-access` 的入口。锚点改为函数 / 枚举名而非行号，避免 sandbox 子系统继续重构时再次失锚。
+- 网络模型已迁移为三态：`src/internal/ai/sandbox/policy.rs::NetworkAccess::{Denied, Allowlist { services }, Full}`（v0.17.723）；`SandboxPolicy::WorkspaceWrite::network_access: NetworkAccess`、`ExternalSandbox::network_access: NetworkAccess`；`has_full_network_access()` / `network_access.is_enabled()` 给 `LIBRA_SANDBOX_NETWORK_DISABLED` 环境变量的设置位置消费。`src/command/code.rs` 中 `--network-access` CLI 通过 `NetworkAccess::from_legacy_bool(...)` 适配回 enum。`Allowlist` 模式的 `Runtime` 降级决策（Required/PreferStrict/BestEffort）已接线；执行层会启动本地 HTTP/CONNECT 代理并注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。
 
 ## 0.17.25 增量收口（2026-05-12）
 
@@ -66,29 +66,29 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **阶段 1 显式 required enforcement 已落地**：`SandboxEnforcement::{Required, PreferStrict, BestEffort}` 已进入策略层并导出给 runtime config；默认保持 `BestEffort` 以维持既有行为。
 - **Linux 静默降级已可关闭**：`SandboxManager::transform()` 在 `Required` 且内部 sandbox policy 需要 OS 后端时，不再允许 Linux helper 缺失后继续裸跑，而是返回 `SandboxTransformError::EnforcementFailed`。
 - **环境开关已接线**：`LIBRA_SANDBOX_ENFORCEMENT=required|prefer_strict|best_effort` 会影响 `libra code` 命令构造路径；无效值返回用户可读错误。
-- **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失时告警会说明相关命令将失败。
-- **仍待收口**：内建 bwrap 未落地前，Linux required 模式仍依赖外部 helper。
+- **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失 + `bwrap` 也不可用时告警会说明相关命令将失败。
+- **后续维护**：v0.17.724 落地内建 bwrap 真实执行后，Linux required 模式不再唯一依赖外部 helper（无 helper 时自动选择 `bwrap`）；per-allowlist 代理后端与本地 HTTP/CONNECT runtime 已落地，后续只剩 TLS SNI 观测、连接池与 metrics 等增强项。
 
 ## 0.17.45 增量收口（2026-05-12）
 
 - **阶段 3 部分落地**：`ExecEnv::into_command()` 在 Unix 平台对实际启用的 Libra 内部 sandbox 命令调用 `setsid()`，让 macOS Seatbelt / Linux helper 子进程脱离调用方 session。
 - **生效范围**：仅当 `effective_sandbox` 为 `MacosSeatbelt` 或 `LinuxSeccomp` 时启用；显式 escalated、`DangerFullAccess`、`ExternalSandbox` 和默认 fallback `SandboxType::None` 不会被这个路径隐式改写。
 - **回归覆盖**：`exec_env_new_session_runs_child_as_session_leader` 在 Unix 上验证 `setsid()` 后 child PID 与 session ID 一致；fallback / escalated transform 继续断言不会设置 `new_session`。
-- **仍待收口**：内建 bwrap 尚未落地，因此阶段 2 的 `--new-session` 参数覆盖仍是后续工作；Seatbelt 读权限收紧也仍在阶段 4。
+- **后续状态**：v0.17.724 内建 bwrap 真实执行落地后，阶段 2 的 `--new-session` 参数覆盖已进入生效路径；Seatbelt 读权限收紧也已在阶段 4 落地。
 
 ## 0.17.46 增量收口（2026-05-12）
 
 - **阶段 4 macOS 基线已落地**：`sensitive_read_paths()` 定义默认敏感读取清单，覆盖 HOME 下的 `.ssh`、`.aws`、`.gnupg`、`.netrc`、`.config/gcloud`、`.kube`、`.config/libra/vault` 以及 `/etc/shadow`。
 - **Seatbelt 拒读已接线**：`create_seatbelt_command_args()` 在 `(allow file-read*)` 后追加参数化 `(deny file-read* (subpath ...))`，保持项目文件可读，同时默认挡住常见 credential 目录。
 - **回归覆盖**：策略层测试验证默认清单；macOS runtime 测试验证 Seatbelt deny policy 与参数表包含 HOME credential 路径和 `/etc/shadow`。
-- **当时仍待收口**：Linux bwrap `--tmpfs` 遮蔽仍是阶段 4 后续工作；更广泛的浏览器/token 默认路径清单已在 0.17.76 扩展。
+- **后续状态**：Linux bwrap `--tmpfs` 遮蔽已由 `create_bwrap_command_args()` 对 `/tmp` 和 `deny_read` 路径接入，并由 `create_bwrap_command_args_masks_sensitive_read_paths_with_tmpfs` 固定；更广泛的浏览器/token 默认路径清单已在 0.17.76 扩展。
 
 ## 0.17.76 增量收口（2026-05-13）
 
 - **阶段 4 macOS 默认拒读清单继续扩展**：`sensitive_read_paths()` 除 SSH/AWS/GPG/netrc/gcloud/kube/Libra vault 外，新增常见 token 与浏览器 profile 路径，包括 `.azure`、`.docker`、`.npmrc`、`.pypirc`、Cargo/Gem credentials、GitHub/Hub config、Firefox/Chrome/Chromium/Brave profile、Flatpak Firefox profile 和 macOS `Library/Cookies`。
 - **Seatbelt 自动继承**：macOS Seatbelt policy 继续通过同一个 `sensitive_read_paths()` 入口生成参数化 `(deny file-read* ...)`，不需要额外配置即可挡住这些默认路径。
 - **回归覆盖**：`sensitive_read_paths_include_home_credentials_and_system_shadow` 扩展断言 token 与浏览器路径。
-- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
+- **后续状态**：Linux bwrap 的 `--tmpfs` 遮蔽已随阶段 2/4 合并进入参数构造层；网络三态后续已在阶段 7 收口。
 
 ## 0.17.47 增量收口（2026-05-12）
 
@@ -96,7 +96,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **路径解析契约**：`deny_read` 支持绝对路径、相对 sandbox cwd 的路径，以及 `~/...` HOME 展开；runtime-provided `SandboxRuntimeConfig::deny_read_paths` 会追加到同一清单并去重。
 - **Seatbelt 接线**：macOS Seatbelt policy 会把默认敏感路径和自定义 `deny_read` 路径合并后生成参数化 `(deny file-read* (subpath ...))`。
 - **回归覆盖**：新增测试覆盖缺失配置 no-op、相对/绝对路径解析、runtime config 追加和 TOML parse error；macOS policy 测试覆盖自定义 deny 路径进入参数表。
-- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
+- **后续状态**：Linux bwrap 的 `--tmpfs` 遮蔽已覆盖默认 `/tmp` 与用户/runtime `deny_read` 路径；网络三态后续已在阶段 7 收口。
 
 ## 0.17.48 增量收口（2026-05-12）
 
@@ -106,6 +106,23 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **回归覆盖**：Linux 单测验证 helper 缺失时会发出 outside-sandbox approval，拒绝后命令不会创建 marker 文件。
 - **仍待收口**：默认 enforcement 仍保持 `BestEffort` 以兼容既有运行环境；内建 bwrap 和网络三态仍分别在阶段 2、阶段 7。
 
+## 0.17.1085 增量收口（2026-05-27）
+
+- **阶段 3 macOS 终端注入防御补齐**：`seatbelt_base_policy.sbpl` 已显式拒绝 `(iokit-user-client-class "IOTTYClient")` 的 `iokit-open`，避免 sandboxed 进程通过终端 user client 反向影响调用方 TTY。
+- **与现有新 session 防御叠加**：该规则不替代 Unix `setsid()` / bwrap `--new-session`，而是在 macOS Seatbelt 策略层补齐同一阶段的终端注入防御面。
+- **回归覆盖**：`seatbelt_base_policy_denies_iottyclient_user_client` 固定策略文本必须同时包含 `deny iokit-open` 与 `IOTTYClient`，防止后续 Seatbelt policy 重排时静默删除该规则。
+
+## 0.17.1125 增量收口（2026-05-30）
+
+- **`sandbox status` 配置校验已对齐执行路径**：`libra sandbox status` 现在会读取当前目录的 `.libra/sandbox.toml`，解析 `[sandbox.network]`，并用同一套 `NetworkService::validate()` 规则拒绝非法 allowlist（例如裸 `*` host）。
+- **失败语义**：无效配置会以 `LBR-CLI-002` fail closed，并提示修复或移除无效 `[sandbox.network]`；诊断命令不再在项目 sandbox 配置错误时继续输出默认策略。
+- **回归覆盖**：`sandbox_status_rejects_invalid_project_network_config` 固定 `--json sandbox status` 对非法网络配置的退出码、稳定错误码和用户可读错误信息。
+
+## 0.17.1137 增量收口（2026-05-30）
+
+- **allowlist proxy 单请求拒绝已写入 Evidence sink**：`AllowlistProxy` 在 HTTP/CONNECT 请求被拒绝时会记录 `network_request_denied` 事件，包含 `proxy_backend`、host、port、protocol 和拒绝原因；shell 工具的 fanout sink 可把该事件带入 `sandbox_evidence` metadata。
+- **回归覆盖**：`allowlist_proxy_runtime_records_evidence_on_denied_connect_target` 固定 denied CONNECT 既返回 `403 Forbidden`，也写入结构化 Evidence；`SandboxEvidenceEvent` metadata 测试固定 `network_request_denied` 的 JSON 字段。
+
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
@@ -113,12 +130,12 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **策略层** [src/internal/ai/sandbox/policy.rs](../../src/internal/ai/sandbox/policy.rs)
 - `SandboxPolicy` 四档：`ReadOnly` / `WorkspaceWrite` / `ExternalSandbox` / `DangerFullAccess`
 - `WritableRoot` 写入根 + 保护子路径（`.git` / `.libra` / `.codex` / `.agents`）
-- 路径通过 `canonicalize` 规范化（policy.rs:280 / 296）
+- 路径通过 `canonicalize` 规范化（policy.rs:532 / 548）
 - `/tmp` 与 `TMPDIR` 由策略显式纳入写入根
 - 危险 writable root 拒绝：`/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock`
 
 **运行时层** [src/internal/ai/sandbox/runtime.rs](../../src/internal/ai/sandbox/runtime.rs)
-- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs::create_seatbelt_command_args，当前位于 :506；`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 通过 `include_str!` 嵌入，runtime.rs:512-513）
+- macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs::create_seatbelt_command_args，当前位于 :857；`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 通过 `include_str!` 嵌入，runtime.rs:864-865）
 - Linux：调用外部 `libra-linux-sandbox` 可执行文件，支持 seccomp 或 bwrap 两种模式，经 `LIBRA_LINUX_SANDBOX_EXE` 与 `LIBRA_USE_LINUX_SANDBOX_BWRAP` 控制
 - Windows：`SandboxTransformError::WindowsSandboxNotImplemented`，与 Claude Code 当前状态对齐
 - 网络控制：沙箱策略联动 `LIBRA_SANDBOX_NETWORK_DISABLED` 环境变量和 Seatbelt 网络策略
@@ -127,7 +144,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `AskForApproval` 四档（Never / OnFailure / OnRequest / UnlessTrusted）
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
-- 沙箱拒绝关键词触发升级重试提示（mod.rs::is_likely_sandbox_denied，当前位于 mod.rs:1763；调用点在 mod.rs:1033）
+- 沙箱拒绝关键词触发升级重试提示（mod.rs::is_likely_sandbox_denied，函数定义当前位于 mod.rs:1936；调用点在 mod.rs:1070；锚点跟随符号名而非行号，避免 sandbox 子系统持续重构后再次失锚）
 - 每次命令执行前注入私有 0o700 tmp，并在执行后清理 `TMPDIR` / `TEMP` / `TMP` 指向目录
 - 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs](../../src/internal/ai/tools/handlers/shell.rs)）
 
@@ -138,9 +155,9 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，`PreferStrict` 在 approval shell 路径会要求用户确认降级，不再无感知降级。
 - Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `.azure` / `.docker` / `.npmrc` / `.pypirc` / Cargo/Gem credentials / `~/.config/gcloud` / `~/.config/gh` / `~/.config/hub` / `~/.kube` / `.config/libra/vault` / Firefox、Chrome、Chromium、Brave profile / macOS `Library/Cookies` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径。
-- `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
-- `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
-- `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
+- `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数已通过 `runtime.rs::create_bwrap_command_args` 落地（v0.17.724），并通过 `exec_env_new_session_runs_child_as_session_leader` 等回归在 Unix 上验证。
+- `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；清理失败会进入 `SandboxEvidenceSink::TmpdirCleanupFailed`，shell handler 会通过 request-level fanout sink 捕获事件并在 `ToolOutput.metadata.sandbox_evidence` 暴露，orchestrator `ToolCallEnd` projection 会写入 `EvidenceEvent(kind="sandbox")`。
+- `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单，并通过 `SandboxEvidenceSink::WritableRootRejected { root, reason }` 把拒绝事件作为结构化 Evidence 写入 sink（`evidence.rs:58`）；agent Runtime 的 `ToolInvocation[E]` projection 已把 shell metadata 中的 sandbox 事件转换成 `Evidence[E]` payload。
 - `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，尚未切换为默认强制或默认询问。
 
 ## 目标与非目标
@@ -164,7 +181,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **本批非目标：**
 
 - **不实现 Windows 沙箱**，保持与 Claude Code 当前状态一致
-- **不实现完整的域名/SNI 过滤代理守护进程**：本轮落地数据结构 + OS 级默认拒绝 + 白名单配置解析 + stub 代理入口；基于 `hickory-dns` + TLS SNI 过滤的完整代理实现单列后续批次
+- **不做 TLS MITM 或连接池/metrics**：本轮代理在 HTTP CONNECT target 与 HTTP Host 层过滤，不解密 TLS，也不注入 CA。更细的 TLS ClientHello SNI 观测、连接池和 metrics 单列后续批次。
 - **不把 FUSE overlayfs 接入 AI 命令执行层**（价值高但侵入大，列为后续独立批次）
 - **不重构 `libra-linux-sandbox` helper**（保留其作为兼容回退路径）
 
@@ -172,15 +189,15 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 | # | Claude Code 做到 | Libra 现状 | 严重度 | 落地阶段 |
 |---|---|---|---|---|
-| G1 | Linux 沙箱开箱即用（bwrap 直调） | 依赖外部 `libra-linux-sandbox` 二进制，未配置时 warn + 裸跑 | ★★★ | 阶段 1 + 阶段 2 |
-| G2 | `--new-session` 阻断 TIOCSTI | sandbox 子进程已 `setsid()`；内建 bwrap `--new-session` 仍待阶段 2 | ★★★ | 阶段 3 部分落地 |
-| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | macOS Seatbelt 已拒读默认敏感路径并支持自定义 deny_read；Linux bwrap 遮蔽仍待实现 | ★★ | 阶段 4 部分落地 |
-| G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
-| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已在 `run_command_spec` 前后注入并清理私有 tmp；清理失败 Evidence 仍待 Runtime 接线 | ✅ | 阶段 5 已落地 |
-| G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
+| G1 | Linux 沙箱开箱即用（bwrap 直调） | 已落地（v0.17.724）：外部 `libra-linux-sandbox` 缺失时自动选择 `bwrap`；`locate_bwrap_binary()` 探测 `PATH` + `LIBRA_BWRAP_BINARY` 覆盖 | ✅ | 阶段 1 + 阶段 2 已落地 |
+| G2 | `--new-session` 阻断 TIOCSTI | 已落地：sandbox 子进程 `setsid()` + 内建 bwrap `create_bwrap_command_args` 包含 `--new-session` / `--die-with-parent`，v0.17.724 真实执行路径下两者生效 | ✅ | 阶段 3 已落地 |
+| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | 已落地：macOS Seatbelt 拒读默认敏感路径 + 自定义 deny_read；Linux bwrap 把 `deny_read` 映射为 `--tmpfs` 遮蔽，内建 bwrap 真实执行路径（v0.17.724）下生效 | ✅ | 阶段 4 已落地 |
+| G4 | 默认拒绝 + 域名白名单的网络策略 | `NetworkAccess::{Denied, Allowlist { services }, Full}` 三态已落地（v0.17.723）；Linux 在 `Denied` 时 `--unshare-net` 已生效；per-allowlist 代理后端 `AllowlistProxy`（v0.17.737）按 host / port / protocol + `*.suffix` 通配匹配，未匹配请求显式 `Deny(...)` 携带原始 host/port/protocol；执行层已启动本地 HTTP/CONNECT allowlist 代理并注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，CONNECT target / HTTP Host 匹配时转发，不匹配时返回 `403 Forbidden` | ✅ | 阶段 7 三态枚举 + 代理后端 + 本地代理 runtime 均已落地 |
+| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已落地：`run_command_spec` 前后注入并清理私有 tmp；清理失败通过 `SandboxEvidenceSink::TmpdirCleanupFailed` 结构化记录（v0.17.720） | ✅ | 阶段 5 已落地 |
+| G6 | 内置 Seccomp 过滤器 | `--seccomp <fd>` wiring + `seccomp_policy_path` 配置位已落地（v0.17.725）；Linux 下 `template/seccomp-default.json` 现在可通过 `seccomp_compile::compile_bundled_seccomp_policy()` 即时编译成 BPF 字节（v0.17.770，`seccompiler` crate 0.5.0 + Linux-only `#[cfg(target_os = "linux")]` 门控）；`ensure_compiled_seccomp_policy_at(path)` 提供首次启动幂等地落盘到 `~/.libra/seccomp.bpf` 的 helper | ✅ | 阶段 2 + on-the-fly compile 均已落地 |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
-| G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
+| G9 | 嵌套容器 / WSL 的自适应降级告警 | `libra sandbox status` 已对 WSL 与常见 container/cgroup 信号输出弱隔离告警；执行策略仍保持显式 enforcement 决策 | ✅ | 诊断面已落地，后续仅维护更多宿主信号 |
 | G10 | Windows 规划中 | 同样未实现 | — | 本轮不处理 |
 
 ## 改进阶段
@@ -193,7 +210,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 已新增 `enforcement: Required | PreferStrict | BestEffort`；当前默认保持 `BestEffort`，避免未显式配置的既有运行环境突然失败
    - `Required` 语义：内部 sandbox policy 需要 OS 后端时，若无法构造有效 sandbox，则返回 `SandboxTransformError::EnforcementFailed`
    - 与现有 `SandboxPermissions::RequireEscalated` 解耦：后者表达"这次调用合法地需要无沙箱"，前者表达"系统配置强制要求沙箱生效"；当前实现仍允许显式 escalated 调用绕过内部策略校验
-2. **修改降级路径**（`runtime.rs::SandboxManager::transform` 内的 `EnforcementFailed` 返回；当前位于 runtime.rs:302 和 :350 两处）
+2. **修改降级路径**（`runtime.rs::SandboxManager::transform` 内的 `EnforcementFailed` 返回；当前位于 runtime.rs:484 和 :572 两处）
    - 已改为根据 `enforcement` 决策：
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }` 返回给调用方
     - `PreferStrict` → 已在 shell approval 路径复用 `ExecApprovalRequest` 弹用户确认；拒绝时不得裸跑
@@ -234,13 +251,13 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **目标**：即使 AI 产出包含 TIOCSTI ioctl 的恶意命令，也无法把指令注入到宿主 TTY。
 
 1. **macOS**（`create_seatbelt_command_args`）
-   - 在 `seatbelt_base_policy.sbpl` 追加 `(deny iokit-open (iokit-user-client-class "IOTTYClient"))` 类规则
+   - 已在 `seatbelt_base_policy.sbpl` 追加 `(deny iokit-open (iokit-user-client-class "IOTTYClient"))` 类规则（v0.17.1085）
    - 已给 sandbox 子进程加 `setsid`（通过 `Command::pre_exec` 在 Unix 下设置 `setsid()`）
 2. **Linux**（`create_bwrap_command_args` / 外部 helper）
    - 外部 helper sandbox 子进程已通过 `ExecEnv` 进入新 session
-   - 内建 bwrap 参数追加 `--new-session` 仍待阶段 2 落地
+   - 内建 bwrap 参数追加 `--new-session` 已通过 `create_bwrap_command_args` 落地（v0.17.724）
 3. **单元测试**
-   - 已通过 Unix 单测验证 `setsid()` 后 child PID 与 session ID 一致；完整 Linux bwrap `tty=?` 覆盖仍待阶段 2
+   - 已通过 Unix 单测验证 `setsid()` 后 child PID 与 session ID 一致；已用 Seatbelt policy 文本测试固定 macOS `IOTTYClient` deny；完整 Linux bwrap `tty=?` 覆盖仍待阶段 2
 
 ### 阶段 4：Seatbelt 读权限收紧（P1）
 
@@ -308,11 +325,11 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - **macOS Seatbelt**（`create_seatbelt_command_args`）：
      - `Denied` / `Allowlist` 模式下**不再注入** `seatbelt_network_policy.sbpl`，并显式追加 `(deny network*)` + `(allow network* (local ip "localhost:*"))` 作为保险
      - `Full` 模式下才注入 `seatbelt_network_policy.sbpl`
-     - `Allowlist` 模式的按域名放行由阶段 7.4 的代理 stub 承担
+     - `Allowlist` 模式的按域名放行由本地 HTTP/CONNECT allowlist 代理承担
    - **Linux bwrap**（`create_bwrap_command_args`）：
-     - `Denied` / `Allowlist` 模式下默认 `--unshare-net`（仅 loopback）
+     - `Denied` 模式下默认 `--unshare-net`
      - `Full` 模式下 `--share-net`
-     - `Allowlist` 模式下通过 `--setenv HTTPS_PROXY=http://127.0.0.1:<port>` 指向本地代理（阶段 7.4）
+     - `Allowlist` 模式下使用 `--share-net` 访问父进程启动的 loopback 代理，并通过 `HTTPS_PROXY=http://127.0.0.1:<port>` 指向该代理
 
 3. **配置契约**（`.libra/sandbox.toml`）
    ```toml
@@ -332,16 +349,21 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    host = "github.com"
    ports = [22, 443]
    ```
-   - 解析走第一批 `config_kv` / `resolve_env()` 基础设施（详见 [config.md](config.md)）
    - 拒绝 `host = "*"` 或空字符串；拒绝未声明 `ports` 的 22/3389 高敏感端口
+   - **已落地（解析 + 收紧接线）**：`SandboxConfigFile`（`src/internal/ai/sandbox/mod.rs`）现在与 `deny_read` 走同一个 `.libra/sandbox.toml` TOML 加载器解析 `[sandbox.network]`（`mode` + `[[sandbox.network.services]]`），`mode = "allowlist"` 时对每条 service 调用 `NetworkService::validate()` 并返回带文件归属的可读错误。解析出的 `NetworkAccess` 通过 `SandboxPolicy::with_network_restriction()` → `NetworkAccess::restrict_with()` 以**只收紧**语义作用于 transform 之前的 policy：取两者中更严格的一方（`Denied < Allowlist < Full`），两个 allowlist 取服务交集。因此配置文件只能锁紧、永远不能放宽 policy 的网络可达性，安全攸关的 transform 派生逻辑保持不变。
+     - **空 allowlist 即 deny-all**：交集为空、或配置 `mode = "allowlist"` 但未列任何 service 时，`restrict_with` 会折叠为 `Denied`（而非空 `Allowlist`）。这是安全必需——OS 层 transform 按 `Allowlist` *mode* 构造 bwrap/seatbelt 参数（共享网络命名空间）并依赖代理过滤；空 allowlist 不会启动代理，若以 `Allowlist` 形态进入 transform，在 `PreferStrict`/`BestEffort` 档下只剩软性 env-var 信号、命名空间仍共享。折叠为 `Denied` 强制 `--unshare-net`。
+     - **已落地（审批升级接线）**：从更严格的 policy（如 `Denied`）经配置**升级**网络访问已走 §7.5 的 `ExecApprovalRequest` 审批通道：`requested_network_access_upgrade()` 先检测 `.libra/sandbox.toml` 是否比当前 policy 更宽，`run_shell_command_with_approval()` 发起不可缓存的网络升级审批，审批通过后以 `network_access_override` 传入 `run_command_spec()`，再由 `build_command_from_spec()` 在 transform 前应用到 policy。`restrict_with` 仍保持只收紧语义；新增 `network_access_upgrade_uses_uncached_approval_request` 与 `approved_network_access_upgrade_reaches_command_environment` 覆盖拒绝路径和批准后 allowlist 代理环境实际到达命令的路径。
+     - **`DangerFullAccess` 例外（按设计不被配置收紧）**：`with_network_restriction` 只作用于带 `network_access` 字段的 `WorkspaceWrite` / `ExternalSandbox`；`ReadOnly` 本已 `Denied`，而 `DangerFullAccess` 是显式的主机级逃逸（需 escalated 审批才能选中，无 `network_access` 字段），配置文件不会静默改写它。因此 `.libra/sandbox.toml [sandbox.network]` **不是**覆盖 `DangerFullAccess` 的绝对网络上限；对该策略的网络管控由 escalation 审批通道负责。
+     - **未采用** `config_kv` / `resolve_env()` 路径：与既有 `deny_read` 对齐、直接走 `.libra/sandbox.toml` TOML 加载器，避免引入第二套解析机制。`[sandbox.network]` 及其子表使用 `deny_unknown_fields`，拼错的表名/字段名会报错而非被静默忽略。
 
-4. **本地白名单代理（本轮 stub + 后续完整实现）**
-   - **本轮**：在 `src/internal/ai/sandbox/` 下新增 `proxy.rs`，提供 `NetworkProxy` trait 与 `NoopProxy`（拒绝一切）、`LoopbackOnlyProxy`（默认）两个实现
-   - `Allowlist` 模式若代理未启动则按 `SandboxEnforcement` 决策：
+4. **本地白名单代理（已落地）**
+   - 已在 `src/internal/ai/sandbox/` 下提供 `NetworkProxy` trait 与 `NoopProxy`（拒绝一切）、`LoopbackOnlyProxy`、`AllowlistProxy` 实现
+   - 已新增本地 HTTP/CONNECT runtime：sandboxed 命令通过 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 连接 loopback 代理，代理按 CONNECT target / HTTP Host 匹配 allowlist host / port / protocol 后再转发
+   - `Allowlist` 模式若代理不可用则按 `SandboxEnforcement` 决策：
      - `Required` → `SandboxTransformError::NetworkEnforcementFailed`
      - `PreferStrict` → 降级为 `Denied` 并在 `sandbox status` 与审批 UI 告警
      - `BestEffort` → 保持 `Denied`
-   - **后续批次**：实现基于 `hyper` + `hickory-resolver` 的 HTTP CONNECT 代理，按 SNI / HTTP Host 过滤；不做 MITM（不需要注入 CA）
+   - **后续批次**：补充 TLS ClientHello SNI 观测、连接池与 metrics；不做 MITM（不需要注入 CA）
 
 5. **审批与审计**
    - 任何 `NetworkAccess` 升级（`Denied → Allowlist`、`Allowlist → Full`）必须经过 `ExecApprovalRequest` 审批通道
@@ -353,14 +375,14 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 现有 `SandboxPolicy::ExternalSandbox { network_access: NetworkAccess::Enabled }` 映射到 `NetworkAccess::Full` + `SandboxEnforcement::BestEffort`
    - 默认策略 `SandboxPolicy::default()` 变更为 `NetworkAccess::Denied`（当前已是 `network_access: false`，行为等价但语义更清晰）
 
-**本阶段非目标**：不实现完整域名过滤代理的 SNI 解析、TLS 握手透传、连接池与 metrics；这些单列后续批次。阶段 7 收口标准是"默认出站 deny 在 OS 层可验证生效；allowlist 配置能加载并在 stub 代理下表达出来"。
+**本阶段非目标**：不实现 TLS MITM、连接池与 metrics；这些单列后续批次。阶段 7 收口标准是"默认出站 deny 在 OS 层可验证生效；allowlist 配置能加载，sandboxed 命令能通过本地 HTTP/CONNECT 代理按 host / port / protocol 放行或拒绝"。
 
 ## 关键文件与可复用符号
 
 | 目标修改点 | 文件 | 既有可复用符号 |
 |---|---|---|
 | 策略扩展（`enforcement` / `deny_read` / `NetworkAccess::{Denied,Allowlist,Full}` / `NetworkService`） | [src/internal/ai/sandbox/policy.rs](../../src/internal/ai/sandbox/policy.rs) | `SandboxPolicy`、`WritableRoot`、`protected_subpaths`、`resolve_root`、`NetworkAccess` |
-| 网络代理 stub + trait | 新增 `src/internal/ai/sandbox/proxy.rs` | 无（新建）；后续接入 `hyper` / `hickory-resolver` |
+| 网络代理 runtime + trait | [src/internal/ai/sandbox/proxy.rs](../../src/internal/ai/sandbox/proxy.rs) + [src/internal/ai/sandbox/proxy_runtime.rs](../../src/internal/ai/sandbox/proxy_runtime.rs) | allowlist proxy 环境注入、CONNECT allow/deny 转发、Host/CONNECT target 解析 |
 | Linux bwrap 直调 + `--new-session` + seccomp | [src/internal/ai/sandbox/runtime.rs](../../src/internal/ai/sandbox/runtime.rs) | `create_linux_sandbox_command_args`（参考）、`create_seatbelt_command_args`（对称实现） |
 | Seatbelt 读权限收紧 | [src/internal/ai/sandbox/seatbelt_base_policy.sbpl](../../src/internal/ai/sandbox/seatbelt_base_policy.sbpl) | 现有基础策略 |
 | 命令执行 / 审批 / tmp 清理 | [src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) | `run_shell_command_with_approval`、`SANDBOX_DENIED_KEYWORDS`、`ApprovalStore` |
@@ -370,7 +392,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ## 与 agent.md Part B 的交接契约
 
-- **Runtime 正式写入**：沙箱拒绝事件、enforcement 失败、危险挂载拒绝必须落到 [agent.md](agent.md) Part B Runtime 的 `ToolInvocation[E]` + `Evidence[E]`，不能藏在 tracing 日志里
+- **Runtime 正式写入 ✅**：shell request-level fanout sink 会保留 tracing / 既有 runtime sink，同时捕获沙箱拒绝事件、enforcement 失败、危险挂载拒绝；orchestrator `ToolCallEnd` 会将 `ToolOutput.metadata.sandbox_evidence` 投影为 [agent.md](agent.md) Part B Runtime 的 `Evidence[E]`。
 - **Phase 边界**：沙箱策略的选择与降级发生在 Phase 2 `CodexTaskExecutor` / `CompletionTaskExecutor` 进入 Runtime 写入之前；Phase 0 / 1 的 readonly tools 默认走 `SandboxPolicy::ReadOnly` + `SandboxEnforcement::Required`
 - **Projection**：`libra sandbox status` 输出可作为 Projection 读取消费者（UI / MCP / diagnostics），但不成为真相源
 
@@ -391,7 +413,8 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - `create_seatbelt_command_args` 对 `sensitive_read_paths()` 生成 deny 规则
    - `create_seatbelt_command_args` 对 `NetworkAccess::Denied` / `Allowlist` 不注入 `seatbelt_network_policy.sbpl` 且追加 `(deny network*)`
    - Linux `enforcement=Required` + `linux_sandbox_exe=None` + 未探测到 bwrap 应返回 `EnforcementFailed`
-   - `NetworkAccess::Allowlist` + 代理未启动 + `enforcement=Required` 应返回 `NetworkEnforcementFailed`
+   - `NetworkAccess::Allowlist` + 代理不可用 + `enforcement=Required` 应返回 `NetworkEnforcementFailed`
+   - `NetworkAccess::Allowlist` 应把已验证服务清单传给执行层，并为 sandboxed 命令注入本地代理环境变量
 
 ### 集成测试（新增 `tests/sandbox_hardening_test.rs`）
 
@@ -402,7 +425,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 5. **`--new-session` 生效（Linux only）**：沙箱内 `ps -o pid,sid,pgid,tty` 应显示 `tty=?`
 6. **`libra sandbox status` 契约**：JSON 输出包含 `platform` / `sandbox_type` / `enforcement` / `writable_roots` / `network.mode` / `network.allowlist` / `proxy_backend` / `bwrap_available` / `helper_path`；退出码与全局三级模型一致
 7. **默认网络拒绝**：不写任何配置的情况下，`curl https://example.com` 在沙箱内应失败（Linux 看到 `Could not resolve host` 或 `Network is unreachable`，macOS 看到 Seatbelt deny）
-8. **白名单放行**：配置 `mode = "allowlist"` + `host = "registry.npmjs.org"` 后，`curl https://registry.npmjs.org` 在 stub 代理下应得到"代理未启动"的显式错误（而不是默默成功），完整代理放行留后续批次验证
+8. **白名单放行**：配置 `mode = "allowlist"` + `host = "registry.npmjs.org"` 后，proxy-aware 工具会拿到 `HTTPS_PROXY=http://127.0.0.1:<port>`，CONNECT target / HTTP Host 匹配 allowlist 时放行，不匹配时返回 `403 Forbidden`
 9. **迁移兼容**：老 JSON `{"type": "workspace-write", "network_access": true}` 反序列化后 `NetworkAccess` 应为 `Full`；`{"network_access": false}` 应为 `Denied`
 
 ### 手工验证
@@ -423,7 +446,7 @@ LIBRA_LINUX_SANDBOX_EXE= cargo run -- code
 # 显式 allowlist：在 .libra/sandbox.toml 写入
 #   [sandbox.network] mode="allowlist"
 #   [[sandbox.network.services]] host="registry.npmjs.org" ports=[443]
-# sandbox status 应显示 network.mode="allowlist" + proxy_backend="stub"
+# sandbox status 应显示 network.mode="allowlist" + proxy_backend="allowlist"
 ```
 
 ### CI（延续 CLAUDE.md 约束）
@@ -436,6 +459,6 @@ LIBRA_LINUX_SANDBOX_EXE= cargo run -- code
 ## 非本轮改动
 
 - **Windows 沙箱**：保持 `WindowsRestrictedToken` 未实现，和 Claude Code 当前状态对齐
-- **完整的域名过滤代理**：本轮落地 OS 层 default deny + 白名单配置 + stub 代理；基于 `hyper` + `hickory-resolver` 的 HTTP CONNECT 代理、SNI 解析、连接池与 metrics 单列后续批次
+- **代理增强**：TLS ClientHello SNI 观测、连接池与 metrics 单列后续批次；当前代理已覆盖 HTTP CONNECT target / HTTP Host 过滤，不做 TLS MITM
 - **FUSE overlayfs 接入 AI 命令执行层**：等 [src/command/worktree-fuse.rs](../../src/command/worktree-fuse.rs) 稳定后再接入 AI 写入隔离
 - **WSL2 / Docker-in-Docker 的自适应弱隔离告警**：放到后续维护批次，靠阶段 1 的 `sandbox status` 做诊断入口

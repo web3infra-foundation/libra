@@ -251,33 +251,43 @@ pub struct InitOutput {
 #[derive(Parser, Debug, Clone)]
 #[command(after_help = EXAMPLES)]
 pub struct InitArgs {
+    /// Create a bare repository (no working tree; metadata at the target directory itself)
     #[clap(long, required = false)]
     pub bare: bool,
 
+    /// Copy hook and exclude templates from `template-directory` instead of using the built-in defaults
     #[clap(long = "template", name = "template-directory", required = false)]
     pub template: Option<String>,
 
+    /// Override the initial branch name (default: `main`)
     #[clap(short = 'b', long, required = false)]
     pub initial_branch: Option<String>,
 
-    #[clap(default_value = ".")]
+    /// Directory in which to create the new `.libra` repository (default: current directory)
+    #[clap(value_name = "DIRECTORY", default_value = ".")]
     pub repo_directory: String,
 
+    /// Suppress the "Initialized empty Libra repository" banner (errors still print)
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
+    /// Filesystem sharing mode for the repository (placeholder — see `git init --shared`)
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
+    /// Object hash algorithm: `sha1` (default) or `sha256`
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
 
+    /// Ref name validation strategy: `strict` (default) or `filesystem`
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
 
+    /// Convert an existing Git repository at `path` into a Libra repository (copies objects, refs, config)
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
     pub from_git_repository: Option<String>,
 
+    /// Initialize the embedded libvault and a PGP signing key (default: true). Pass `--vault false` to skip
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub vault: bool,
 }
@@ -359,6 +369,7 @@ pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()
     if args.quiet {
         effective_output.quiet = true;
         effective_output.progress = ProgressMode::None;
+        effective_output.progress_preference = crate::utils::output::ProgressPreference::None;
     }
 
     let progress = if effective_output.is_json() || effective_output.quiet {
@@ -1014,7 +1025,7 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
         resolve_user_identity_sources(LocalIdentityTarget::ExplicitDb(database_path))
             .await
             .map_err(|error| InitError::VaultInitializationFailed {
-                message: error.to_string(),
+                message: format!("{error:#}"),
             })?;
     let user_name = identity_sources
         .config_name
@@ -1027,14 +1038,14 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
 
     let (unseal_key, enc_token) = vault::init_vault(root_dir).await.map_err(|error| {
         InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         }
     })?;
 
     if let Err(error) = vault::store_credentials(&unseal_key, &enc_token).await {
         rollback_failed_vault_init(root_dir).await;
         return Err(InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         });
     }
 
@@ -1043,7 +1054,7 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
     {
         rollback_failed_vault_init(root_dir).await;
         return Err(InitError::VaultInitializationFailed {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         });
     }
 
@@ -1062,7 +1073,7 @@ async fn set_vault_signing_value(database_path: &Path, enabled: bool) -> Result<
     )
     .await
     .map_err(|error| InitError::VaultInitializationFailed {
-        message: error.to_string(),
+        message: format!("{error:#}"),
     })
 }
 

@@ -110,6 +110,41 @@ fn embed_does_not_carry_generated_or_secret_paths() {
     }
 }
 
+/// Every entry in `EMBED_DENY_SEGMENTS` must actually be rejected by
+/// `embed_path_is_allowed` — as a bare segment, mid-path, and as a
+/// leaf. The existing test only spot-checks `.env` / `.dev.vars` /
+/// `node_modules` explicitly; the other segments (`.next`,
+/// `.open-next`, `.wrangler`, `.turbo`, `.next-types`, `test-results`,
+/// `playwright-report`, `cloudflare-env.d.ts`, `.DS_Store`,
+/// `_design_reference`, `_legacy_not_for_v1`) were never individually
+/// pinned. This data-driven test guarantees the const and the deny
+/// logic stay in sync and auto-covers any future segment added to the
+/// const — a build artifact or design-reference dir slipping into the
+/// published Worker bundle is exactly what this denylist prevents.
+///
+/// Note: `.env` and `.dev.vars` additionally have dedicated
+/// `starts_with` fallback guards in `embed_path_is_allowed`, so for
+/// those two this test pins *that they are denied*, not specifically
+/// the exact-match arm. The other 12 segments have no fallback and are
+/// pinned here for the first time.
+#[test]
+fn every_embed_deny_segment_is_rejected() {
+    for seg in EMBED_DENY_SEGMENTS {
+        assert!(
+            !embed_path_is_allowed(seg),
+            "deny segment `{seg}` must be rejected as a bare path",
+        );
+        assert!(
+            !embed_path_is_allowed(&format!("app/{seg}/page.tsx")),
+            "deny segment `{seg}` must be rejected mid-path",
+        );
+        assert!(
+            !embed_path_is_allowed(&format!("src/{seg}")),
+            "deny segment `{seg}` must be rejected as a leaf segment",
+        );
+    }
+}
+
 #[test]
 fn embed_contains_critical_worker_entrypoints() {
     let embed_paths: BTreeSet<String> = WorkerTemplate::iter().map(|s| s.to_string()).collect();

@@ -204,6 +204,11 @@ enum ResetError {
     #[error("refusing to reset to locked branch '{0}'")]
     LockedTarget(String),
 
+    /// Refused to move HEAD/index/worktree while HEAD is attached to a
+    /// Libra-managed AI branch.
+    #[error("refusing to reset locked current branch '{0}'")]
+    LockedCurrentBranch(String),
+
     #[error("{primary}; rollback failed: {rollback}")]
     Rollback {
         primary: Box<ResetError>,
@@ -232,6 +237,7 @@ impl ResetError {
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
             Self::LockedTarget(_) => StableErrorCode::CliInvalidTarget,
+            Self::LockedCurrentBranch(_) => StableErrorCode::ConflictOperationBlocked,
             Self::Rollback { primary, .. } => primary.stable_code(),
         }
     }
@@ -260,6 +266,7 @@ impl ResetError {
             Self::LockedTarget(_) => Some(
                 "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
             ),
+            Self::LockedCurrentBranch(_) => Some("switch to a user branch before running reset"),
             Self::RevisionRead(_) => {
                 Some("check whether the repository references and object storage are readable.")
             }
@@ -326,6 +333,18 @@ fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
     }
 }
 
+async fn reject_reset_on_ai_managed_current_branch() -> Result<(), ResetError> {
+    match Head::current_result()
+        .await
+        .map_err(map_reset_head_commit_error)?
+    {
+        Head::Branch(name) if branch::is_ai_managed_branch(&name) => {
+            Err(ResetError::LockedCurrentBranch(name))
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
 
@@ -377,6 +396,8 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
             warnings: Vec::new(),
         });
     }
+
+    reject_reset_on_ai_managed_current_branch().await?;
 
     let target_commit_id = resolve_commit(&args.target).await?;
     let reset_stats = perform_reset(target_commit_id, mode, &args.target).await?;
@@ -834,9 +855,11 @@ pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
 }
 
 fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>, ResetError> {
+    let workdir_buf = workdir.to_path_buf();
     fn remove_empty_dirs_recursive(
         dir: &Path,
         workdir: &Path,
+        workdir_buf: &PathBuf,
         warnings: &mut Vec<String>,
     ) -> Result<bool, ResetError> {
         if !dir.is_dir() || dir == workdir {
@@ -856,11 +879,14 @@ fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>,
             let path = entry.path();
 
             if path.is_dir() {
-                // Don't remove .libra directory
-                if path.file_name().and_then(|n| n.to_str()) == Some(".libra") {
+                // Don't remove .libra directory or ignored directories
+                if path.file_name().and_then(|n| n.to_str()) == Some(".libra")
+                    || util::check_gitignore(workdir_buf, &path)
+                {
                     has_files = true;
                 } else {
-                    has_files |= remove_empty_dirs_recursive(&path, workdir, warnings)?;
+                    has_files |=
+                        remove_empty_dirs_recursive(&path, workdir, workdir_buf, warnings)?;
                 }
             } else {
                 has_files = true;
@@ -894,8 +920,11 @@ fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>,
         })?;
         let path = entry.path();
 
-        if path.is_dir() && path.file_name().and_then(|n| n.to_str()) != Some(".libra") {
-            let _ = remove_empty_dirs_recursive(&path, workdir, &mut warnings)?;
+        if path.is_dir()
+            && path.file_name().and_then(|n| n.to_str()) != Some(".libra")
+            && !util::check_gitignore(&workdir_buf, &path)
+        {
+            let _ = remove_empty_dirs_recursive(&path, workdir, &workdir_buf, &mut warnings)?;
         }
     }
 
@@ -1080,6 +1109,10 @@ mod tests {
             ResetError::PathspecNotMatched("src/missing.rs".to_string()).to_string(),
             "pathspec 'src/missing.rs' did not match any file(s) known to libra",
         );
+        assert_eq!(
+            ResetError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
+            "refusing to reset locked current branch 'agent-traces'",
+        );
         // ObjectLoad — three structured fields.
         assert_eq!(
             ResetError::ObjectLoad {
@@ -1090,6 +1123,115 @@ mod tests {
             .to_string(),
             "failed to load tree 'deadbeef': object not found",
         );
+    }
+
+    /// Pin the `stable_code()` mapping for every variant of
+    /// [`ResetError`]. The [`StableErrorCode`] is what `--json`
+    /// consumers branch on; ResetError has 20 variants spread across
+    /// repo-state (RepoNotFound / RepoStateInvalid / RepoCorrupt),
+    /// I/O (IoReadFailed / IoWriteFailed), and CLI input
+    /// (CliInvalidArguments / CliInvalidTarget) buckets. A future
+    /// refactor that flips even a single mapping silently changes
+    /// client retry classification.
+    ///
+    /// The existing scattered per-variant tests (HeadUnborn,
+    /// HeadRead, WorktreeRead, RevisionRead, RevisionCorrupt) keep
+    /// their narrative role of documenting one mapping at a time;
+    /// this single test owns the exhaustive surface contract so
+    /// adding a new variant trips both this list and the
+    /// `stable_code()` impl's exhaustive match.
+    #[test]
+    fn reset_error_stable_code_pins_each_variant() {
+        assert_eq!(
+            ResetError::NotInRepo.stable_code(),
+            StableErrorCode::RepoNotFound,
+        );
+        assert_eq!(
+            ResetError::InvalidRevision("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::HeadUnborn.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            ResetError::HeadRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::HeadCorrupt("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "ignored".to_string(),
+                detail: "ignored".to_string(),
+            }
+            .stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::IndexLoad("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::IndexSave("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::HeadUpdate("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::WorktreeRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::WorktreeRestore("ignored".to_string()).stable_code(),
+            StableErrorCode::IoWriteFailed,
+        );
+        assert_eq!(
+            ResetError::RevisionRead("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
+        );
+        assert_eq!(
+            ResetError::RevisionCorrupt("ignored".to_string()).stable_code(),
+            StableErrorCode::RepoCorrupt,
+        );
+        assert_eq!(
+            ResetError::InvalidPathspecEncoding("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecWithSoft("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecWithHard.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            ResetError::PathspecNotMatched("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::LockedTarget("ignored".to_string()).stable_code(),
+            StableErrorCode::CliInvalidTarget,
+        );
+        assert_eq!(
+            ResetError::LockedCurrentBranch("ignored".to_string()).stable_code(),
+            StableErrorCode::ConflictOperationBlocked,
+        );
+        // Rollback delegates to its primary error's stable_code via
+        // recursion; pinning the delegation surfaces a future change
+        // that would (e.g.) shadow the primary code with the rollback
+        // code instead.
+        let rollback = ResetError::Rollback {
+            primary: Box::new(ResetError::HeadUnborn),
+            rollback: Box::new(ResetError::IndexSave("ignored".to_string())),
+        };
+        assert_eq!(rollback.stable_code(), StableErrorCode::RepoStateInvalid);
     }
 
     #[test]

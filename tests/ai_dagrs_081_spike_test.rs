@@ -7,7 +7,7 @@
 //!   `node_succeeded`.
 //! - `subscribe` delivers an `ExecutionTerminated` event with the correct status.
 //!
-//! **Layer:** L1 — deterministic, no I/O, no external dependencies.
+//! **Layer:** L1 — deterministic, local manifest read only, no external services.
 
 use std::sync::Arc;
 
@@ -17,6 +17,23 @@ use dagrs::{
     Output,
     event::{GraphEvent, TerminationStatus},
 };
+
+/// The Phase 2 runtime contract assumes the `dagrs` 0.8.1 API surface. Pin the
+/// manifest dependency so a downgrade or broad version range cannot make the
+/// spike pass against an unintended crate version.
+#[test]
+fn cargo_manifest_pins_dagrs_081_dependency() {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .expect("Cargo.toml must be readable for dagrs version guard");
+    let parsed: toml::Value = toml::from_str(&manifest).expect("Cargo.toml must parse as TOML");
+    let version = parsed
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("dagrs"))
+        .and_then(toml::Value::as_str);
+
+    assert_eq!(version, Some("0.8.1"));
+}
 
 /// Empty `Action` used as a placeholder node. The spike only needs to verify dagrs's
 /// graph-shape / event contracts, so each node's body returns immediately with

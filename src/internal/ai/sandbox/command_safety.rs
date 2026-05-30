@@ -498,4 +498,183 @@ mod tests {
         assert!(!is_known_safe_shell_command("python script.py"));
         assert!(!shell_command_might_be_dangerous("python script.py"));
     }
+
+    /// Empty / whitespace-only commands must be classified as neither
+    /// known-safe nor dangerous — they're a no-op. Pin both paths to
+    /// avoid silent classification drift.
+    #[test]
+    fn empty_command_is_neither_safe_nor_dangerous() {
+        for raw in ["", "   ", "\t\n"] {
+            assert!(
+                !is_known_safe_shell_command(raw),
+                "empty raw {raw:?} must not be auto-safe",
+            );
+            assert!(
+                !shell_command_might_be_dangerous(raw),
+                "empty raw {raw:?} must not be auto-dangerous",
+            );
+        }
+    }
+
+    /// Shell metacharacter injection vectors must be flagged as
+    /// dangerous when the bash parser can't structurally validate the
+    /// command (redirects, command substitution, brace expansion).
+    /// Pipelines (`|`) and chained commands (`&&`, `||`, `;`) are
+    /// recognised by the bash parser and decompose into per-command
+    /// safety checks; metachar injection only triggers when the
+    /// parser bails out.
+    #[test]
+    fn shell_metacharacter_injection_is_flagged() {
+        // Redirects, command substitution, backticks, and brace
+        // expansion break the bash parser path → fall through to the
+        // metacharacter check.
+        let danger_cases = [
+            "echo > /etc/passwd",
+            "echo $(rm -rf .)",
+            "echo `whoami`",
+            // `;` followed by a dangerous command parses as a list;
+            // the second command (rm -rf /) classifies as dangerous.
+            "ls; rm -rf /",
+        ];
+        for raw in danger_cases {
+            assert!(
+                shell_command_might_be_dangerous(raw),
+                "{raw:?} must classify as dangerous",
+            );
+            assert!(
+                !is_known_safe_shell_command(raw),
+                "{raw:?} must NOT classify as known-safe",
+            );
+        }
+    }
+
+    /// `rm` is dangerous only with `-f` or `-rf`; a plain `rm foo` does
+    /// NOT auto-trigger the dangerous flag (the validator delegates the
+    /// decision to the runtime).
+    #[test]
+    fn rm_is_dangerous_only_with_force_flag() {
+        assert!(shell_command_might_be_dangerous("rm -f target.txt"));
+        assert!(shell_command_might_be_dangerous("rm -rf build"));
+        // Without -f / -rf, rm doesn't auto-classify as dangerous via
+        // this static check.
+        assert!(!shell_command_might_be_dangerous("rm target.txt"));
+        assert!(!shell_command_might_be_dangerous("rm -i target.txt"));
+    }
+
+    /// `sudo <cmd>` must recurse into the wrapped command. `sudo rm
+    /// -rf X` is dangerous; `sudo ls` is not.
+    #[test]
+    fn sudo_unwraps_and_classifies_wrapped_command() {
+        assert!(shell_command_might_be_dangerous("sudo rm -rf /"));
+        assert!(shell_command_might_be_dangerous("sudo git reset --hard"));
+        assert!(!shell_command_might_be_dangerous("sudo ls -la"));
+    }
+
+    /// `git push` dangerous flags: `--force`, `--force-with-lease`,
+    /// `--force-if-includes`, `--delete`, `-f`, `-d`, and refspecs
+    /// starting with `+` or `:`.
+    #[test]
+    fn git_push_dangerous_flag_matrix() {
+        let cases = [
+            "git push --force origin main",
+            "git push --force-with-lease",
+            "git push --force-if-includes",
+            "git push --delete origin main",
+            "git push -f",
+            "git push -d origin feature",
+            "git push origin :main",
+            "git push origin +abc123:main",
+        ];
+        for raw in cases {
+            assert!(
+                shell_command_might_be_dangerous(raw),
+                "{raw:?} must classify as dangerous",
+            );
+        }
+
+        // Plain `git push origin main` is NOT dangerous.
+        assert!(!shell_command_might_be_dangerous("git push origin main"));
+    }
+
+    /// `git branch -d` / `-D` / `--delete` flag branch deletion.
+    #[test]
+    fn git_branch_delete_is_dangerous() {
+        for raw in [
+            "git branch -d feature",
+            "git branch -D feature",
+            "git branch --delete feature",
+            "git branch --delete=feature",
+        ] {
+            assert!(
+                shell_command_might_be_dangerous(raw),
+                "{raw:?} must classify as dangerous",
+            );
+        }
+
+        // Plain `git branch foo` (create) is NOT dangerous.
+        assert!(!shell_command_might_be_dangerous("git branch feature"));
+        assert!(!shell_command_might_be_dangerous("git branch -a"));
+    }
+
+    /// `git clean -f` / `--force` triggers; clustered short flags
+    /// containing `f` (e.g. `-fd`, `-dfx`) also trigger.
+    #[test]
+    fn git_clean_force_is_dangerous_including_clustered_short_flags() {
+        assert!(shell_command_might_be_dangerous("git clean -f"));
+        assert!(shell_command_might_be_dangerous("git clean --force"));
+        assert!(shell_command_might_be_dangerous("git clean -fd"));
+        assert!(shell_command_might_be_dangerous("git clean -dfx"));
+
+        // `git clean -n` (dry run) is NOT dangerous.
+        assert!(!shell_command_might_be_dangerous("git clean -n"));
+    }
+
+    /// `git reset` and `git rm` are unconditionally dangerous (any
+    /// arguments). Pin so a future "narrow the check" refactor doesn't
+    /// silently allow `git reset` through.
+    #[test]
+    fn git_reset_and_rm_are_unconditionally_dangerous() {
+        assert!(shell_command_might_be_dangerous("git reset"));
+        assert!(shell_command_might_be_dangerous("git reset --hard"));
+        assert!(shell_command_might_be_dangerous("git reset --soft HEAD~1"));
+        assert!(shell_command_might_be_dangerous("git rm file.txt"));
+        assert!(shell_command_might_be_dangerous("git rm --cached file.txt"));
+    }
+
+    /// Git subcommands not on the dangerous list (log, status, diff,
+    /// fetch, etc.) must NOT classify as dangerous.
+    #[test]
+    fn safe_git_subcommands_are_not_dangerous() {
+        for raw in [
+            "git log",
+            "git log --oneline",
+            "git status",
+            "git diff",
+            "git diff HEAD",
+            "git fetch origin",
+            "git show HEAD",
+            "git config --list",
+        ] {
+            assert!(
+                !shell_command_might_be_dangerous(raw),
+                "{raw:?} must NOT classify as dangerous",
+            );
+        }
+    }
+
+    /// `is_known_safe_shell_command` must accept basic read-only
+    /// commands plus AND-chained read-only commands. `||` chains also
+    /// allowed when each subcommand is read-only. Pipelines (`|`)
+    /// decompose into per-command checks: each command must be in the
+    /// read-only allowlist.
+    ///
+    /// Note: only specific git subcommands are in the safe allowlist
+    /// (status, log, diff, show, branch — read-only only). `git
+    /// fetch` is intentionally NOT safe because it can mutate refs.
+    #[test]
+    fn and_or_chained_read_only_commands_are_safe() {
+        assert!(is_known_safe_shell_command("git status || true"));
+        assert!(is_known_safe_shell_command("git status && git log && pwd"));
+        assert!(is_known_safe_shell_command("ls -la | head -5"));
+    }
 }

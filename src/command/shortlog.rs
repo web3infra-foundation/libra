@@ -70,11 +70,11 @@ use crate::{
 
 const SHORTLOG_EXAMPLES: &str = "\
 EXAMPLES:
-  libra shortlog
-  libra shortlog HEAD~5
-  libra shortlog -n -s
-  libra shortlog --json
-";
+    libra shortlog                  Summarize commits reachable from HEAD by author
+    libra shortlog HEAD~5           Summarize a subset of history starting from a revision
+    libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
+    libra shortlog --since 24h      Restrict to commits in the last 24 hours
+    libra shortlog --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = SHORTLOG_EXAMPLES)]
@@ -91,12 +91,12 @@ pub struct ShortlogArgs {
     #[clap(short = 'e', long = "email")]
     pub email: bool,
 
-    /// Show commits more recent than a specific date
-    #[clap(long = "since")]
+    /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+    #[clap(long = "since", value_name = "DATE")]
     pub since: Option<String>,
 
-    /// Show commits older than a specific date
-    #[clap(long = "until")]
+    /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+    #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
 
     /// Revision to summarize. Defaults to HEAD.

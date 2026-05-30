@@ -29,12 +29,11 @@ const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: usize = 256 * 4;
 
 const VERIFY_PACK_EXAMPLES: &str = "\
-Examples:
-  libra verify-pack objects/pack/pack-abc123.idx
-  libra verify-pack --pack objects/pack/pack-abc123.pack objects/pack/pack-abc123.idx
-  libra verify-pack -v pack-abc123.idx
-  libra verify-pack pack-abc123.idx --json
-";
+EXAMPLES:
+    libra verify-pack objects/pack/pack-abc123.idx                   Verify an index against its sibling .pack
+    libra verify-pack --pack pack.pack pack.idx                      Verify with an explicit pack path
+    libra verify-pack -v pack-abc123.idx                             Print every indexed object hash and offset
+    libra verify-pack pack-abc123.idx --json                         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = VERIFY_PACK_EXAMPLES)]

@@ -304,4 +304,234 @@ mod tests {
         assert!(!provenance.require_sbom);
         assert_eq!(provenance.transparency_log.mode, TransparencyMode::None);
     }
+
+    /// `default_risk` HumanInLoop escalation table per risk level:
+    /// Low → not required / 0 approvers
+    /// Medium → required / 1 approver
+    /// High → required / 2 approvers
+    /// Pin the table so a re-tune is detected here, not at validation
+    /// time.
+    #[test]
+    fn default_risk_human_in_loop_escalates_per_risk_level() {
+        let low = default_risk(RiskLevel::Low, "low risk".into(), vec![]);
+        assert!(!low.human_in_loop.required);
+        assert_eq!(low.human_in_loop.min_approvers, 0);
+
+        let medium = default_risk(RiskLevel::Medium, "medium risk".into(), vec![]);
+        assert!(medium.human_in_loop.required);
+        assert_eq!(medium.human_in_loop.min_approvers, 1);
+
+        let high = default_risk(RiskLevel::High, "high risk".into(), vec![]);
+        assert!(high.human_in_loop.required);
+        assert_eq!(high.human_in_loop.min_approvers, 2);
+    }
+
+    /// `default_constraints` retention_days table:
+    /// Low → 7, Medium → 30, High → 14 (note: High's retention is
+    /// lower than Medium's, which is intentional — see the privacy
+    /// constraint that bounds High-risk data exposure).
+    #[test]
+    fn default_constraints_retention_days_per_risk_level() {
+        assert_eq!(
+            default_constraints(RiskLevel::Low).privacy.retention_days,
+            7
+        );
+        assert_eq!(
+            default_constraints(RiskLevel::Medium)
+                .privacy
+                .retention_days,
+            30
+        );
+        // Pin the High = 14 anomaly so a future "monotonic" refactor
+        // doesn't silently raise it.
+        assert_eq!(
+            default_constraints(RiskLevel::High).privacy.retention_days,
+            14
+        );
+    }
+
+    /// `default_constraints` max_wall_clock_seconds table:
+    /// Low → 3600 (1h), Medium → 14400 (4h), High → 28800 (8h).
+    #[test]
+    fn default_constraints_max_wall_clock_seconds_per_risk_level() {
+        assert_eq!(
+            default_constraints(RiskLevel::Low)
+                .resources
+                .max_wall_clock_seconds,
+            3600,
+        );
+        assert_eq!(
+            default_constraints(RiskLevel::Medium)
+                .resources
+                .max_wall_clock_seconds,
+            14400,
+        );
+        assert_eq!(
+            default_constraints(RiskLevel::High)
+                .resources
+                .max_wall_clock_seconds,
+            28800,
+        );
+    }
+
+    /// `default_constraints` dependency_policy table: Low/High both
+    /// use NoNew; Medium uses AllowWithReview. Pin the asymmetric
+    /// pattern so a future "linear" refactor doesn't silently allow
+    /// new dependencies at High risk.
+    #[test]
+    fn default_constraints_dependency_policy_low_and_high_match() {
+        assert_eq!(
+            default_constraints(RiskLevel::Low)
+                .security
+                .dependency_policy,
+            DependencyPolicy::NoNew,
+        );
+        assert_eq!(
+            default_constraints(RiskLevel::High)
+                .security
+                .dependency_policy,
+            DependencyPolicy::NoNew,
+        );
+        assert_eq!(
+            default_constraints(RiskLevel::Medium)
+                .security
+                .dependency_policy,
+            DependencyPolicy::AllowWithReview,
+        );
+    }
+
+    /// `default_evidence` min_citations escalates with risk:
+    /// Low → 0, Medium → 2, High → 3.
+    #[test]
+    fn default_evidence_min_citations_escalates_per_risk_level() {
+        assert_eq!(
+            default_evidence(RiskLevel::Low).min_citations_per_decision,
+            0,
+        );
+        assert_eq!(
+            default_evidence(RiskLevel::Medium).min_citations_per_decision,
+            2,
+        );
+        assert_eq!(
+            default_evidence(RiskLevel::High).min_citations_per_decision,
+            3,
+        );
+    }
+
+    /// `default_evidence` strategy table: Medium uses PinnedOfficial;
+    /// Low and High both use RepoFirst. Pin the asymmetric pattern.
+    #[test]
+    fn default_evidence_strategy_medium_vs_low_and_high() {
+        assert_eq!(
+            default_evidence(RiskLevel::Low).strategy,
+            EvidenceStrategy::RepoFirst,
+        );
+        assert_eq!(
+            default_evidence(RiskLevel::Medium).strategy,
+            EvidenceStrategy::PinnedOfficial,
+        );
+        assert_eq!(
+            default_evidence(RiskLevel::High).strategy,
+            EvidenceStrategy::RepoFirst,
+        );
+    }
+
+    /// `default_execution` parallelism table:
+    /// Low → 2 parallel, Medium → 4, High → 1 (serial for safety).
+    /// max_retries table: Low/Medium → 3, High → 2 (less retry budget
+    /// to fail fast).
+    #[test]
+    fn default_execution_concurrency_and_retry_per_risk_level() {
+        let low = default_execution(RiskLevel::Low);
+        assert_eq!(low.concurrency.max_parallel_tasks, 2);
+        assert_eq!(low.retry.max_retries, 3);
+
+        let medium = default_execution(RiskLevel::Medium);
+        assert_eq!(medium.concurrency.max_parallel_tasks, 4);
+        assert_eq!(medium.retry.max_retries, 3);
+
+        let high = default_execution(RiskLevel::High);
+        assert_eq!(high.concurrency.max_parallel_tasks, 1);
+        assert_eq!(high.retry.max_retries, 2);
+    }
+
+    /// Medium-risk + implementation-work must add SAST/SCA/SBOM but
+    /// NOT provenance/transparency artifacts. Pins the "Medium = some
+    /// security artifacts, no release artifacts" boundary.
+    #[test]
+    fn default_artifacts_medium_risk_impl_adds_security_no_release() {
+        let artifacts = default_artifacts(RiskLevel::Medium, true);
+        let names: Vec<&ArtifactName> = artifacts.required.iter().map(|a| &a.name).collect();
+
+        assert!(names.contains(&&ArtifactName::Patchset));
+        assert!(names.contains(&&ArtifactName::SastReport));
+        assert!(names.contains(&&ArtifactName::ScaReport));
+        assert!(names.contains(&&ArtifactName::Sbom));
+
+        assert!(!names.contains(&&ArtifactName::ProvenanceAttestation));
+        assert!(!names.contains(&&ArtifactName::TransparencyProof));
+    }
+
+    /// High-risk + implementation-work must add SAST/SCA/SBOM AND
+    /// provenance/transparency. Pins the High-risk artifact set is
+    /// a strict superset of Medium-risk.
+    #[test]
+    fn default_artifacts_high_risk_impl_adds_security_and_release() {
+        let artifacts = default_artifacts(RiskLevel::High, true);
+        let names: Vec<&ArtifactName> = artifacts.required.iter().map(|a| &a.name).collect();
+
+        assert!(names.contains(&&ArtifactName::Patchset));
+        assert!(names.contains(&&ArtifactName::SastReport));
+        assert!(names.contains(&&ArtifactName::ScaReport));
+        assert!(names.contains(&&ArtifactName::Sbom));
+        assert!(names.contains(&&ArtifactName::ProvenanceAttestation));
+        assert!(names.contains(&&ArtifactName::TransparencyProof));
+    }
+
+    /// `default_artifacts` retention.days table:
+    /// Low → 7 days, Medium → 180 days, High → 365 days.
+    /// Note: this is the **artifact** retention, distinct from the
+    /// privacy retention in `default_constraints` (Low=7, Medium=30,
+    /// High=14). The validator clamps these to the minimum.
+    #[test]
+    fn default_artifacts_retention_days_per_risk_level() {
+        assert_eq!(default_artifacts(RiskLevel::Low, true).retention.days, 7);
+        assert_eq!(
+            default_artifacts(RiskLevel::Medium, true).retention.days,
+            180
+        );
+        assert_eq!(default_artifacts(RiskLevel::High, true).retention.days, 365);
+    }
+
+    /// `default_provenance` transparency_log: only `High` + impl-work
+    /// uses `Rekor`; everything else uses `None`. Pin the lookup table.
+    #[test]
+    fn default_provenance_transparency_log_mode_per_risk_level() {
+        assert_eq!(
+            default_provenance(RiskLevel::Low, true)
+                .transparency_log
+                .mode,
+            TransparencyMode::None,
+        );
+        assert_eq!(
+            default_provenance(RiskLevel::Medium, true)
+                .transparency_log
+                .mode,
+            TransparencyMode::Rekor,
+        );
+        assert_eq!(
+            default_provenance(RiskLevel::High, true)
+                .transparency_log
+                .mode,
+            TransparencyMode::Rekor,
+        );
+
+        // Analysis-only suppresses Rekor at every level.
+        assert_eq!(
+            default_provenance(RiskLevel::High, false)
+                .transparency_log
+                .mode,
+            TransparencyMode::None,
+        );
+    }
 }

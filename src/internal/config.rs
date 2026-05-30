@@ -722,6 +722,18 @@ impl ConfigKv {
         if Self::remote_config_with_conn(db, new).await?.is_some() {
             return Err(anyhow!("fatal: remote {new} already exists."));
         }
+        let ssh_old_prefix = format!("vault.ssh.{old}.");
+        let ssh_new_prefix = format!("vault.ssh.{new}.");
+        let existing_target_ssh_entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&ssh_new_prefix))
+            .all(db)
+            .await
+            .context("failed to query target SSH key entries for rename")?;
+        if !existing_target_ssh_entries.is_empty() {
+            return Err(anyhow!(
+                "fatal: SSH key namespace for remote '{new}' already exists"
+            ));
+        }
 
         // Rename remote.old.* → remote.new.*
         let old_prefix = format!("remote.{old}.");
@@ -763,8 +775,6 @@ impl ConfigKv {
         }
 
         // Cascade SSH key rename: vault.ssh.old.* → vault.ssh.new.*
-        let ssh_old_prefix = format!("vault.ssh.{old}.");
-        let ssh_new_prefix = format!("vault.ssh.{new}.");
         let ssh_entries = config_kv::Entity::find()
             .filter(config_kv::Column::Key.starts_with(&ssh_old_prefix))
             .all(db)
@@ -866,6 +876,76 @@ pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
 ///   as "not configured").
 pub async fn resolve_env(name: &str) -> Result<Option<String>> {
     resolve_env_for_target(name, LocalIdentityTarget::CurrentRepo).await
+}
+
+/// Synchronous wrapper around [`resolve_env`] for call sites that cannot become
+/// async (e.g. sync constructors inside otherwise-async pipelines, or
+/// closures threaded through `Fn(&str) -> Option<String>` lookup helpers).
+///
+/// Functional scope:
+/// - Checks `std::env::var(name)` first — the common fast path that does not
+///   need a tokio runtime.
+/// - When the env var is unset, spawns a private std-thread that owns a
+///   single-purpose tokio runtime, drives the async [`resolve_env_for_target`]
+///   call against [`LocalIdentityTarget::CurrentRepo`], and returns the
+///   resolved value to the caller. This mirrors the pattern in
+///   `src/utils/client_storage.rs::resolve_env_sync` and is intentionally
+///   isolated from any caller-owned tokio runtime.
+///
+/// Returns `Ok(None)` only when the process env, the local repo's
+/// `.libra/libra.db`, and the global `~/.libra/config.db` all lack the value.
+/// Returns `Err` when the worker thread crashed before sending OR when the
+/// underlying async resolver returned an error (e.g. corrupt SQLite,
+/// schema-mismatch propagation that the vault-init fix in v0.17.515 did not
+/// downgrade — those still bubble up here so storage / provider init paths
+/// can surface "Run `libra db upgrade`" hints rather than silently treating a
+/// vault-configured key as missing).
+///
+/// Prefer the async [`resolve_env`] when the caller is already inside an
+/// async context — that avoids the per-call thread spawn.
+pub fn resolve_env_sync(name: &str) -> anyhow::Result<Option<String>> {
+    if let Ok(val) = std::env::var(name) {
+        return Ok(Some(val));
+    }
+
+    let owned = name.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<Option<String>> {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|err| anyhow::anyhow!("failed to create tokio runtime: {err}"))?;
+            runtime.block_on(resolve_env_for_target(
+                &owned,
+                LocalIdentityTarget::CurrentRepo,
+            ))
+        })();
+        let _ = tx.send(result);
+    });
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("resolve_env_sync worker for '{name}' exited unexpectedly"))?
+}
+
+/// Required-value wrapper over [`resolve_env_sync`]: returns `Ok(value)`
+/// when the variable is set in the process env, the local repo's
+/// `.libra/libra.db`, or the global `~/.libra/config.db`, and a single
+/// actionable error otherwise. Provider clients use this for the
+/// API-key class of variables where missing means the provider cannot
+/// initialise.
+pub fn resolve_required_env_sync(name: &str) -> anyhow::Result<String> {
+    match resolve_env_sync(name)? {
+        Some(value) => Ok(value),
+        None => Err(anyhow::anyhow!(
+            "environment variable `{name}` is not set — export it or store it in libra config (`libra config set vault.env.{name} <value>`)"
+        )),
+    }
+}
+
+/// Optional-value wrapper over [`resolve_env_sync`]. Identical to
+/// [`resolve_env_sync`]; provided as a named alias so callers can
+/// document at the call site that the variable is optional and
+/// `Ok(None)` is the success path.
+pub fn resolve_optional_env_sync(name: &str) -> anyhow::Result<Option<String>> {
+    resolve_env_sync(name)
 }
 
 /// Resolve an environment variable using an explicit local config target.
@@ -1036,12 +1116,19 @@ fn trim_non_empty_config_value(value: String) -> Option<String> {
 /// values in separate fields so callers (notably `libra commit`) can apply
 /// `user.useConfigOnly` semantics — refusing to fall back to env vars when
 /// the user has explicitly opted into config-only identity.
+///
+/// Failures while reading the config DB (missing file, stale schema, locked
+/// SQLite) are downgraded to `tracing::warn!` + `None` rather than hard
+/// errors. Identity is auxiliary at vault-init time (the caller falls back
+/// to env vars or hard-coded defaults), and at `commit` time the missing
+/// value still surfaces as a clear `IdentityMissing` error — so a corrupted
+/// `~/.libra/config.db` no longer blocks `libra init` / `libra clone`.
 pub async fn resolve_user_identity_sources(
     local_target: LocalIdentityTarget<'_>,
 ) -> Result<UserIdentitySources> {
     Ok(UserIdentitySources {
-        config_name: read_cascaded_config_value(local_target, "user.name").await?,
-        config_email: read_cascaded_config_value(local_target, "user.email").await?,
+        config_name: read_identity_field_with_warning(local_target, "user.name").await,
+        config_email: read_identity_field_with_warning(local_target, "user.email").await,
         env_name: env_first_non_empty(&[
             "GIT_COMMITTER_NAME",
             "GIT_AUTHOR_NAME",
@@ -1054,6 +1141,23 @@ pub async fn resolve_user_identity_sources(
             "LIBRA_COMMITTER_EMAIL",
         ]),
     })
+}
+
+async fn read_identity_field_with_warning(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Option<String> {
+    match read_cascaded_config_value(local_target, key).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                key = key,
+                error = %format!("{error:#}"),
+                "failed to read identity field from config; treating as unset"
+            );
+            None
+        }
+    }
 }
 
 /// Read a `vault.env.*` entry from the local target, decrypting if needed.

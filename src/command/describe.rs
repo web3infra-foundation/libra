@@ -20,25 +20,25 @@ use crate::{
 
 const DESCRIBE_EXAMPLES: &str = "\
 EXAMPLES:
-  libra describe
-  libra describe --tags
-  libra describe --always
-  libra describe HEAD~1
-  libra describe --json
-";
+    libra describe                  Describe HEAD using the nearest annotated tag
+    libra describe --tags           Include lightweight tags (not just annotated ones) in the search
+    libra describe --always         Fall back to abbreviated commit hash when no tag matches
+    libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
+    libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
+    libra describe --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
 #[command(after_help = DESCRIBE_EXAMPLES)]
 pub struct DescribeArgs {
-    // The commit object name, Defaults to HEAD.
+    /// Commit-ish (hash, ref, or tag) to describe. Defaults to HEAD
     pub commit: Option<String>,
 
-    // Instead of only using annotated tags, use any tag found in refs/tags namespace.
+    /// Consider any tag in refs/tags (not just annotated tags) when describing
     #[clap(long)]
     pub tags: bool,
 
-    // Instead of using the default 7 hexadecimal digits as the abbreviated object name, use <n> digits.
-    #[clap(long)]
+    /// Use N hex digits for the abbreviated commit hash (default: 7)
+    #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
 
     /// Show an abbreviated commit hash when no tag can describe the target.

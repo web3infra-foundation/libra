@@ -33,7 +33,7 @@ use crate::{
 };
 
 fn is_internal_switch_target(name: &str) -> bool {
-    name == repo_branch::INTENT_BRANCH
+    repo_branch::is_ai_managed_branch(name)
 }
 
 const SWITCH_EXAMPLES: &str = "\
@@ -48,7 +48,7 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = SWITCH_EXAMPLES)]
 pub struct SwitchArgs {
-    /// branch name
+    /// Target branch, commit, or remote-tracking ref to switch to (e.g. `main`, `abc1234`, `origin/main`)
     pub branch: Option<String>,
 
     /// Create a new branch based on the given branch or current HEAD, and switch to it

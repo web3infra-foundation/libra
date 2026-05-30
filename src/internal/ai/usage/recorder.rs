@@ -233,3 +233,127 @@ fn cost_micro_dollars(cost_usd: Option<f64>) -> Option<i64> {
         Some(micro_dollars.round() as i64)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `u64_to_i64_value` must clamp values exceeding `i64::MAX` to
+    /// `i64::MAX` rather than wrapping or panicking. Pin both the
+    /// happy path (`u64::MAX -> i64::MAX`) and a representative
+    /// in-range value.
+    #[test]
+    fn u64_to_i64_value_clamps_overflow_to_i64_max() {
+        // In-range value passes through unchanged.
+        match u64_to_i64_value(42) {
+            Value::BigInt(Some(v)) => assert_eq!(v, 42),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+        match u64_to_i64_value(0) {
+            Value::BigInt(Some(v)) => assert_eq!(v, 0),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+        // i64::MAX is the boundary — exactly representable.
+        match u64_to_i64_value(i64::MAX as u64) {
+            Value::BigInt(Some(v)) => assert_eq!(v, i64::MAX),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+        // u64::MAX overflows -> clamped to i64::MAX.
+        match u64_to_i64_value(u64::MAX) {
+            Value::BigInt(Some(v)) => assert_eq!(v, i64::MAX),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+    }
+
+    /// `bool_to_i64_value` maps `true -> 1` and `false -> 0`. Pin
+    /// against a future "true→-1" sentinel encoding refactor.
+    #[test]
+    fn bool_to_i64_value_maps_true_one_false_zero() {
+        match bool_to_i64_value(true) {
+            Value::BigInt(Some(v)) => assert_eq!(v, 1),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+        match bool_to_i64_value(false) {
+            Value::BigInt(Some(v)) => assert_eq!(v, 0),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+    }
+
+    /// `optional_i64_value` round-trips both Some and None.
+    #[test]
+    fn optional_i64_value_threads_some_and_none() {
+        match optional_i64_value(Some(42)) {
+            Value::BigInt(Some(v)) => assert_eq!(v, 42),
+            other => panic!("expected BigInt(Some), got {other:?}"),
+        }
+        match optional_i64_value(None) {
+            Value::BigInt(None) => {}
+            other => panic!("expected BigInt(None), got {other:?}"),
+        }
+    }
+
+    /// `cost_micro_dollars` happy path: USD * 1e6 rounded to i64
+    /// using `f64::round()` (round-half-away-from-zero).
+    #[test]
+    fn cost_micro_dollars_converts_usd_to_micro_dollars() {
+        assert_eq!(cost_micro_dollars(Some(0.0)), Some(0));
+        assert_eq!(cost_micro_dollars(Some(1.0)), Some(1_000_000));
+        // 0.0012345 USD = 1234.5 micro-dollars → 1235 via round-
+        // half-away-from-zero. Pin the rounding direction.
+        assert_eq!(cost_micro_dollars(Some(0.0012345)), Some(1235));
+        // 0.0000005 USD = 0.5 → rounds to 1; 0.0000004 → 0.
+        assert_eq!(cost_micro_dollars(Some(0.0000005)), Some(1));
+        assert_eq!(cost_micro_dollars(Some(0.0000004)), Some(0));
+    }
+
+    /// `cost_micro_dollars` rejects negative / NaN / ±Inf inputs.
+    /// Pin so a future "saturate to 0" refactor catches a wider net.
+    #[test]
+    fn cost_micro_dollars_rejects_invalid_inputs() {
+        assert_eq!(cost_micro_dollars(None), None);
+        assert_eq!(cost_micro_dollars(Some(-0.01)), None);
+        assert_eq!(cost_micro_dollars(Some(f64::NAN)), None);
+        assert_eq!(cost_micro_dollars(Some(f64::INFINITY)), None);
+        assert_eq!(cost_micro_dollars(Some(f64::NEG_INFINITY)), None);
+    }
+
+    /// `cost_micro_dollars` rejects values that would overflow i64
+    /// after the 1e6 multiplication. Pin so a future "saturate at
+    /// MAX" refactor breaks this test loudly (i.e. the caller would
+    /// see Some(MAX) instead of None — a behaviour change).
+    #[test]
+    fn cost_micro_dollars_returns_none_on_i64_overflow() {
+        // i64::MAX micros ≈ 9.22e12 USD. A USD value 100x larger
+        // overflows.
+        let huge = (i64::MAX as f64 / 1_000_000.0) * 10.0;
+        assert_eq!(cost_micro_dollars(Some(huge)), None);
+    }
+
+    /// `UsageContext` clones cleanly (the recorder clones the context
+    /// per insert to thread fields into the SQL statement).
+    #[test]
+    fn usage_context_derives_clone_and_eq() {
+        let ctx = UsageContext {
+            session_id: Some("s1".to_string()),
+            thread_id: Some("t1".to_string()),
+            agent_run_id: Some("r1".to_string()),
+            run_id: Some("run1".to_string()),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            request_kind: "chat".to_string(),
+            intent: Some("fix".to_string()),
+            agent_name: Some("coder".to_string()),
+        };
+        let cloned = ctx.clone();
+        assert_eq!(cloned, ctx);
+        // Subtle: agent_name=None must be distinguishable from
+        // agent_name=Some("") for the per-agent grouping path.
+        let mut anon = ctx.clone();
+        anon.agent_name = None;
+        assert_ne!(anon, ctx);
+        let mut empty = ctx.clone();
+        empty.agent_name = Some(String::new());
+        assert_ne!(empty, ctx);
+        assert_ne!(empty.agent_name, anon.agent_name);
+    }
+}

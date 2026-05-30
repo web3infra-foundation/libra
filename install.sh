@@ -2,7 +2,7 @@
 # libra installer · TUI
 #
 #   curl -fsSL https://libra.tools/install.sh | sh
-#   curl -fsSL https://libra.tools/install.sh | sh -s -- -v v0.1.0
+#   curl -fsSL https://libra.tools/install.sh | sh -s -- -v v0.17.874
 #
 # Visual design ports the Libra TUI Installer mock — banner, conversational
 # agent voice, animated per-step spinner, themed colors, success box.
@@ -18,7 +18,7 @@ INSTALL_DIR="${LIBRA_INSTALL_DIR:-$LIBRA_HOME/bin}"
 # user opts in with LIBRA_ALLOW_FALLBACK=1. Default behaviour is fail-fast so
 # offline installs cannot silently regress to a stale version. Bump this on
 # every release so the opt-in fallback remains useful.
-DEFAULT_VERSION="v0.1.1"
+DEFAULT_VERSION="v0.17.874"
 
 # ─── theme (Dusk) ────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ -z "${LIBRA_NO_TUI:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then

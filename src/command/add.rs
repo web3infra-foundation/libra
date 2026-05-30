@@ -58,8 +58,10 @@ EXAMPLES:
     libra add --refresh                Refresh index metadata without staging";
 
 /// Stage file contents for the next commit.
-///
-/// See `libra add --help` for the same EXAMPLES rendered through clap.
+// EXAMPLES are wired via `#[command(after_help = ADD_EXAMPLES)]` and render
+// at the bottom of `libra add --help`. The meta-commentary that used to live
+// here as a `///` line leaked into clap's `--help` body (see
+// `tests/command/add_test.rs::test_add_help_does_not_leak_impl_meta`).
 #[derive(Parser, Debug)]
 #[command(after_help = ADD_EXAMPLES)]
 pub struct AddArgs {
@@ -1073,7 +1075,7 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
 /// Generate a `Blob` from a file.
 ///
 /// Functional scope:
-/// - When the file matches a `.libraattributes` LFS filter, returns a pointer
+/// - When the file matches a `.libra_attributes` LFS filter, returns a pointer
 ///   blob via [`Blob::from_lfs_file`]; otherwise reads the file content
 ///   verbatim into a regular blob.
 fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {

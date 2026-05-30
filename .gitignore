@@ -68,3 +68,5 @@ gha-creds-*.json
 # AI
 .codex
 .claude
+.antigravitycli
+.omo

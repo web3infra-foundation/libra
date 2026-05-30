@@ -5,9 +5,8 @@
 //! scheduler's current selection, active work, and live context window without
 //! rewriting the underlying snapshot or event objects.
 //!
-//! TODO(test): add CRUD and round-trip persistence coverage once the
-//! `SchedulerState` store lands. The domain types are defined before the
-//! projector / repository implementation to keep the schema work isolated.
+//! The domain types stay alongside `SchedulerStateRepository` so the in-memory
+//! scheduler contract and SQLite persistence contract evolve together.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeZone, Utc};
@@ -152,6 +151,48 @@ impl LiveContextPinKind {
 }
 
 /// Repository for per-thread scheduler projection state.
+impl SchedulerState {
+    /// Ordinal convention: `current_plan_heads[ordinal=0]` is the
+    /// **execution** plan head. Matches the ordering applied by
+    /// `apply_scheduler_mutation(SetCurrentPlanHeads)` (Wave 1B v0.17.589)
+    /// and by `SelectedPlanSet::ordered_ids` in the contracts surface.
+    pub const EXECUTION_HEAD_ORDINAL: i64 = 0;
+
+    /// Ordinal convention: `current_plan_heads[ordinal=1]` is the
+    /// **test** plan head.
+    pub const TEST_HEAD_ORDINAL: i64 = 1;
+
+    /// The execution plan head, if `current_plan_heads` carries an entry
+    /// at [`EXECUTION_HEAD_ORDINAL`](Self::EXECUTION_HEAD_ORDINAL).
+    pub fn execution_head(&self) -> Option<&PlanHeadRef> {
+        self.current_plan_heads
+            .iter()
+            .find(|head| head.ordinal == Self::EXECUTION_HEAD_ORDINAL)
+    }
+
+    /// The test plan head, if `current_plan_heads` carries an entry at
+    /// [`TEST_HEAD_ORDINAL`](Self::TEST_HEAD_ORDINAL).
+    pub fn test_head(&self) -> Option<&PlanHeadRef> {
+        self.current_plan_heads
+            .iter()
+            .find(|head| head.ordinal == Self::TEST_HEAD_ORDINAL)
+    }
+
+    /// `true` when no task or run is currently active. Phase 2 dispatch
+    /// uses this as the "ready to start the next task" precondition.
+    pub fn is_idle(&self) -> bool {
+        self.active_task_id.is_none() && self.active_run_id.is_none()
+    }
+
+    /// `true` when the thread has been seeded with at least one selected
+    /// plan. Mutations that require a seeded thread (e.g.
+    /// `StartStage`, `MarkTaskActive`) should fail-closed when this
+    /// returns `false`.
+    pub fn is_seeded(&self) -> bool {
+        self.selected_plan_id.is_some() || !self.selected_plan_ids.is_empty()
+    }
+}
+
 #[derive(Clone)]
 pub struct SchedulerStateRepository {
     db: DatabaseConnection,
@@ -531,9 +572,125 @@ fn metadata_from_row(raw: Option<&str>, thread_id: ThreadId) -> Result<Option<Va
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use uuid::Uuid;
 
-    use super::SchedulerStateCasError;
+    use super::{PlanHeadRef, SchedulerState, SchedulerStateCasError};
+
+    fn empty_state(thread_id: Uuid) -> SchedulerState {
+        SchedulerState {
+            thread_id,
+            selected_plan_id: None,
+            selected_plan_ids: vec![],
+            current_plan_heads: vec![],
+            active_task_id: None,
+            active_run_id: None,
+            live_context_window: vec![],
+            metadata: None,
+            updated_at: Utc::now(),
+            version: 0,
+        }
+    }
+
+    /// `execution_head()` / `test_head()` must find entries by ordinal
+    /// regardless of `Vec` ordering — the scheduler emits them sorted by
+    /// ordinal today, but callers should not depend on positional access.
+    #[test]
+    fn head_helpers_locate_by_ordinal_not_position() {
+        let mut state = empty_state(Uuid::new_v4());
+        let exec_id = Uuid::new_v4();
+        let test_id = Uuid::new_v4();
+        // Deliberately reversed-order vector so positional access at [0]
+        // would point at the test head — verifying the helpers don't
+        // accidentally read `[0]`.
+        state.current_plan_heads = vec![
+            PlanHeadRef {
+                plan_id: test_id,
+                ordinal: SchedulerState::TEST_HEAD_ORDINAL,
+            },
+            PlanHeadRef {
+                plan_id: exec_id,
+                ordinal: SchedulerState::EXECUTION_HEAD_ORDINAL,
+            },
+        ];
+
+        assert_eq!(
+            state.execution_head().map(|h| h.plan_id),
+            Some(exec_id),
+            "execution_head() must locate the entry with ordinal=0",
+        );
+        assert_eq!(
+            state.test_head().map(|h| h.plan_id),
+            Some(test_id),
+            "test_head() must locate the entry with ordinal=1",
+        );
+    }
+
+    /// Empty `current_plan_heads` must return `None` from both helpers —
+    /// callers will branch on these before issuing a Phase 2 dispatch.
+    #[test]
+    fn head_helpers_return_none_when_no_heads() {
+        let state = empty_state(Uuid::new_v4());
+        assert!(state.execution_head().is_none());
+        assert!(state.test_head().is_none());
+    }
+
+    /// `is_idle()` is the "ready to start the next task" predicate:
+    /// returns `true` only when both `active_task_id` and `active_run_id`
+    /// are `None`.
+    #[test]
+    fn is_idle_requires_both_active_task_and_run_to_be_none() {
+        let mut state = empty_state(Uuid::new_v4());
+        assert!(state.is_idle(), "fresh state must be idle");
+
+        state.active_task_id = Some(Uuid::new_v4());
+        assert!(!state.is_idle(), "non-None active_task_id must clear idle");
+
+        state.active_task_id = None;
+        state.active_run_id = Some(Uuid::new_v4());
+        assert!(!state.is_idle(), "non-None active_run_id must clear idle");
+
+        state.active_task_id = Some(Uuid::new_v4());
+        state.active_run_id = Some(Uuid::new_v4());
+        assert!(!state.is_idle(), "both set must clear idle");
+    }
+
+    /// `is_seeded()` is `true` when either `selected_plan_id` is set or
+    /// `selected_plan_ids` has at least one entry — matching the
+    /// convention in `apply_scheduler_mutation(SetCurrentPlanHeads)`
+    /// which mirrors `selected_plan_id` to the execution head while also
+    /// populating `selected_plan_ids`.
+    #[test]
+    fn is_seeded_requires_either_legacy_or_ordered_selection() {
+        let mut state = empty_state(Uuid::new_v4());
+        assert!(!state.is_seeded(), "fresh state must not be seeded");
+
+        state.selected_plan_id = Some(Uuid::new_v4());
+        assert!(
+            state.is_seeded(),
+            "legacy selected_plan_id alone must flag as seeded",
+        );
+
+        state.selected_plan_id = None;
+        state.selected_plan_ids = vec![PlanHeadRef {
+            plan_id: Uuid::new_v4(),
+            ordinal: 0,
+        }];
+        assert!(
+            state.is_seeded(),
+            "non-empty selected_plan_ids alone must flag as seeded",
+        );
+    }
+
+    /// The ordinal constants must stay aligned with the convention used
+    /// by `apply_scheduler_mutation(SetCurrentPlanHeads)` — execution at
+    /// 0, test at 1. Pinning the values here protects against accidental
+    /// re-ordering that would silently invert head dispatch.
+    #[test]
+    fn head_ordinals_are_pinned_constants() {
+        assert_eq!(SchedulerState::EXECUTION_HEAD_ORDINAL, 0);
+        assert_eq!(SchedulerState::TEST_HEAD_ORDINAL, 1);
+    }
 
     #[test]
     fn scheduler_state_cas_error_display_pins_owned_variants() {

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     info_println,
     internal::{
-        ai::usage::{UsageQuery, UsageQueryFilter},
+        ai::usage::{UsageGrouping, UsageQuery, UsageQueryFilter},
         db::get_db_conn_instance_for_path,
     },
     utils::{
@@ -19,7 +19,31 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra usage --help` output.
+///
+/// `usage` exposes two sub-commands: `report` (aggregate provider costs
+/// and token totals) and `prune` (delete rows past a retention window).
+/// The banner pins the canonical invocation plus common filter
+/// combinations (`--since 7d`, `--session`, `--include-failed`, csv
+/// format) so users can map intent to invocation without reading the
+/// design doc. Cross-cutting `--help` EXAMPLES rollout per
+/// `docs/improvement/README.md` item B.
+pub const USAGE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra usage report                                  Per-model totals across all recorded rows
+    libra usage report --by agent                       Per-agent totals across all recorded rows
+    libra usage report --by agent-provider-model        Per-agent provider/model breakdown
+    libra usage report --since 24h                      Per-model totals for the last 24 hours
+    libra usage report --since 7d --include-failed      Include failed requests in counts/wall-clock
+    libra usage report --session <session-id>           Restrict report to one session
+    libra usage report --thread <thread-uuid>           Restrict report to one canonical thread
+    libra usage report --format csv                     CSV table for downstream tooling
+    libra usage --json report --since 7d                Structured JSON output for agents
+    libra usage prune                                   Use the configured retention window
+    libra usage prune --retention-days 30               Delete rows older than 30 days";
+
 #[derive(Parser, Debug)]
+#[command(after_help = USAGE_EXAMPLES)]
 pub struct UsageArgs {
     #[command(subcommand)]
     pub command: UsageSubcommand,
@@ -29,20 +53,20 @@ pub struct UsageArgs {
 pub enum UsageSubcommand {
     /// Report usage aggregates.
     Report {
-        /// Aggregation dimension. Currently only `model` is supported.
-        #[arg(long, default_value = "model", value_parser = ["model"])]
-        by: String,
-        /// Start time filter. Accepts RFC3339, YYYY-MM-DD, or relative values like 24h/7d.
-        #[arg(long)]
+        /// Aggregation dimension.
+        #[arg(long, value_enum, default_value_t = UsageReportBy::Model)]
+        by: UsageReportBy,
+        /// Start time filter (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
+        #[arg(long, value_name = "DATE")]
         since: Option<String>,
-        /// End time filter. Accepts RFC3339, YYYY-MM-DD, or relative values like 1h.
-        #[arg(long)]
+        /// End time filter (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
+        #[arg(long, value_name = "DATE")]
         until: Option<String>,
-        /// Restrict report to a session id.
-        #[arg(long)]
+        /// Restrict report to a single provider session id
+        #[arg(long, value_name = "SESSION_ID")]
         session: Option<String>,
-        /// Restrict report to a canonical thread id.
-        #[arg(long)]
+        /// Restrict report to a single canonical Libra Thread UUID
+        #[arg(long, value_name = "THREAD_UUID")]
         thread: Option<String>,
         /// Include failed provider requests in request counts and wall-clock totals.
         #[arg(long)]
@@ -64,6 +88,34 @@ pub enum UsageReportFormat {
     Human,
     Json,
     Csv,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum UsageReportBy {
+    /// Group by provider/model. This preserves the original usage report shape.
+    Model,
+    /// Group by declarative agent name only.
+    Agent,
+    /// Group by agent name, provider, and model.
+    AgentProviderModel,
+}
+
+impl UsageReportBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Agent => "agent",
+            Self::AgentProviderModel => "agent-provider-model",
+        }
+    }
+
+    fn grouping(self) -> UsageGrouping {
+        match self {
+            Self::Model => UsageGrouping::ProviderModel,
+            Self::Agent => UsageGrouping::Agent,
+            Self::AgentProviderModel => UsageGrouping::AgentProviderModel,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -112,7 +164,7 @@ pub async fn execute_safe(args: UsageArgs, output: &OutputConfig) -> CliResult<(
 }
 
 struct UsageReportOptions {
-    by: String,
+    by: UsageReportBy,
     since: Option<String>,
     until: Option<String>,
     session: Option<String>,
@@ -146,14 +198,15 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
     };
     let db = open_repo_db().await?;
     let rows = UsageQuery::new(db)
-        .aggregate_by_model_filtered(&filter)
+        .aggregate_filtered(options.by.grouping(), &filter)
         .await
         .map_err(|error| CliError::failure(format!("failed to query usage stats: {error}")))?;
+    let by = options.by.as_str().to_string();
     if output.is_json() || options.format == UsageReportFormat::Json {
         return emit_json_data(
             "usage.report",
             &UsageReportOutput {
-                by: options.by,
+                by,
                 filter: filter_output,
                 rows,
             },
@@ -161,35 +214,125 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
         );
     }
     if options.format == UsageReportFormat::Csv {
-        return emit_usage_csv(&rows, output);
+        return emit_usage_csv(options.by, &rows, output);
     }
     if rows.is_empty() {
         info_println!(output, "No usage stats recorded.");
         return Ok(());
     }
     for row in &rows {
-        let total = if row.total_tokens > 0 {
-            row.total_tokens
-        } else {
-            row.prompt_tokens.saturating_add(row.completion_tokens)
-        };
+        let total = usage_total_tokens(row);
         let cost = usage_human_cost(row);
-        info_println!(
-            output,
-            "{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
-            row.provider,
-            row.model,
-            row.request_count,
-            row.failed_count,
-            total,
-            row.cached_tokens,
-            row.reasoning_tokens,
-            row.tool_call_count,
-            row.wall_clock_ms,
-            cost
-        );
+        match options.by {
+            UsageReportBy::Model => {
+                info_println!(
+                    output,
+                    "{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    row.provider,
+                    row.model,
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+            UsageReportBy::Agent => {
+                info_println!(
+                    output,
+                    "{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    usage_agent_name(row),
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+            UsageReportBy::AgentProviderModel => {
+                info_println!(
+                    output,
+                    "{}\t{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    usage_agent_name(row),
+                    row.provider,
+                    row.model,
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// Session-bootstrap auto-prune (v0.17.791): if `[usage]
+/// retention_days = N` is configured in the repo's
+/// `config.toml`, prune usage rows older than `N` days. Called
+/// once per `libra code` session start so long-running operators
+/// don't accumulate unbounded usage history.
+///
+/// Soft-failure: every error path emits `tracing::warn!` and
+/// returns without bubbling — a malformed config or DB error
+/// must not block session startup. Returns the number of rows
+/// pruned (or 0 if no retention is configured / on any error).
+pub async fn auto_prune_at_session_start(storage_root: &Path) -> u64 {
+    let config_path = storage_root.join("config.toml");
+    let retention_days = match read_usage_retention_days_config(&config_path) {
+        Ok(Some(days)) => days,
+        Ok(None) => return 0,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                path = %config_path.display(),
+                "failed to read usage retention config at session bootstrap; \
+                 skipping auto-prune",
+            );
+            return 0;
+        }
+    };
+    let conn = match open_repo_db_at(storage_root).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "failed to open repo DB for usage auto-prune; skipping",
+            );
+            return 0;
+        }
+    };
+    let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+    match crate::internal::ai::usage::UsageRecorder::new(conn)
+        .prune_before(&cutoff.to_rfc3339())
+        .await
+    {
+        Ok(deleted) => {
+            if deleted > 0 {
+                tracing::info!(
+                    deleted,
+                    retention_days,
+                    cutoff = %cutoff.to_rfc3339(),
+                    "session-bootstrap pruned old usage rows",
+                );
+            }
+            deleted
+        }
+        Err(err) => {
+            tracing::warn!(%err, "usage auto-prune failed; skipping");
+            0
+        }
+    }
 }
 
 async fn prune_usage(retention_days: Option<u32>, output: &OutputConfig) -> CliResult<()> {
@@ -220,19 +363,26 @@ async fn prune_usage(retention_days: Option<u32>, output: &OutputConfig) -> CliR
 }
 
 fn emit_usage_csv(
+    by: UsageReportBy,
     rows: &[crate::internal::ai::usage::UsageAggregate],
     output: &OutputConfig,
 ) -> CliResult<()> {
-    info_println!(
-        output,
-        "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
-    );
+    match by {
+        UsageReportBy::Model => info_println!(
+            output,
+            "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+        UsageReportBy::Agent => info_println!(
+            output,
+            "agent_name,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+        UsageReportBy::AgentProviderModel => info_println!(
+            output,
+            "agent_name,provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+    };
     for row in rows {
-        let total = if row.total_tokens > 0 {
-            row.total_tokens
-        } else {
-            row.prompt_tokens.saturating_add(row.completion_tokens)
-        };
+        let total = usage_total_tokens(row);
         let cost = row
             .cost_usd
             .map(|cost| format!("{cost:.6}"))
@@ -241,23 +391,59 @@ fn emit_usage_csv(
             .cost_estimate_micro_dollars
             .map(|cost| cost.to_string())
             .unwrap_or_default();
-        info_println!(
-            output,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_escape(&row.provider),
-            csv_escape(&row.model),
-            row.request_count,
-            row.failed_count,
-            row.prompt_tokens,
-            row.completion_tokens,
-            row.cached_tokens,
-            row.reasoning_tokens,
-            total,
-            row.tool_call_count,
-            row.wall_clock_ms,
-            cost,
-            cost_estimate
-        );
+        match by {
+            UsageReportBy::Model => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(&row.provider),
+                csv_escape(&row.model),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+            UsageReportBy::Agent => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(row.agent_name.as_deref().unwrap_or("")),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+            UsageReportBy::AgentProviderModel => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(row.agent_name.as_deref().unwrap_or("")),
+                csv_escape(&row.provider),
+                csv_escape(&row.model),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+        }
     }
     Ok(())
 }
@@ -340,6 +526,18 @@ fn usage_human_cost(row: &crate::internal::ai::usage::UsageAggregate) -> String 
         .unwrap_or_default()
 }
 
+fn usage_total_tokens(row: &crate::internal::ai::usage::UsageAggregate) -> u64 {
+    if row.total_tokens > 0 {
+        row.total_tokens
+    } else {
+        row.prompt_tokens.saturating_add(row.completion_tokens)
+    }
+}
+
+fn usage_agent_name(row: &crate::internal::ai::usage::UsageAggregate) -> &str {
+    row.agent_name.as_deref().unwrap_or("(legacy)")
+}
+
 fn csv_escape(value: &str) -> String {
     if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
@@ -397,6 +595,23 @@ async fn open_repo_db() -> CliResult<sea_orm::DatabaseConnection> {
                 "failed to open repository database {}: {error}",
                 db_path.display()
             ))
+        })
+}
+
+/// Variant of [`open_repo_db`] that takes an explicit
+/// `storage_root` instead of resolving via the working
+/// directory. Used by the v0.17.791 session-bootstrap
+/// auto-prune path which already has the resolved storage
+/// root in scope.
+async fn open_repo_db_at(storage_root: &Path) -> anyhow::Result<sea_orm::DatabaseConnection> {
+    let db_path = storage_root.join(DATABASE);
+    get_db_conn_instance_for_path(&db_path)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed to open repository database {}: {err}",
+                db_path.display()
+            )
         })
 }
 

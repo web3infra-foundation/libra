@@ -60,6 +60,46 @@ pub enum TaskNodeStatus {
     Skipped,
 }
 
+impl TaskNodeStatus {
+    /// Every variant of [`TaskNodeStatus`] in declaration order
+    /// (`Pending`, `Running`, `Completed`, `Failed`, `Skipped`).
+    /// Mirrors the v0.17.660+ `*::all()` pattern: the fixed-length
+    /// array forces a future variant to extend `all()` plus the
+    /// `is_terminal` / `is_completed` / `is_failed` partition arms
+    /// in the same patch.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Pending,
+            Self::Running,
+            Self::Completed,
+            Self::Failed,
+            Self::Skipped,
+        ]
+    }
+
+    /// `true` when the task node has reached a terminal status
+    /// (`Completed`, `Failed`, or `Skipped`). Pending / Running tasks
+    /// are still in-flight from the scheduler's perspective and the
+    /// orchestrator must continue waiting on them.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Skipped)
+    }
+
+    /// `true` only for the clean-completion status. Distinct from
+    /// `is_terminal()` because `Failed` and `Skipped` are terminal
+    /// but should NOT be treated as success by orchestration logic.
+    pub fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// `true` only for the failed status. Distinct from
+    /// `is_terminal()` so the orchestrator can decide retry vs
+    /// escalation without re-enumerating the variants.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed)
+    }
+}
+
 /// High-level type of an execution task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +107,20 @@ pub enum TaskKind {
     Implementation,
     Analysis,
     Gate,
+}
+
+impl TaskKind {
+    /// Every variant of [`TaskKind`] in declaration order
+    /// (`Implementation`, `Analysis`, `Gate`). Useful for tests
+    /// that sweep every kind plus future routing logic that needs
+    /// to fan out across task types.
+    ///
+    /// Mirrors the v0.17.660+ `*::all()` pattern: the fixed-length
+    /// array forces a future variant (e.g. `Review`) to extend this
+    /// list in the same patch.
+    pub fn all() -> [Self; 3] {
+        [Self::Implementation, Self::Analysis, Self::Gate]
+    }
 }
 
 /// The verification stage represented by a gate task.
@@ -77,6 +131,18 @@ pub enum GateStage {
     Integration,
     Security,
     Release,
+}
+
+impl GateStage {
+    /// Every variant of [`GateStage`] in declaration order
+    /// (`Fast`, `Integration`, `Security`, `Release`). The
+    /// declaration order is also the **escalation order** — Fast
+    /// gates run first and have the lowest cost, Release gates run
+    /// last and have the highest cost. Callers that need to iterate
+    /// gates in escalation order can use `all()` directly.
+    pub fn all() -> [Self; 4] {
+        [Self::Fast, Self::Integration, Self::Security, Self::Release]
+    }
 }
 
 /// Contract for a compiled task.
@@ -549,6 +615,16 @@ pub enum TaskRuntimeNoteLevel {
     Error,
 }
 
+impl TaskRuntimeNoteLevel {
+    /// Every variant of [`TaskRuntimeNoteLevel`] in declaration order
+    /// (`Info`, `Error`). Useful for exhaustive iteration in tests
+    /// and for log-level filtering callsites that need to fan out
+    /// across both severities.
+    pub fn all() -> [Self; 2] {
+        [Self::Info, Self::Error]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskWorkspaceBackend {
@@ -564,6 +640,15 @@ impl TaskWorkspaceBackend {
             Self::Copy => "copy worktree",
             Self::Fuse => "FUSE worktree",
         }
+    }
+
+    /// Every variant of [`TaskWorkspaceBackend`] in declaration order
+    /// (`Shared`, `Copy`, `Fuse`). Mirrors the v0.17.660+ `*::all()`
+    /// pattern: the fixed-length array forces a future variant to
+    /// extend this list in the same patch (otherwise the type-check
+    /// at the callsite catches the regression).
+    pub fn all() -> [Self; 3] {
+        [Self::Shared, Self::Copy, Self::Fuse]
     }
 }
 
@@ -925,5 +1010,138 @@ mod tests {
             OrchestratorError::ProjectionError("schema drift".to_string()).to_string(),
             "projection error: schema drift",
         );
+    }
+
+    #[test]
+    fn task_kind_all_enumerates_every_variant_in_declaration_order() {
+        let kinds = TaskKind::all();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(
+            kinds,
+            [TaskKind::Implementation, TaskKind::Analysis, TaskKind::Gate]
+        );
+
+        for kind in &TaskKind::all() {
+            let expected_tag = match kind {
+                TaskKind::Implementation => "\"implementation\"",
+                TaskKind::Analysis => "\"analysis\"",
+                TaskKind::Gate => "\"gate\"",
+            };
+            let serialised = serde_json::to_string(kind).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {kind:?}");
+            let back: TaskKind = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, *kind);
+        }
+    }
+
+    #[test]
+    fn gate_stage_all_enumerates_every_variant_in_escalation_order() {
+        let stages = GateStage::all();
+        assert_eq!(stages.len(), 4);
+        assert_eq!(
+            stages,
+            [
+                GateStage::Fast,
+                GateStage::Integration,
+                GateStage::Security,
+                GateStage::Release,
+            ]
+        );
+
+        for stage in &GateStage::all() {
+            let expected_tag = match stage {
+                GateStage::Fast => "\"fast\"",
+                GateStage::Integration => "\"integration\"",
+                GateStage::Security => "\"security\"",
+                GateStage::Release => "\"release\"",
+            };
+            let serialised = serde_json::to_string(stage).unwrap();
+            assert_eq!(serialised, expected_tag, "wire tag mismatch for {stage:?}");
+            let back: GateStage = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(back, *stage);
+        }
+    }
+
+    /// `TaskRuntimeNoteLevel::all()` enumerates both severities in
+    /// declaration order. Fixed-length array forces future variants
+    /// to extend this list and any callsite that consumes it.
+    #[test]
+    fn task_runtime_note_level_all_enumerates_both_variants() {
+        assert_eq!(
+            TaskRuntimeNoteLevel::all(),
+            [TaskRuntimeNoteLevel::Info, TaskRuntimeNoteLevel::Error],
+        );
+    }
+
+    /// `TaskWorkspaceBackend::all()` enumerates every variant and
+    /// pins each variant's `label()` text. The cross-check forces a
+    /// future variant to extend `all()`, the `label` arm, and this
+    /// assertion together.
+    #[test]
+    fn task_workspace_backend_all_pins_every_variant_and_label() {
+        let backends = TaskWorkspaceBackend::all();
+        assert_eq!(backends.len(), 3);
+        assert_eq!(
+            backends,
+            [
+                TaskWorkspaceBackend::Shared,
+                TaskWorkspaceBackend::Copy,
+                TaskWorkspaceBackend::Fuse,
+            ]
+        );
+        for backend in &TaskWorkspaceBackend::all() {
+            let expected_label = match backend {
+                TaskWorkspaceBackend::Shared => "shared workspace",
+                TaskWorkspaceBackend::Copy => "copy worktree",
+                TaskWorkspaceBackend::Fuse => "FUSE worktree",
+            };
+            assert_eq!(backend.label(), expected_label);
+        }
+    }
+
+    /// `TaskNodeStatus::all()` enumerates every variant in
+    /// declaration order, with each variant cleanly partitioned
+    /// across the three predicates `is_terminal` / `is_completed` /
+    /// `is_failed`. The exhaustive `match` in the cross-check
+    /// forces a future sixth variant to be added alongside `all()`
+    /// and the partition arms in the same patch.
+    #[test]
+    fn task_node_status_all_partitions_terminal_completed_failed_across_every_variant() {
+        let statuses = TaskNodeStatus::all();
+        assert_eq!(statuses.len(), 5);
+        assert_eq!(
+            statuses,
+            [
+                TaskNodeStatus::Pending,
+                TaskNodeStatus::Running,
+                TaskNodeStatus::Completed,
+                TaskNodeStatus::Failed,
+                TaskNodeStatus::Skipped,
+            ]
+        );
+
+        for status in &TaskNodeStatus::all() {
+            let (expected_terminal, expected_completed, expected_failed) = match status {
+                TaskNodeStatus::Pending | TaskNodeStatus::Running => (false, false, false),
+                TaskNodeStatus::Completed => (true, true, false),
+                TaskNodeStatus::Failed => (true, false, true),
+                TaskNodeStatus::Skipped => (true, false, false),
+            };
+            assert_eq!(
+                status.is_terminal(),
+                expected_terminal,
+                "is_terminal mismatch for {status:?}",
+            );
+            assert_eq!(
+                status.is_completed(),
+                expected_completed,
+                "is_completed mismatch for {status:?}",
+            );
+            assert_eq!(
+                status.is_failed(),
+                expected_failed,
+                "is_failed mismatch for {status:?}",
+            );
+        }
     }
 }

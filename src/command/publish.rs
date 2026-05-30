@@ -84,8 +84,36 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra publish --help` output.
+///
+/// `publish` exposes five sub-commands (init / sync / status / deploy /
+/// unpublish) that together drive the read-only Cloudflare Worker
+/// publishing path. The banner pins the canonical invocation per
+/// sub-command plus a dry-run sync, a sensitive-path allowance, a
+/// site-scoped status, a deploy that skips Cloudflare mutation, and a
+/// JSON variant for agents so users can map intent to invocation
+/// without reading the design doc. Cross-cutting `--help` EXAMPLES
+/// rollout per `docs/improvement/README.md` item B.
+pub const PUBLISH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra publish init --slug <slug> --clone-domain <domain>
+                                              Materialise the local Worker template scaffold
+    libra publish status                      Inspect local Worker template / D1 ref drift
+    libra publish status --site-id <uuid>     Inspect a specific published site by UUID
+    libra publish sync                        Sync default refs to D1/R2
+    libra publish sync --dry-run              Plan the publish without writing to D1/R2
+    libra publish sync --ref refs/heads/main  Sync a single named ref
+    libra publish sync --force                Re-upload every file/object regardless of CAS
+    libra publish sync --allow-sensitive-path <path>
+                                              Allow a path the deny list normally blocks (private sites)
+    libra publish deploy                      Build the Worker and deploy to Cloudflare
+    libra publish deploy --skip-deploy        Build only; skip Cloudflare mutation
+    libra publish unpublish --site-id <uuid> --yes
+                                              Disable a published site without deleting D1/R2 data
+    libra publish --json sync --dry-run       Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
-#[command(about = "Manage read-only Cloudflare Worker publishing")]
+#[command(about = "Manage read-only Cloudflare Worker publishing", after_help = PUBLISH_EXAMPLES)]
 pub struct PublishArgs {
     #[command(subcommand)]
     pub command: PublishCommand,
@@ -111,41 +139,35 @@ pub struct InitArgs {
     #[arg(long)]
     pub slug: Option<String>,
 
-    /// Public clone domain, e.g. `code.example.com`.
-    #[arg(long)]
+    /// Public clone domain (e.g. `code.example.com`)
+    #[arg(long, value_name = "DOMAIN")]
     pub clone_domain: Option<String>,
 
-    /// Browser-facing origin URL, e.g. `https://code.example.com`.
-    /// Codex pass-8 P2: documented in publish.md / docs/commands.
-    #[arg(long)]
+    /// Browser-facing origin URL (e.g. `https://code.example.com`)
+    #[arg(long, value_name = "URL")]
     pub display_origin: Option<String>,
 
-    /// Display name shown in the Worker UI header.
-    /// Codex pass-8 P2: documented in publish.md / docs/commands.
-    #[arg(long)]
+    /// Display name shown in the Worker UI header
+    #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
-    /// `public` (browser-readable) or `private` (Cloudflare Access).
-    #[arg(long)]
+    /// Site visibility: `public` (browser-readable) or `private` (Cloudflare Access)
+    #[arg(long, value_name = "MODE")]
     pub visibility: Option<String>,
 
-    /// Worker name; defaults to `libra-publish`.
-    #[arg(long)]
+    /// Cloudflare Worker name (default: `libra-publish`)
+    #[arg(long, value_name = "NAME")]
     pub worker_name: Option<String>,
 
-    /// Per-file preview cap in bytes. Files larger than this fall
-    /// back to metadata-only. Must be positive — pass `0` is rejected
-    /// because a zero cap defeats the purpose of code-preview
-    /// publishing. Codex pass-8 P2 + pass-9 P2: documented flag with
-    /// clap-side `> 0` validation.
-    #[arg(long, value_parser = parse_max_preview_bytes)]
+    /// Per-file preview cap in bytes. Files larger than this fall back to metadata-only. Must be > 0 — passing `0` is rejected because a zero cap defeats the purpose of code-preview publishing
+    #[arg(long, value_name = "BYTES", value_parser = parse_max_preview_bytes)]
     pub max_preview_bytes: Option<u64>,
 }
 
 #[derive(Parser, Debug)]
 pub struct SyncArgs {
-    /// Sync only the named ref (`refs/heads/main` or `main`).
-    #[arg(long)]
+    /// Sync only the named ref (e.g. `refs/heads/main` or `main`)
+    #[arg(long, value_name = "REF")]
     pub r#ref: Option<String>,
 
     /// Print the plan without writing to D1/R2.
@@ -156,19 +178,15 @@ pub struct SyncArgs {
     #[arg(long)]
     pub fail_on_dirty: bool,
 
-    /// Redaction policy: `default` or `strict`.
-    #[arg(long, default_value = "default")]
+    /// AI snapshot redaction policy: `default` or `strict`
+    #[arg(long, value_name = "POLICY", default_value = "default")]
     pub ai_redaction: String,
 
-    /// Allow a path that the deny list would normally block. Only
-    /// honored on `private` sites. Codex pass-8 P2: documented in
-    /// publish.md `.librapublishignore` section.
-    #[arg(long, value_name = "path")]
+    /// Allow a path that the deny list would normally block. Only honored on `private` sites
+    #[arg(long, value_name = "PATH")]
     pub allow_sensitive_path: Vec<String>,
 
-    /// Force re-upload of every file/object even if `is_synced`
-    /// is set. Codex pass-8 P2: documented in publish.md hardening
-    /// criteria for the CAS latest-revision conflict path.
+    /// Force re-upload of every file/object even if `is_synced` is set
     #[arg(long)]
     pub force: bool,
 }
@@ -200,6 +218,8 @@ pub struct UnpublishArgs {
 
 const WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const WORKER_TEMPLATE_MANIFEST_PATH: &str = ".libra/publish/worker-template-manifest.json";
+const PUBLISH_D1_DATABASE_ID_PLACEHOLDER: &str = "REPLACE_WITH_D1_DATABASE_ID";
+const PUBLISH_R2_BUCKET_NAME_PLACEHOLDER: &str = "REPLACE_WITH_R2_BUCKET_NAME";
 const PUBLISH_REDACTION_RULES_VERSION: &str = "2026.05.13-1";
 
 /// GitHub Issues URL surfaced on inline `InternalInvariant` bug paths in
@@ -664,8 +684,10 @@ fn publish_status_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, and LIBRA_D1_DATABASE_ID for cloud \
-             comparison, or omit --site-id/publish.site_id to inspect only the local template.",
+            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, and \
+             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
+             variables for cloud comparison. Omit --site-id/publish.site_id to inspect only \
+             the local template.",
         )
 }
 
@@ -802,14 +824,26 @@ fn ensure_publish_deploy_files(worker_dir: &Path) -> CliResult<()> {
             .with_hint("restore the Worker bindings generated by 'libra publish init'."));
         }
     }
-    if wrangler.contains("REPLACE_WITH_D1_DATABASE_ID") {
-        return Err(CliError::failure(format!(
-            "publish deploy requires a real D1 database_id in '{}' instead of \
-             REPLACE_WITH_D1_DATABASE_ID",
-            wrangler_path.display(),
-        ))
-        .with_stable_code(StableErrorCode::RepoStateInvalid)
-        .with_hint("create a Cloudflare D1 database and replace REPLACE_WITH_D1_DATABASE_ID."));
+    for (placeholder, resource, hint) in [
+        (
+            PUBLISH_D1_DATABASE_ID_PLACEHOLDER,
+            "D1 database_id",
+            "create a Cloudflare D1 database and replace REPLACE_WITH_D1_DATABASE_ID.",
+        ),
+        (
+            PUBLISH_R2_BUCKET_NAME_PLACEHOLDER,
+            "R2 bucket_name",
+            "create a Cloudflare R2 bucket and replace REPLACE_WITH_R2_BUCKET_NAME.",
+        ),
+    ] {
+        if wrangler.contains(placeholder) {
+            return Err(CliError::failure(format!(
+                "publish deploy requires a real {resource} in '{}' instead of {placeholder}",
+                wrangler_path.display(),
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint(hint));
+        }
     }
     Ok(())
 }
@@ -1044,8 +1078,9 @@ async fn run_publish_sync_non_dry_run(args: &SyncArgs) -> CliResult<PublishSyncO
             CliError::fatal(format!("failed to initialize publish R2 storage: {source}"))
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint(
-                    "set LIBRA_STORAGE_ENDPOINT, LIBRA_STORAGE_BUCKET, \
-                     LIBRA_STORAGE_ACCESS_KEY, and LIBRA_STORAGE_SECRET_KEY.",
+                    "set vault.env.LIBRA_STORAGE_ENDPOINT, vault.env.LIBRA_STORAGE_BUCKET, \
+                     vault.env.LIBRA_STORAGE_ACCESS_KEY, and vault.env.LIBRA_STORAGE_SECRET_KEY \
+                     with `libra config set`, or export the matching variables.",
                 )
         })?;
 
@@ -1919,8 +1954,9 @@ fn publish_sync_d1_error(operation: &str, source: D1Error) -> CliError {
     CliError::fatal(format!("{operation}: {}", source.message))
         .with_stable_code(stable_code)
         .with_hint(
-            "set LIBRA_D1_ACCOUNT_ID, LIBRA_D1_API_TOKEN, LIBRA_D1_DATABASE_ID, and \
-             publish.site_id before running 'libra publish sync'.",
+            "set vault.env.LIBRA_D1_ACCOUNT_ID, vault.env.LIBRA_D1_API_TOKEN, \
+             vault.env.LIBRA_D1_DATABASE_ID with `libra config set`, or export the matching \
+             variables, and set publish.site_id before running 'libra publish sync'.",
         )
 }
 
@@ -3371,20 +3407,45 @@ mod tests {
         }
     }
 
+    fn replace_wrangler_string_field_for_test(wrangler: &str, field: &str, value: &str) -> String {
+        let field_prefix = format!("\"{field}\":");
+        wrangler
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with(&field_prefix) {
+                    let indent = &line[..line.len() - trimmed.len()];
+                    format!("{indent}\"{field}\": \"{value}\",")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn replace_d1_database_id_for_test(wrangler: &str, database_id: &str) -> String {
+        replace_wrangler_string_field_for_test(wrangler, "database_id", database_id)
+    }
+
+    fn replace_r2_bucket_name_for_test(wrangler: &str, bucket_name: &str) -> String {
+        replace_wrangler_string_field_for_test(wrangler, "bucket_name", bucket_name)
+    }
+
+    fn make_wrangler_deployable_for_test(wrangler: &str) -> String {
+        let wrangler =
+            replace_d1_database_id_for_test(wrangler, "00000000-0000-0000-0000-000000000000");
+        replace_r2_bucket_name_for_test(&wrangler, "libra-publish-test")
+    }
+
     fn materialize_deployable_worker(repo_root: &Path) {
         run_publish_init_at_root(repo_root, &default_init_args())
             .expect("publish init must materialize the template");
         let wrangler_path = repo_root.join("worker/wrangler.jsonc");
         let wrangler =
             fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
-        fs::write(
-            &wrangler_path,
-            wrangler.replace(
-                "REPLACE_WITH_D1_DATABASE_ID",
-                "00000000-0000-0000-0000-000000000000",
-            ),
-        )
-        .expect("wrangler config placeholder should be replaceable");
+        fs::write(&wrangler_path, make_wrangler_deployable_for_test(&wrangler))
+            .expect("wrangler config placeholders should be replaceable");
     }
 
     #[tokio::test]
@@ -4034,6 +4095,22 @@ mod tests {
             expected_package_json
         );
 
+        let wrangler = fs::read_to_string(temp.path().join("worker/wrangler.jsonc"))
+            .expect("materialized wrangler config must be readable");
+        assert!(
+            wrangler.contains("REPLACE_WITH_D1_DATABASE_ID"),
+            "publish init must leave an explicit D1 placeholder: {wrangler}"
+        );
+        assert!(
+            wrangler.contains("REPLACE_WITH_R2_BUCKET_NAME"),
+            "publish init must leave an explicit R2 placeholder: {wrangler}"
+        );
+        assert!(
+            !wrangler.contains("8e067bd6-f12c-4462-a536-65f8acde59ce")
+                && !wrangler.contains("libra-action"),
+            "publish init must not materialize repo-specific Cloudflare resource ids: {wrangler}"
+        );
+
         let manifest_path = temp.path().join(WORKER_TEMPLATE_MANIFEST_PATH);
         let manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("manifest must be readable"))
@@ -4307,7 +4384,7 @@ mod tests {
                     "failed to initialize D1 client for publish status ref comparison",
                     D1Error {
                         code: 1001,
-                        message: "LIBRA_D1_ACCOUNT_ID not set (env or vault)".to_string(),
+                        message: "LIBRA_D1_ACCOUNT_ID is not configured".to_string(),
                     },
                 ))
             },
@@ -4409,6 +4486,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir must be created");
         run_publish_init_at_root(temp.path(), &default_init_args())
             .expect("publish init must materialize the template");
+        let wrangler_path = temp.path().join("worker/wrangler.jsonc");
+        let wrangler =
+            fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
+        fs::write(
+            &wrangler_path,
+            replace_d1_database_id_for_test(&wrangler, "REPLACE_WITH_D1_DATABASE_ID"),
+        )
+        .expect("wrangler config should be writable for placeholder validation test");
         let args = DeployArgs { skip_deploy: true };
         let mut runner = FakePublishWorkerCommandRunner::default();
 
@@ -4419,6 +4504,36 @@ mod tests {
         assert!(
             err.message().contains("REPLACE_WITH_D1_DATABASE_ID"),
             "error must identify the placeholder config: {}",
+            err.message()
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "deploy must not run build or cloud commands before config validation"
+        );
+    }
+
+    #[test]
+    fn publish_deploy_requires_configured_r2_bucket_name_before_commands() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        run_publish_init_at_root(temp.path(), &default_init_args())
+            .expect("publish init must materialize the template");
+        let wrangler_path = temp.path().join("worker/wrangler.jsonc");
+        let wrangler =
+            fs::read_to_string(&wrangler_path).expect("materialized wrangler config is readable");
+        let wrangler =
+            replace_d1_database_id_for_test(&wrangler, "00000000-0000-0000-0000-000000000000");
+        fs::write(&wrangler_path, wrangler)
+            .expect("wrangler config should be writable for R2 placeholder validation test");
+        let args = DeployArgs { skip_deploy: true };
+        let mut runner = FakePublishWorkerCommandRunner::default();
+
+        let err = run_publish_deploy_at_root(temp.path(), &args, &mut runner)
+            .expect_err("deploy must fail before running commands with placeholder R2 config");
+
+        assert_eq!(err.stable_code(), StableErrorCode::RepoStateInvalid);
+        assert!(
+            err.message().contains("REPLACE_WITH_R2_BUCKET_NAME"),
+            "error must identify the R2 placeholder config: {}",
             err.message()
         );
         assert!(

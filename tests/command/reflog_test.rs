@@ -495,3 +495,35 @@ async fn test_reflog_show_with_stat() {
     let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--stat", "-n", "2"]);
     reflog::execute(args).await; // Should complete without panic
 }
+
+/// `libra reflog --help` surfaces the EXAMPLES banner so users see the
+/// three sub-commands (`show`, `delete`, `exists`) plus a filtered show,
+/// a HEAD@{N} delete selector, and the JSON variant for agents. Cross-cutting
+/// `--help` EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_reflog_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for reflog --help");
+    let output = run_libra_command(&["reflog", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "reflog --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "reflog --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra reflog show",
+        "libra reflog show main --number 20",
+        "libra reflog exists refs/heads/feature-x",
+        "libra reflog delete HEAD@{2}",
+        "libra reflog --json show HEAD",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "reflog --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}

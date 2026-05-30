@@ -75,6 +75,36 @@ Example:
 }
 ```
 
+## Examples
+
+```bash
+# Validate the rules in .libra/automation.toml and list them
+libra automation list
+
+# Plan due rules without running them (dry-run is the default for run)
+libra automation run
+
+# Run a single rule by id regardless of whether its cron trigger is due
+libra automation run --rule my-rule
+
+# Simulate a specific current time when evaluating cron triggers
+libra automation run --now 2026-05-23T12:00:00Z
+
+# Actually spawn shell actions that pass safety preflight
+libra automation run --live
+
+# Show the 50 most recent automation history rows
+libra automation history --limit 50
+
+# Structured JSON envelope for agents
+libra automation --json list
+libra automation --json run
+```
+
+The same banner is rendered by `libra automation --help` so the doc and the
+CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
+`docs/improvement/README.md` item B).
+
 ## Notes
 
 - The command requires a Libra repository for `run` and `history` because

@@ -459,6 +459,47 @@ fn test_fsck_corrupted_object() {
 
 #[test]
 #[serial]
+/// Tests fsck rejects annotated tag objects that are syntactically valid UTF-8
+/// but missing required tag headers.
+fn test_fsck_rejects_tag_object_missing_tagger() {
+    let repo = create_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    assert_cli_success(&log_output, "log --pretty=%H");
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    let tag_data = format!(
+        "object {commit_hash}\ntype commit\ntag broken-tag\n\nmalformed tag without tagger\n"
+    );
+    let tag_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        git_internal::internal::object::types::ObjectType::Tag,
+        tag_data.as_bytes(),
+    );
+    let storage =
+        libra::utils::client_storage::ClientStorage::init(repo.path().join(".libra/objects"));
+    storage
+        .put(
+            &tag_hash,
+            tag_data.as_bytes(),
+            git_internal::internal::object::types::ObjectType::Tag,
+        )
+        .expect("write malformed tag object");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        !output.status.success(),
+        "fsck should fail on malformed tag object"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing tagger"),
+        "fsck should report missing tagger, stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
 /// Tests fsck with missing object file.
 /// Verifies that fsck detects and reports missing objects.
 fn test_fsck_missing_object() {

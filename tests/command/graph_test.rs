@@ -69,3 +69,33 @@ fn graph_repo_flag_uses_target_repo_when_passed_after_thread_id() {
         report
     );
 }
+
+/// `libra graph --help` surfaces the EXAMPLES banner so users see the
+/// default thread-id invocation, the `--repo` override, and the JSON
+/// variant without reading the design doc. Cross-cutting `--help`
+/// EXAMPLES rollout per `docs/improvement/README.md` item B.
+#[test]
+fn test_graph_help_lists_examples_banner() {
+    let repo = tempdir().expect("tempdir for graph --help");
+    let output = run_libra_command(&["graph", "--help"], repo.path());
+    assert!(
+        output.status.success(),
+        "graph --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "graph --help should include EXAMPLES banner, stdout: {stdout}"
+    );
+    for invocation in [
+        "libra graph <thread-uuid>",
+        "libra graph <thread-uuid> --repo",
+        "libra graph --json <thread-uuid>",
+    ] {
+        assert!(
+            stdout.contains(invocation),
+            "graph --help should include `{invocation}`, stdout: {stdout}"
+        );
+    }
+}
