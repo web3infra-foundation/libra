@@ -796,7 +796,7 @@ TUI 状态不新增"看起来完成但其实未完成"的 idle 状态。active G
 
 | 文件 | 改动 |
 |------|------|
-| `src/internal/ai/agent/profile/parser.rs` | 解析 `mode`、`variant`、`temperature`、`top_p`、`steps`、`model: provider/model` |
+| `src/internal/ai/agent/profile/parser.rs` | 解析 `mode`、`variant`、`temperature`、`top_p`、`steps`、`model: provider/model`、嵌套 `permission:` |
 | `src/internal/ai/agent/profile/router.rs` | 返回 `AgentExecutionSpec` 或 `AgentRoute`，保留 `get(name)` |
 | `src/internal/tui/app.rs` | slash command 选中 agent 时，不再只拼 system prompt；同时可切换 model binding |
 | `src/command/code.rs` | 启动时构建 `ProviderFactory` 并交给 TUI runtime |
@@ -813,6 +813,7 @@ TUI 状态不新增"看起来完成但其实未完成"的 idle 状态。active G
 
 - 旧 embedded profiles 全部可 parse。
 - project `.libra/agents/planner.md` 覆盖 embedded planner，且 `model: anthropic/claude-...` lift 为 `ModelBinding`。
+- `.libra/agents/*.md` 的嵌套 `permission:` frontmatter lift 为 `AgentPermissionSpec`，并保持 `write -> edit` / `bash -> shell` 兼容归一。
 - `model: fast` 仍保留为 preference，不触发 provider factory。
 - 选中 agent 后 usage context 使用 agent provider/model。
 
@@ -1664,6 +1665,7 @@ You are a planner.
 - 旧 `model: fast` 不被解析为 ModelBinding；保留为 `model_preference: "fast"`，`AgentExecutionSpec.model = None`。
 - 旧 frontmatter 缺 `mode` 字段时，`AgentExecutionSpec.mode = Primary`。
 - `cargo run -- code --agent planner` 在 fake provider 下启动并显示 `provider=anthropic` 的 usage row（fake provider 模拟 anthropic 包装）。
+- v0.17.1134 已补齐 Markdown `permission:` frontmatter 到 `AgentPermissionSpec` 的 parser lift；`write` / `bash` 别名沿用 TOML config 的归一语义。
 
 测试文件：`tests/ai_agent_profile_test.rs` + `tests/ai_agent_route_test.rs`。
 
