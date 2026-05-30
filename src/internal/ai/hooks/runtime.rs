@@ -743,6 +743,68 @@ async fn write_session_end_checkpoint(
     use sea_orm::{ConnectionTrait, Statement};
 
     use crate::internal::ai::history::{CheckpointCommitParams, CheckpointScope, HistoryManager};
+    use crate::internal::ai::observed_agents::{
+        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
+    };
+
+    // Capture the agent's full on-disk transcript for the checkpoint blob.
+    // The prompt-only stopgap is replaced by the adapter's `read_transcript`:
+    // resolve the provider's ObservedAgent, read the raw transcript, and
+    // redact it before it touches durable storage (entire.md §8.1 / §13 P0).
+    // The transcript's redaction matches are merged into the checkpoint's
+    // `redaction_report` so the stored report stays consistent with the
+    // stored blob. Falls back to the already-redacted prompt when the
+    // adapter is unknown, advertises no transcript (no path, or the file is
+    // absent/empty), or errors — the SessionEnd checkpoint must still write.
+    let mut report_value = serde_json::from_str::<serde_json::Value>(redaction_report_json)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let prompt_fallback =
+        || RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec());
+    let transcript_redacted = match AgentKind::from_db_str(agent_kind) {
+        Some(kind) => {
+            let adapter = agent_for(kind);
+            let ctx = AgentSessionCtx {
+                session_id: libra_session_id.to_string(),
+                provider_session_id: envelope.session_id.clone(),
+                working_dir: std::path::PathBuf::from(&envelope.cwd),
+                transcript_path: envelope
+                    .transcript_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            };
+            // Security gate (entire.md §8.1 / §13 P0): `transcript_path` comes
+            // from the untrusted hook envelope. Only read + persist it when it
+            // resolves inside the provider's own home-relative transcript root
+            // (e.g. `~/.claude`); a forged path pointing at an arbitrary file
+            // must never be copied into the syncable agent-traces blob.
+            let trusted = ctx
+                .transcript_path
+                .as_deref()
+                .is_some_and(|path| transcript_path_within_provider_root(adapter, path));
+            if !trusted {
+                prompt_fallback()
+            } else {
+                match adapter.read_transcript(&ctx) {
+                    Ok(Some(raw)) if !raw.is_empty() => {
+                        let (redacted, report) = Redactor::new_default().redact(&raw);
+                        merge_redaction_report_into(&mut report_value, &report);
+                        redacted
+                    }
+                    Ok(_) => prompt_fallback(),
+                    Err(err) => {
+                        tracing::warn!(
+                            agent_kind,
+                            error = %format!("{err:#}"),
+                            "failed to read agent transcript for checkpoint; \
+                             falling back to the redacted prompt"
+                        );
+                        prompt_fallback()
+                    }
+                }
+            }
+        }
+        None => prompt_fallback(),
+    };
 
     // Build a minimal metadata.json. Phase 2 keeps the schema small; later
     // phases extend with model_info, tool_use_id, subagent links, etc.
@@ -754,8 +816,7 @@ async fn write_session_end_checkpoint(
         "scope": "committed",
         "provider_session_id": envelope.session_id,
         "working_dir": envelope.cwd,
-        "redaction_report": serde_json::from_str::<serde_json::Value>(redaction_report_json)
-            .unwrap_or_else(|_| serde_json::json!({})),
+        "redaction_report": report_value,
         "created_at": now,
     });
 
@@ -769,22 +830,6 @@ async fn write_session_end_checkpoint(
     }
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("serialize checkpoint metadata")?;
-
-    // Transcript bytes for this minimal checkpoint = the redacted prompt the
-    // session ended on, or an empty stream when no prompt was carried. The
-    // bytes are already redacted because the upsert path scrubs them in
-    // place; we capture the same view here so the persisted blob never
-    // contains a leaked secret. Extending to the full session transcript is
-    // adapter-specific work (Phase 2 follow-up — `read_transcript` on
-    // ObservedAgent).
-    // Wrap in `RedactedBytes` so the agent-traces write path enforces the
-    // entire.md §8.1 / §13 P0 contract at the type level: the bytes were
-    // already scrubbed by the upsert path (see above), so this uses the
-    // sanctioned in-crate `new_unchecked` "already-redacted input"
-    // constructor rather than passing raw `&[u8]`.
-    let transcript_redacted = crate::internal::ai::observed_agents::RedactedBytes::new_unchecked(
-        redacted_prompt.unwrap_or("").as_bytes().to_vec(),
-    );
 
     let provider_name = envelope_provider_slug(agent_kind);
 
@@ -870,6 +915,79 @@ async fn write_session_end_checkpoint(
     // Phase 3 enhancement that adds per-rule counters to metadata.
     let _ = redaction_matches;
     Ok(())
+}
+
+/// Merge a [`RedactionReport`](crate::internal::ai::observed_agents::RedactionReport)
+/// produced while redacting the captured transcript into the checkpoint's
+/// existing `redaction_report` JSON object (built from the event payload's
+/// prompt / tool-input matches). Appends the transcript's `matches` and adds
+/// its `bytes_scanned` / `bytes_redacted` counters so the stored report stays
+/// consistent with the stored (redacted) transcript blob. A non-object
+/// `report` (only possible from a malformed input string) is left untouched.
+/// Decide whether `path` may be read into a checkpoint transcript blob.
+///
+/// The transcript path originates from the (untrusted) hook envelope, so a
+/// forged payload could otherwise point it at any file the Libra process can
+/// read and have the contents copied into the syncable `agent-traces` blob
+/// (entire.md §8.1 / §13 P0). Constrain it: after symlink canonicalization,
+/// `path` must live under one of the adapter's home-relative roots (e.g.
+/// `~/.claude` for Claude Code, `~/.gemini` for Gemini). Non-existent paths,
+/// an unresolvable home directory, or a path outside every root all return
+/// `false` so the caller falls back to the already-redacted prompt.
+/// `LIBRA_TEST_HOME` overrides the home directory for tests, mirroring the
+/// vault module.
+fn transcript_path_within_provider_root(
+    adapter: &dyn crate::internal::ai::observed_agents::ObservedAgent,
+    path: &std::path::Path,
+) -> bool {
+    let home = std::env::var_os("LIBRA_TEST_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir);
+    let Some(home) = home else {
+        return false;
+    };
+    let Ok(canonical_path) = path.canonicalize() else {
+        return false;
+    };
+    adapter.protected_dirs().iter().any(|dir| {
+        home.join(dir)
+            .canonicalize()
+            .map(|root| canonical_path.starts_with(root))
+            .unwrap_or(false)
+    })
+}
+
+fn merge_redaction_report_into(
+    report: &mut serde_json::Value,
+    extra: &crate::internal::ai::observed_agents::RedactionReport,
+) {
+    let Some(obj) = report.as_object_mut() else {
+        return;
+    };
+    if !extra.matches.is_empty() {
+        let extra_matches =
+            serde_json::to_value(&extra.matches).unwrap_or_else(|_| serde_json::json!([]));
+        match obj.get_mut("matches").and_then(|m| m.as_array_mut()) {
+            Some(arr) => {
+                if let Some(extra_arr) = extra_matches.as_array() {
+                    arr.extend(extra_arr.iter().cloned());
+                }
+            }
+            None => {
+                obj.insert("matches".to_string(), extra_matches);
+            }
+        }
+    }
+    for (key, added) in [
+        ("bytes_scanned", extra.bytes_scanned),
+        ("bytes_redacted", extra.bytes_redacted),
+    ] {
+        let current = obj
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        obj.insert(key.to_string(), serde_json::json!(current + added as u64));
+    }
 }
 
 /// Map `agent_session.agent_kind` (the closed enum stored in the database)
@@ -1236,6 +1354,7 @@ impl SessionPhase {
 #[cfg(test)]
 mod tests {
     use serde_json::Map;
+    use serial_test::serial;
 
     use super::*;
     use crate::internal::ai::hooks::providers::{claude_provider, gemini_provider};
@@ -2092,6 +2211,129 @@ mod tests {
         assert!(
             body.contains("deploy with") && body.contains("please"),
             "the redacted transcript must retain the non-secret text, got: {body}",
+        );
+    }
+
+    /// entire.md §6.3 / §7.1: the SessionEnd checkpoint transcript blob must
+    /// carry the agent's FULL on-disk transcript (read via the
+    /// `ObservedAgent::read_transcript` adapter), not just the closing
+    /// prompt, and that transcript must be redacted before storage. Writes a
+    /// real transcript file with a unique marker plus a secret, points the
+    /// envelope at it, and asserts the persisted blob contains the marker
+    /// (proving full capture) with the secret scrubbed.
+    #[tokio::test]
+    #[serial]
+    async fn session_end_checkpoint_captures_full_transcript_via_adapter() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+
+        // The transcript must live under the provider's home-relative root
+        // (`~/.claude`) to pass the security trust check, so stand up a fake
+        // HOME via LIBRA_TEST_HOME and place the file there. It carries content
+        // the closing prompt does NOT contain plus an AWS-key-shaped secret
+        // that must be redacted.
+        let home = tempfile::tempdir().expect("fake home tempdir");
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let transcript_path = claude_dir.join("session-transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "user: kick off the deploy\nassistant: full-transcript-marker-9f3 with AKIAIOSFODNN7EXAMPLE\n",
+        )
+        .unwrap();
+        let transcript_path_str = transcript_path.to_string_lossy().to_string();
+
+        let envelope = |hook: &str, prompt: Option<&str>| -> Vec<u8> {
+            let mut base = json!({
+                "hook_event_name": hook,
+                "session_id": "S-full-transcript",
+                "cwd": "/tmp/repo",
+                "transcript_path": transcript_path_str,
+            });
+            if let (Some(p), Some(obj)) = (prompt, base.as_object_mut()) {
+                obj.insert("prompt".to_string(), json!(p));
+            }
+            serde_json::to_vec(&base).unwrap()
+        };
+
+        let prior_home = std::env::var_os("LIBRA_TEST_HOME");
+        // SAFETY: test-only env mutation, restored before the assertions;
+        // serialised via #[serial] so it cannot race other env readers.
+        unsafe {
+            std::env::set_var("LIBRA_TEST_HOME", home.path());
+        }
+
+        ingest_agent_traces_payload(
+            &envelope("SessionStart", None),
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        // Closing prompt deliberately omits the transcript marker so the test
+        // can distinguish "captured the prompt" from "captured the transcript".
+        ingest_agent_traces_payload(
+            &envelope("SessionEnd", Some("wrap up now")),
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("end ok");
+
+        // Restore the env before the (env-independent) assertions below.
+        unsafe {
+            match prior_home {
+                Some(value) => std::env::set_var("LIBRA_TEST_HOME", value),
+                None => std::env::remove_var("LIBRA_TEST_HOME"),
+            }
+        }
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+
+        let backend = conn.get_database_backend();
+        let blob_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_id FROM object_index WHERE o_type = 'agent_transcript' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query transcript blob")
+            .expect("a transcript blob must be indexed");
+        let blob_oid: String = blob_row.try_get_by("o_id").unwrap();
+
+        let object_path = repo_path
+            .join("objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        let raw = std::fs::read(&object_path).expect("read transcript blob object");
+        let mut decoder = flate2::read::ZlibDecoder::new(&raw[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        let header_end = decoded
+            .iter()
+            .position(|&b| b == 0)
+            .expect("blob object has a header terminator");
+        let body = String::from_utf8_lossy(&decoded[header_end + 1..]);
+
+        assert!(
+            body.contains("full-transcript-marker-9f3"),
+            "checkpoint must capture the full transcript via the adapter, not just the prompt: {body}",
+        );
+        assert!(
+            !body.contains("AKIAIOSFODNN7EXAMPLE"),
+            "the secret in the transcript must be redacted before storage: {body}",
+        );
+        assert!(
+            !body.contains("wrap up now"),
+            "the full transcript should replace the prompt-only stopgap: {body}",
         );
     }
 
