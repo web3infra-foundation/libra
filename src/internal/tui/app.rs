@@ -19,6 +19,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
+use git_internal::internal::object::context::SelectionStrategy;
 use ring::digest;
 use serde::Deserialize;
 use tokio::{
@@ -100,7 +101,10 @@ use crate::{
         },
         projection::ProjectionRebuilder,
         prompt::SystemPromptBuilder,
-        runtime::phase0::write_intent,
+        runtime::phase0::{
+            ContextSnapshotItem, ContextSnapshotRequest, write_context_snapshot_if_needed,
+            write_intent,
+        },
         sandbox::{
             ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, NetworkAccess,
             ReviewDecision,
@@ -7359,11 +7363,33 @@ where
                     Some("MCP server unavailable; intent not persisted.".to_string());
                 None
             };
+            let mut context_snapshot_id = None;
+            let mut context_snapshot_warning = None;
+            if let Some(ref mcp_server) = mcp_server {
+                match persist_phase0_context_snapshot_for_review(&spec, &working_dir, mcp_server)
+                    .await
+                {
+                    Ok(snapshot_id) => context_snapshot_id = snapshot_id,
+                    Err(error) => {
+                        context_snapshot_warning = Some(format!(
+                            "failed to persist Phase 0 ContextSnapshot: {error}"
+                        ));
+                    }
+                }
+            }
 
             let pretty_json =
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
-            let warnings = persistence_warning.into_iter().collect::<Vec<_>>();
-            let review = build_intentspec_review(&spec, intent_id.as_deref(), &warnings);
+            let warnings = persistence_warning
+                .into_iter()
+                .chain(context_snapshot_warning)
+                .collect::<Vec<_>>();
+            let review = build_intentspec_review(
+                &spec,
+                intent_id.as_deref(),
+                context_snapshot_id.as_deref(),
+                &warnings,
+            );
 
             let llm_output = turn
                 .as_ref()
@@ -8923,13 +8949,13 @@ mod tests {
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         parse_task_command_args, parse_usage_grouping,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
-        phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
-        provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
-        session_graph_thread_id, should_auto_classify_first_user_message,
-        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
-        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
-        task_description_from_prompt, undo_should_prefer_vcs_rollback,
-        usage_detail_popup_enabled_from_toml,
+        phase0_context_snapshot_request_from_changed_files, phase0_plan_tool_loop_config,
+        phase1_plan_tool_loop_config, provider_plan_draft_from_args, provider_plan_draft_from_plan,
+        record_orchestrator_thread_metadata, review_scroll_action, session_graph_thread_id,
+        should_auto_classify_first_user_message, should_auto_repair_execution_failure,
+        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
+        should_route_plain_message_to_plan, task_description_from_prompt,
+        undo_should_prefer_vcs_rollback, usage_detail_popup_enabled_from_toml,
     };
     use crate::internal::{
         ai::{
@@ -9402,8 +9428,56 @@ mod tests {
             "Phase 0 review persistence must go through the runtime formal-write helper"
         );
         assert!(
+            body.contains("persist_phase0_context_snapshot_for_review("),
+            "Phase 0 review persistence must evaluate ContextSnapshot freeze through the runtime helper"
+        );
+        assert!(
             !body.contains("persist_intentspec("),
             "begin_plan_workflow must not call lower-level IntentSpec persistence directly"
+        );
+        assert!(
+            !body.contains("create_context_snapshot_impl("),
+            "begin_plan_workflow must not write ContextSnapshot directly through MCP"
+        );
+    }
+
+    #[test]
+    fn phase0_context_snapshot_request_skips_clean_worktree() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "inspect current flow".to_string(),
+            kind: ObjectiveKind::Analysis,
+        }]);
+        let actor = ActorRef::system("phase0-test").unwrap();
+
+        let request = phase0_context_snapshot_request_from_changed_files(&spec, Vec::new(), actor);
+
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn phase0_context_snapshot_request_captures_changed_paths() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "inspect current flow".to_string(),
+            kind: ObjectiveKind::Analysis,
+        }]);
+        let actor = ActorRef::system("phase0-test").unwrap();
+
+        let request = phase0_context_snapshot_request_from_changed_files(
+            &spec,
+            vec!["src/main.rs".to_string(), " docs/agent.md ".to_string()],
+            actor,
+        )
+        .expect("dirty worktree should produce a snapshot request");
+
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[0].path, "src/main.rs");
+        assert_eq!(request.items[1].path, "docs/agent.md");
+        assert!(
+            request
+                .summary
+                .as_deref()
+                .unwrap()
+                .contains("2 changed paths")
         );
     }
 
@@ -11399,6 +11473,59 @@ async fn persist_phase0_intent_for_review(
 ) -> anyhow::Result<String> {
     let outcome = write_intent(spec, mcp_server).await?;
     Ok(outcome.intent_id)
+}
+
+async fn persist_phase0_context_snapshot_for_review(
+    spec: &IntentSpec,
+    working_dir: &Path,
+    mcp_server: &Arc<LibraMcpServer>,
+) -> anyhow::Result<Option<String>> {
+    let actor = mcp_server
+        .resolve_actor_from_params(Some("system"), Some("libra-plan"))
+        .map_err(|error| anyhow::anyhow!("failed to resolve actor for ContextSnapshot: {error}"))?;
+    let Some(request) = phase0_context_snapshot_request_from_changed_files(
+        spec,
+        changed_files_from_status(working_dir),
+        actor,
+    ) else {
+        return Ok(None);
+    };
+
+    let outcome = write_context_snapshot_if_needed(request, mcp_server).await?;
+    Ok(outcome.map(|snapshot| snapshot.snapshot_id))
+}
+
+fn phase0_context_snapshot_request_from_changed_files(
+    spec: &IntentSpec,
+    changed_files: Vec<String>,
+    actor: git_internal::internal::object::types::ActorRef,
+) -> Option<ContextSnapshotRequest> {
+    let items = changed_files
+        .into_iter()
+        .filter_map(|path| {
+            let path = path.trim().to_string();
+            (!path.is_empty()).then_some(ContextSnapshotItem {
+                kind: Some("file".to_string()),
+                path,
+                preview: None,
+                blob_hash: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(ContextSnapshotRequest {
+        summary: Some(format!(
+            "Phase 0 worktree context for IntentSpec {}: {} changed paths",
+            spec.metadata.id,
+            items.len()
+        )),
+        items,
+        selection_strategy: SelectionStrategy::Heuristic,
+        actor,
+    })
 }
 
 fn intentspec_with_plan_draft_objectives(
