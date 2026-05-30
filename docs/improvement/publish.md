@@ -925,6 +925,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.143) 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差记录在本节的 Worker accepted baseline handoff，作为无 PR 上下文时的 durable handoff。
 - [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
+- [x] (v0.17.1133) `libra publish init` 物化的 `worker/wrangler.jsonc` 使用 `REPLACE_WITH_D1_DATABASE_ID` 和 `REPLACE_WITH_R2_BUCKET_NAME` 占位符，不再携带仓库/账号专用 Cloudflare 资源 id；`publish deploy` 在 build 前拒绝这两个占位符。
 - [x] (v0.17.51) `libra publish status` 展示本地 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；云端 D1 refs/status 对比已由 Phase 4 落地。
 - [x] (v0.17.14) Next.js + React 前端能展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
 - [x] (v0.17.60) 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。

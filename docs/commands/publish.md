@@ -204,7 +204,7 @@ Current behavior:
   from `libra publish init`.
 - Fails before running commands when the template is missing,
   conflicted, outdated, or when `worker/wrangler.jsonc` still contains
-  `REPLACE_WITH_D1_DATABASE_ID`.
+  `REPLACE_WITH_D1_DATABASE_ID` or `REPLACE_WITH_R2_BUCKET_NAME`.
 - Allows a `modified` template status so user-owned Worker edits can be
   deployed intentionally.
 - Runs `pnpm build` from `worker/`.
