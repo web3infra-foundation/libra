@@ -341,32 +341,36 @@ pub struct IndexCheckResult {
 }
 
 pub async fn execute(args: FsckArgs) {
+    let exit_code = match run_fsck(&args).await {
+        Ok(fsck_result) => {
+            // Exit with failure code only for serious issues (not dangling/unreachable).
+            if fsck_result.has_errors { 1 } else { 0 }
+        }
+        Err(error) => {
+            error.print_stderr();
+            error.exit_code()
+        }
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     let storage = ClientStorage::init(path::objects());
 
-    let result = if let Some(ref object_id) = args.object {
+    if let Some(ref object_id) = args.object {
         check_single_object(object_id, &storage).await
     } else {
-        check_all_objects(&args, &storage).await
-    };
-
-    match result {
-        Ok(fsck_result) => {
-            // Exit with failure code only for serious issues (not dangling/unreachable)
-            if fsck_result.has_errors {
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            std::process::exit(1);
-        }
+        check_all_objects(args, &storage).await
     }
 }
 
 pub async fn execute_safe(args: FsckArgs, _output: &OutputConfig) -> CliResult<()> {
-    // execute_safe is called from cli.rs but currently just delegates to execute
-    // JSON output is not supported for fsck
-    execute(args).await;
+    let fsck_result = run_fsck(&args).await?;
+    if fsck_result.has_errors {
+        return Err(CliError::failure("fsck found repository integrity issues").with_exit_code(1));
+    }
     Ok(())
 }
 
