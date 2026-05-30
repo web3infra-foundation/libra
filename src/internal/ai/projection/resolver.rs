@@ -360,6 +360,7 @@ impl ProjectionResolver {
             &intent_task_index,
             &plan_step_task_index,
             &task_run_index,
+            &intent_context_frame_index,
         );
 
         Ok(ThreadQueryIndexes {
@@ -435,6 +436,7 @@ fn query_index_diagnostics(
     intent_task_index: &[IntentTaskIndexRow],
     plan_step_task_index: &[PlanStepTaskIndexRow],
     task_run_index: &[TaskRunIndexRow],
+    intent_context_frame_index: &[IntentContextFrameIndexRow],
 ) -> Vec<QueryIndexDiagnostic> {
     let mut diagnostics = Vec::new();
     let intent_ids = thread_intent_ids(bundle);
@@ -487,6 +489,28 @@ fn query_index_diagnostics(
                 active_run_id,
                 format!(
                     "Scheduler active run {active_run_id} is not reachable from task-run query indexes"
+                ),
+            ));
+        }
+    }
+
+    let mut seen_context_frames = BTreeSet::new();
+    for context_frame in &bundle.scheduler.live_context_window {
+        if !seen_context_frames.insert(context_frame.context_frame_id) {
+            continue;
+        }
+        let indexed = intent_context_frame_index.iter().any(|row| {
+            row.context_frame_id == context_frame.context_frame_id
+                && (intent_ids.is_empty() || intent_ids.contains(&row.intent_id))
+        });
+        if !indexed {
+            diagnostics.push(query_index_diagnostic(
+                "missing_live_context_frame_index",
+                "ai_index_intent_context_frame",
+                context_frame.context_frame_id,
+                format!(
+                    "Scheduler live context frame {} is not reachable from intent-context-frame query indexes for thread {}",
+                    context_frame.context_frame_id, bundle.thread.thread_id
                 ),
             ));
         }

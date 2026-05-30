@@ -311,6 +311,40 @@ async fn projection_resolver_query_indexes_diagnose_missing_scheduler_links() {
     );
 }
 
+/// Scenario: live context frames carried by the scheduler must be reachable
+/// through the intent-context-frame query index. Without this diagnostic, a
+/// resume surface can show a fresh live context window while the read-side
+/// indexes cannot rebuild or explain where that context came from.
+#[tokio::test]
+async fn projection_resolver_query_indexes_diagnose_missing_live_context_frame_links() {
+    let db = setup_db().await;
+    let thread_id = id("afafafaf-afaf-4afa-8afa-afafafafafaf");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let scheduler = sample_scheduler(thread_id);
+    let frame_id = scheduler.live_context_window[0].context_frame_id;
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    assert!(
+        indexes.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_live_context_frame_index"
+                && diagnostic.index_name == "ai_index_intent_context_frame"
+                && diagnostic.subject_id == frame_id
+        }),
+        "expected missing live-context-frame diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+}
+
 /// Scenario: when neither projection nor scheduler rows exist but the underlying
 /// history has Intent + Task objects, `load_or_rebuild_thread_bundle` reconstructs a
 /// `Fresh` bundle from the AI history. Confirms the rebuild path is reachable end to
