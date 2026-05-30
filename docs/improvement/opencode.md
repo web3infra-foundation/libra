@@ -1443,7 +1443,7 @@ max_steps = 20
 | `src/internal/ai/agent/profile/config.rs` | `AgentsConfig` TOML schema + validation |
 | `src/internal/ai/usage/recorder.rs` | `UsageContext` 增加 `agent_name` |
 | `src/internal/db/migration.rs` | additive migration 为 `agent_usage_stats` 增加 `agent_name` + index；版本号必须晚于 entire.md 的 `2026050303_agent_capture` |
-| `src/internal/ai/usage/query.rs` | 支持 `--by=agent` 或 `(agent, provider, model)` 聚合 |
+| `src/internal/ai/usage/query.rs` / `src/command/usage.rs` | 支持 CLI `--by=agent` 或 `--by=agent-provider-model` 聚合 |
 | `src/internal/tui/slash_command.rs` / app 相关文件 | `/agents`、`/budget`、`/usage`、`/goal status` 只读入口扩展 |
 | `docs/` / examples | 多 agent 示例与迁移说明 |
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     info_println,
     internal::{
-        ai::usage::{UsageQuery, UsageQueryFilter},
+        ai::usage::{UsageGrouping, UsageQuery, UsageQueryFilter},
         db::get_db_conn_instance_for_path,
     },
     utils::{
@@ -31,6 +31,8 @@ use crate::{
 pub const USAGE_EXAMPLES: &str = "\
 EXAMPLES:
     libra usage report                                  Per-model totals across all recorded rows
+    libra usage report --by agent                       Per-agent totals across all recorded rows
+    libra usage report --by agent-provider-model        Per-agent provider/model breakdown
     libra usage report --since 24h                      Per-model totals for the last 24 hours
     libra usage report --since 7d --include-failed      Include failed requests in counts/wall-clock
     libra usage report --session <session-id>           Restrict report to one session
@@ -51,9 +53,9 @@ pub struct UsageArgs {
 pub enum UsageSubcommand {
     /// Report usage aggregates.
     Report {
-        /// Aggregation dimension. Currently only `model` is supported.
-        #[arg(long, default_value = "model", value_parser = ["model"])]
-        by: String,
+        /// Aggregation dimension.
+        #[arg(long, value_enum, default_value_t = UsageReportBy::Model)]
+        by: UsageReportBy,
         /// Start time filter (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
         #[arg(long, value_name = "DATE")]
         since: Option<String>,
@@ -86,6 +88,34 @@ pub enum UsageReportFormat {
     Human,
     Json,
     Csv,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum UsageReportBy {
+    /// Group by provider/model. This preserves the original usage report shape.
+    Model,
+    /// Group by declarative agent name only.
+    Agent,
+    /// Group by agent name, provider, and model.
+    AgentProviderModel,
+}
+
+impl UsageReportBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Agent => "agent",
+            Self::AgentProviderModel => "agent-provider-model",
+        }
+    }
+
+    fn grouping(self) -> UsageGrouping {
+        match self {
+            Self::Model => UsageGrouping::ProviderModel,
+            Self::Agent => UsageGrouping::Agent,
+            Self::AgentProviderModel => UsageGrouping::AgentProviderModel,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -134,7 +164,7 @@ pub async fn execute_safe(args: UsageArgs, output: &OutputConfig) -> CliResult<(
 }
 
 struct UsageReportOptions {
-    by: String,
+    by: UsageReportBy,
     since: Option<String>,
     until: Option<String>,
     session: Option<String>,
@@ -168,14 +198,15 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
     };
     let db = open_repo_db().await?;
     let rows = UsageQuery::new(db)
-        .aggregate_by_model_filtered(&filter)
+        .aggregate_filtered(options.by.grouping(), &filter)
         .await
         .map_err(|error| CliError::failure(format!("failed to query usage stats: {error}")))?;
+    let by = options.by.as_str().to_string();
     if output.is_json() || options.format == UsageReportFormat::Json {
         return emit_json_data(
             "usage.report",
             &UsageReportOutput {
-                by: options.by,
+                by,
                 filter: filter_output,
                 rows,
             },
@@ -183,33 +214,65 @@ async fn report_usage(options: UsageReportOptions, output: &OutputConfig) -> Cli
         );
     }
     if options.format == UsageReportFormat::Csv {
-        return emit_usage_csv(&rows, output);
+        return emit_usage_csv(options.by, &rows, output);
     }
     if rows.is_empty() {
         info_println!(output, "No usage stats recorded.");
         return Ok(());
     }
     for row in &rows {
-        let total = if row.total_tokens > 0 {
-            row.total_tokens
-        } else {
-            row.prompt_tokens.saturating_add(row.completion_tokens)
-        };
+        let total = usage_total_tokens(row);
         let cost = usage_human_cost(row);
-        info_println!(
-            output,
-            "{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
-            row.provider,
-            row.model,
-            row.request_count,
-            row.failed_count,
-            total,
-            row.cached_tokens,
-            row.reasoning_tokens,
-            row.tool_call_count,
-            row.wall_clock_ms,
-            cost
-        );
+        match options.by {
+            UsageReportBy::Model => {
+                info_println!(
+                    output,
+                    "{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    row.provider,
+                    row.model,
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+            UsageReportBy::Agent => {
+                info_println!(
+                    output,
+                    "{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    usage_agent_name(row),
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+            UsageReportBy::AgentProviderModel => {
+                info_println!(
+                    output,
+                    "{}\t{}\t{}\trequests={}\tfailed={}\ttokens={}\tcached={}\treasoning={}\ttool_calls={}\twall_ms={}{}",
+                    usage_agent_name(row),
+                    row.provider,
+                    row.model,
+                    row.request_count,
+                    row.failed_count,
+                    total,
+                    row.cached_tokens,
+                    row.reasoning_tokens,
+                    row.tool_call_count,
+                    row.wall_clock_ms,
+                    cost
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -300,19 +363,26 @@ async fn prune_usage(retention_days: Option<u32>, output: &OutputConfig) -> CliR
 }
 
 fn emit_usage_csv(
+    by: UsageReportBy,
     rows: &[crate::internal::ai::usage::UsageAggregate],
     output: &OutputConfig,
 ) -> CliResult<()> {
-    info_println!(
-        output,
-        "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
-    );
+    match by {
+        UsageReportBy::Model => info_println!(
+            output,
+            "provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+        UsageReportBy::Agent => info_println!(
+            output,
+            "agent_name,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+        UsageReportBy::AgentProviderModel => info_println!(
+            output,
+            "agent_name,provider,model,requests,failed,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_tokens,tool_calls,wall_ms,cost_usd,cost_estimate_micro_dollars"
+        ),
+    };
     for row in rows {
-        let total = if row.total_tokens > 0 {
-            row.total_tokens
-        } else {
-            row.prompt_tokens.saturating_add(row.completion_tokens)
-        };
+        let total = usage_total_tokens(row);
         let cost = row
             .cost_usd
             .map(|cost| format!("{cost:.6}"))
@@ -321,23 +391,59 @@ fn emit_usage_csv(
             .cost_estimate_micro_dollars
             .map(|cost| cost.to_string())
             .unwrap_or_default();
-        info_println!(
-            output,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_escape(&row.provider),
-            csv_escape(&row.model),
-            row.request_count,
-            row.failed_count,
-            row.prompt_tokens,
-            row.completion_tokens,
-            row.cached_tokens,
-            row.reasoning_tokens,
-            total,
-            row.tool_call_count,
-            row.wall_clock_ms,
-            cost,
-            cost_estimate
-        );
+        match by {
+            UsageReportBy::Model => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(&row.provider),
+                csv_escape(&row.model),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+            UsageReportBy::Agent => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(row.agent_name.as_deref().unwrap_or("")),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+            UsageReportBy::AgentProviderModel => info_println!(
+                output,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(row.agent_name.as_deref().unwrap_or("")),
+                csv_escape(&row.provider),
+                csv_escape(&row.model),
+                row.request_count,
+                row.failed_count,
+                row.prompt_tokens,
+                row.completion_tokens,
+                row.cached_tokens,
+                row.reasoning_tokens,
+                total,
+                row.tool_call_count,
+                row.wall_clock_ms,
+                cost,
+                cost_estimate
+            ),
+        }
     }
     Ok(())
 }
@@ -418,6 +524,18 @@ fn usage_human_cost(row: &crate::internal::ai::usage::UsageAggregate) -> String 
     row.cost_estimate_micro_dollars
         .map(|micro| format!(" ~${:.4}", micro as f64 / 1_000_000.0))
         .unwrap_or_default()
+}
+
+fn usage_total_tokens(row: &crate::internal::ai::usage::UsageAggregate) -> u64 {
+    if row.total_tokens > 0 {
+        row.total_tokens
+    } else {
+        row.prompt_tokens.saturating_add(row.completion_tokens)
+    }
+}
+
+fn usage_agent_name(row: &crate::internal::ai::usage::UsageAggregate) -> &str {
+    row.agent_name.as_deref().unwrap_or("(legacy)")
 }
 
 fn csv_escape(value: &str) -> String {
