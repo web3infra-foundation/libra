@@ -580,7 +580,9 @@ pub(crate) async fn ingest_agent_traces_payload(
     // into `metadata_json` so `libra agent checkpoint rewind --apply`
     // can resolve the on-disk transcript file without re-running the
     // adapter's path-discovery heuristics.
-    let metadata_json = build_agent_session_metadata_json(&envelope);
+    let concurrent_active =
+        session_concurrent_active(conn, backend, event.kind, &session_id, &envelope.cwd).await?;
+    let metadata_json = build_agent_session_metadata_json(&envelope, concurrent_active);
     let upsert_sql = "
         INSERT INTO agent_session (
             session_id, agent_kind, provider_session_id, state, working_dir,
@@ -594,7 +596,8 @@ pub(crate) async fn ingest_agent_traces_payload(
             stopped_at = CASE WHEN excluded.state = 'stopped' THEN excluded.last_event_at
                               ELSE agent_session.stopped_at END,
             metadata_json = CASE
-                WHEN length(excluded.metadata_json) > 2 THEN excluded.metadata_json
+                WHEN length(excluded.metadata_json) > 2
+                    THEN json_patch(agent_session.metadata_json, excluded.metadata_json)
                 ELSE agent_session.metadata_json
             END
     ";
@@ -650,7 +653,10 @@ pub(crate) async fn ingest_agent_traces_payload(
 /// path can locate the file without re-deriving provider conventions.
 /// Returns `"{}"` when no useful fields are populated, so the upsert
 /// CASE expression can detect the placeholder.
-fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
+fn build_agent_session_metadata_json(
+    envelope: &SessionHookEnvelope,
+    concurrent_active: bool,
+) -> String {
     let mut obj = serde_json::Map::new();
     if let Some(path) = envelope.transcript_path.as_deref()
         && !path.is_empty()
@@ -660,10 +666,61 @@ fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
             serde_json::Value::String(path.to_string()),
         );
     }
+    // §6.3 state machine: a `TurnStart` that observes another `active`
+    // session in the same `working_dir` records `concurrent_active=true`
+    // (non-blocking). Only emit the field when set so the upsert's
+    // placeholder detection (`length(metadata_json) > 2`) still treats an
+    // otherwise-empty object as `"{}"`.
+    if concurrent_active {
+        obj.insert(
+            "concurrent_active".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if obj.is_empty() {
         return "{}".to_string();
     }
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Detect whether a `TurnStart` is starting alongside another active agent
+/// session in the same `working_dir`.
+///
+/// Per the agent-traces state machine (`docs/improvement/entire.md` §6.3),
+/// a `TurnStart` (UserPromptSubmit) checks for other `active` sessions in
+/// the same `working_dir`; finding any records `concurrent_active=true`
+/// without blocking. Only `TurnStart` events newly raise the flag; the
+/// marker's stickiness across the rest of the session is handled by the
+/// metadata upsert, which merges (`json_patch`) rather than overwrites, so a
+/// once-set `concurrent_active=true` survives later events that omit it.
+async fn session_concurrent_active(
+    conn: &sea_orm::DatabaseConnection,
+    backend: sea_orm::DatabaseBackend,
+    event_kind: LifecycleEventKind,
+    libra_session_id: &str,
+    working_dir: &str,
+) -> Result<bool> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    // Only a fresh turn newly detects concurrency.
+    if !matches!(event_kind, LifecycleEventKind::TurnStart) {
+        return Ok(false);
+    }
+
+    // Count *other* active sessions sharing this working_dir.
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT COUNT(*) AS peers FROM agent_session \
+             WHERE state = 'active' AND working_dir = ? AND session_id <> ?",
+            [working_dir.into(), libra_session_id.into()],
+        ))
+        .await
+        .context("failed to count concurrent active sessions")?;
+    let peers = row
+        .and_then(|row| row.try_get_by::<i64, _>("peers").ok())
+        .unwrap_or(0);
+    Ok(peers > 0)
 }
 
 /// Write a SessionEnd checkpoint: materialise transcript + metadata blobs,
@@ -1561,6 +1618,199 @@ mod tests {
         assert!(
             !report_json.contains("AKIAIOSFODNN7EXAMPLE"),
             "raw secret leaked into redaction_report column: {report_json}"
+        );
+    }
+
+    /// Read the `metadata_json` for a provider session id as a JSON value.
+    async fn ingest_session_metadata(
+        conn: &DatabaseConnection,
+        provider_session_id: &str,
+    ) -> serde_json::Value {
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT metadata_json FROM agent_session WHERE provider_session_id = ?",
+                [provider_session_id.into()],
+            ))
+            .await
+            .expect("metadata query")
+            .expect("session row");
+        let json: String = row.try_get_by("metadata_json").unwrap();
+        serde_json::from_str(&json).expect("metadata_json is valid JSON")
+    }
+
+    /// §6.3 state machine: a second concurrent session that submits a prompt
+    /// (`TurnStart`) while a peer is still `active` in the same `working_dir`
+    /// records `concurrent_active=true` in its session metadata, and a session
+    /// that never observed a peer at a turn stays unmarked.
+    #[tokio::test]
+    async fn ingest_turn_start_marks_concurrent_active_with_peer_in_same_workdir() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        // Session A starts and stays active (shared cwd `/tmp/repo`).
+        ingest_agent_traces_payload(
+            &ingest_envelope("SessionStart", "S-A", json!({})),
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session A start ingest succeeds");
+
+        // Session B starts in the same working_dir.
+        ingest_agent_traces_payload(
+            &ingest_envelope("SessionStart", "S-B", json!({})),
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session B start ingest succeeds");
+
+        // Session B submits a prompt → must observe A and flag concurrency.
+        ingest_agent_traces_payload(
+            &ingest_envelope("UserPromptSubmit", "S-B", json!({ "prompt": "hello" })),
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session B prompt ingest succeeds");
+
+        let b_meta = ingest_session_metadata(&conn, "S-B").await;
+        assert_eq!(
+            b_meta.get("concurrent_active").and_then(|v| v.as_bool()),
+            Some(true),
+            "B's TurnStart with an active peer must record concurrent_active=true: {b_meta}"
+        );
+
+        // A never ran a turn alongside a peer, so it stays unmarked.
+        let a_meta = ingest_session_metadata(&conn, "S-A").await;
+        assert!(
+            a_meta.get("concurrent_active").is_none(),
+            "A had no concurrent turn and must not be flagged: {a_meta}"
+        );
+    }
+
+    /// A lone session's `TurnStart` with no peer active in the same
+    /// `working_dir` must not raise `concurrent_active`.
+    #[tokio::test]
+    async fn ingest_turn_start_without_peer_does_not_mark_concurrent_active() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        ingest_agent_traces_payload(
+            &ingest_envelope("SessionStart", "S-solo", json!({})),
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("solo session start ingest succeeds");
+
+        ingest_agent_traces_payload(
+            &ingest_envelope("UserPromptSubmit", "S-solo", json!({ "prompt": "hi" })),
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("solo session prompt ingest succeeds");
+
+        let meta = ingest_session_metadata(&conn, "S-solo").await;
+        assert!(
+            meta.get("concurrent_active").is_none(),
+            "a lone session must not be flagged concurrent_active: {meta}"
+        );
+    }
+
+    /// Once a turn marks a session `concurrent_active`, the marker is sticky:
+    /// later events merge (`json_patch`) into the existing metadata rather
+    /// than overwriting it, so a subsequent turn whose envelope no longer has
+    /// a peer (and so omits the flag) cannot clear the marker, and updating
+    /// another key (`transcript_path`) preserves it.
+    #[tokio::test]
+    async fn ingest_metadata_merge_preserves_marker_and_updates_transcript() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        for sid in ["S-A", "S-B"] {
+            ingest_agent_traces_payload(
+                &ingest_envelope("SessionStart", sid, json!({})),
+                super::super::provider::ProviderHookCommand::SessionStart,
+                LifecycleEventKind::SessionStart,
+                claude_provider(),
+                &conn,
+                None,
+            )
+            .await
+            .expect("session start ingest succeeds");
+        }
+
+        // B's first turn observes A and is marked.
+        ingest_agent_traces_payload(
+            &ingest_envelope("UserPromptSubmit", "S-B", json!({ "prompt": "hello" })),
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session B first prompt ingest succeeds");
+
+        // A stops, so no peer remains active.
+        ingest_agent_traces_payload(
+            &ingest_envelope("SessionEnd", "S-A", json!({})),
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session A end ingest succeeds");
+
+        // B's second turn (peer gone) carries a *different* transcript_path
+        // and omits the flag. The merge must update transcript_path while
+        // keeping concurrent_active=true.
+        let second_turn = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "S-B",
+            "cwd": "/tmp/repo",
+            "transcript_path": "/tmp/repo/transcript-2.jsonl",
+            "prompt": "second turn",
+        });
+        ingest_agent_traces_payload(
+            &serde_json::to_vec(&second_turn).expect("serialize envelope"),
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("session B second prompt ingest succeeds");
+
+        let meta = ingest_session_metadata(&conn, "S-B").await;
+        assert_eq!(
+            meta.get("concurrent_active").and_then(|v| v.as_bool()),
+            Some(true),
+            "marker must survive a later peer-free turn via metadata merge: {meta}"
+        );
+        assert_eq!(
+            meta.get("transcript_path").and_then(|v| v.as_str()),
+            Some("/tmp/repo/transcript-2.jsonl"),
+            "the later turn's transcript_path must be merged in: {meta}"
         );
     }
 
