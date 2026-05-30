@@ -71,6 +71,7 @@ use crate::{
             ValidationOutcome, ValidationReportStore, ValidationStage, ValidationStageResult,
             ValidatorEngine, aggregate_risk_score, build_decision_proposal,
             contracts::{EvidenceKind, FinalDecisionVerdict, TaskExecutionStatus},
+            phase3::{ArtifactLedger, TaskArtifactRefs},
         },
         session::{SessionStore, jsonl::SessionJsonlStore},
         tools::ToolOutput,
@@ -1071,11 +1072,18 @@ impl ExecutionAuditSession {
             .await?,
         );
         record_terminal_intent_event(&self.mcp_server, &thread_id, request.decision).await?;
+        let artifact_ledger = build_artifact_ledger(&thread_id, &persisted_tasks)?;
+        let release_candidate_patchset_id = parse_optional_persisted_object_id(
+            "release candidate patchset",
+            chosen_patchset_id.as_deref(),
+        )?;
         let derived_records = Some(
             persist_validation_decision_derivatives(
                 &self.mcp_server,
                 &thread_id,
                 &run_id,
+                &artifact_ledger,
+                release_candidate_patchset_id,
                 request.system_report,
                 request.decision,
             )
@@ -2838,11 +2846,18 @@ pub async fn persist_execution(
         .await?,
     );
     record_terminal_intent_event(request.mcp_server, &intent_id, request.decision).await?;
+    let artifact_ledger = build_artifact_ledger(&intent_id, &persisted_tasks)?;
+    let release_candidate_patchset_id = parse_optional_persisted_object_id(
+        "release candidate patchset",
+        chosen_patchset_id.as_deref(),
+    )?;
     let derived_records = Some(
         persist_validation_decision_derivatives(
             request.mcp_server,
             &intent_id,
             &run_id,
+            &artifact_ledger,
+            release_candidate_patchset_id,
             request.system_report,
             request.decision,
         )
@@ -4039,10 +4054,46 @@ async fn record_terminal_intent_event(
     Ok(())
 }
 
+fn build_artifact_ledger(
+    thread_id: &str,
+    tasks: &[PersistedTaskArtifacts],
+) -> Result<ArtifactLedger, OrchestratorError> {
+    let thread_id = parse_persisted_object_id("artifact ledger thread", thread_id)?;
+    let mut ledger = ArtifactLedger::new(thread_id);
+    for task in tasks {
+        let mut refs = TaskArtifactRefs::new(task.task_id);
+        if let Some(patchset_id) = task.patchset_id.as_deref() {
+            refs.patchset_ids.push(parse_persisted_object_id(
+                "artifact ledger patchset",
+                patchset_id,
+            )?);
+        }
+        ledger.push_task(refs);
+    }
+    Ok(ledger)
+}
+
+fn parse_optional_persisted_object_id(
+    label: &str,
+    value: Option<&str>,
+) -> Result<Option<Uuid>, OrchestratorError> {
+    value
+        .map(|value| parse_persisted_object_id(label, value))
+        .transpose()
+}
+
+fn parse_persisted_object_id(label: &str, value: &str) -> Result<Uuid, OrchestratorError> {
+    parse_object_id(value).map_err(|error| {
+        OrchestratorError::ConfigError(format!("invalid {label} id '{value}': {error:#}"))
+    })
+}
+
 async fn persist_validation_decision_derivatives(
     mcp_server: &Arc<LibraMcpServer>,
     thread_id: &str,
     run_id: &str,
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
     system_report: &SystemReport,
     decision: &DecisionOutcome,
 ) -> Result<PersistedDerivedRecords, OrchestratorError> {
@@ -4066,7 +4117,12 @@ async fn persist_validation_decision_derivatives(
     let report = validator.build_report(
         thread_id,
         Some(run_id),
-        validation_stages_from_system_report(system_report),
+        validation_stages_from_system_report_with_artifacts(
+            system_report,
+            artifact_ledger,
+            release_candidate_patchset_id,
+            decision,
+        ),
     );
     let policy = DecisionPolicy::default();
     let risk = aggregate_risk_score(&report, &policy);
@@ -4217,10 +4273,30 @@ async fn rebuild_thread_projection(
     Ok(())
 }
 
+#[cfg(test)]
 fn validation_stages_from_system_report(
     system_report: &SystemReport,
 ) -> Vec<ValidationStageResult> {
-    let release_blockers = release_stage_blockers(system_report);
+    validation_stages_from_system_report_with_artifacts(
+        system_report,
+        &ArtifactLedger::new(Uuid::nil()),
+        None,
+        &DecisionOutcome::HumanReviewRequired,
+    )
+}
+
+fn validation_stages_from_system_report_with_artifacts(
+    system_report: &SystemReport,
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
+    decision: &DecisionOutcome,
+) -> Vec<ValidationStageResult> {
+    let mut release_blockers = release_stage_blockers(system_report);
+    release_blockers.extend(release_candidate_blockers(
+        artifact_ledger,
+        release_candidate_patchset_id,
+        decision,
+    ));
     let release_passed = system_report.release.all_required_passed
         && system_report.review_passed
         && system_report.artifacts_complete
@@ -4245,6 +4321,24 @@ fn validation_stages_from_system_report(
             release_blockers,
         ),
     ]
+}
+
+fn release_candidate_blockers(
+    artifact_ledger: &ArtifactLedger,
+    release_candidate_patchset_id: Option<Uuid>,
+    decision: &DecisionOutcome,
+) -> Vec<String> {
+    if *decision != DecisionOutcome::Commit {
+        return Vec::new();
+    }
+
+    match release_candidate_patchset_id {
+        Some(patchset_id) if artifact_ledger.has_patchset(patchset_id) => Vec::new(),
+        Some(patchset_id) => vec![format!(
+            "release candidate patchset {patchset_id} is not present in the artifact ledger"
+        )],
+        None => vec!["release candidate patchset is missing for commit decision".to_string()],
+    }
 }
 
 fn validation_stage_from_gate_report(
@@ -5047,6 +5141,75 @@ mod tests {
     }
 
     #[test]
+    fn commit_validation_requires_release_candidate_patchset_in_artifact_ledger() {
+        let system_report = SystemReport {
+            integration: GateReport::empty(),
+            security: GateReport::empty(),
+            release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
+            overall_passed: true,
+        };
+        let thread_id = Uuid::new_v4();
+        let missing_patchset_id = Uuid::new_v4();
+        let empty_ledger = ArtifactLedger::new(thread_id);
+
+        let stages = validation_stages_from_system_report_with_artifacts(
+            &system_report,
+            &empty_ledger,
+            Some(missing_patchset_id),
+            &DecisionOutcome::Commit,
+        );
+        let release = stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release stage");
+
+        assert_eq!(release.outcome, ValidationOutcome::BlockingFailed);
+        assert!(
+            release
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("is not present in the artifact ledger"))
+        );
+    }
+
+    #[test]
+    fn commit_validation_accepts_release_candidate_patchset_from_artifact_ledger() {
+        let system_report = SystemReport {
+            integration: GateReport::empty(),
+            security: GateReport::empty(),
+            release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
+            overall_passed: true,
+        };
+        let thread_id = Uuid::new_v4();
+        let patchset_id = Uuid::new_v4();
+        let mut ledger = ArtifactLedger::new(thread_id);
+        let mut task_refs = TaskArtifactRefs::new(Uuid::new_v4());
+        task_refs.patchset_ids.push(patchset_id);
+        ledger.push_task(task_refs);
+
+        let stages = validation_stages_from_system_report_with_artifacts(
+            &system_report,
+            &ledger,
+            Some(patchset_id),
+            &DecisionOutcome::Commit,
+        );
+        let release = stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release stage");
+
+        assert_eq!(release.outcome, ValidationOutcome::Passed);
+    }
+
+    #[test]
     fn abandon_decision_overrides_auto_accept_decision_proposal() {
         let thread_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
@@ -5289,6 +5452,18 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let latest_report = ValidationReportStore::new(db.clone())
+            .load_latest(parse_object_id(persisted.thread_id.as_deref().unwrap()).unwrap())
+            .await
+            .unwrap()
+            .expect("latest validation report");
+        let release_stage = latest_report
+            .summary
+            .stages
+            .iter()
+            .find(|stage| stage.stage == ValidationStage::Release)
+            .expect("release validation stage");
+        assert_eq!(release_stage.outcome, ValidationOutcome::Passed);
         assert!(
             ai_risk_score_breakdown::Entity::find_by_id(
                 derived.risk_score_breakdown_id.to_string()
