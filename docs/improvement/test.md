@@ -116,7 +116,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | Codex 旁路运行时 | 静态守卫 | mock WS app-server + plan-first 拦截 |
 | MCP 双入口一致 | done | control.json mcpUrl + --stdio mutex + dual-reachability smoke + web `/messages` → SSE/MCP observe + MCP `create_task` → web SSE observe |
 | Session resume / kill 重启 | 已覆盖 | happy-path resume + SIGTERM-mid-turn 恢复最近提交消息 |
-| 性能 smoke | 3 条 ignored smoke | 10 并发 `/threads`、100k transcript、1k event SSE；1 小时真网 soak 仍 deferred |
+| 性能 smoke | 4 条 ignored smoke + nightly | 10 并发 `/threads`、100k transcript、1k event SSE；HTTP/SSE 1 小时 soak 已由 nightly/manual workflow 接入 |
 | 真实模型生成 | runner 已落地 | DeepSeek `deepseek-v4-flash` live gate 已接入；5-day pass-rate 等待 secret/nightly |
 | 错误码契约 | 已覆盖 | L0 single-source mapping + 文档同步测试 |
 
@@ -307,12 +307,12 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.18 性能与稳定性 smoke
 
-- **现状 ✅⚠️**：`tests/code_ui_perf_smoke_test.rs` 已有 3 条 `#[ignore]` smoke；长时真网 soak 仍 deferred。
+- **现状 ✅**：`tests/code_ui_perf_smoke_test.rs` 已有 4 条 `#[ignore]` smoke；长时 HTTP/SSE soak 由 `.github/workflows/code-ui-sse-soak-nightly.yml` nightly/manual job 跑同一测试，默认 `LIBRA_SSE_SOAK_SECS=3600`。
 - **缺口**：
   - 已完成：100k 行 transcript 下 `/session` 序列化耗时上限（默认 < 500 ms，可由 `LIBRA_PERF_CEILING_MS` 调整）。
   - 已完成：1 000 events SSE broadcast monotonic seq。
   - 已完成：10 并发 `/threads` 查询不死锁。
-  - 仍待：1 小时真网 SSE soak，需独立 nightly job。
+  - 已完成：HTTP/SSE 1 小时 soak 独立 nightly/manual job，使用 fake provider 通过真实本地 web server `/api/code/events` 长连接并周期性提交 heartbeat。
 - **优先级**：P2。
 - **测试位置**：**L2 已新增** `tests/code_ui_perf_smoke_test.rs`，`#[ignore]` + `LIBRA_RUN_PERF=1` 时跑。
 
@@ -357,7 +357,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 **建议推迟或降级：**
 
 - “lagged stream 不死”跨进程测试容易依赖 socket backpressure 和 broadcast polling 时序，放到 P2 或以 in-process 单元测试覆盖解析器。
-- 1 小时真网 SSE soak 继续作为 nightly / 外部运行项；不阻塞本地 L2 矩阵。
+- 1 小时 HTTP/SSE soak 已接入 `.github/workflows/code-ui-sse-soak-nightly.yml`；不阻塞本地 L2 矩阵。
 
 ### 6.2 数据驱动设计
 
@@ -612,7 +612,7 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 | 5.15 | Diagnostics redaction | done | exist | done | – | ✅ | 持续随 diagnostics 字段增量维护 |
 | 5.16 | Session resume / kill | – | – | done | – | ✅ | 并发同 thread 由 5.6 control-instance lock 覆盖 |
 | 5.17 | 并发 / size limits | – | – | done | – | ✅ | 无 |
-| 5.18 | 性能 smoke | – | – | done(ignore) | – | ✅⚠️ | 1 小时真网 SSE soak |
+| 5.18 | 性能 smoke | – | – | done(ignore + nightly) | – | ✅ | HTTP/SSE 1 小时 soak 已接入 nightly/manual workflow |
 | 5.19 | 真实模型生成 | – | – | – | done(gated) | ✅⚠️ | secret + 5-day nightly pass-rate |
 | 5.20 | 错误码契约 | done | – | – | – | ✅ | 新 error code 需同步文档和测试 |
 
@@ -765,7 +765,7 @@ cargo test --all --all-features
 
 ## 当前 Wave 状态（2026-05-12 同步）
 
-Wave 1–11 与 Wave 12 部分已完成；剩余项均为外部运行条件（Wave 12 长时 SSE soak、Model generation 5-day pass-rate），不再有仓库内可直接编码的 Wave 9 缺口：
+Wave 1–11 与 Wave 12 已完成仓库内 wiring；剩余项仅为外部运行窗口（Model generation 5-day pass-rate），不再有仓库内可直接编码的 Wave 9 缺口：
 
 | Wave | 状态 | 备注 |
 |---|---|---|
@@ -780,6 +780,6 @@ Wave 1–11 与 Wave 12 部分已完成；剩余项均为外部运行条件（Wa
 | 9 | ✅ closed | `--resume` CLI 表面 4 条（unknown UUID、unknown 非 UUID 字符串、happy-path 跨进程恢复 transcript、SIGTERM-mid-turn 恢复最近提交消息）；§5.16 closure criterion ✅；§5.13 closed — `--codex-port 0` validation smoke + `MockCodexWsServer` helper（tokio-tungstenite，accept WS handshake、回 initialize/thread/start JSON-RPC envelope）+ 端到端 round-trip smoke ✅ + binary 级 boot smoke（`libra code --provider codex` 真实链入 mock，锁定 `initialize` / `thread/start` 和默认 plan-mode payload）✅ + `thread/started` notification persistence ✅ + plan gate smoke（approval pending 前不 resolve）✅ + managed startup reconnect smoke ✅；§5.14 item 1/2/3-smoke ✅（control.json mcpUrl + --stdio mutex + 同进程 web/MCP dual-reachability via `Mcp-Session-Id` 头）；§5.14 web `/messages` → SSE/MCP observe ✅；§5.14 MCP `tools/call create_task` → web SSE observe ✅ |
 | 10 | ✅ closed | §5.2 provider boot 7/7 reachable providers 已落地（DeepSeek+flags、OpenAI、Anthropic、Kimi+flags、Ollama+flag、Zhipu、Gemini）经 `tests/helpers/mock_provider_server.rs`（无新增 dev-dep，复用 `axum`）+ 新增 `GeminiClient::with_base_url` test-only 构造器；§5.2 missing-key / `--api-base` quick-follow 已闭合；Codex 见 §5.13；§5.8 TUI 复杂状态已由 TestBackend / inline buffer 覆盖 |
 | 11 | ✅ closed | `tests/harness/matrix.rs` 已加 `ProviderSpec::ModelFromEnvFile` + DeepSeek thinking/high-reasoning 自动注入；`tests/code_ui_remote_model_generation_matrix.rs` 在 `LIBRA_RUN_LIVE=1` 下真正调用矩阵；`.github/workflows/model-generation-nightly.yml` 提供每日 cron + `workflow_dispatch`，需 maintainer 配置 `DEEPSEEK_API_KEY` secret 后才会运行；regression L0 测试（`build_session_options_for_*_provider_*`）锁定 DeepSeek 旗标注入逻辑 |
-| 12 | ✅ closed | 错误码 doc/code sync L0 测试 + perf smoke 3 条（10 并发 `/threads`、100k transcript snapshot 序列化 < 500ms 可由 `LIBRA_PERF_CEILING_MS` 调整、SSE broadcast 1 000 events monotonic seq L1）`#[ignore]` + `LIBRA_RUN_PERF=1`；唯一 deferred 项是 1-小时真网 SSE soak（独立 nightly job） |
+| 12 | ✅ closed | 错误码 doc/code sync L0 测试 + perf smoke 4 条（10 并发 `/threads`、100k transcript snapshot 序列化 < 500ms 可由 `LIBRA_PERF_CEILING_MS` 调整、SSE broadcast 1 000 events monotonic seq L1、HTTP/SSE 1 小时 soak nightly/manual job）`#[ignore]` + `LIBRA_RUN_PERF=1` |
 
-落地完成判定的全部门：仓库内可直接编码的 Wave 项已闭合。已闭合：Wave 9 §5.13（`--codex-port 0` validation + `MockCodexWsServer` 协议 helper + handshake round-trip smoke + binary boot smoke + 默认 plan-mode payload + `thread/started` notification persistence + plan gate smoke + startup reconnect smoke）、§5.14 item 1/2/3-smoke + web `/messages` → SSE/MCP observe + MCP `create_task` → web SSE observe、§5.16 happy-path + SIGTERM-mid-turn、Wave 10 §5.2 全量 7/7 provider + missing-key / `--api-base` quick-follow、Wave 10 §5.8 TUI render 复杂状态。Wave 11 已具备完整工作流（harness wiring + 每日 nightly + L0 regression）；剩余条件（5 天连续 ≥ 90% 通过率）依赖 maintainer 配置 `DEEPSEEK_API_KEY` 并等待 5 个 nightly run。Wave 12 perf smoke 现含 1k events SSE broadcast monotonic 验证；1-小时真网 SSE soak 需独立 nightly job。当前仓库状态对应"基础矩阵已落地 + Wave 9/10/11 已 closed + Wave 12 已 wire，剩余为外部运行窗口"。
+落地完成判定的全部门：仓库内可直接编码的 Wave 项已闭合。已闭合：Wave 9 §5.13（`--codex-port 0` validation + `MockCodexWsServer` 协议 helper + handshake round-trip smoke + binary boot smoke + 默认 plan-mode payload + `thread/started` notification persistence + plan gate smoke + startup reconnect smoke）、§5.14 item 1/2/3-smoke + web `/messages` → SSE/MCP observe + MCP `create_task` → web SSE observe、§5.16 happy-path + SIGTERM-mid-turn、Wave 10 §5.2 全量 7/7 provider + missing-key / `--api-base` quick-follow、Wave 10 §5.8 TUI render 复杂状态。Wave 11 已具备完整工作流（harness wiring + 每日 nightly + L0 regression）；剩余条件（5 天连续 ≥ 90% 通过率）依赖 maintainer 配置 `DEEPSEEK_API_KEY` 并等待 5 个 nightly run。Wave 12 perf smoke 现含 1k events SSE broadcast monotonic 验证与 HTTP/SSE 1 小时 nightly soak。当前仓库状态对应"基础矩阵已落地 + Wave 9/10/11 已 closed + Wave 12 已 wire，剩余为外部运行窗口"。

@@ -160,7 +160,7 @@
 
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
-| `code_ui_perf_smoke_test` | 6 | Code UI startup / first-token latency smoke | `src/command/code.rs`, `src/internal/tui/` |
+| `code_ui_perf_smoke_test` | 6 | Code UI perf / SSE soak smoke | `src/command/code.rs`, `src/internal/tui/`, `src/internal/ai/web/` |
 
 ---
 
