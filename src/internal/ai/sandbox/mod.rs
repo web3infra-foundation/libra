@@ -3142,7 +3142,18 @@ mod tests {
         assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
         match &events[0] {
             SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
-                assert_eq!(root, &dangerous_root);
+                // The recorded root is canonicalised before validation
+                // (see `push_root_unique` in policy.rs), so on hosts
+                // where `/var/run` is a symlink to `/run` it surfaces as
+                // `/run/docker.sock` rather than the requested
+                // `/var/run/docker.sock`. Assert the stable, symlink-
+                // independent property: the rejected root is the Docker
+                // socket by file name.
+                assert_eq!(
+                    root.file_name(),
+                    dangerous_root.file_name(),
+                    "rejected root should be the docker socket (canonicalised path may differ by host symlink layout): {root:?}"
+                );
                 assert!(
                     !reason.is_empty(),
                     "rejection must include a non-empty reason"
