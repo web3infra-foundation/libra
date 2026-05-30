@@ -75,7 +75,6 @@ use crate::{
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
-            persistence::persist_intentspec,
             render_summary, repair_intentspec, resolve_intentspec,
             types::{
                 ConflictResolution, DecompositionMode, LibraBinding, NetworkPolicy, Objective,
@@ -101,6 +100,7 @@ use crate::{
         },
         projection::ProjectionRebuilder,
         prompt::SystemPromptBuilder,
+        runtime::phase0::write_intent,
         sandbox::{
             ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, NetworkAccess,
             ReviewDecision,
@@ -7346,7 +7346,7 @@ where
 
             let mut persistence_warning = None;
             let intent_id = if let Some(ref mcp_server) = mcp_server {
-                match persist_intentspec(&spec, mcp_server).await {
+                match persist_phase0_intent_for_review(&spec, mcp_server).await {
                     Ok(intent_id) => Some(intent_id),
                     Err(error) => {
                         persistence_warning =
@@ -9238,6 +9238,25 @@ mod tests {
         }
     }
 
+    fn function_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+        let start = source.find(signature)?;
+        let open = source[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(&source[open..=open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     #[test]
     fn provider_plan_draft_steps_replace_objectives_for_execution_plan_compile() {
         let spec = minimal_intentspec(vec![Objective {
@@ -9369,6 +9388,22 @@ mod tests {
                 .allowed_tools
                 .as_ref()
                 .is_some_and(|tools| tools.iter().any(|tool| tool == "submit_intent_draft"))
+        );
+    }
+
+    #[test]
+    fn phase0_review_persistence_uses_runtime_write_helper() {
+        let source = include_str!("app.rs");
+        let body = function_body(source, "async fn begin_plan_workflow")
+            .expect("begin_plan_workflow body should be found");
+
+        assert!(
+            body.contains("persist_phase0_intent_for_review("),
+            "Phase 0 review persistence must go through the runtime formal-write helper"
+        );
+        assert!(
+            !body.contains("persist_intentspec("),
+            "begin_plan_workflow must not call lower-level IntentSpec persistence directly"
         );
     }
 
@@ -11356,6 +11391,14 @@ fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
         }
     }
     deduped
+}
+
+async fn persist_phase0_intent_for_review(
+    spec: &IntentSpec,
+    mcp_server: &Arc<LibraMcpServer>,
+) -> anyhow::Result<String> {
+    let outcome = write_intent(spec, mcp_server).await?;
+    Ok(outcome.intent_id)
 }
 
 fn intentspec_with_plan_draft_objectives(
