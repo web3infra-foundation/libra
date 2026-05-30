@@ -5415,13 +5415,13 @@ Codex TUI 运行时在 `App<M>::start_managed_code_turn()`（[`src/internal/tui/
 
 ### Current Generic TUI Phase 1 Transitional Path
 
-通用 completion provider 的 TUI 路径当前先进入 Phase 0 `IntentSpec` review，再进入 Phase 1 planning review；但 Phase 1 仍是 single execution-plan transitional path，尚未完成 execution/test dual-plan Scheduler cutover。
+通用 completion provider 的 TUI 路径当前先进入 Phase 0 `IntentSpec` review，再进入 Phase 1 planning review；Phase 1 review 持久化已从 single execution-plan 过渡到 execution/test 双 `Plan` 预览 bundle（`persist_plan_review_bundle` 复用 plan-set 持久化，execution 再复用该 preview plan set），但 UI 展示和 provider draft 仍是单 ordered draft，完整 Scheduler cutover 仍由 runtime `SelectPlanSet` 路径负责。
 
 该过渡路径的对象边界如下：
 
 1. provider 只能通过 `submit_plan_draft` 返回 planning draft；draft 只包含 `explanation` 和有序 `steps[].title`，不包含 runtime status。
-2. Libra 本地 planner 把 draft 规范化为正式 `Plan(role=execution)` 和对应 `Task` snapshots；`PlanStep` 仍是 `Plan` 内部步骤，不是独立 snapshot。
-3. 每个 `Task.origin_step_id` 必须指向已持久化 `Plan.steps[*].step_id`。
+2. Libra 本地 planner 把 draft 规范化为执行计划，再按 task kind 持久化为 `Plan(role=execution)` / `Plan(role=test)` 双 plan；`Task` snapshots 仍由 review bundle 一次性创建。
+3. 每个 `Task.origin_step_id` 必须指向其所属 role plan 的 `Plan.steps[*].step_id`，`plan_id_by_task_id` 记录 execution/test 归属。
 4. Phase 1 review UI 只展示正式编译后的 execution plan / task 表；provider draft 不再作为 `update_plan` checkbox transcript 展示。
 5. `update_plan` 保留为普通多步任务进度工具，不再承担 Phase 1 provider planning draft 的语义。
 
@@ -5623,7 +5623,7 @@ pub struct MockCompletionModel { /* scripted responses */ }
 |---|---|---|---|---|
 | Phase 0 | `Intent` / `ContextSnapshot` | Runtime Phase 0 helper + shared MCP/history persistence 已验证；Codex/Code UI 调用方 cutover 仍待完成 | 已验证（`runtime::phase0::{write_intent, write_context_snapshot_if_needed}`） | `phase0_write_helpers_persist_intent_and_context_snapshot` pin 住 `Intent` id 与 `ContextSnapshot` 的 history `snapshot` id 可解析 |
 | Phase 0 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 共享 execution-audit finalize 路径已验证；Codex/Code UI Phase 0 review 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession::finalize` + MCP/history） | `execution_audit_session_persists_runtime_side_objects` 覆盖 `ToolInvocation` id、`ContextFrame` redaction、terminal `Decision` id、terminal `IntentEvent::Completed` |
-| Phase 1 | `Plan(role=execution|test)` / `Task` / `Scheduler.selected_plan_ids` | Runtime Phase 1 plan-set helper 已验证；Codex/Code UI plan review 调用方 cutover 仍待完成 | 已验证（`write_plan_set` + review-bundle task persistence + `SchedulerMutation::SelectPlanSet`） | `write_plan_set_persists_execution_and_test_plan_pair` pin 住 execution/test `Plan` 与 `Scheduler.selected_plan_ids` execution→test ordering；`review_bundle_persists_plan_tasks_and_execution_reuses_tasks` 覆盖 `Task` 持久化/复用 |
+| Phase 1 | `Plan(role=execution|test)` / `Task` / `Scheduler.selected_plan_ids` | Runtime Phase 1 plan-set helper 已验证；Code UI / TUI review bundle 已写 execution/test preview plan set；Codex provider 主执行调用方 cutover 仍待完成 | 已验证（`write_plan_set` + review-bundle execution/test plan + task persistence + `SchedulerMutation::SelectPlanSet`） | `write_plan_set_persists_execution_and_test_plan_pair` pin 住 execution/test `Plan` 与 `Scheduler.selected_plan_ids` execution→test ordering；`review_bundle_persists_plan_tasks_and_execution_reuses_tasks` 覆盖 review bundle 写入 execution/test plan、`Task` origin step 归属与 execution 复用 |
 | Phase 1 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 共享 execution-audit finalize 路径已验证；Codex/Code UI Phase 1 review 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession::finalize` + MCP/history） | `execution_audit_session_persists_runtime_side_objects` 覆盖 `ToolInvocation` id、`ContextFrame` redaction、terminal `Decision` id、terminal `IntentEvent::Completed` |
 | Phase 2 | `Run` / `PatchSet` / `Provenance` | 共享 persistence 已验证；Codex `TaskExecutor` 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession::finalize`） | `execution_audit_session_persists_runtime_side_objects` pin 住 `PersistedExecution.run_id` / `provenance_id` / task `patchset_id` 可解析到 history |
 | Phase 2 | `TaskEvent` / `RunEvent` / `PlanStepEvent` / `RunUsage` | attempt lifecycle bridge 已验证；Codex `TaskExecutor` 调用方 cutover 仍待完成 | 已验证（`ExecutionAuditSession` + Phase 2 bridge） | `phase2_session_bridge_persists_attempt_lifecycle_events` 覆盖 Patching→Completed / Running→Done / Progressing→Completed；`execution_audit_session_persists_runtime_side_objects` 覆盖 `run_usage_id` |

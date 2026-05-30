@@ -718,9 +718,13 @@ fn default_execution_revision() -> u32 {
 /// Formal Plan/Task snapshots created during Phase 1 review and reused during execution.
 #[derive(Clone, Debug, Default)]
 pub struct PersistedPlanReviewBundle {
+    /// Execution plan id. Kept as `plan_id` for the existing TUI post-plan
+    /// call sites that still treat the execution plan as the primary plan.
     pub plan_id: String,
+    pub test_plan_id: String,
     pub step_ids: HashMap<Uuid, Uuid>,
     pub task_ids: HashMap<Uuid, String>,
+    pub plan_id_by_task_id: HashMap<Uuid, String>,
 }
 
 /// Configuration for the orchestrator.

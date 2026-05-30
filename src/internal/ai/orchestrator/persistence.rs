@@ -249,6 +249,7 @@ struct RuntimeAuditState {
     latest_run_event_kind: Option<RunEventKind>,
     latest_task_run_event_kind: HashMap<Uuid, RunEventKind>,
     preview_plan_id: Option<String>,
+    preview_test_plan_id: Option<String>,
 }
 
 enum RuntimeAuditCommand {
@@ -344,6 +345,9 @@ impl ExecutionAuditSession {
             .as_ref()
             .map(|bundle| bundle.plan_id.clone())
             .or_else(|| persisted_plan_id.map(ToString::to_string));
+        let preview_test_plan_id = persisted_plan_bundle
+            .as_ref()
+            .map(|bundle| bundle.test_plan_id.clone());
         let preview_step_ids = persisted_plan_bundle
             .as_ref()
             .map(|bundle| bundle.step_ids.clone())
@@ -374,6 +378,7 @@ impl ExecutionAuditSession {
             latest_run_event_kind: Some(RunEventKind::Created),
             latest_task_run_event_kind: HashMap::new(),
             preview_plan_id,
+            preview_test_plan_id,
         }));
         let (tx, rx) = mpsc::unbounded_channel();
         let observer: Arc<dyn super::types::OrchestratorObserver> =
@@ -418,37 +423,69 @@ impl ExecutionAuditSession {
                 .then(|| state.preview_plan_id.clone())
                 .flatten()
         };
+        let preview_test_plan_id = {
+            let state = self.state.lock().await;
+            (plan.revision == 1 && state.plan_ids.is_empty())
+                .then(|| state.preview_test_plan_id.clone())
+                .flatten()
+        };
         let (persisted_plan_set, can_reuse_preview_tasks) = if let Some(plan_id) = preview_plan_id {
-            match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
-                Ok(execution_plan) => {
-                    let test_plan = create_plan_revision_for_role(
-                        &self.mcp_server,
-                        &intent_id,
-                        parent_test_plan_id.as_deref(),
-                        plan,
-                        PersistedPlanRole::Test,
-                    )
-                    .await?;
-                    (build_plan_set(plan, execution_plan, test_plan)?, true)
+            if let Some(test_plan_id) = preview_test_plan_id {
+                match bind_existing_plan_set(&self.mcp_server, &plan_id, &test_plan_id, plan).await
+                {
+                    Ok(plan_set) => (plan_set, true),
+                    Err(error) if is_missing_persisted_plan_error(&error) => {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            test_plan_id = %test_plan_id,
+                            "preview plan set was not found during execution; creating a new plan revision"
+                        );
+                        (
+                            create_plan_set_revision(
+                                &self.mcp_server,
+                                &intent_id,
+                                parent_execution_plan_id.as_deref(),
+                                parent_test_plan_id.as_deref(),
+                                plan,
+                            )
+                            .await?,
+                            false,
+                        )
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) if is_missing_persisted_plan_error(&error) => {
-                    tracing::warn!(
-                        plan_id = %plan_id,
-                        "preview plan was not found during execution; creating a new plan revision"
-                    );
-                    (
-                        create_plan_set_revision(
+            } else {
+                match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
+                    Ok(execution_plan) => {
+                        let test_plan = create_plan_revision_for_role(
                             &self.mcp_server,
                             &intent_id,
-                            parent_execution_plan_id.as_deref(),
                             parent_test_plan_id.as_deref(),
                             plan,
+                            PersistedPlanRole::Test,
                         )
-                        .await?,
-                        false,
-                    )
+                        .await?;
+                        (build_plan_set(plan, execution_plan, test_plan)?, true)
+                    }
+                    Err(error) if is_missing_persisted_plan_error(&error) => {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            "preview plan was not found during execution; creating a new plan revision"
+                        );
+                        (
+                            create_plan_set_revision(
+                                &self.mcp_server,
+                                &intent_id,
+                                parent_execution_plan_id.as_deref(),
+                                parent_test_plan_id.as_deref(),
+                                plan,
+                            )
+                            .await?,
+                            false,
+                        )
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         } else {
             (
@@ -1547,20 +1584,23 @@ pub async fn persist_plan_review_bundle(
     intent_id: &str,
     plan: &ExecutionPlanSpec,
 ) -> Result<PersistedPlanReviewBundle, OrchestratorError> {
-    let persisted_plan = create_plan_revision(mcp_server, intent_id, None, plan).await?;
+    let persisted_plan_set =
+        create_plan_set_revision(mcp_server, intent_id, None, None, plan).await?;
     let task_ids = create_compiled_tasks_initial(
         mcp_server,
         intent_id,
         None,
         plan,
-        &persisted_plan.step_id_map,
+        &persisted_plan_set.step_id_map,
     )
     .await?;
 
     Ok(PersistedPlanReviewBundle {
-        plan_id: persisted_plan.plan_id,
-        step_ids: persisted_plan.step_id_map,
+        plan_id: persisted_plan_set.execution.plan_id,
+        test_plan_id: persisted_plan_set.test.plan_id,
+        step_ids: persisted_plan_set.step_id_map,
         task_ids,
+        plan_id_by_task_id: persisted_plan_set.plan_id_by_task_id,
     })
 }
 
@@ -1630,6 +1670,70 @@ async fn bind_existing_plan_revision(
     let step_id_map = plan
         .tasks
         .iter()
+        .zip(persisted_plan.steps().iter())
+        .map(|(task, step)| (task.step_id(), step.step_id()))
+        .collect();
+    Ok(PersistedPlanRevision {
+        plan_id: plan_id.to_string(),
+        step_id_map,
+    })
+}
+
+async fn bind_existing_plan_set(
+    mcp_server: &Arc<LibraMcpServer>,
+    execution_plan_id: &str,
+    test_plan_id: &str,
+    plan: &ExecutionPlanSpec,
+) -> Result<PersistedPlanSet, OrchestratorError> {
+    let execution = bind_existing_plan_revision_for_role(
+        mcp_server,
+        execution_plan_id,
+        plan,
+        PersistedPlanRole::Execution,
+    )
+    .await?;
+    let test = bind_existing_plan_revision_for_role(
+        mcp_server,
+        test_plan_id,
+        plan,
+        PersistedPlanRole::Test,
+    )
+    .await?;
+    build_plan_set(plan, execution, test)
+}
+
+async fn bind_existing_plan_revision_for_role(
+    mcp_server: &Arc<LibraMcpServer>,
+    plan_id: &str,
+    plan: &ExecutionPlanSpec,
+    role: PersistedPlanRole,
+) -> Result<PersistedPlanRevision, OrchestratorError> {
+    let persisted_plan = load_persisted_plan(mcp_server, plan_id).await?;
+    let role_tasks = plan
+        .tasks
+        .iter()
+        .filter(|task| plan_role_for_task(task) == role)
+        .collect::<Vec<_>>();
+    let expected_step_count = role_tasks.len().max(1);
+    if persisted_plan.steps().len() != expected_step_count {
+        return Err(OrchestratorError::PersistenceError(format!(
+            "persisted preview {} plan step count mismatch: expected {}, got {}",
+            role.label(),
+            expected_step_count,
+            persisted_plan.steps().len()
+        )));
+    }
+    for (task, step) in role_tasks.iter().zip(persisted_plan.steps().iter()) {
+        if step.description() != task.title() {
+            return Err(OrchestratorError::PersistenceError(format!(
+                "persisted preview {} plan does not match compiled execution plan at step '{}'",
+                role.label(),
+                task.title()
+            )));
+        }
+    }
+    let step_id_map = role_tasks
+        .into_iter()
         .zip(persisted_plan.steps().iter())
         .map(|(task, step)| (task.step_id(), step.step_id()))
         .collect();
@@ -3384,6 +3488,7 @@ async fn create_compiled_task(
     parse_created_id("task", &result)
 }
 
+#[cfg(test)]
 async fn create_plan_revision(
     mcp_server: &Arc<LibraMcpServer>,
     intent_id: &str,
@@ -6218,8 +6323,26 @@ mod tests {
 
         assert_eq!(bundle.step_ids.len(), plan_spec.tasks.len());
         assert_eq!(bundle.task_ids.len(), plan_spec.tasks.len());
+        assert_ne!(
+            bundle.plan_id, bundle.test_plan_id,
+            "Phase 1 review must persist distinct execution/test plans"
+        );
+        assert_eq!(
+            bundle
+                .plan_id_by_task_id
+                .get(&plan_spec.tasks[0].id())
+                .map(String::as_str),
+            Some(bundle.plan_id.as_str())
+        );
+        assert_eq!(
+            bundle
+                .plan_id_by_task_id
+                .get(&plan_spec.tasks[1].id())
+                .map(String::as_str),
+            Some(bundle.test_plan_id.as_str())
+        );
         let history = server.intent_history_manager.as_ref().unwrap();
-        assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+        assert_eq!(history.list_objects("plan").await.unwrap().len(), 2);
         assert_eq!(
             history.list_objects("task").await.unwrap().len(),
             plan_spec.tasks.len()
