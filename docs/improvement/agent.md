@@ -5621,7 +5621,7 @@ pub struct MockCompletionModel { /* scripted responses */ }
 
 | Phase | 对象 / 视图 | Codex 路径 | 通用路径 | 有测试 |
 |---|---|---|---|---|
-| Phase 0 | `Intent` / `ContextSnapshot` | 需验证 | 需验证 | 需验证 |
+| Phase 0 | `Intent` / `ContextSnapshot` | Runtime Phase 0 helper + shared MCP/history persistence 已验证；Codex/Code UI 调用方 cutover 仍待完成 | 已验证（`runtime::phase0::{write_intent, write_context_snapshot_if_needed}`） | `phase0_write_helpers_persist_intent_and_context_snapshot` pin 住 `Intent` id 与 `ContextSnapshot` 的 history `snapshot` id 可解析 |
 | Phase 0 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 需验证 | 需验证 | 需验证 |
 | Phase 1 | `Plan(role=execution|test)` / `Task` / `Scheduler.selected_plan_ids` | 需验证 | 需验证 | 需验证 |
 | Phase 1 | `ToolInvocation` / `ContextFrame` / terminal `Decision` / `IntentEvent` | 需验证 | 需验证 | 需验证 |

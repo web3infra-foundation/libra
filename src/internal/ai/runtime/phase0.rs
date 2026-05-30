@@ -255,12 +255,23 @@ fn parse_snapshot_id(result: &CallToolResult) -> Option<String> {
 mod tests {
     use git_internal::internal::object::types::ActorKind;
     use rmcp::model::Content;
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
-    use crate::internal::ai::intentspec::{
-        DraftAcceptance, DraftIntent as DraftIntentBody, DraftRisk, IntentDraft, ResolveContext,
-        RiskLevel, resolve_intentspec,
-        types::{ChangeType, Objective, ObjectiveKind},
+    use crate::{
+        internal::{
+            ai::{
+                history::HistoryManager,
+                intentspec::{
+                    DraftAcceptance, DraftIntent as DraftIntentBody, DraftRisk, IntentDraft,
+                    ResolveContext, RiskLevel, resolve_intentspec,
+                    types::{ChangeType, Objective, ObjectiveKind},
+                },
+                workflow_objects::parse_object_id,
+            },
+            db,
+        },
+        utils::storage::local::LocalStorage,
     };
 
     /// Build a minimal but real `IntentSpec` so the `IntentWriteOutcome`
@@ -346,6 +357,25 @@ mod tests {
         }
     }
 
+    async fn setup_server() -> (Arc<LibraMcpServer>, TempDir) {
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let db_path = temp_path.join("libra.db");
+        let db = db::create_database(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_path.join("objects")));
+        let history_manager = Arc::new(HistoryManager::new(
+            storage.clone(),
+            temp_path,
+            Arc::new(db),
+        ));
+        (
+            Arc::new(LibraMcpServer::new(Some(history_manager), Some(storage))),
+            temp_dir,
+        )
+    }
+
     /// `snapshot_needed` must return `false` only when both `items` is empty
     /// *and* `summary` is `None` — that's the "nothing to record" gate.
     #[test]
@@ -390,6 +420,53 @@ mod tests {
         // gate keep the early-return semantics observable.
         let req = empty_request();
         assert!(!snapshot_needed(&req));
+    }
+
+    #[tokio::test]
+    async fn phase0_write_helpers_persist_intent_and_context_snapshot() {
+        let (server, _temp_dir) = setup_server().await;
+        let spec = sample_intent_spec();
+
+        let intent = write_intent(&spec, &server).await.unwrap();
+        assert_eq!(intent.source, spec);
+
+        let snapshot = write_context_snapshot_if_needed(
+            ContextSnapshotRequest {
+                items: vec![ContextSnapshotItem {
+                    kind: Some("file".to_string()),
+                    path: "src/main.rs".to_string(),
+                    preview: Some("fn main() {}".to_string()),
+                    blob_hash: None,
+                }],
+                selection_strategy: SelectionStrategy::Explicit,
+                summary: Some("phase0 context snapshot".to_string()),
+                actor: sample_actor(),
+            },
+            &server,
+        )
+        .await
+        .unwrap()
+        .expect("non-empty Phase 0 context should persist a snapshot");
+        assert_eq!(snapshot.summary.as_deref(), Some("phase0 context snapshot"));
+        assert_eq!(snapshot.item_count, 1);
+
+        let history = server.intent_history_manager.as_ref().unwrap();
+        for (object_type, object_id) in [
+            ("intent", intent.intent_id.as_str()),
+            ("snapshot", snapshot.snapshot_id.as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(
+                        object_type,
+                        &parse_object_id(object_id).unwrap().to_string()
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "expected Phase 0 {object_type} id {object_id} to resolve in history",
+            );
+        }
     }
 
     /// `ContextSnapshotWriteOutcome` must derive `Clone` + `PartialEq` so
