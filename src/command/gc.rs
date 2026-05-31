@@ -12,7 +12,12 @@ use std::{
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{commit::Commit, tag::Tag as GitTag, tree::Tree, types::ObjectType},
+    internal::object::{
+        commit::Commit,
+        tag::Tag as GitTag,
+        tree::{Tree, TreeItemMode},
+        types::ObjectType,
+    },
 };
 use sea_orm::EntityTrait;
 use serde::Serialize;
@@ -39,6 +44,8 @@ EXAMPLES:
     libra --json gc --prune=never    Inspect reachability and pack hygiene without deleting objects";
 
 const DEFAULT_PRUNE: &str = "2.weeks.ago";
+const GITLINK_INDEX_MODE: u32 = 0o160000;
+const LIVE_PACK_SIDECARS: &[&str] = &["bitmap", "rev", "mtimes"];
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 const SECONDS_PER_MONTH: u64 = 30 * SECONDS_PER_DAY;
@@ -550,6 +557,9 @@ fn index_roots() -> CliResult<HashSet<ObjectHash>> {
     })?;
     for stage in 0..=3 {
         for entry in index.tracked_entries(stage) {
+            if entry.mode == GITLINK_INDEX_MODE {
+                continue;
+            }
             roots.insert(entry.hash);
         }
     }
@@ -590,7 +600,12 @@ fn object_children(storage: &ClientStorage, hash: &ObjectHash) -> CliResult<Vec<
         }
         ObjectType::Tree => {
             let tree: Tree = load_object(hash).map_err(|error| corrupt_object(hash, error))?;
-            Ok(tree.tree_items.iter().map(|item| item.id).collect())
+            Ok(tree
+                .tree_items
+                .iter()
+                .filter(|item| item.mode != TreeItemMode::Commit)
+                .map(|item| item.id)
+                .collect())
         }
         ObjectType::Tag => {
             let tag: GitTag = load_object(hash).map_err(|error| corrupt_object(hash, error))?;
@@ -1081,6 +1096,48 @@ mod tests {
         assert!(reachability.reachable.contains(&commit.id));
         assert!(reachability.reachable.contains(&tree.id));
         assert!(reachability.reachable.contains(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers graph traversal ignoring gitlink tree entries.
+    async fn trace_reachable_skips_gitlink_tree_items() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("content");
+        save_object(&blob, &blob.id).unwrap();
+        let gitlink = test_hash(4);
+        let tree = Tree {
+            id: test_hash(2),
+            tree_items: vec![
+                TreeItem {
+                    mode: TreeItemMode::Blob,
+                    id: blob.id,
+                    name: "file.txt".to_string(),
+                },
+                TreeItem {
+                    mode: TreeItemMode::Commit,
+                    id: gitlink,
+                    name: "submodule".to_string(),
+                },
+            ],
+        };
+        save_object(&tree, &tree.id).unwrap();
+        let commit = commit_with_tree(tree.id, Vec::new());
+        save_object(&commit, &commit.id).unwrap();
+
+        let mut reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::from([commit.id]),
+            reachable: HashSet::new(),
+        };
+        trace_reachable(&storage, &mut reachability).unwrap();
+
+        assert!(reachability.reachable.contains(&blob.id));
+        assert!(!reachability.reachable.contains(&gitlink));
     }
 
     #[tokio::test]
