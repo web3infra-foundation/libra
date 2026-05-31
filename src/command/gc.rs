@@ -641,3 +641,129 @@ fn clean_pack_directory(
 
     Ok(stats)
 }
+
+fn collect_pack_groups(pack_dir: &Path) -> CliResult<BTreeMap<String, PackGroup>> {
+    let mut groups = BTreeMap::<String, PackGroup>::new();
+    for entry in fs::read_dir(pack_dir).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read pack directory '{}': {}",
+            pack_dir.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        let entry = entry.map_err(|error| {
+            CliError::fatal(format!("failed to read pack directory entry: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(stem) = pack_stem(&path) else {
+            continue;
+        };
+        let group = groups.entry(stem).or_default();
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("pack") => group.pack = Some(path),
+            Some("idx") => group.idx = Some(path),
+            Some("keep") => group.keep = Some(path),
+            _ => group.others.push(path),
+        }
+    }
+    Ok(groups)
+}
+
+fn pack_stem(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    if !file_name.starts_with("pack-") {
+        return None;
+    }
+    if let Some(stem) = file_name.strip_suffix(".pack") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = file_name.strip_suffix(".idx") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = file_name.strip_suffix(".keep") {
+        return Some(stem.to_string());
+    }
+    file_name
+        .split_once('.')
+        .map(|(stem, _)| stem.to_string())
+        .or_else(|| Some(file_name.to_string()))
+}
+
+fn handle_pack_file(
+    path: &Path,
+    policy: PrunePolicy,
+    dry_run: bool,
+    has_keep: bool,
+    reason: &str,
+) -> CliResult<PackFileAction> {
+    if has_keep {
+        return Ok(PackFileAction {
+            path: display_path(path),
+            action: PackAction::Retained,
+            reason: format!("{reason}; matching .keep file is present"),
+        });
+    }
+    if !should_prune(path, policy)? {
+        return Ok(PackFileAction {
+            path: display_path(path),
+            action: PackAction::Retained,
+            reason: format!("{reason}; file is newer than prune cutoff or pruning is disabled"),
+        });
+    }
+    let action = if dry_run {
+        PackAction::WouldPrune
+    } else {
+        remove_file(path)?;
+        PackAction::Pruned
+    };
+    Ok(PackFileAction {
+        path: display_path(path),
+        action,
+        reason: reason.to_string(),
+    })
+}
+
+fn remove_file(path: &Path) -> CliResult<()> {
+    fs::remove_file(path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to remove '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+    })
+}
+
+fn remove_empty_parent_dir(path: &Path) -> CliResult<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    match fs::remove_dir(parent) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to remove empty object directory '{}': {}",
+            parent.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed)),
+    }
+}
+
+fn format_io_error(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => error.to_string(),
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
+}
