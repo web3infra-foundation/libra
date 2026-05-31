@@ -18,7 +18,7 @@ use git_internal::{
     hash::{ObjectHash, get_hash_kind},
     internal::{
         index::Index,
-        object::{commit::Commit, tree::Tree, types::ObjectType},
+        object::{commit::Commit, tag::Tag, tree::Tree, types::ObjectType},
     },
     utils::read_sha,
 };
@@ -225,6 +225,7 @@ fn list_idx_objects(idx_path: &Path) -> io::Result<Vec<ObjectHash>> {
     if magic == IDX_MAGIC {
         // Index v2
         idx_file.seek(io::SeekFrom::Start(FANOUT_LEN + 8))?;
+        idx_file.seek(io::SeekFrom::Current(-4))?;
         let mut fanout_entry = [0u8; 4];
         idx_file.read_exact(&mut fanout_entry)?;
 
@@ -244,6 +245,7 @@ fn list_idx_objects(idx_path: &Path) -> io::Result<Vec<ObjectHash>> {
             ));
         }
         idx_file.seek(io::SeekFrom::Start(FANOUT_LEN))?;
+        idx_file.seek(io::SeekFrom::Current(-4))?;
         let mut fanout_entry = [0u8; 4];
         idx_file.read_exact(&mut fanout_entry)?;
         let object_count = u32::from_be_bytes(fanout_entry) as usize;
@@ -612,6 +614,11 @@ fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> Vec<ObjectHas
                 for item in &tree.tree_items {
                     refs.push(item.id);
                 }
+            }
+        }
+        ObjectType::Tag => {
+            if let Ok(tag) = load_object::<Tag>(hash) {
+                refs.push(tag.object_hash);
             }
         }
         _ => {}

@@ -12,7 +12,10 @@ use git_internal::{
     internal::object::{
         blob::Blob,
         commit::Commit,
+        signature::{Signature, SignatureType},
+        tag::Tag,
         tree::{Tree, TreeItem, TreeItemMode},
+        types::ObjectType,
     },
 };
 use sea_orm::{ActiveModelTrait, Set};
@@ -80,7 +83,7 @@ fn write_fake_idx_v2(repo: &Path, hashes: &[ObjectHash]) -> PathBuf {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&[0xFF, 0x74, 0x4F, 0x63]);
     bytes.extend_from_slice(&2u32.to_be_bytes());
-    bytes.extend_from_slice(&vec![0u8; 256 * 4]);
+    bytes.extend_from_slice(&vec![0u8; 255 * 4]);
     bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
     for hash in hashes {
         bytes.extend_from_slice(hash.as_ref());
@@ -100,7 +103,7 @@ fn write_fake_idx_v1(repo: &Path, hashes: &[ObjectHash]) -> PathBuf {
     let idx_path = pack_dir.join("pack-test-v1.idx");
 
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&vec![0u8; 256 * 4]);
+    bytes.extend_from_slice(&vec![0u8; 255 * 4]);
     bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
     for (idx, hash) in hashes.iter().enumerate() {
         bytes.extend_from_slice(&(idx as u32).to_be_bytes());
@@ -147,6 +150,45 @@ fn insert_invalid_reference(repo: &Path, name: &str, commit: &str) {
         };
         model.insert(&db_conn).await.expect("insert invalid ref");
     });
+}
+
+/// Insert an annotated tag reference pointing at a tag object.
+fn insert_tag_reference(repo: &Path, tag_name: &str, tag_object: &ObjectHash) {
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let db_conn = libra::internal::db::get_db_conn_instance().await;
+        let model = libra::internal::model::reference::ActiveModel {
+            name: Set(Some(format!("refs/tags/{tag_name}"))),
+            kind: Set(libra::internal::model::reference::ConfigKind::Tag),
+            commit: Set(Some(tag_object.to_string())),
+            remote: Set(None),
+            ..Default::default()
+        };
+        model.insert(&db_conn).await.expect("insert tag ref");
+    });
+}
+
+/// Create an annotated tag object that points to a commit and store its ref.
+fn create_annotated_tag(repo: &Path, commit: &ObjectHash, tag_name: &str) -> ObjectHash {
+    let _guard = ChangeDirGuard::new(repo);
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let tag = Tag::new(
+        *commit,
+        ObjectType::Commit,
+        tag_name.to_string(),
+        Signature {
+            signature_type: SignatureType::Tagger,
+            name: "tester".to_string(),
+            email: "tester@example.com".to_string(),
+            timestamp: 1,
+            timezone: "+0000".to_string(),
+        },
+        "annotated tag".to_string(),
+    );
+    save_object(&tag, &tag.id).expect("failed to save tag object");
+    insert_tag_reference(repo, tag_name, &tag.id);
+    tag.id
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +261,25 @@ fn test_prune_verbose_reports_deletions() {
     assert!(stdout.contains(&format!("{blob} blob")));
 }
 
+#[test]
+#[serial]
+fn test_prune_keeps_tagged_commit_object() {
+    let repo = create_committed_repo_via_cli();
+    let (commit, tree, blob) = create_unreachable_commit(repo.path(), "tagged-commit");
+    let _tag = create_annotated_tag(repo.path(), &commit, "v1.2.3");
+
+    assert!(object_exists(repo.path(), &commit.to_string()));
+    assert!(object_exists(repo.path(), &tree.to_string()));
+    assert!(object_exists(repo.path(), &blob.to_string()));
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should keep annotated tag targets");
+
+    assert!(object_exists(repo.path(), &commit.to_string()));
+    assert!(object_exists(repo.path(), &tree.to_string()));
+    assert!(object_exists(repo.path(), &blob.to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Boundary Condition Tests (>= 8 required)
 // ---------------------------------------------------------------------------
@@ -251,7 +312,7 @@ fn test_prune_expire_relative_keeps_recent_blob() {
 
 #[test]
 #[serial]
-/// Tests future --expire prunes reachable objects.
+/// Tests future --expire prunes unreachable objects.
 fn test_prune_expire_future_prunes_unreachable_blob() {
     let repo = create_committed_repo_via_cli();
     let blob = create_unreachable_blob(repo.path(), "orphan-blob-expire-future");
