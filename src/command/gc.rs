@@ -36,11 +36,13 @@ EXAMPLES:
     libra gc                         Trace reachable objects and prune old unreachable loose objects
     libra gc --dry-run --prune=now   Report every object and stale pack file that would be removed
     libra gc --prune=now             Remove unreachable loose objects immediately
-    libra gc --prune=never --json    Inspect reachability and pack hygiene without deleting objects";
+    libra --json gc --prune=never    Inspect reachability and pack hygiene without deleting objects";
 
 const DEFAULT_PRUNE: &str = "2.weeks.ago";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
+const SECONDS_PER_MONTH: u64 = 30 * SECONDS_PER_DAY;
+const SECONDS_PER_YEAR: u64 = 365 * SECONDS_PER_DAY;
 
 #[derive(Parser, Debug)]
 #[command(after_help = GC_EXAMPLES)]
@@ -49,7 +51,7 @@ pub struct GcArgs {
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Prune unreachable loose objects older than DATE (`now`, `never`, `N.days.ago`, `N.weeks.ago`).
+    /// Prune unreachable loose objects older than DATE (`now`, `never`, `N.days.ago`, `N.weeks.ago`, etc.).
     #[arg(long, default_value = DEFAULT_PRUNE, value_name = "DATE", conflicts_with = "no_prune")]
     pub prune: String,
 
@@ -317,6 +319,8 @@ fn parse_prune_date(raw: &str) -> CliResult<PrunePolicy> {
         "hours.ago" | "hour.ago" => amount.saturating_mul(60 * 60),
         "days.ago" | "day.ago" => amount.saturating_mul(SECONDS_PER_DAY),
         "weeks.ago" | "week.ago" => amount.saturating_mul(SECONDS_PER_WEEK),
+        "months.ago" | "month.ago" => amount.saturating_mul(SECONDS_PER_MONTH),
+        "years.ago" | "year.ago" => amount.saturating_mul(SECONDS_PER_YEAR),
         _ => return Err(invalid_prune_date(value)),
     };
 
@@ -851,6 +855,10 @@ mod tests {
             "2.days.ago",
             "1.week.ago",
             "2.weeks.ago",
+            "1.month.ago",
+            "2.months.ago",
+            "1.year.ago",
+            "2.years.ago",
             "all",
         ] {
             if value == "all" {
@@ -875,7 +883,7 @@ mod tests {
 
     #[test]
     fn parse_prune_date_rejects_bad_amount_and_unit() {
-        for value in ["x.days.ago", "2.months.ago"] {
+        for value in ["x.days.ago", "2.fortnights.ago"] {
             let error = parse_prune_date(value).unwrap_err();
             assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
         }
@@ -1544,6 +1552,12 @@ mod tests {
     #[test]
     fn seconds_per_week_matches_days() {
         assert_eq!(SECONDS_PER_WEEK, 7 * SECONDS_PER_DAY);
+    }
+
+    #[test]
+    fn longer_prune_constants_match_calendar_approximations() {
+        assert_eq!(SECONDS_PER_MONTH, 30 * SECONDS_PER_DAY);
+        assert_eq!(SECONDS_PER_YEAR, 365 * SECONDS_PER_DAY);
     }
 
     #[test]
