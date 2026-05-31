@@ -11,17 +11,22 @@ libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--fo
 ## Description
 
 `libra gc` traces objects reachable from repository references, reflogs, the
-index, in-progress operation state, and local AI/cloud catalogs, then prunes
-unreachable loose objects that match the configured prune cutoff. It also
+index, in-progress operation state, and local AI catalogs, then prunes
+unreachable loose objects that match the configured prune cutoff. When cloud
+backup is configured, unsynced `object_index` rows retain matching loose objects
+as pending backup data; they are reported as retained unreachable objects rather
+than counted as reachable graph roots. It also
 inspects `.libra/objects/pack/` and removes stale sidecar files such as orphan
 `.idx` files when they are old enough and not protected by a matching `.keep`
 file.
 
 Valid `.pack` + `.idx` pairs are verified through Libra's existing
 `verify-pack`/pack decoding path. Malformed pack groups are retained and
-reported instead of blocking unrelated cleanup. Libra currently does not rewrite
-valid packs, perform delta compression, create cruft packs, expire reflogs, or
-repack loose reachable objects.
+reported instead of blocking unrelated cleanup. If reachable-object traversal is
+incomplete, non-dry-run loose-object pruning is skipped for that invocation and
+the reason is emitted in `warnings[]`. Libra currently does not rewrite valid
+packs, perform delta compression, create cruft packs, expire reflogs, or repack
+loose reachable objects.
 
 ## Options
 
@@ -67,7 +72,7 @@ With `--json`, `libra gc` returns a `gc` envelope containing:
 - `reachable_objects`
 - `unreachable_objects[]` with object id, type, action, and reason
 - `pack_files.packs_verified`, `objects_in_packs`, and `stale_files[]`
-- `warnings[]` for accepted compatibility flags, stale roots, and forced locks
+- `warnings[]` for accepted compatibility flags, stale roots, incomplete traversal, and forced locks
 
 ```json
 {
@@ -131,5 +136,6 @@ or cruft-pack creation.
 | Not inside a Libra repository | `LBR-REPO-001` | 128 |
 | Invalid prune date | `LBR-CLI-002` | 129 |
 | Object storage cannot be read | `LBR-IO-001` | 128 |
+| Object directory is a symlink or not a directory | `LBR-REPO-002` | 128 |
 | Another GC run holds `gc.lock` | `LBR-CONFLICT-002` | 2 |
 | Object or pack sidecar deletion fails | `LBR-IO-002` | 128 |
