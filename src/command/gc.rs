@@ -853,6 +853,13 @@ mod tests {
             "2.weeks.ago",
             "all",
         ] {
+            if value == "all" {
+                assert!(matches!(
+                    parse_prune_date(value).unwrap(),
+                    PrunePolicy::OlderThan(_)
+                ));
+                continue;
+            }
             assert!(
                 matches!(parse_prune_date(value).unwrap(), PrunePolicy::OlderThan(_)),
                 "{value} should parse"
