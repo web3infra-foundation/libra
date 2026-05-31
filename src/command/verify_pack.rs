@@ -37,6 +37,7 @@ EXAMPLES:
     libra verify-pack -v pack-abc123.idx                             Print every indexed object hash and offset
     libra verify-pack pack-abc123.idx --json                         Structured JSON output for agents";
 
+/// Command-line options for `libra verify-pack`.
 #[derive(Parser, Debug)]
 #[command(after_help = VERIFY_PACK_EXAMPLES)]
 pub struct VerifyPackArgs {
@@ -53,56 +54,89 @@ pub struct VerifyPackArgs {
     pub verbose: bool,
 }
 
+/// Full verification result used by human and JSON renderers.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackOutput {
+    /// Pack index path shown to the caller.
     idx_file: String,
+    /// Pack data path verified against the index.
     pack_file: String,
+    /// Parsed pack-index format version.
     index_version: u8,
+    /// Number of objects listed by the index.
     object_count: usize,
+    /// Pack checksum recorded in the index trailer.
     pack_hash: String,
+    /// Index checksum recorded in the index trailer.
     index_hash: String,
+    /// Whether the pack/index pair passed validation.
     verified: bool,
+    /// Per-object details emitted in verbose mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     objects: Vec<VerifyPackObjectOutput>,
 }
 
+/// Verbose verification details for one packed object.
 #[derive(Debug, Clone, Serialize)]
 struct VerifyPackObjectOutput {
+    /// Object ID listed in the index.
     oid: String,
+    /// Decoded object type from the pack entry.
     object_type: String,
+    /// Uncompressed object size.
     size: usize,
+    /// Number of bytes occupied by this entry in the pack file.
     size_in_pack: u64,
+    /// Offset of the entry inside the pack file.
     offset: u64,
+    /// Optional CRC32 stored by version 2 pack indexes.
     #[serde(skip_serializing_if = "Option::is_none")]
     crc32: Option<u32>,
 }
 
+/// Parsed representation of a pack index file.
 #[derive(Debug, Clone)]
 struct ParsedIndex {
+    /// Pack-index version.
     version: u8,
+    /// Sorted index entries.
     entries: Vec<ParsedIndexEntry>,
+    /// Pack checksum recorded by the index.
     pack_hash: ObjectHash,
+    /// Index checksum bytes recorded by the index.
     index_hash: Vec<u8>,
 }
 
+/// One object entry parsed from a pack index.
 #[derive(Debug, Clone)]
 struct ParsedIndexEntry {
+    /// Object ID.
     hash: ObjectHash,
+    /// Pack-file offset.
     offset: u64,
+    /// Optional CRC32 for version 2 indexes.
     crc32: Option<u32>,
 }
 
+/// Pack decoding result keyed by object ID.
 #[derive(Debug, Clone)]
 struct DecodedPack {
+    /// Pack checksum computed while decoding.
     pack_hash: ObjectHash,
+    /// Pack file length in bytes.
     pack_len: u64,
+    /// Decoded entries by object ID.
     entries: BTreeMap<ObjectHash, DecodedPackEntry>,
 }
 
+/// Metadata extracted from one decoded pack entry.
 #[derive(Debug, Clone)]
 struct DecodedPackEntry {
+    /// Index metadata derived from the decoded entry.
     index: IndexEntry,
+    /// Decoded object type.
     object_type: ObjectType,
+    /// Uncompressed object size.
     size: usize,
 }
 

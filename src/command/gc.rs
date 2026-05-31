@@ -44,6 +44,7 @@ const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 const SECONDS_PER_MONTH: u64 = 30 * SECONDS_PER_DAY;
 const SECONDS_PER_YEAR: u64 = 365 * SECONDS_PER_DAY;
 
+/// Command-line options for `libra gc`.
 #[derive(Parser, Debug)]
 #[command(after_help = GC_EXAMPLES)]
 pub struct GcArgs {
@@ -72,89 +73,140 @@ pub struct GcArgs {
     pub force: bool,
 }
 
+/// Complete `gc` result used by human and JSON renderers.
 #[derive(Debug, Clone, Serialize)]
 struct GcOutput {
+    /// Effective prune option reported to callers.
     prune: String,
+    /// Whether this run only reported planned removals.
     dry_run: bool,
+    /// Aggregate loose-object scan and prune statistics.
     loose_objects: LooseObjectStats,
+    /// Number of objects marked reachable after graph traversal.
     reachable_objects: usize,
+    /// Per-object actions for unreachable loose objects.
     unreachable_objects: Vec<GcObjectAction>,
+    /// Pack-directory verification and cleanup statistics.
     pack_files: PackStats,
+    /// Compatibility warnings emitted for accepted no-op flags.
     warnings: Vec<String>,
 }
 
+/// Aggregate statistics for loose-object scanning and pruning.
 #[derive(Debug, Clone, Default, Serialize)]
 struct LooseObjectStats {
+    /// Number of loose object files scanned.
     scanned: usize,
+    /// Number of scanned loose objects that were reachable.
     reachable: usize,
+    /// Number of scanned loose objects that were unreachable.
     unreachable: usize,
+    /// Number of unreachable loose objects deleted.
     pruned: usize,
+    /// Number of unreachable loose objects retained.
     retained: usize,
 }
 
+/// One action taken or planned for an unreachable loose object.
 #[derive(Debug, Clone, Serialize)]
 struct GcObjectAction {
+    /// Object ID of the unreachable loose object.
     oid: String,
+    /// Object type reported for the loose object.
     object_type: String,
+    /// Action taken or planned for the object.
     action: GcAction,
+    /// Human-readable reason for the action.
     reason: String,
 }
 
+/// JSON-stable action names for loose-object pruning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum GcAction {
+    /// Object was removed.
     Pruned,
+    /// Object would be removed in a non-dry-run invocation.
     WouldPrune,
+    /// Object was retained.
     Retained,
 }
 
+/// Aggregate pack-directory verification and cleanup statistics.
 #[derive(Debug, Clone, Default, Serialize)]
 struct PackStats {
+    /// Whether `.libra/objects/pack` exists.
     directory_exists: bool,
+    /// Number of valid pack/index pairs verified.
     packs_verified: usize,
+    /// Number of indexed objects found in verified packs.
     objects_in_packs: usize,
+    /// Actions for stale pack sidecar files.
     stale_files: Vec<PackFileAction>,
 }
 
+/// One action taken or planned for a stale pack-directory file.
 #[derive(Debug, Clone, Serialize)]
 struct PackFileAction {
+    /// Filesystem path reported for the pack sidecar.
     path: String,
+    /// Action taken or planned for the file.
     action: PackAction,
+    /// Human-readable reason for the action.
     reason: String,
 }
 
+/// JSON-stable action names for pack sidecar cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PackAction {
+    /// File was removed.
     Pruned,
+    /// File would be removed in a non-dry-run invocation.
     WouldPrune,
+    /// File was retained.
     Retained,
 }
 
+/// Effective pruning policy after resolving CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrunePolicy {
+    /// Never remove unreachable objects or stale pack files.
     Never,
+    /// Remove entries whose modification time is at or before the cutoff.
     OlderThan(SystemTime),
 }
 
+/// Loose object discovered in the object database.
 #[derive(Debug, Clone)]
 struct LooseObject {
+    /// Object ID reconstructed from the loose-object path.
     hash: ObjectHash,
+    /// Filesystem path to the loose-object file.
     path: PathBuf,
 }
 
+/// Mutable state used while collecting and tracing object reachability.
 #[derive(Debug, Clone, Default)]
 struct Reachability {
+    /// Loose objects discovered before graph traversal.
     loose: Vec<LooseObject>,
+    /// Root object IDs loaded from refs, reflogs, and index entries.
     roots: HashSet<ObjectHash>,
+    /// Object IDs reached by graph traversal.
     reachable: HashSet<ObjectHash>,
 }
 
+/// Files in `.libra/objects/pack` grouped by shared pack stem.
 #[derive(Debug, Clone, Default)]
 struct PackGroup {
+    /// Matching `.pack` file when present.
     pack: Option<PathBuf>,
+    /// Matching `.idx` file when present.
     idx: Option<PathBuf>,
+    /// Matching `.keep` file when present.
     keep: Option<PathBuf>,
+    /// Other files sharing the same pack stem.
     others: Vec<PathBuf>,
 }
 
