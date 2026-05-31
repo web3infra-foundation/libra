@@ -1,5 +1,7 @@
 //! Implementation of `fsck` command for verifying repository integrity.
 //!
+//! `fsck` 命令的实现，用于验证存储库完整性。
+//!
 //! This command checks the integrity of objects, refs, and index in a Libra repository.
 
 use std::{
