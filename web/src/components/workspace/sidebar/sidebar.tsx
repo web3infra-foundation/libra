@@ -3,7 +3,7 @@
  * thread list, and the account/settings popover trigger at the bottom.
  *
  * Phase 1 wires the active thread to the live `CodeUiSessionSnapshot`.
- * Historical thread list lands in Phase 4 once `/api/code/threads` exists.
+ * Historical thread list is sourced from `/api/code/threads`.
  */
 "use client";
 

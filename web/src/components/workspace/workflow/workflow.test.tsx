@@ -157,4 +157,19 @@ describe("Workflow", () => {
 
     unmount();
   });
+
+  it("shows a neutral token usage placeholder when the snapshot lacks usage data", () => {
+    storeState.snapshot = baseSnapshot();
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    const tokenBadge = Array.from(container.querySelectorAll("[title]")).find(
+      (node) => (node as HTMLElement).title.includes("Token usage is not exposed"),
+    ) as HTMLElement | undefined;
+    expect(tokenBadge).toBeDefined();
+    expect(tokenBadge?.textContent).toContain("Token");
+    expect(tokenBadge?.textContent).toContain("—");
+
+    unmount();
+  });
 });

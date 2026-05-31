@@ -82,3 +82,18 @@ Invalid params map to `-32602`. HTTP 4xx/5xx errors map to `-32000` with
 `data.status` and `data.code`, preserving Libra errors such as
 `INVALID_CONTROL_TOKEN`, `INVALID_CONTROLLER_TOKEN`, `CONTROLLER_CONFLICT`, and
 `INTERACTION_NOT_ACTIVE`.
+
+## Control endpoint & header reference
+
+The loopback control surface exposes these `/api/code/*` endpoints, consumed by
+`libra code-control` and the browser/automation controllers. The full matrix and
+error-code mapping live here (this section replaces the former
+`docs/automation/local-tui-control.md`, removed when the Code TUI was dropped):
+
+- `GET /api/code/threads` — list the Code sessions (threads) a controller may attach to.
+
+Authentication headers:
+
+- `X-Libra-Control-Token` — process-level control token from `libra code --control write`.
+- `X-Code-Controller-Token` — per-controller token issued on `controller/attach`,
+  sent on subsequent controller-scoped requests (distinct from `X-Libra-Control-Token`).

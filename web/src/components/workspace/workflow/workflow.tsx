@@ -87,7 +87,7 @@ export function Workflow({ width }: Props) {
         </div>
         <div className="flex items-center gap-1.5 text-ink-3">
           <span
-            title="No token usage data yet — wire up in Phase 4."
+            title="Token usage is not exposed in the current web snapshot yet."
             className="inline-flex items-center gap-1.5 rounded-sm border border-rule-2 bg-paper-2 px-2 py-1 text-[11px] text-ink-2"
           >
             <IconTokens size={11} />

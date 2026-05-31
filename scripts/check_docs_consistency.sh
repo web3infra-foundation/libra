@@ -28,11 +28,11 @@ for endpoint in \
   "/api/code/goal/start" \
   "/api/code/goal/cancel"
 do
-  require_doc "$endpoint" "docs/automation/local-tui-control.md"
+  require_doc "$endpoint" "docs/commands/code-control.md"
 done
 
 for header_name in "X-Libra-Control-Token" "X-Code-Controller-Token"; do
-  require_doc "$header_name" "docs/automation/local-tui-control.md"
+  require_doc "$header_name" "docs/commands/code-control.md"
   rg -qi -- "$header_name" src docs >/dev/null
 done
 
@@ -56,10 +56,8 @@ done
 
 require_doc "code-control --stdio" "docs/commands/code-control.md"
 require_doc "diagnostics.get" "docs/commands/code-control.md"
-require_doc "test-provider" "docs/automation/local-tui-control.md"
-require_doc "code_ui_scenarios" "docs/automation/local-tui-control.md"
-require_doc "target/code-ui-scenarios" "docs/automation/local-tui-control.md"
-require_doc "Scenario::new" "docs/automation/local-tui-control.md"
+require_doc "test-provider" "docs/development/web-only.md"
+require_doc "code_ui_scenarios" "docs/development/web-only.md"
 require_doc "diagnostics_redaction_test" "docs/improvement/agent.md"
 require_doc "Run TUI automation scenarios" ".github/workflows/base.yml"
 
