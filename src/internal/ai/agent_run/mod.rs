@@ -70,6 +70,7 @@ pub mod permission;
 pub mod risk_score;
 pub mod run;
 pub mod task;
+pub mod validator;
 pub mod workspace_sizing;
 pub mod workspace_strategy;
 
@@ -268,6 +269,7 @@ pub use permission::AgentPermissionProfile;
 pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
+pub use validator::collect_distillable_evidence_ids;
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
     WriteScopeViolation, check_write_in_scope, record_materialization, resolve_full_copy_fallback,
