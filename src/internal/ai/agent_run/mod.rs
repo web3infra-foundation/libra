@@ -67,6 +67,7 @@ pub mod evidence_query;
 pub mod parallel;
 pub mod patchset;
 pub mod permission;
+pub mod risk_score;
 pub mod run;
 pub mod task;
 pub mod workspace_sizing;
@@ -264,6 +265,7 @@ pub use parallel::{
 };
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
+pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
 pub use workspace_strategy::{
