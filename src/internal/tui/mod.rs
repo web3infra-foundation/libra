@@ -1,5 +1,7 @@
 //! Terminal UI for the `libra code` interactive console.
 //!
+//! `libra code` 交互式控制台的终端用户界面。
+//!
 //! This module is the root of the ratatui-based TUI that hosts an interactive
 //! agent session. The runtime is an event loop: terminal events from
 //! [`terminal::Tui`] feed into [`app::App`], which mutates state held by
