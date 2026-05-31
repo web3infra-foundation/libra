@@ -9,9 +9,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use chrono::{DateTime, NaiveDate};
 use clap::Parser;
 use git_internal::{
-    hash::ObjectHash,
+    hash::{ObjectHash, get_hash_kind},
     internal::object::{
         commit::Commit,
         tag::Tag as GitTag,
@@ -75,7 +76,7 @@ pub struct GcArgs {
     #[arg(long)]
     pub auto: bool,
 
-    /// Accepted for Git compatibility. The current implementation has no gc lock.
+    /// Force the run if a stale gc lock file is present.
     #[arg(long)]
     pub force: bool,
 }
@@ -219,6 +220,19 @@ struct PackGroup {
     others: Vec<PathBuf>,
 }
 
+/// Held while a `gc` process owns `.libra/gc.lock`.
+struct GcLockGuard {
+    path: PathBuf,
+    _file: fs::File,
+    forced: bool,
+}
+
+impl Drop for GcLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// Run `gc` with default human-output configuration.
 pub async fn execute(args: GcArgs) -> Result<(), String> {
     execute_safe(args, &OutputConfig::default())
@@ -246,6 +260,7 @@ pub async fn execute_safe(args: GcArgs, output: &OutputConfig) -> CliResult<()> 
 
 /// Execute the garbage-collection pass and return renderable statistics.
 async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
+    let lock = acquire_gc_lock(args.force)?;
     let policy = prune_policy(args)?;
     let storage = ClientStorage::init(path::objects());
     let mut reachability = collect_reachability(&storage).await?;
@@ -285,7 +300,11 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
             .push("--auto is accepted for compatibility; Libra still runs one local pass".into());
     }
     if args.force {
-        warnings.push("--force is accepted for compatibility; no gc lock is used".into());
+        if lock.forced {
+            warnings.push("--force removed an existing gc lock before running".into());
+        } else {
+            warnings.push("--force is accepted for compatibility; gc lock was available".into());
+        }
     }
 
     Ok(GcOutput {
@@ -301,6 +320,68 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
         pack_files,
         warnings,
     })
+}
+
+/// Acquire the repository-local GC lock.
+fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
+    use std::io::Write as _;
+
+    let path = util::storage_path().join("gc.lock");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let _ = writeln!(file, "pid={}", std::process::id());
+            Ok(GcLockGuard {
+                path,
+                _file: file,
+                forced: false,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && force => {
+            fs::remove_file(&path).map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to remove existing gc lock '{}': {}",
+                    path.display(),
+                    format_io_error(&error)
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+            })?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to create gc lock '{}': {}",
+                        path.display(),
+                        format_io_error(&error)
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+            let _ = writeln!(file, "pid={}", std::process::id());
+            Ok(GcLockGuard {
+                path,
+                _file: file,
+                forced: true,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(CliError::conflict(format!(
+                "gc is already running; lock file '{}' exists",
+                path.display()
+            ))
+            .with_hint("wait for the current gc to finish, or re-run with --force after verifying the lock is stale."))
+        }
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to create gc lock '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed)),
+    }
 }
 
 /// Render the garbage-collection result as human text or JSON.
@@ -374,6 +455,26 @@ fn parse_prune_date(raw: &str) -> CliResult<PrunePolicy> {
         return Ok(PrunePolicy::OlderThan(SystemTime::now()));
     }
 
+    if let Ok(seconds) = value.parse::<i64>() {
+        return Ok(PrunePolicy::OlderThan(system_time_from_unix_seconds(
+            seconds,
+        )));
+    }
+
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Ok(PrunePolicy::OlderThan(system_time_from_unix_seconds(
+            timestamp.timestamp(),
+        )));
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        && let Some(timestamp) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(PrunePolicy::OlderThan(system_time_from_unix_seconds(
+            timestamp.and_utc().timestamp(),
+        )));
+    }
+
     let Some((amount, unit)) = value.split_once('.') else {
         return Err(invalid_prune_date(value));
     };
@@ -398,11 +499,22 @@ fn parse_prune_date(raw: &str) -> CliResult<PrunePolicy> {
     ))
 }
 
+/// Convert signed Unix seconds into a `SystemTime` cutoff.
+fn system_time_from_unix_seconds(seconds: i64) -> SystemTime {
+    if seconds >= 0 {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds as u64)
+    } else {
+        SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(seconds.unsigned_abs()))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+}
+
 /// Build the structured CLI error used for invalid prune dates.
 fn invalid_prune_date(value: &str) -> CliError {
     CliError::fatal(format!("invalid prune date '{value}'"))
         .with_stable_code(StableErrorCode::CliInvalidArguments)
-        .with_hint("use 'now', 'never', or a relative value like '2.weeks.ago'.")
+        .with_hint("use 'now', 'never', a Unix timestamp, RFC3339, YYYY-MM-DD, or a relative value like '2.weeks.ago'.")
 }
 
 /// Decide whether a filesystem entry is old enough for the prune policy.
@@ -897,7 +1009,7 @@ fn parse_stored_hash(raw: &str, source: &str) -> CliResult<ObjectHash> {
 
 /// Return whether a stored object ID is the all-zero null value.
 fn is_null_oid(raw: &str) -> bool {
-    !raw.is_empty() && raw.bytes().all(|byte| byte == b'0')
+    raw.len() == get_hash_kind().size() * 2 && raw.bytes().all(|byte| byte == b'0')
 }
 
 /// Collect object IDs referenced by the working tree index.
@@ -1438,6 +1550,17 @@ mod tests {
                 matches!(parse_prune_date(value).unwrap(), PrunePolicy::OlderThan(_)),
                 "{value} should parse"
             );
+        }
+    }
+
+    #[test]
+    /// Covers absolute prune-date forms accepted by the help text.
+    fn parse_prune_date_accepts_absolute_dates() {
+        for value in ["0", "1970-01-01", "1970-01-01T00:00:00Z"] {
+            let PrunePolicy::OlderThan(cutoff) = parse_prune_date(value).unwrap() else {
+                panic!("expected absolute cutoff");
+            };
+            assert!(cutoff <= SystemTime::now());
         }
     }
 
@@ -2156,6 +2279,44 @@ mod tests {
         assert_eq!(output.warnings.len(), 3);
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers the repository-local GC lock blocking concurrent runs.
+    async fn acquire_gc_lock_blocks_second_holder() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock = acquire_gc_lock(false).unwrap();
+
+        let error = match acquire_gc_lock(false) {
+            Ok(_) => panic!("second lock should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        drop(lock);
+        assert!(!util::storage_path().join("gc.lock").exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers `--force` replacing an existing GC lock file.
+    async fn acquire_gc_lock_force_replaces_existing_file() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, "stale").unwrap();
+
+        let lock = acquire_gc_lock(true).unwrap();
+
+        assert!(lock.forced);
+        assert!(lock_path.exists());
+    }
+
     #[test]
     /// Covers human dry-run output rendering.
     fn render_gc_output_prints_human_dry_run_summary() {
@@ -2298,9 +2459,14 @@ mod tests {
     #[test]
     /// Covers all-zero object ID detection.
     fn is_null_oid_requires_non_empty_zero_string() {
-        assert!(is_null_oid("0000"));
+        let zero = "0".repeat(get_hash_kind().size() * 2);
+        assert!(is_null_oid(&zero));
+        assert!(!is_null_oid("0000"));
         assert!(!is_null_oid(""));
-        assert!(!is_null_oid("0001"));
+        assert!(!is_null_oid(&format!(
+            "{}1",
+            "0".repeat(get_hash_kind().size() * 2 - 1)
+        )));
     }
 
     #[test]

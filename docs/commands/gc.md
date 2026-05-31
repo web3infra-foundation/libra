@@ -10,27 +10,29 @@ libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--fo
 
 ## Description
 
-`libra gc` traces objects reachable from repository references, reflogs, and the
-index, then prunes unreachable loose objects that match the configured prune
-cutoff. It also inspects `.libra/objects/pack/` and removes stale sidecar files
-such as orphan `.idx` files when they are old enough and not protected by a
-matching `.keep` file.
+`libra gc` traces objects reachable from repository references, reflogs, the
+index, in-progress operation state, and local AI/cloud catalogs, then prunes
+unreachable loose objects that match the configured prune cutoff. It also
+inspects `.libra/objects/pack/` and removes stale sidecar files such as orphan
+`.idx` files when they are old enough and not protected by a matching `.keep`
+file.
 
 Valid `.pack` + `.idx` pairs are verified through Libra's existing
-`verify-pack`/pack decoding path. Libra currently does not rewrite valid packs,
-perform delta compression, create cruft packs, expire reflogs, or repack loose
-reachable objects.
+`verify-pack`/pack decoding path. Malformed pack groups are retained and
+reported instead of blocking unrelated cleanup. Libra currently does not rewrite
+valid packs, perform delta compression, create cruft packs, expire reflogs, or
+repack loose reachable objects.
 
 ## Options
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--dry-run` | `-n` | Report objects and pack sidecars that would be removed without deleting them | Off |
-| `--prune <DATE>` | | Prune unreachable loose objects older than `<DATE>`; supports `now`, `never`, `N.seconds.ago`, `N.minutes.ago`, `N.hours.ago`, `N.days.ago`, `N.weeks.ago`, `N.months.ago`, and `N.years.ago` | `2.weeks.ago` |
+| `--prune <DATE>` | | Prune unreachable loose objects older than `<DATE>`; supports `now`, `never`, Unix timestamps, RFC3339 timestamps, `YYYY-MM-DD`, and `N.seconds.ago`, `N.minutes.ago`, `N.hours.ago`, `N.days.ago`, `N.weeks.ago`, `N.months.ago`, `N.years.ago` | `2.weeks.ago` |
 | `--no-prune` | | Disable pruning and only inspect reachability and pack hygiene | Off |
 | `--aggressive` | | Accepted for Git compatibility; Libra does not repack or delta-compress yet | Off |
 | `--auto` | | Accepted for Git compatibility; Libra still runs one deterministic local pass | Off |
-| `--force` | | Accepted for Git compatibility; the current implementation has no gc lock | Off |
+| `--force` | | Replace an existing `gc.lock` after verifying it is stale | Off |
 | `--json` | | Emit a structured JSON envelope | Off |
 | `--machine` | | Emit the same envelope as one compact JSON line | Off |
 
@@ -65,7 +67,7 @@ With `--json`, `libra gc` returns a `gc` envelope containing:
 - `reachable_objects`
 - `unreachable_objects[]` with object id, type, action, and reason
 - `pack_files.packs_verified`, `objects_in_packs`, and `stale_files[]`
-- `warnings[]` for accepted compatibility flags that do not change behavior yet
+- `warnings[]` for accepted compatibility flags, stale roots, and forced locks
 
 ```json
 {
@@ -116,6 +118,7 @@ or cruft-pack creation.
 | Dry run | `-n` / `--dry-run` | `--dry-run` | N/A |
 | Disable pruning | `--no-prune` | `--no-prune` | N/A |
 | Pack verification | Reuses `verify-pack` for valid pack/index pairs | Repack/verify as part of maintenance | N/A |
+| GC lock | `.libra/gc.lock` for concurrent `gc` runs | Supported | N/A |
 | Repack valid objects | Unsupported | Supported | N/A |
 | Cruft packs | Unsupported | Supported | N/A |
 | Reflog expiration | Unsupported | Supported | N/A |
@@ -128,6 +131,5 @@ or cruft-pack creation.
 | Not inside a Libra repository | `LBR-REPO-001` | 128 |
 | Invalid prune date | `LBR-CLI-002` | 129 |
 | Object storage cannot be read | `LBR-IO-001` | 128 |
-| Reachable object is malformed or missing | `LBR-REPO-002` | 128 |
-| Pack/index pair is malformed or inconsistent | `LBR-REPO-002` | 128 |
+| Another GC run holds `gc.lock` | `LBR-CONFLICT-002` | 2 |
 | Object or pack sidecar deletion fails | `LBR-IO-002` | 128 |
