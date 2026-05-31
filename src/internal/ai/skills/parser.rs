@@ -1,4 +1,6 @@
 //! Skill parser: markdown + TOML frontmatter -> [`SkillDefinition`].
+//!
+//! 技能解析器：markdown + TOML frontmatter -> [`SkillDefinition`]。
 
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
