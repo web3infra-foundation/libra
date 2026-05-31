@@ -524,8 +524,49 @@ async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
         }
     }
 
+    roots.extend(stash_roots()?);
     roots.extend(index_roots()?);
     Ok(roots)
+}
+
+/// Load root object IDs from file-backed stash references and stash reflogs.
+fn stash_roots() -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    let storage_path = util::storage_path();
+    let stash_ref = storage_path.join("refs/stash");
+    if let Some(content) = read_optional_metadata_file(&stash_ref, "stash reference")? {
+        let raw = content.trim();
+        if !raw.is_empty() {
+            roots.insert(parse_stored_hash(raw, "stash reference")?);
+        }
+    }
+
+    let stash_log = storage_path.join("logs/refs/stash");
+    if let Some(content) = read_optional_metadata_file(&stash_log, "stash reflog")? {
+        for line in content.lines() {
+            let mut fields = line.split_whitespace();
+            for raw in [fields.next(), fields.next()].into_iter().flatten() {
+                if !is_null_oid(raw) {
+                    roots.insert(parse_stored_hash(raw, "stash reflog")?);
+                }
+            }
+        }
+    }
+    Ok(roots)
+}
+
+/// Read an optional repository metadata file, treating absence as empty data.
+fn read_optional_metadata_file(path: &Path, label: &str) -> CliResult<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to read {label} '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
 }
 
 /// Parse an object ID read from repository metadata.
@@ -1669,6 +1710,80 @@ mod tests {
         for hash in expected {
             assert!(roots.contains(&hash));
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers index roots ignoring gitlink entries.
+    async fn index_roots_skip_gitlink_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let gitlink = test_hash(7);
+        let mut index = git_internal::internal::index::Index::new();
+        let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+            "submodule".to_string(),
+            gitlink,
+            0,
+        );
+        entry.mode = GITLINK_INDEX_MODE;
+        index.add(entry);
+        index.to_file(path::index()).unwrap();
+
+        let roots = index_roots().unwrap();
+        assert!(!roots.contains(&gitlink));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers file-backed stash references being used as reachability roots.
+    async fn run_gc_preserves_file_backed_stash_ref() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let blob = Blob::from_content("stashed");
+        save_object(&blob, &blob.id).unwrap();
+        let stash_ref = util::storage_path().join("refs/stash");
+        fs::create_dir_all(stash_ref.parent().unwrap()).unwrap();
+        fs::write(&stash_ref, format!("{}\n", blob.id)).unwrap();
+
+        let result = run_gc(&GcArgs {
+            dry_run: false,
+            prune: "now".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.loose_objects.pruned, 0);
+        assert!(storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers file-backed stash reflogs being used as reachability roots.
+    async fn stash_roots_include_file_backed_reflog_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let old_hash = test_hash(10);
+        let new_hash = test_hash(11);
+        let stash_log = util::storage_path().join("logs/refs/stash");
+        fs::create_dir_all(stash_log.parent().unwrap()).unwrap();
+        fs::write(
+            &stash_log,
+            format!("{old_hash} {new_hash} tester <tester@example.com> 1 +0000\tstash\n"),
+        )
+        .unwrap();
+
+        let roots = stash_roots().unwrap();
+
+        assert!(roots.contains(&old_hash));
+        assert!(roots.contains(&new_hash));
     }
 
     #[tokio::test]
