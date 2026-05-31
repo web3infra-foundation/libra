@@ -104,6 +104,39 @@ fn test_blame_machine_output_is_single_line_json() {
     assert!(parsed["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: a missing path in JSON mode must use the stable invalid-target
+/// code so agents can distinguish user input errors from repository failures.
+#[test]
+fn test_blame_json_file_not_found_uses_stable_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "blame", "missing.txt"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert!(report.message.contains("file 'missing.txt' not found"));
+}
+
+/// Scenario: an invalid revision in JSON mode must be reported as a stable
+/// invalid-target error rather than a generic fatal failure.
+#[test]
+fn test_blame_json_invalid_revision_uses_stable_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["--json", "blame", "tracked.txt", "no-such-rev"],
+        repo.path(),
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.category, "cli");
+    assert!(report.message.contains("invalid revision: 'no-such-rev'"));
+}
+
 /// Scenario: human-readable blame output must truncate excessively long
 /// (Unicode) author names with an ellipsis ("...") rather than corrupt
 /// the table layout. Regression guard against char-vs-byte width bugs.
@@ -198,6 +231,52 @@ async fn test_blame_json_line_range_filters_output() {
     assert_eq!(lines[0]["line_number"], 2);
     assert_eq!(lines[0]["hash"], second.to_string());
     assert_eq!(lines[0]["content"], "line2-modified");
+}
+
+/// Scenario: all documented `-L` syntaxes must work in JSON mode: a single
+/// line and a relative `START,+COUNT` range.
+#[tokio::test]
+#[serial]
+async fn test_blame_json_line_range_single_and_relative_forms() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "-L", "1", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame single line range");
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+
+    let output = run_libra_command(&["--json", "blame", "-L", "1,+2", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame relative line range");
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+    assert_eq!(lines[1]["line_number"], 2);
+    assert_eq!(lines[1]["hash"], second.to_string());
+}
+
+/// Scenario: empty files should be valid JSON results with an empty `lines`
+/// array, not a special-case error.
+#[test]
+fn test_blame_json_empty_file_returns_empty_lines() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("empty.txt"), "").unwrap();
+    let output = run_libra_command(&["add", "empty.txt"], repo.path());
+    assert_cli_success(&output, "add empty file");
+    let output = run_libra_command(&["commit", "-m", "empty file", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit empty file");
+
+    let output = run_libra_command(&["--json", "blame", "empty.txt"], repo.path());
+    assert_cli_success(&output, "json blame empty file");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["file"], "empty.txt");
+    assert_eq!(json["data"]["lines"].as_array().unwrap().len(), 0);
 }
 
 /// Scenario: an out-of-bounds `-L` range must surface as a stable CLI
