@@ -9,6 +9,7 @@ use std::{
     fs, io,
     io::{Read, Seek},
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +23,7 @@ use git_internal::{
     },
     utils::read_sha,
 };
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
@@ -43,6 +44,7 @@ use crate::{
 
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: u64 = 256 * 4;
+const TAG_REF_PREFIX: &str = "refs/tags/";
 
 const PRUNE_LONG_ABOUT: &str =
     "Prune unreachable loose objects from the repository.
@@ -205,9 +207,14 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
     {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "idx")
-                && let Ok(packed) = list_idx_objects(&path)
-            {
+            if path.extension().is_some_and(|ext| ext == "idx") {
+                let packed = list_idx_objects(&path).map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to read pack index '{}': {error}",
+                        path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                })?;
                 packed_objects.extend(packed);
             }
         }
@@ -348,26 +355,76 @@ async fn collect_starting_points(
 
     // User-specified heads
     for head in heads {
-        let commit = resolve_head_commit(head).await?;
-        if !storage.exist(&commit) {
-            return Err(CliError::fatal(format!(
-                "head '{head}' points to missing object {commit}"
-            ))
-            .with_stable_code(StableErrorCode::RepoCorrupt));
+        let hash = resolve_head_object(head, storage).await?;
+        if !storage.exist(&hash) {
+            return Err(
+                CliError::fatal(format!("head '{head}' points to missing object {hash}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt),
+            );
         }
-        starting_points.insert(commit);
+        starting_points.insert(hash);
     }
 
     Ok(starting_points)
 }
 
-/// Resolve a user-provided head argument to a commit hash.
-async fn resolve_head_commit(head: &str) -> CliResult<ObjectHash> {
-    util::get_commit_base_typed(head).await.map_err(|error| {
-        CliError::command_usage(format!("invalid head '{head}': {error}"))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash")
-    })
+/// Resolve a user-provided head argument to an object hash.
+async fn resolve_head_object(head: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
+    if let Some(hash) = resolve_tag_object_ref(head).await {
+        return Ok(hash);
+    }
+
+    if let Ok(hash) = util::get_commit_base(head).await {
+        return Ok(hash);
+    }
+
+    if let Ok(hash) = ObjectHash::from_str(head) {
+        return Ok(hash);
+    }
+
+    let results = storage.search_result(head).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to search objects while resolving '{head}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if results.len() == 1 {
+        return Ok(results[0]);
+    }
+    if results.len() > 1 {
+        return Err(CliError::command_usage(format!(
+            "ambiguous argument '{}': matched {} objects",
+            head,
+            results.len()
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    Err(CliError::fatal(format!("Not a valid object name {}", head))
+        .with_stable_code(StableErrorCode::CliInvalidTarget))
+}
+
+fn normalize_tag_ref_name(object_ref: &str) -> String {
+    if object_ref.starts_with(TAG_REF_PREFIX) {
+        object_ref.to_string()
+    } else {
+        format!("{TAG_REF_PREFIX}{object_ref}")
+    }
+}
+
+async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
+    let full_ref_name = normalize_tag_ref_name(object_ref);
+    let db_conn = db::get_db_conn_instance().await;
+    let tag_ref = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .filter(reference::Column::Name.eq(full_ref_name))
+        .one(&db_conn)
+        .await
+        .ok()
+        .flatten()?;
+
+    let target_hash = tag_ref.commit?;
+    ObjectHash::from_str(&target_hash).ok()
 }
 
 /// Build a prune plan by filtering unreachable loose objects.
@@ -675,7 +732,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&IDX_MAGIC);
         bytes.extend_from_slice(&2u32.to_be_bytes());
-        bytes.extend_from_slice(&vec![0u8; FANOUT_LEN as usize]);
+        bytes.extend_from_slice(&vec![0u8; 255 * 4]);
         bytes.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
         for hash in &hashes {
             bytes.extend_from_slice(hash.as_ref());

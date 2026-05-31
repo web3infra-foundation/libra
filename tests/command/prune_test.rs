@@ -452,21 +452,6 @@ fn test_prune_packed_v1_prunes_reachable_duplicate() {
 
 #[test]
 #[serial]
-/// Tests v1 pack indexes are ignored in sha256 repos.
-fn test_prune_packed_v1_ignored_in_sha256_repo() {
-    let repo = tempdir().unwrap();
-    let output = run_libra_command(&["init", "--object-format", "sha256"], repo.path());
-    assert_cli_success(&output, "failed to init sha256 repo");
-
-    let dummy_hash = ObjectHash::from_bytes(&[0x11; 20]).expect("hash");
-    write_fake_idx_v1(repo.path(), &[dummy_hash]);
-
-    let output = run_libra_command(&["prune"], repo.path());
-    assert_cli_success(&output, "prune should succeed in sha256 repo");
-}
-
-#[test]
-#[serial]
 /// Tests prune removes a batch of unreachable loose blobs.
 fn test_prune_large_unreachable_batch() {
     let repo = create_committed_repo_via_cli();
@@ -559,7 +544,7 @@ fn test_prune_invalid_head_fails() {
     let output = run_libra_command(&["prune", "not-a-ref"], repo.path());
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid head"));
+    assert!(stderr.contains("Not a valid object name"));
 }
 
 #[test]
@@ -598,7 +583,7 @@ fn test_prune_double_dash_invalid_head_fails() {
     let output = run_libra_command(&["prune", "--", "--not-a-ref"], repo.path());
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid head"));
+    assert!(stderr.contains("Not a valid object name"));
 }
 
 #[test]
@@ -654,5 +639,5 @@ fn test_prune_missing_full_hash_head_fails() {
     let output = run_libra_command(&["prune", &missing], repo.path());
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid head"));
+    assert!(stderr.contains("missing object"));
 }

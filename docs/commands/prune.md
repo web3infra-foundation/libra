@@ -49,7 +49,8 @@ In addition to objects reachable from any of our references, keep objects reacha
 
 ```bash
 $ libra prune HEAD~2
-$ libra prune test1 test2
+$ libra prune v1.0 v1.1
+$ libra prune 74689c87fb53b6d666de95efea667d99ba2fa52a
 ```
 
 ## Examples
