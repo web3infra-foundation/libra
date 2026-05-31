@@ -158,6 +158,7 @@ struct PackGroup {
     others: Vec<PathBuf>,
 }
 
+/// Run `gc` with default human-output configuration.
 pub async fn execute(args: GcArgs) -> Result<(), String> {
     execute_safe(args, &OutputConfig::default())
         .await
@@ -182,6 +183,7 @@ pub async fn execute_safe(args: GcArgs, output: &OutputConfig) -> CliResult<()> 
     render_gc_output(&result, output)
 }
 
+/// Execute the garbage-collection pass and return renderable statistics.
 async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let policy = prune_policy(args)?;
     let storage = ClientStorage::init(path::objects());
@@ -239,6 +241,7 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     })
 }
 
+/// Render the garbage-collection result as human text or JSON.
 fn render_gc_output(result: &GcOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("gc", result, output);
@@ -291,6 +294,7 @@ fn render_gc_output(result: &GcOutput, output: &OutputConfig) -> CliResult<()> {
     Ok(())
 }
 
+/// Resolve CLI pruning flags into an effective prune policy.
 fn prune_policy(args: &GcArgs) -> CliResult<PrunePolicy> {
     if args.no_prune {
         return Ok(PrunePolicy::Never);
@@ -298,6 +302,7 @@ fn prune_policy(args: &GcArgs) -> CliResult<PrunePolicy> {
     parse_prune_date(&args.prune)
 }
 
+/// Parse Git-style relative prune dates accepted by `gc`.
 fn parse_prune_date(raw: &str) -> CliResult<PrunePolicy> {
     let value = raw.trim();
     if value.eq_ignore_ascii_case("never") {
@@ -331,12 +336,14 @@ fn parse_prune_date(raw: &str) -> CliResult<PrunePolicy> {
     ))
 }
 
+/// Build the structured CLI error used for invalid prune dates.
 fn invalid_prune_date(value: &str) -> CliError {
     CliError::fatal(format!("invalid prune date '{value}'"))
         .with_stable_code(StableErrorCode::CliInvalidArguments)
         .with_hint("use 'now', 'never', or a relative value like '2.weeks.ago'.")
 }
 
+/// Decide whether a filesystem entry is old enough for the prune policy.
 fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
     match policy {
         PrunePolicy::Never => Ok(false),
@@ -356,6 +363,7 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
     }
 }
 
+/// Collect loose objects and root object IDs before graph traversal.
 async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability> {
     let loose = list_loose_objects(storage.base_path())?;
     let roots = collect_roots_from_database().await?;
@@ -366,6 +374,7 @@ async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability
     })
 }
 
+/// List object files stored in Git-compatible loose-object directories.
 fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
     if !objects_dir.exists() {
         return Ok(Vec::new());
@@ -424,10 +433,12 @@ fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
     Ok(objects)
 }
 
+/// Return whether a directory name can be a loose-object hash prefix.
 fn is_hex_prefix(prefix: &str) -> bool {
     prefix.len() == 2 && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Load root object IDs from refs, reflogs, and the index.
 async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
     let db = get_db_conn_instance().await;
     let mut roots = HashSet::new();
@@ -458,6 +469,7 @@ async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
     Ok(roots)
 }
 
+/// Parse an object ID read from repository metadata.
 fn parse_stored_hash(raw: &str, source: &str) -> CliResult<ObjectHash> {
     ObjectHash::from_str(raw).map_err(|error| {
         CliError::fatal(format!("invalid {source} object id '{raw}': {error}"))
@@ -465,10 +477,12 @@ fn parse_stored_hash(raw: &str, source: &str) -> CliResult<ObjectHash> {
     })
 }
 
+/// Return whether a stored object ID is the all-zero null value.
 fn is_null_oid(raw: &str) -> bool {
     !raw.is_empty() && raw.bytes().all(|byte| byte == b'0')
 }
 
+/// Collect object IDs referenced by the working tree index.
 fn index_roots() -> CliResult<HashSet<ObjectHash>> {
     let mut roots = HashSet::new();
     let index_path = path::index();
@@ -488,6 +502,7 @@ fn index_roots() -> CliResult<HashSet<ObjectHash>> {
     Ok(roots)
 }
 
+/// Traverse the object graph from roots and mark all reachable objects.
 fn trace_reachable(storage: &ClientStorage, reachability: &mut Reachability) -> CliResult<()> {
     let mut queue = VecDeque::from_iter(reachability.roots.iter().copied());
     while let Some(hash) = queue.pop_front() {
@@ -503,6 +518,7 @@ fn trace_reachable(storage: &ClientStorage, reachability: &mut Reachability) -> 
     Ok(())
 }
 
+/// Return object IDs directly referenced by a commit, tree, tag, or blob.
 fn object_children(storage: &ClientStorage, hash: &ObjectHash) -> CliResult<Vec<ObjectHash>> {
     let object_type = storage.get_object_type(hash).map_err(|error| {
         CliError::fatal(format!(
@@ -531,11 +547,13 @@ fn object_children(storage: &ClientStorage, hash: &ObjectHash) -> CliResult<Vec<
     }
 }
 
+/// Convert an object-load failure into a repository-corruption CLI error.
 fn corrupt_object(hash: &ObjectHash, error: git_internal::errors::GitError) -> CliError {
     CliError::fatal(format!("failed to load reachable object {hash}: {error}"))
         .with_stable_code(StableErrorCode::RepoCorrupt)
 }
 
+/// Remove or report unreachable loose objects according to the prune policy.
 fn prune_unreachable_loose_objects(
     storage: &ClientStorage,
     reachability: &Reachability,
@@ -581,6 +599,7 @@ fn prune_unreachable_loose_objects(
     Ok(actions)
 }
 
+/// Verify valid pack groups and clean stale pack sidecar files.
 fn clean_pack_directory(
     storage: &ClientStorage,
     policy: PrunePolicy,
@@ -646,6 +665,7 @@ fn clean_pack_directory(
     Ok(stats)
 }
 
+/// Group pack-directory files by their `pack-*` stem.
 fn collect_pack_groups(pack_dir: &Path) -> CliResult<BTreeMap<String, PackGroup>> {
     let mut groups = BTreeMap::<String, PackGroup>::new();
     for entry in fs::read_dir(pack_dir).map_err(|error| {
@@ -678,6 +698,7 @@ fn collect_pack_groups(pack_dir: &Path) -> CliResult<BTreeMap<String, PackGroup>
     Ok(groups)
 }
 
+/// Extract the shared `pack-*` stem from a pack-directory filename.
 fn pack_stem(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_str()?;
     if !file_name.starts_with("pack-") {
@@ -698,6 +719,7 @@ fn pack_stem(path: &Path) -> Option<String> {
         .or_else(|| Some(file_name.to_string()))
 }
 
+/// Remove, retain, or report one stale pack-directory file.
 fn handle_pack_file(
     path: &Path,
     policy: PrunePolicy,
@@ -732,6 +754,7 @@ fn handle_pack_file(
     })
 }
 
+/// Delete a file and convert I/O failures into stable CLI errors.
 fn remove_file(path: &Path) -> CliResult<()> {
     fs::remove_file(path).map_err(|error| {
         CliError::fatal(format!(
@@ -743,6 +766,7 @@ fn remove_file(path: &Path) -> CliResult<()> {
     })
 }
 
+/// Remove an empty loose-object prefix directory after deleting an object.
 fn remove_empty_parent_dir(path: &Path) -> CliResult<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -760,6 +784,7 @@ fn remove_empty_parent_dir(path: &Path) -> CliResult<()> {
     }
 }
 
+/// Normalize common filesystem errors to stable human-readable text.
 fn format_io_error(error: &io::Error) -> String {
     match error.kind() {
         io::ErrorKind::NotFound => "No such file or directory".to_string(),
@@ -768,6 +793,7 @@ fn format_io_error(error: &io::Error) -> String {
     }
 }
 
+/// Convert a path to the display string used in structured output.
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
@@ -796,11 +822,13 @@ mod tests {
         utils::{output::JsonFormat, test, util},
     };
 
+    /// Build a deterministic object hash for unit tests.
     fn test_hash(byte: u8) -> ObjectHash {
         ObjectHash::from_bytes(&vec![byte; get_hash_kind().size()])
             .expect("hash bytes should match active hash kind")
     }
 
+    /// Build a stable test signature.
     fn signature() -> Signature {
         Signature {
             signature_type: SignatureType::Author,
@@ -811,6 +839,7 @@ mod tests {
         }
     }
 
+    /// Build a test commit that references a tree and optional parents.
     fn commit_with_tree(tree_id: ObjectHash, parents: Vec<ObjectHash>) -> Commit {
         Commit {
             id: test_hash(9),
@@ -826,6 +855,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers `never` and immediate prune-date parsing.
     fn parse_prune_date_accepts_never_and_now() {
         assert_eq!(parse_prune_date("never").unwrap(), PrunePolicy::Never);
         assert!(matches!(
@@ -835,6 +865,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers week-based relative prune-date parsing.
     fn parse_prune_date_accepts_relative_weeks() {
         let PrunePolicy::OlderThan(cutoff) = parse_prune_date("2.weeks.ago").unwrap() else {
             panic!("expected cutoff");
@@ -843,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers all supported relative prune-date units.
     fn parse_prune_date_accepts_supported_relative_units() {
         for value in [
             "1.second.ago",
@@ -876,12 +908,14 @@ mod tests {
     }
 
     #[test]
+    /// Covers rejection of non-relative prune-date text.
     fn parse_prune_date_rejects_unknown_values() {
         let error = parse_prune_date("yesterday").unwrap_err();
         assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
     }
 
     #[test]
+    /// Covers rejection of invalid relative prune-date forms.
     fn parse_prune_date_rejects_bad_amount_and_unit() {
         for value in ["x.days.ago", "2.fortnights.ago"] {
             let error = parse_prune_date(value).unwrap_err();
@@ -890,6 +924,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers loose-object prefix validation.
     fn is_hex_prefix_requires_two_hex_digits() {
         assert!(is_hex_prefix("ab"));
         assert!(is_hex_prefix("09"));
@@ -898,6 +933,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers grouping of standard pack filenames.
     fn pack_stem_groups_standard_pack_files() {
         assert_eq!(
             pack_stem(Path::new("pack-abc.pack")).as_deref(),
@@ -914,6 +950,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers ignoring filenames outside the pack namespace.
     fn pack_stem_ignores_non_pack_prefixes() {
         assert!(pack_stem(Path::new("tmp.pack")).is_none());
         assert!(pack_stem(Path::new("README")).is_none());
@@ -921,6 +958,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers loose-object scanning while ignoring the pack directory.
     async fn list_loose_objects_skips_pack_directory() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -937,6 +975,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers loose-object scanning when the objects directory is absent.
     fn list_loose_objects_returns_empty_for_missing_directory() {
         let dir = tempdir().unwrap();
         let objects = list_loose_objects(&dir.path().join("missing")).unwrap();
@@ -944,6 +983,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers loose-object scanning filters for invalid entries.
     fn list_loose_objects_skips_non_files_and_invalid_names() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("loose-file"), b"x").unwrap();
@@ -958,6 +998,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers graph traversal through commit, tree, and blob objects.
     async fn trace_reachable_walks_commit_tree_and_blob() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -992,6 +1033,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers traversal when a root object was already marked reachable.
     async fn trace_reachable_skips_already_seen_roots() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1012,6 +1054,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers dry-run pruning of unreachable loose objects.
     async fn prune_unreachable_loose_objects_respects_dry_run() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1039,6 +1082,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers deleting an unreachable loose object that matches the cutoff.
     async fn prune_unreachable_loose_objects_removes_matching_object() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1066,6 +1110,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers retaining loose objects marked reachable.
     async fn prune_unreachable_loose_objects_keeps_reachable_object() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1093,6 +1138,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers pruning an orphan pack index file.
     async fn clean_pack_directory_prunes_orphan_idx() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1117,6 +1163,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers retaining stale pack files protected by `.keep`.
     async fn clean_pack_directory_keeps_files_when_keep_exists() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1142,6 +1189,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers pack cleanup when the pack directory is missing.
     async fn clean_pack_directory_returns_empty_when_directory_missing() {
         let dir = tempdir().unwrap();
         let storage = ClientStorage::init(dir.path().join("objects"));
@@ -1154,6 +1202,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers pruning orphan pack files and temporary sidecars.
     async fn clean_pack_directory_prunes_orphan_pack_and_sidecar() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1186,6 +1235,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers `run_gc` retaining unreachable objects when pruning is disabled.
     async fn run_gc_prune_never_reports_retained_unreachable_object() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1211,6 +1261,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers `run_gc` removing unreachable objects with an immediate cutoff.
     async fn run_gc_prune_now_removes_unreachable_object() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1237,6 +1288,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers compatibility warnings for accepted Git flags.
     async fn run_gc_warns_for_compatibility_flags() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1257,6 +1309,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers human dry-run output rendering.
     fn render_gc_output_prints_human_dry_run_summary() {
         let result = GcOutput {
             prune: "now".into(),
@@ -1292,6 +1345,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers human pruning output rendering.
     fn render_gc_output_prints_human_pruned_summary() {
         let result = GcOutput {
             prune: "now".into(),
@@ -1322,6 +1376,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers quiet and JSON output rendering modes.
     fn render_gc_output_respects_quiet_and_json_modes() {
         let result = GcOutput {
             prune: "never".into(),
@@ -1347,6 +1402,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers legacy string error rendering from `execute`.
     async fn execute_maps_errors_to_strings() {
         let dir = tempdir().unwrap();
         let _guard = test::ChangeDirGuard::new(dir.path());
@@ -1365,6 +1421,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers structured missing-repository errors from `execute_safe`.
     async fn execute_safe_reports_missing_repository() {
         let dir = tempdir().unwrap();
         let _guard = test::ChangeDirGuard::new(dir.path());
@@ -1385,11 +1442,13 @@ mod tests {
     }
 
     #[test]
+    /// Covers path display conversion.
     fn display_path_uses_path_display() {
         assert!(display_path(Path::new("objects/pack")).contains("objects"));
     }
 
     #[test]
+    /// Covers all-zero object ID detection.
     fn is_null_oid_requires_non_empty_zero_string() {
         assert!(is_null_oid("0000"));
         assert!(!is_null_oid(""));
@@ -1397,12 +1456,14 @@ mod tests {
     }
 
     #[test]
+    /// Covers filesystem error normalization.
     fn format_io_error_normalizes_not_found() {
         let error = io::Error::new(io::ErrorKind::NotFound, "missing");
         assert_eq!(format_io_error(&error), "No such file or directory");
     }
 
     #[test]
+    /// Covers default loose-object statistics.
     fn loose_object_stats_default_is_zero() {
         let stats = LooseObjectStats::default();
         assert_eq!(stats.scanned, 0);
@@ -1410,6 +1471,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers default pack statistics.
     fn pack_stats_default_has_no_directory() {
         let stats = PackStats::default();
         assert!(!stats.directory_exists);
@@ -1417,6 +1479,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers `--no-prune` policy precedence.
     fn prune_policy_obeys_no_prune() {
         let args = GcArgs {
             dry_run: false,
@@ -1430,6 +1493,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers invalid stored object IDs.
     fn parse_stored_hash_rejects_invalid_hash() {
         let error = parse_stored_hash("not-a-hash", "reference").unwrap_err();
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
@@ -1437,6 +1501,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers index entries being used as reachability roots.
     async fn collect_roots_includes_index_entries() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1463,6 +1528,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers invalid prune-date errors through `execute_safe`.
     async fn execute_safe_rejects_invalid_prune() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -1484,6 +1550,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers grouping miscellaneous pack sidecar files.
     fn collect_pack_groups_groups_other_sidecars() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("pack-abcd.tmp"), b"tmp").unwrap();
@@ -1492,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers dry-run reporting for stale pack files.
     fn handle_pack_file_reports_would_prune_in_dry_run() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack-abcd.idx");
@@ -1509,6 +1577,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers retaining stale pack files when pruning is disabled.
     fn handle_pack_file_retains_when_prune_disabled() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack-abcd.idx");
@@ -1519,6 +1588,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers retaining non-empty loose-object prefix directories.
     fn remove_empty_parent_dir_ignores_non_empty_directory() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("aa").join("object");
@@ -1529,6 +1599,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers stable JSON names for loose-object actions.
     fn gc_action_serialization_names_are_stable() {
         assert_eq!(
             serde_json::to_value(GcAction::WouldPrune).unwrap(),
@@ -1537,6 +1608,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers stable JSON names for pack-file actions.
     fn pack_action_serialization_names_are_stable() {
         assert_eq!(
             serde_json::to_value(PackAction::WouldPrune).unwrap(),
@@ -1545,28 +1617,33 @@ mod tests {
     }
 
     #[test]
+    /// Covers the default prune constant used by help and docs.
     fn default_prune_constant_matches_help_contract() {
         assert_eq!(DEFAULT_PRUNE, "2.weeks.ago");
     }
 
     #[test]
+    /// Covers the week duration constant.
     fn seconds_per_week_matches_days() {
         assert_eq!(SECONDS_PER_WEEK, 7 * SECONDS_PER_DAY);
     }
 
     #[test]
+    /// Covers month and year duration approximations.
     fn longer_prune_constants_match_calendar_approximations() {
         assert_eq!(SECONDS_PER_MONTH, 30 * SECONDS_PER_DAY);
         assert_eq!(SECONDS_PER_YEAR, 365 * SECONDS_PER_DAY);
     }
 
     #[test]
+    /// Covers examples mentioning dry-run and JSON modes.
     fn gc_examples_mentions_dry_run_and_json() {
         assert!(GC_EXAMPLES.contains("--dry-run"));
         assert!(GC_EXAMPLES.contains("--json"));
     }
 
     #[test]
+    /// Covers retention reasons in pack-file actions.
     fn pack_file_action_can_report_retention_reason() {
         let action = PackFileAction {
             path: "pack-x.idx".into(),
@@ -1577,6 +1654,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers object action metadata fields.
     fn gc_object_action_can_report_prune_reason() {
         let action = GcObjectAction {
             oid: "abc".into(),
@@ -1588,6 +1666,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers the default reachability accumulator.
     fn reachability_default_has_no_roots() {
         let reachability = Reachability::default();
         assert!(reachability.roots.is_empty());
@@ -1595,6 +1674,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers the default pack group accumulator.
     fn pack_group_default_is_empty() {
         let group = PackGroup::default();
         assert!(group.pack.is_none());
@@ -1603,6 +1683,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers `PrunePolicy::Never`.
     fn should_prune_returns_false_for_never() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file");
@@ -1611,6 +1692,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers pruning with a future cutoff.
     fn should_prune_accepts_future_cutoff() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file");
@@ -1625,6 +1707,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers missing-file metadata errors during prune checks.
     fn should_prune_reports_missing_file_metadata_error() {
         let dir = tempdir().unwrap();
         let error = should_prune(
@@ -1636,6 +1719,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers blob objects having no graph children.
     fn object_children_blob_has_no_children() {
         let repo = tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();

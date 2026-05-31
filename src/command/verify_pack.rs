@@ -106,6 +106,7 @@ struct DecodedPackEntry {
     size: usize,
 }
 
+/// Run `verify-pack` with default human-output configuration.
 pub async fn execute(args: VerifyPackArgs) -> Result<(), String> {
     execute_safe(args, &OutputConfig::default())
         .await
@@ -126,13 +127,18 @@ pub async fn execute_safe(args: VerifyPackArgs, output: &OutputConfig) -> CliRes
     render_verify_pack_output(&result, args.verbose, output)
 }
 
+/// Minimal pack/index verification summary reused by maintenance commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PackInspection {
+    /// Number of objects recorded in the pack index.
     pub object_count: usize,
+    /// Pack index format version.
     pub index_version: u8,
+    /// Hash of the verified pack payload stored in the index trailer.
     pub pack_hash: String,
 }
 
+/// Verify an explicit `.idx` / `.pack` pair and return reusable pack metadata.
 pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult<PackInspection> {
     let idx_bytes = read_file(idx_file, "pack index")?;
     if let Some(hash_kind) =
@@ -151,6 +157,7 @@ pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult
     })
 }
 
+/// Verify command arguments and build the full verification output.
 fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
     let idx_file = args.idx_file.clone();
     let pack_file = args
@@ -215,6 +222,7 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
     })
 }
 
+/// Parse a pack index in either version 1 or version 2 format.
 fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     if bytes.starts_with(&IDX_MAGIC) {
         parse_idx_v2(bytes)
@@ -223,6 +231,7 @@ fn parse_index(bytes: &[u8]) -> Result<ParsedIndex, String> {
     }
 }
 
+/// Infer SHA-1 or SHA-256 object format from a version 2 index layout.
 fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
     if !bytes.starts_with(&IDX_MAGIC) {
         return Ok(None);
@@ -261,6 +270,7 @@ fn infer_idx_v2_hash_kind(bytes: &[u8]) -> Result<Option<HashKind>, String> {
     }
 }
 
+/// Return whether a version 2 index can fit the requested hash length.
 fn idx_v2_layout_matches_hash_kind(bytes: &[u8], object_count: usize, kind: HashKind) -> bool {
     let hash_len = kind.size();
     let Some(mut cursor) = (8 + FANOUT_LEN).checked_add(object_count.saturating_mul(hash_len))
@@ -306,6 +316,7 @@ fn idx_v2_layout_matches_hash_kind(bytes: &[u8], object_count: usize, kind: Hash
     remaining == hash_len * 2 || remaining == hash_len + 20
 }
 
+/// Parse a version 1 pack index.
 fn parse_idx_v1(bytes: &[u8]) -> Result<ParsedIndex, String> {
     const HASH_LEN: usize = 20;
     const ENTRY_LEN: usize = 4 + HASH_LEN;
@@ -368,6 +379,7 @@ fn parse_idx_v1(bytes: &[u8]) -> Result<ParsedIndex, String> {
     })
 }
 
+/// Parse a version 2 pack index.
 fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
     let hash_len = get_hash_kind().size();
     if bytes.len() < 8 + FANOUT_LEN + hash_len * 2 {
@@ -501,6 +513,7 @@ fn parse_idx_v2(bytes: &[u8]) -> Result<ParsedIndex, String> {
     })
 }
 
+/// Read the 256-entry fanout table from a pack index.
 fn parse_fanout(bytes: &[u8], offset: usize) -> Result<[u32; 256], String> {
     if bytes.len() < offset + FANOUT_LEN {
         return Err("pack index fanout table is truncated".to_string());
@@ -520,6 +533,7 @@ fn parse_fanout(bytes: &[u8], offset: usize) -> Result<[u32; 256], String> {
     Ok(fanout)
 }
 
+/// Validate that the fanout table is monotonically increasing.
 fn validate_fanout_monotonic(fanout: &[u32; 256]) -> Result<(), String> {
     for pair in fanout.windows(2) {
         if pair[0] > pair[1] {
@@ -529,6 +543,7 @@ fn validate_fanout_monotonic(fanout: &[u32; 256]) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate that pack-index object names are strictly sorted.
 fn validate_sorted_entries(entries: &[ParsedIndexEntry]) -> Result<(), String> {
     for pair in entries.windows(2) {
         if pair[0].hash >= pair[1].hash {
@@ -541,6 +556,7 @@ fn validate_sorted_entries(entries: &[ParsedIndexEntry]) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate fanout bucket counts against parsed index entries.
 fn validate_fanout_matches_entries(
     fanout: &[u32; 256],
     entries: &[ParsedIndexEntry],
@@ -558,6 +574,7 @@ fn validate_fanout_matches_entries(
     Ok(())
 }
 
+/// Decode a pack archive into objects and packed sizes.
 fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
     let file = fs::File::open(pack_file).map_err(|error| {
         CliError::fatal(format!(
@@ -640,6 +657,7 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
     })
 }
 
+/// Insert a decoded pack entry while rejecting duplicate object IDs.
 fn insert_decoded_pack_entry(
     entries: &mut BTreeMap<ObjectHash, DecodedPackEntry>,
     entry: DecodedPackEntry,
@@ -651,6 +669,7 @@ fn insert_decoded_pack_entry(
     Ok(())
 }
 
+/// Compute packed entry sizes from index offsets and pack length.
 fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<ObjectHash, u64>> {
     let trailer_start = pack_len
         .checked_sub(get_hash_kind().size() as u64)
@@ -680,6 +699,7 @@ fn pack_entry_sizes(index: &ParsedIndex, pack_len: u64) -> CliResult<BTreeMap<Ob
     Ok(sizes)
 }
 
+/// Extract a value from an `Arc<Mutex<_>>` after pack decoding completes.
 fn take_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, String> {
     let mutex =
         Arc::try_unwrap(arc).map_err(|_| format!("{label} still has outstanding references"))?;
@@ -688,6 +708,7 @@ fn take_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, String> {
         .map_err(|_| format!("{label} mutex poisoned"))
 }
 
+/// Compare parsed index metadata with decoded pack contents.
 fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Result<(), String> {
     if index.pack_hash != pack.pack_hash {
         return Err(format!(
@@ -730,6 +751,7 @@ fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Resul
     Ok(())
 }
 
+/// Render verification results as human output or JSON.
 fn render_verify_pack_output(
     result: &VerifyPackOutput,
     verbose: bool,
@@ -754,6 +776,7 @@ fn render_verify_pack_output(
     Ok(())
 }
 
+/// Read a file and convert failures into stable CLI I/O errors.
 fn read_file(path: &Path, label: &str) -> CliResult<Vec<u8>> {
     fs::read(path).map_err(|error| {
         CliError::fatal(format!(
@@ -765,11 +788,13 @@ fn read_file(path: &Path, label: &str) -> CliResult<Vec<u8>> {
     })
 }
 
+/// Build the structured error used for malformed index files.
 fn invalid_index(path: &Path, detail: String) -> CliError {
     CliError::fatal(format!("invalid pack index '{}': {detail}", path.display()))
         .with_stable_code(StableErrorCode::RepoCorrupt)
 }
 
+/// Build the structured error used for pack/index verification failures.
 fn verification_failed(idx_file: &Path, pack_file: &Path, detail: String) -> CliError {
     CliError::fatal(format!(
         "pack verification failed for '{}' against '{}': {detail}",
@@ -779,16 +804,19 @@ fn verification_failed(idx_file: &Path, pack_file: &Path, detail: String) -> Cli
     .with_stable_code(StableErrorCode::RepoCorrupt)
 }
 
+/// Hash bytes using the repository's active object format.
 fn hash_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut hash = HashAlgorithm::new();
     hash.update(bytes);
     hash.finalize()
 }
 
+/// Compute a SHA-1 digest for version 1 pack-index checksums.
 fn sha1_bytes(bytes: &[u8]) -> Vec<u8> {
     Sha1::digest(bytes).to_vec()
 }
 
+/// Convert bytes to lowercase hexadecimal text.
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -799,10 +827,12 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Convert a path to a display string for command output.
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Normalize common filesystem errors for human-readable messages.
 fn format_io_error(err: &io::Error) -> String {
     match err.kind() {
         io::ErrorKind::NotFound => "No such file or directory".to_string(),
@@ -817,6 +847,7 @@ mod tests {
 
     use super::*;
 
+    /// Build a decoded pack entry for unit tests.
     fn decoded_entry(hash: ObjectHash) -> DecodedPackEntry {
         DecodedPackEntry {
             index: IndexEntry {
@@ -830,6 +861,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers duplicate object detection while inserting decoded entries.
     fn insert_decoded_pack_entry_rejects_duplicate_hashes() {
         let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
         let hash = ObjectHash::new(b"duplicate");
