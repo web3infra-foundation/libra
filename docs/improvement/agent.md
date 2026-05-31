@@ -4316,7 +4316,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | **`--resume` / phase-aware recovery 合同已落地** | 高 | v0.17.1175 已将 `ProjectionResolver::load_for_resume(thread_id, rebuilder)` 与 `ResumeBundle { phase_at_resume, resume_reason, resume_actions }` 贯通到 `libra code --resume`，并覆盖 Fresh / InterruptedRun / StaleReadOnly / Unavailable 的恢复动作；non-terminal run 的事件化 interrupted 标记、ready-queue 重建和 `ContextFrame[E]` 恢复审计均已落到 session JSONL |
 | **Query Index / Rebuild 合同部分落地** | 高 | v0.17.1113 起 `ProjectionResolver::{load_query_indexes, load_or_rebuild_query_indexes}` 返回 `ThreadQueryIndexes { freshness, ... }`，并复用 targeted rebuild / `StaleReadOnly` / `Unavailable` 降级合同；v0.17.1127 新增 `ThreadQueryIndexes::diagnostics`，对 scheduler 引用的 plan/task/run 缺失 denormalized index row 以及 targeted rebuild failure 给出结构化诊断。v0.17.1141 起同一诊断层也覆盖 `live_context_window` 指向的 ContextFrame 缺失 `ai_index_intent_context_frame` row。剩余项收窄为 formal object 存在性 / Snapshot 全量一致性深查 |
 | **Phase 2 的 DAG runtime 合同未完全收敛** | 高 | `dagrs` 依赖与 spike 已收敛到 `0.8.1`，但 Phase 2 graph build / event / report / retry / resume 语义仍需正式提升为共享 Runtime contract |
-| **Code UI 尚未收敛到共享 read model / interaction state / controller lease** | 高 | TUI / Web 仍各自维护 session snapshot 与交互状态，`pending_post_plan`、`pending_plan_revision`、approval、`request_user_input` 等还未进入共享 schema |
+| **Code UI 尚未收敛到共享 read model / interaction state / controller lease** | 高 | TUI / Web 仍各自维护 session snapshot 与交互状态；`pending_plan_revision` / `pending_post_plan` 已进入共享 snapshot / interaction 视图，但 controller lease 与更完整的 shared interaction lifecycle 仍需继续收口 |
 | **安全 / 审批 / tool boundary 仍未由 Runtime 接管** | 高 | `approvalPolicy`、readonly tool 边界、鉴权、secret redaction 与 durable audit 仍以 provider-specific / ad hoc 方式存在，尚未形成共享执行边界 |
 | **prompt assembly 仍是 Codex / generic 双入口** | 中 | Intent / Planning / Task prompt 组装尚未统一到共享 `PromptPackage` / `IntentPromptBuilder` / `PlanningPromptBuilder` / `TaskPromptBuilder`，Phase 语义容易继续漂移 |
 | **共享函数边界未定义** | 中 | plan review、revision chain、formal write、projection update、interaction handling 哪些必须共享未说明 |
@@ -4336,7 +4336,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 ### Baseline Corrections
 
 1. `CodeUiProviderAdapter` 已经存在；缺口不是"新增一个 adapter"，而是把现有 adapter 拆成命令面和读模型面，并让通用 provider 真正接入共享 read model。
-2. TUI 当前不是纯渲染器；`pending_post_plan`、`pending_plan_revision` 等状态仍在本地维护，必须迁移到共享 interaction / projection。
+2. TUI 当前不是纯渲染器；`pending_post_plan`、`pending_plan_revision` 等状态仍在本地维护，但已开始镜像到共享 snapshot / interaction，后续必须继续迁移到共享 interaction / projection。
 3. `SessionState.id`、`CodeUiSessionSnapshot.session_id`、`provider_session_resume`、Codex `threadId` 仍在混用，当前恢复模型还没有收敛到 canonical `thread_id`。
 4. `ExecutionAuditSession` 已经是共享写入层前身；目标不是凭空发明新抽象，而是把现有持久化与 formal writes 收敛成 `Runtime` facade。
 5. Phase 3 系统验证当前仍被 planner 注入为 gate task；目标态必须把它提升为独立的 `ValidatorEngine`，而不是继续塞在 Phase 2 DAG 内。

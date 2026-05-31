@@ -220,6 +220,22 @@ pub struct CodeUiInteractionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CodeUiPendingPostPlanSnapshot {
+    pub spec_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub selected: usize,
+    pub network_access: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub automatic_repair_attempts: u8,
+    pub automatic_repair_max_attempts: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CodeUiPlanStep {
     pub step: String,
     pub status: String,
@@ -297,6 +313,10 @@ pub struct CodeUiSessionSnapshot {
     pub transcript: Vec<CodeUiTranscriptEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<CodeUiUsageSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_plan_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_post_plan: Option<CodeUiPendingPostPlanSnapshot>,
     pub plans: Vec<CodeUiPlanSnapshot>,
     pub tasks: Vec<CodeUiTaskSnapshot>,
     pub tool_calls: Vec<CodeUiToolCallSnapshot>,
@@ -317,6 +337,8 @@ impl Default for CodeUiSessionSnapshot {
             status: CodeUiSessionStatus::Idle,
             transcript: Vec::new(),
             usage: None,
+            pending_plan_revision: None,
+            pending_post_plan: None,
             plans: Vec::new(),
             tasks: Vec::new(),
             tool_calls: Vec::new(),
@@ -568,6 +590,13 @@ impl CodeUiSession {
     pub async fn set_usage(&self, usage: Option<CodeUiUsageSnapshot>) {
         self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             snapshot.usage = usage;
+        })
+        .await;
+    }
+
+    pub async fn set_pending_plan_revision(&self, pending_plan_revision: Option<String>) {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
+            snapshot.pending_plan_revision = pending_plan_revision;
         })
         .await;
     }
@@ -1691,6 +1720,8 @@ pub fn initial_snapshot(
         status: CodeUiSessionStatus::Idle,
         transcript: Vec::new(),
         usage: None,
+        pending_plan_revision: None,
+        pending_post_plan: None,
         plans: Vec::new(),
         tasks: Vec::new(),
         tool_calls: Vec::new(),
@@ -1913,6 +1944,24 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "clientId": "browser-1" })).unwrap();
 
         assert_eq!(request.kind, CodeUiControllerKind::Browser);
+    }
+
+    // Test scenario: verifies `set_pending_plan_revision_updates_snapshot` covers the pending plan revision snapshot update behavior.
+    // 测试场景：验证 `set_pending_plan_revision_updates_snapshot` 覆盖 pending plan revision snapshot update 对应的行为。
+    #[tokio::test]
+    async fn set_pending_plan_revision_updates_snapshot() {
+        let session = test_session();
+
+        session
+            .set_pending_plan_revision(Some("{\"title\":\"Revise\"}".to_string()))
+            .await;
+        assert_eq!(
+            session.snapshot().await.pending_plan_revision.as_deref(),
+            Some("{\"title\":\"Revise\"}")
+        );
+
+        session.set_pending_plan_revision(None).await;
+        assert!(session.snapshot().await.pending_plan_revision.is_none());
     }
 
     // Test scenario: verifies `interaction_update_broadcasts_typed_session_snapshot_event` covers the interaction update broadcasts typed session snapshot event behavior.
