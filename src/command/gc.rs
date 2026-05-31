@@ -201,6 +201,8 @@ struct Reachability {
     loose: Vec<LooseObject>,
     /// Root object IDs loaded from refs, reflogs, and index entries.
     roots: HashSet<ObjectHash>,
+    /// Object IDs protected from pruning without being part of Git reachability.
+    protected: HashSet<ObjectHash>,
     /// Object IDs reached by graph traversal.
     reachable: HashSet<ObjectHash>,
     /// Non-fatal graph traversal warnings.
@@ -553,10 +555,11 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
 /// Collect loose objects and root object IDs before graph traversal.
 async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability> {
     let loose = list_loose_objects(storage.base_path())?;
-    let roots = collect_roots_from_database().await?;
+    let (roots, protected) = collect_roots_from_database().await?;
     Ok(Reachability {
         loose,
         roots,
+        protected,
         reachable: HashSet::new(),
         warnings: Vec::new(),
     })
@@ -652,10 +655,11 @@ fn is_hex_prefix(prefix: &str) -> bool {
     prefix.len() == 2 && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Load root object IDs from refs, reflogs, and the index.
-async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
+/// Load root object IDs and non-reachability prune protections.
+async fn collect_roots_from_database() -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
     let db = get_db_conn_instance().await;
     let mut roots = HashSet::new();
+    let mut protected = HashSet::new();
 
     let refs = reference::Entity::find().all(&db).await.map_err(|error| {
         CliError::fatal(format!("failed to load references: {error}"))
@@ -684,9 +688,9 @@ async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
     roots.extend(rebase_state_roots(&db).await?);
     roots.extend(bisect_state_roots(&db).await?);
     roots.extend(merge_state_roots()?);
-    roots.extend(object_index_roots(&db).await?);
+    protected.extend(object_index_prune_protections(&db).await?);
     roots.extend(agent_checkpoint_roots(&db).await?);
-    Ok(roots)
+    Ok((roots, protected))
 }
 
 /// Check whether an optional SQLite table exists without creating it.
@@ -880,11 +884,76 @@ async fn current_repo_id<C: ConnectionTrait>(db: &C) -> CliResult<String> {
     }
 }
 
-/// Load unsynced local cloud index rows that still need object bytes.
-async fn object_index_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
-    let mut roots = HashSet::new();
+/// Return whether cloud backup is configured for this repository.
+async fn cloud_backup_enabled<C: ConnectionTrait>(db: &C) -> CliResult<bool> {
+    if let Some(storage_type) = config_value(db, "vault.env.LIBRA_STORAGE_TYPE").await?
+        && matches!(storage_type.trim(), "s3" | "r2")
+    {
+        return Ok(true);
+    }
+    if matches!(
+        std::env::var("LIBRA_STORAGE_TYPE").ok().as_deref(),
+        Some("s3" | "r2")
+    ) {
+        return Ok(true);
+    }
+
+    for key in [
+        "LIBRA_D1_ACCOUNT_ID",
+        "LIBRA_D1_API_TOKEN",
+        "LIBRA_D1_DATABASE_ID",
+        "LIBRA_STORAGE_ENDPOINT",
+        "LIBRA_STORAGE_ACCESS_KEY",
+        "LIBRA_STORAGE_SECRET_KEY",
+    ] {
+        let env_present = std::env::var(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        let config_present = config_value(db, &format!("vault.env.{key}"))
+            .await?
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        if env_present || config_present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Read a config value from the current repository database when present.
+async fn config_value<C: ConnectionTrait>(db: &C, key: &str) -> CliResult<Option<String>> {
+    if !table_exists(db, "config_kv").await? {
+        return Ok(None);
+    }
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT value FROM config_kv WHERE key = ? LIMIT 1",
+            [key.into()],
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to read config value '{key}': {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    row.map(|row| row.try_get_by_index(0))
+        .transpose()
+        .map_err(|error| {
+            CliError::fatal(format!("failed to decode config value '{key}': {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })
+}
+
+/// Load unsynced cloud index rows that should be retained until uploaded.
+async fn object_index_prune_protections<C: ConnectionTrait>(
+    db: &C,
+) -> CliResult<HashSet<ObjectHash>> {
+    let mut protected = HashSet::new();
     if !table_exists(db, "object_index").await? {
-        return Ok(roots);
+        return Ok(protected);
+    }
+    if !cloud_backup_enabled(db).await? {
+        return Ok(protected);
     }
     let repo_id = current_repo_id(db).await?;
     let rows = object_index::Entity::find()
@@ -893,13 +962,13 @@ async fn object_index_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
         .all(db)
         .await
         .map_err(|error| {
-            CliError::fatal(format!("failed to load object_index roots: {error}"))
+            CliError::fatal(format!("failed to load object_index protections: {error}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
     for row in rows {
-        roots.insert(parse_stored_hash(&row.o_id, "object_index.o_id")?);
+        protected.insert(parse_stored_hash(&row.o_id, "object_index.o_id")?);
     }
-    Ok(roots)
+    Ok(protected)
 }
 
 /// Load objects explicitly referenced by the AI checkpoint catalog.
@@ -1128,6 +1197,16 @@ async fn prune_unreachable_loose_objects(
             .get_object_type(&loose.hash)
             .map(|kind| kind.to_string())
             .unwrap_or_else(|_| "unknown".to_string());
+
+        if reachability.protected.contains(&loose.hash) {
+            actions.push(GcObjectAction {
+                oid: loose.hash.to_string(),
+                object_type,
+                action: GcAction::Retained,
+                reason: "object is pending cloud backup".to_string(),
+            });
+            continue;
+        }
 
         if should_prune(&loose.path, policy)? {
             let action = if dry_run {
@@ -1710,6 +1789,7 @@ mod tests {
         let mut reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([commit.id]),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1754,6 +1834,7 @@ mod tests {
         let mut reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([commit.id]),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1777,6 +1858,7 @@ mod tests {
         let mut reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([blob.id]),
+            protected: HashSet::new(),
             reachable: HashSet::from([blob.id]),
             warnings: Vec::new(),
         };
@@ -1797,6 +1879,7 @@ mod tests {
         let mut reachability = Reachability {
             loose: Vec::new(),
             roots: HashSet::from([missing]),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1821,6 +1904,7 @@ mod tests {
         let reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1851,6 +1935,7 @@ mod tests {
         let reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1909,6 +1994,7 @@ mod tests {
         let reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
+            protected: HashSet::new(),
             reachable: HashSet::new(),
             warnings: Vec::new(),
         };
@@ -1940,6 +2026,39 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers retaining unreachable objects that are still pending cloud backup.
+    async fn prune_unreachable_loose_objects_retains_cloud_protected_object() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("cloud pending");
+        save_object(&blob, &blob.id).unwrap();
+        let reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::new(),
+            protected: HashSet::from([blob.id]),
+            reachable: HashSet::new(),
+            warnings: Vec::new(),
+        };
+
+        let actions = prune_unreachable_loose_objects(
+            &storage,
+            &reachability,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actions[0].action, GcAction::Retained);
+        assert_eq!(actions[0].reason, "object is pending cloud backup");
+        assert!(storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     /// Covers retaining loose objects marked reachable.
     async fn prune_unreachable_loose_objects_keeps_reachable_object() {
         let repo = tempdir().unwrap();
@@ -1952,6 +2071,7 @@ mod tests {
         let reachability = Reachability {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([blob.id]),
+            protected: HashSet::new(),
             reachable: HashSet::from([blob.id]),
             warnings: Vec::new(),
         };
@@ -2563,7 +2683,7 @@ mod tests {
             .await
             .unwrap();
 
-        let roots = collect_roots_from_database().await.unwrap();
+        let (roots, _protected) = collect_roots_from_database().await.unwrap();
         assert!(!roots.is_empty());
     }
 
@@ -2620,7 +2740,7 @@ mod tests {
         .await
         .unwrap();
 
-        let roots = collect_roots_from_database().await.unwrap();
+        let (roots, _protected) = collect_roots_from_database().await.unwrap();
 
         for hash in [onto, orig_head, current_head, todo, done, stopped] {
             assert!(roots.contains(&hash));
@@ -2673,7 +2793,7 @@ mod tests {
         .await
         .unwrap();
 
-        let roots = collect_roots_from_database().await.unwrap();
+        let (roots, _protected) = collect_roots_from_database().await.unwrap();
 
         for hash in [orig_head, bad, good, current, skipped] {
             assert!(roots.contains(&hash));
@@ -2704,7 +2824,7 @@ mod tests {
         )
         .unwrap();
 
-        let roots = collect_roots_from_database().await.unwrap();
+        let (roots, _protected) = collect_roots_from_database().await.unwrap();
 
         assert!(roots.contains(&orig_head));
         assert!(roots.contains(&target));
@@ -2811,11 +2931,15 @@ mod tests {
         .await
         .unwrap();
 
-        let roots = collect_roots_from_database().await.unwrap();
+        ConfigKv::set("vault.env.LIBRA_STORAGE_TYPE", "r2", false)
+            .await
+            .unwrap();
+        let (roots, protected) = collect_roots_from_database().await.unwrap();
 
-        assert!(roots.contains(&unsynced));
-        assert!(!roots.contains(&other_repo));
-        assert!(!roots.contains(&synced));
+        assert!(!roots.contains(&unsynced));
+        assert!(protected.contains(&unsynced));
+        assert!(!protected.contains(&other_repo));
+        assert!(!protected.contains(&synced));
         for hash in [parent, tree, metadata, traces] {
             assert!(roots.contains(&hash));
         }
