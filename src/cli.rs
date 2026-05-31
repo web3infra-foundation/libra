@@ -1229,7 +1229,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
-        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output).await?,
+        Commands::Notes(cmd_args) => command::notes::execute_safe(cmd_args, &output, &argv).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
         Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,

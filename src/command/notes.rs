@@ -117,13 +117,22 @@ pub struct NotesRemovedEntry {
 }
 
 pub async fn execute(args: NotesArgs) {
-    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
+    let argv: Vec<String> = std::env::args().collect();
+    if let Err(err) = execute_safe(args, &OutputConfig::default(), &argv).await {
         err.print_stderr();
     }
 }
 
 /// Safe entry point that returns structured [`CliResult`].
-pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<()> {
+///
+/// `argv` is the raw process argument vector used to reconstruct
+/// the original `-m`/`-F` occurrence order. Callers that do not spawn
+/// from `main()` should provide the same slice they passed to clap.
+pub async fn execute_safe(
+    args: NotesArgs,
+    output: &OutputConfig,
+    argv: &[String],
+) -> CliResult<()> {
     let notes_ref = &args.ref_;
     notes::validate_notes_ref(notes_ref).map_err(|e| CliError::from(NotesCliError::from(e)))?;
 
@@ -138,7 +147,7 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
             file: _,
             force,
         } => {
-            let content = build_note_content()?;
+            let content = build_note_content(argv)?;
             let result = notes::add(
                 notes_ref,
                 object.as_deref().unwrap_or("HEAD"),
@@ -219,21 +228,20 @@ enum ContentPart {
 /// order.  Clap splits them into separate `Vec`s, but `git notes` semantics
 /// require that the paragraph order matches the command-line order (e.g.
 /// `-F header -m trailer` must produce `header\n\ntrailer`, not the reverse).
-fn ordered_content_parts() -> Vec<ContentPart> {
-    let args: Vec<String> = std::env::args().collect();
+fn ordered_content_parts(argv: &[String]) -> Vec<ContentPart> {
     let mut parts = Vec::new();
     let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
+    while i < argv.len() {
+        let arg = &argv[i];
         if arg == "-m" || arg == "--message" {
             i += 1;
-            if i < args.len() {
-                parts.push(ContentPart::Message(args[i].clone()));
+            if i < argv.len() {
+                parts.push(ContentPart::Message(argv[i].clone()));
             }
         } else if arg == "-F" || arg == "--file" {
             i += 1;
-            if i < args.len() {
-                parts.push(ContentPart::File(args[i].clone()));
+            if i < argv.len() {
+                parts.push(ContentPart::File(argv[i].clone()));
             }
         } else if let Some(val) = arg.strip_prefix("-m") {
             if !val.is_empty() {
@@ -253,8 +261,8 @@ fn ordered_content_parts() -> Vec<ContentPart> {
     parts
 }
 
-fn build_note_content() -> CliResult<String> {
-    let ordered = ordered_content_parts();
+fn build_note_content(argv: &[String]) -> CliResult<String> {
+    let ordered = ordered_content_parts(argv);
 
     let mut parts: Vec<String> = Vec::new();
 
