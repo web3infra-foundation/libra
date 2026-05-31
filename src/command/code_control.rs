@@ -1,4 +1,6 @@
 //! Local automation shim for driving an existing `libra code --control write`
+//!
+//! 本地自动化垫片，用于驱动现有的 `libra code --control write`
 //! session over NDJSON JSON-RPC 2.0.
 //!
 //! This command is intentionally separate from `libra code --stdio`, which

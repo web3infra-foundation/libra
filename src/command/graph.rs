@@ -1,4 +1,6 @@
 //! Thread graph TUI for inspecting AI workflow version state.
+//!
+//! 线程图 TUI，用于检查 AI 工作流版本状态。
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
