@@ -143,7 +143,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。当前卡片与 step detail 已显示 live `Plan.title` / `Plan.summary`，review diff 按 patchset 维度展示 id / status / file counts，task/run detail output 也已按长内容折叠展开，sidebar 也提供了手动 refresh thread list affordance。
+- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。当前卡片与 step detail 已显示 live `Plan.title` / `Plan.summary`，review diff 按 patchset 维度展示 id / status / file counts，task/run detail output 也已按长内容折叠展开，sidebar 提供手动 refresh thread list affordance，Summary 也保留手动 refresh repo status affordance。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
 - Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；v0.17.1049 已把 `/api/code/diagnostics` best-effort 映射进 Agent 行（pid、web/mcp 端口、log file、active interaction、last error）。
