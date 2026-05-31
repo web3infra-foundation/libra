@@ -576,3 +576,68 @@ fn prune_unreachable_loose_objects(
     }
     Ok(actions)
 }
+
+fn clean_pack_directory(
+    storage: &ClientStorage,
+    policy: PrunePolicy,
+    dry_run: bool,
+) -> CliResult<PackStats> {
+    let pack_dir = storage.base_path().join("pack");
+    let mut stats = PackStats {
+        directory_exists: pack_dir.exists(),
+        ..Default::default()
+    };
+    if !pack_dir.exists() {
+        return Ok(stats);
+    }
+
+    let groups = collect_pack_groups(&pack_dir)?;
+    for (stem, group) in groups {
+        let has_keep = group.keep.is_some();
+        match (&group.pack, &group.idx) {
+            (Some(pack), Some(idx)) => {
+                let inspection = verify_pack::inspect_pack_files(idx, pack).map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to verify pack group '{}': {}",
+                        stem,
+                        error.render()
+                    ))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+                })?;
+                stats.packs_verified += 1;
+                stats.objects_in_packs += inspection.object_count;
+            }
+            (Some(pack), None) => {
+                stats.stale_files.push(handle_pack_file(
+                    pack,
+                    policy,
+                    dry_run,
+                    has_keep,
+                    "pack file has no matching .idx",
+                )?);
+            }
+            (None, Some(idx)) => {
+                stats.stale_files.push(handle_pack_file(
+                    idx,
+                    policy,
+                    dry_run,
+                    has_keep,
+                    "pack index has no matching .pack",
+                )?);
+            }
+            (None, None) => {}
+        }
+
+        for other in group.others {
+            stats.stale_files.push(handle_pack_file(
+                &other,
+                policy,
+                dry_run,
+                has_keep,
+                "stale pack temporary or sidecar file",
+            )?);
+        }
+    }
+
+    Ok(stats)
+}
