@@ -361,7 +361,14 @@ fn next_revision(previous_revision: u32) -> Option<u32> {
 /// the three failure shapes so callers can surface a precise error message
 /// rather than a generic "not paired".
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-pub enum PairingError {
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
+    )
+)]
+pub(crate) enum PairingError {
     /// The supposed-execution-plan argument actually carries a different
     /// `kind`. Caught first because the rest of the checks assume the
     /// argument really is an execution plan.
@@ -404,7 +411,14 @@ pub enum PairingError {
 /// checked first, then test-plan kind, then revision parity. Callers that
 /// pass two malformed inputs will see the execution-side error first; this
 /// is deterministic so audit logs stay stable.
-pub fn validate_paired_plan_revisions(
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "staged runtime revision helper is covered by unit tests before production call-site cutover"
+    )
+)]
+pub(crate) fn validate_paired_plan_revisions(
     execution: &RevisionChainEntry,
     test: &RevisionChainEntry,
 ) -> Result<(), PairingError> {
