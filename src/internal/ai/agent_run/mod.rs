@@ -1,5 +1,7 @@
 //! Step 2 sub-agent contracts (CEX-S2-10 schema-first runtime contracts).
 //!
+//! 第 2 步子代理契约（CEX-S2-10 模式优先运行时契约）。
+//!
 //! # Status
 //!
 //! This module is **schema-only**: it defines the data types Step 2 will use,

@@ -1,5 +1,7 @@
 //! AI provider backends for Libra Code.
 //!
+//! Libra Code 的 AI 提供商后端。
+//!
 //! This module contains pluggable provider implementations that translate
 //! between libra's provider-agnostic [`CompletionRequest`](super::completion::CompletionRequest)
 //! / [`CompletionResponse`](super::completion::request::CompletionResponse) types

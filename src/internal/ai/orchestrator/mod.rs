@@ -1,5 +1,7 @@
 //! AI orchestrator subsystem.
 //!
+//! AI 编排器子系统。
+//!
 //! Boundary: this layer coordinates planning, workspace preparation, execution,
 //! verification, decisions, checkpointing, and persistence for formal AI runs. Provider
 //! adapters and raw completion APIs stay outside this module. End-to-end coverage lives
