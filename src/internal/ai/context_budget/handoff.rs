@@ -1,5 +1,7 @@
 //! Context handoff types + 8-section SUMMARY parser.
 //!
+//! 上下文交接类型 + 8 部分摘要解析器。
+//!
 //! This module is the OC-Phase 4 P4.3 deliverable from
 //! `docs/improvement/opencode.md`. The dispatcher (OC-Phase 3) and the
 //! compaction agent (OC-Phase 4 P4.4) both need a way to describe a

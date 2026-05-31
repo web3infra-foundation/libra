@@ -1,5 +1,7 @@
 //! LLM-summary path for the embedded `compaction` agent.
 //!
+//! 嵌入式 `compaction` 代理的 LLM 摘要路径。
+//!
 //! OC-Phase 4 P4.4 deliverable from `docs/improvement/opencode.md`. The
 //! sister module [`super::handoff`] (P4.3) defines the
 //! [`ContextHandoff`] value and the strict 8-section parser; this

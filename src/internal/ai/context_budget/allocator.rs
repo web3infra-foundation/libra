@@ -1,4 +1,6 @@
 //! Deterministic allocation of concrete context candidates against a budget.
+//!
+//! 针对预算的具体上下文候选的确定性分配。
 
 use std::collections::HashMap;
 
