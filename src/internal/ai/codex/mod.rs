@@ -1441,6 +1441,7 @@ fn build_code_ui_snapshot_from_codex_session(
         status: codex_code_ui_status(session),
         transcript,
         usage: code_ui_usage_snapshot(session, &current.provider).or_else(|| current.usage.clone()),
+        pending_plan_revision: current.pending_plan_revision.clone(),
         plans: session
             .plans
             .iter()

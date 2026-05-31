@@ -176,6 +176,7 @@ export type CodeUiSessionSnapshot = {
   status: CodeUiSessionStatus;
   transcript: CodeUiTranscriptEntry[];
   usage?: CodeUiUsageSnapshot;
+  pendingPlanRevision?: string;
   plans: CodeUiPlanSnapshot[];
   tasks: CodeUiTaskSnapshot[];
   toolCalls: CodeUiToolCallSnapshot[];
