@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, gc, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -382,6 +382,8 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
+    #[command(about = "Prune unreachable objects and clean stale pack files")]
+    Gc(command::gc::GcArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -1181,6 +1183,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
+        Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,

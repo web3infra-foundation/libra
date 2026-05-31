@@ -126,6 +126,31 @@ pub async fn execute_safe(args: VerifyPackArgs, output: &OutputConfig) -> CliRes
     render_verify_pack_output(&result, args.verbose, output)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackInspection {
+    pub object_count: usize,
+    pub index_version: u8,
+    pub pack_hash: String,
+}
+
+pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult<PackInspection> {
+    let idx_bytes = read_file(idx_file, "pack index")?;
+    if let Some(hash_kind) =
+        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?
+    {
+        set_hash_kind(hash_kind);
+    }
+    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
+    let decoded = decode_pack(pack_file)?;
+    validate_index_against_pack(&parsed, &decoded)
+        .map_err(|detail| verification_failed(idx_file, pack_file, detail))?;
+    Ok(PackInspection {
+        object_count: parsed.entries.len(),
+        index_version: parsed.version,
+        pack_hash: parsed.pack_hash.to_string(),
+    })
+}
+
 fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
     let idx_file = args.idx_file.clone();
     let pack_file = args
