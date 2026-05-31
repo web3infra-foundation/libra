@@ -271,9 +271,16 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let storage = ClientStorage::init(path::objects());
     let mut reachability = collect_reachability(&storage).await?;
     trace_reachable(&storage, &mut reachability);
+    let skip_loose_prune = !args.dry_run && !reachability.warnings.is_empty();
+    let loose_policy = if skip_loose_prune {
+        PrunePolicy::Never
+    } else {
+        policy
+    };
 
     let loose =
-        prune_unreachable_loose_objects(&storage, &reachability, policy, args.dry_run).await?;
+        prune_unreachable_loose_objects(&storage, &reachability, loose_policy, args.dry_run)
+            .await?;
     let pack_files = clean_pack_directory(&storage, policy, args.dry_run)?;
 
     let loose_stats = LooseObjectStats {
@@ -295,6 +302,11 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     };
 
     let mut warnings = reachability.warnings.clone();
+    if skip_loose_prune {
+        warnings.push(
+            "reachability traversal was incomplete; loose-object pruning was skipped".to_string(),
+        );
+    }
     if args.aggressive {
         warnings.push(
             "--aggressive is accepted for compatibility; Libra gc does not repack objects yet"
@@ -1888,6 +1900,48 @@ mod tests {
 
         assert!(reachability.reachable.contains(&missing));
         assert_eq!(reachability.warnings.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers destructive pruning being disabled when reachability is incomplete.
+    async fn run_gc_skips_loose_prune_after_reachability_warning() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("keep when graph is incomplete");
+        save_object(&blob, &blob.id).unwrap();
+        let missing = test_hash(13);
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO reference (name, kind, \"commit\", remote) VALUES ('broken', 'Head', ?, NULL)",
+            [missing.to_string().into()],
+        ))
+        .await
+        .unwrap();
+
+        let output = run_gc(&GcArgs {
+            dry_run: false,
+            prune: "now".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.loose_objects.pruned, 0);
+        assert!(storage.exist(&blob.id));
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| { warning.contains("loose-object pruning was skipped") })
+        );
     }
 
     #[tokio::test]
