@@ -580,7 +580,12 @@ pub(crate) async fn ingest_agent_traces_payload(
     // into `metadata_json` so `libra agent checkpoint rewind --apply`
     // can resolve the on-disk transcript file without re-running the
     // adapter's path-discovery heuristics.
-    let metadata_json = build_agent_session_metadata_json(&envelope);
+    let concurrent_active = if matches!(event.kind, LifecycleEventKind::TurnStart) {
+        has_concurrent_active_session(conn, agent_kind, &envelope).await?
+    } else {
+        false
+    };
+    let metadata_json = build_agent_session_metadata_json(&envelope, concurrent_active);
     let upsert_sql = "
         INSERT INTO agent_session (
             session_id, agent_kind, provider_session_id, state, working_dir,
@@ -651,7 +656,10 @@ pub(crate) async fn ingest_agent_traces_payload(
 /// path can locate the file without re-deriving provider conventions.
 /// Returns `"{}"` when no useful fields are populated, so the upsert
 /// CASE expression can detect the placeholder.
-fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
+fn build_agent_session_metadata_json(
+    envelope: &SessionHookEnvelope,
+    concurrent_active: bool,
+) -> String {
     let mut obj = serde_json::Map::new();
     if let Some(path) = envelope.transcript_path.as_deref()
         && !path.is_empty()
@@ -661,10 +669,43 @@ fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
             serde_json::Value::String(path.to_string()),
         );
     }
+    if concurrent_active {
+        obj.insert(
+            "concurrent_active".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if obj.is_empty() {
         return "{}".to_string();
     }
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
+}
+
+async fn has_concurrent_active_session(
+    conn: &sea_orm::DatabaseConnection,
+    agent_kind: &str,
+    envelope: &SessionHookEnvelope,
+) -> Result<bool> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM agent_session \
+             WHERE state = 'active' AND working_dir = ? \
+               AND NOT (agent_kind = ? AND provider_session_id = ?)",
+            [
+                envelope.cwd.clone().into(),
+                agent_kind.into(),
+                envelope.session_id.clone().into(),
+            ],
+        ))
+        .await
+        .context("failed to detect concurrent active agent sessions")?;
+    let count = row
+        .and_then(|row| row.try_get_by::<i64, _>("n").ok())
+        .unwrap_or(0);
+    Ok(count > 0)
 }
 
 /// Write a committed checkpoint: materialise transcript + metadata blobs,
@@ -1618,6 +1659,52 @@ mod tests {
             !report_json.contains("AKIAIOSFODNN7EXAMPLE"),
             "raw secret leaked into redaction_report column: {report_json}"
         );
+    }
+
+    /// entire.md §13 #6: concurrent TurnStart events in the same working_dir
+    /// must not block ingestion, but the later session should be marked so
+    /// operators can identify overlapping external-agent activity.
+    #[tokio::test]
+    async fn ingest_turn_start_marks_concurrent_active_session() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let first = ingest_envelope("SessionStart", "S-concurrent-a", json!({}));
+        ingest_agent_traces_payload(
+            &first,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("first session starts");
+
+        let second = ingest_envelope("UserPromptSubmit", "S-concurrent-b", json!({}));
+        ingest_agent_traces_payload(
+            &second,
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+            None,
+        )
+        .await
+        .expect("second prompt ingests despite concurrent active session");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT metadata_json FROM agent_session WHERE provider_session_id = ?",
+                ["S-concurrent-b".into()],
+            ))
+            .await
+            .expect("query")
+            .expect("second session row exists");
+        let metadata_json: String = row.try_get_by("metadata_json").unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(metadata["concurrent_active"], json!(true));
     }
 
     #[tokio::test]
