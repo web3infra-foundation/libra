@@ -1082,7 +1082,10 @@ async fn approved_permission_up_down_up_round_trip() {
         .rollback_to(&conn, 2026050501)
         .await
         .expect("rollback past approved_permission");
-    assert_eq!(rolled, vec![2026053101, 2026053001, 2026052301, 2026050801, 2026050601]);
+    assert_eq!(
+        rolled,
+        vec![2026053101, 2026053001, 2026052301, 2026050801, 2026050601]
+    );
     assert!(
         !table_exists(&conn, "approved_permission").await,
         "down migration must drop the table"
@@ -1101,7 +1104,10 @@ async fn approved_permission_up_down_up_round_trip() {
         .run_pending(&conn)
         .await
         .expect("second up reapplies cleanly");
-    assert_eq!(reapplied, vec![2026050601, 2026050801, 2026052301, 2026053001, 2026053101]);
+    assert_eq!(
+        reapplied,
+        vec![2026050601, 2026050801, 2026052301, 2026053001, 2026053101]
+    );
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);
     assert!(column_exists(&conn, "agent_usage_stats", "agent_name").await);

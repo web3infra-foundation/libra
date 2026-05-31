@@ -7,7 +7,7 @@
 use std::str::FromStr;
 
 use git_internal::{hash::ObjectHash, internal::object::ObjectTrait};
-use sea_orm::{ConnectionTrait, DbErr, Statement};
+use sea_orm::{ConnectionTrait, DbErr, Statement, TransactionTrait};
 
 use crate::{internal::db::get_db_conn_instance, utils::util};
 
@@ -119,15 +119,6 @@ pub async fn add(
 
     let db = get_db_conn_instance().await;
 
-    // Check if a note already exists for this object in this ref
-    let existing = find_note_blob(&db, notes_ref, &object_str).await?;
-    if existing.is_some() && !force {
-        return Err(NotesError::AlreadyExists {
-            notes_ref: notes_ref.to_string(),
-            object: object_str,
-        });
-    }
-
     // Create and store the blob
     let blob = git_internal::internal::object::blob::Blob::from_content(message);
     let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
@@ -136,23 +127,27 @@ pub async fn add(
         .map_err(NotesError::StoreBlobFailed)?;
     let note_hash = blob.id.to_string();
 
-    if let Some(_existing_blob) = existing {
-        // Update existing row
+    if force {
+        // INSERT … ON CONFLICT DO UPDATE: atomic upsert — no check-then-act gap.
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
-            "UPDATE notes SET blob = ? WHERE notes_ref = ? AND object = ?",
+            "INSERT INTO notes (notes_ref, object, blob) VALUES (?, ?, ?) \
+             ON CONFLICT(notes_ref, object) DO UPDATE SET blob = excluded.blob",
             [
-                note_hash.clone().into(),
                 notes_ref.into(),
                 object_str.clone().into(),
+                note_hash.clone().into(),
             ],
         ))
         .await?;
     } else {
-        // Insert new row
+        // INSERT … ON CONFLICT DO NOTHING: if the row already exists the
+        // statement is a no-op and `changes()` returns 0, so we detect the
+        // conflict without a separate SELECT.
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
-            "INSERT INTO notes (notes_ref, object, blob) VALUES (?, ?, ?)",
+            "INSERT INTO notes (notes_ref, object, blob) VALUES (?, ?, ?) \
+             ON CONFLICT(notes_ref, object) DO NOTHING",
             [
                 notes_ref.into(),
                 object_str.clone().into(),
@@ -160,6 +155,21 @@ pub async fn add(
             ],
         ))
         .await?;
+
+        let changes: Option<i64> = db
+            .query_one(Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT changes()",
+            ))
+            .await?
+            .map(|row| row.try_get_by_index(0).unwrap_or(0));
+
+        if changes == Some(0) {
+            return Err(NotesError::AlreadyExists {
+                notes_ref: notes_ref.to_string(),
+                object: object_str,
+            });
+        }
     }
 
     Ok(AddNoteResult {
@@ -276,15 +286,19 @@ pub async fn remove(
         to_delete.push((obj_str, blob_hash));
     }
 
-    // Phase 2: delete all verified rows.
+    // Phase 2: delete all verified rows inside a single transaction so a
+    // partial remove cannot survive a mid-delete failure (e.g. I/O error,
+    // lock timeout, or interruption).
+    let txn = db.begin().await?;
     for (obj_str, _blob_hash) in &to_delete {
-        db.execute(Statement::from_sql_and_values(
+        txn.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
             "DELETE FROM notes WHERE notes_ref = ? AND object = ?",
             [notes_ref.into(), obj_str.clone().into()],
         ))
         .await?;
     }
+    txn.commit().await?;
 
     Ok(to_delete)
 }

@@ -632,9 +632,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         Migration {
             version: 2026053101,
             name: "ai_final_decision",
-            up: include_str!(
-                "../../../sql/migrations/2026053101_ai_final_decision.sql"
-            ),
+            up: include_str!("../../../sql/migrations/2026053101_ai_final_decision.sql"),
             down: Some(include_str!(
                 "../../../sql/migrations/2026053101_ai_final_decision_down.sql"
             )),
