@@ -548,8 +548,10 @@ fn index_roots() -> CliResult<HashSet<ObjectHash>> {
         ))
         .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
-    for entry in index.tracked_entries(0) {
-        roots.insert(entry.hash);
+    for stage in 0..=3 {
+        for entry in index.tracked_entries(stage) {
+            roots.insert(entry.hash);
+        }
     }
     Ok(roots)
 }
@@ -1576,6 +1578,35 @@ mod tests {
 
         let roots = collect_roots_from_database().await.unwrap();
         assert!(!roots.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers unmerged index stages being protected as reachability roots.
+    async fn index_roots_include_unmerged_stages() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let mut index = git_internal::internal::index::Index::new();
+        let mut expected = HashSet::new();
+
+        for stage in 1..=3 {
+            let hash = test_hash(stage);
+            let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+                "conflict.txt".to_string(),
+                hash,
+                stage as u32,
+            );
+            entry.flags.stage = stage;
+            index.add(entry);
+            expected.insert(hash);
+        }
+        index.to_file(path::index()).unwrap();
+
+        let roots = index_roots().unwrap();
+        for hash in expected {
+            assert!(roots.contains(&hash));
+        }
     }
 
     #[tokio::test]
