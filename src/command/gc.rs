@@ -997,3 +997,248 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn prune_unreachable_loose_objects_respects_dry_run() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("garbage");
+        save_object(&blob, &blob.id).unwrap();
+        let reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::new(),
+            reachable: HashSet::new(),
+        };
+
+        let actions = prune_unreachable_loose_objects(
+            &storage,
+            &reachability,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            true,
+        )
+        .unwrap();
+        assert_eq!(actions[0].action, GcAction::WouldPrune);
+        assert!(storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn prune_unreachable_loose_objects_removes_matching_object() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("garbage");
+        save_object(&blob, &blob.id).unwrap();
+        let reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::new(),
+            reachable: HashSet::new(),
+        };
+
+        let actions = prune_unreachable_loose_objects(
+            &storage,
+            &reachability,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+        assert_eq!(actions[0].action, GcAction::Pruned);
+        assert!(!storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn prune_unreachable_loose_objects_keeps_reachable_object() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("reachable");
+        save_object(&blob, &blob.id).unwrap();
+        let reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::from([blob.id]),
+            reachable: HashSet::from([blob.id]),
+        };
+
+        let actions = prune_unreachable_loose_objects(
+            &storage,
+            &reachability,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+        assert!(actions.is_empty());
+        assert!(storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn clean_pack_directory_prunes_orphan_idx() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let idx = pack_dir.join("pack-deadbeef.idx");
+        fs::write(&idx, b"orphan").unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files.len(), 1);
+        assert_eq!(stats.stale_files[0].action, PackAction::Pruned);
+        assert!(!idx.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn clean_pack_directory_keeps_files_when_keep_exists() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let idx = pack_dir.join("pack-deadbeef.idx");
+        let keep = pack_dir.join("pack-deadbeef.keep");
+        fs::write(&idx, b"orphan").unwrap();
+        fs::write(&keep, b"keep").unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files[0].action, PackAction::Retained);
+        assert!(idx.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn clean_pack_directory_returns_empty_when_directory_missing() {
+        let dir = tempdir().unwrap();
+        let storage = ClientStorage::init(dir.path().join("objects"));
+
+        let stats = clean_pack_directory(&storage, PrunePolicy::Never, false).unwrap();
+
+        assert!(!stats.directory_exists);
+        assert!(stats.stale_files.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn clean_pack_directory_prunes_orphan_pack_and_sidecar() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let pack = pack_dir.join("pack-deadbeef.pack");
+        let sidecar = pack_dir.join("pack-feedface.tmp");
+        fs::write(&pack, b"orphan").unwrap();
+        fs::write(&sidecar, b"tmp").unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files.len(), 2);
+        assert!(
+            stats
+                .stale_files
+                .iter()
+                .all(|file| file.action == PackAction::Pruned)
+        );
+        assert!(!pack.exists());
+        assert!(!sidecar.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn run_gc_prune_never_reports_retained_unreachable_object() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let blob = Blob::from_content("unreachable");
+        save_object(&blob, &blob.id).unwrap();
+
+        let output = run_gc(&GcArgs {
+            dry_run: false,
+            prune: "never".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.loose_objects.unreachable, 1);
+        assert_eq!(output.unreachable_objects[0].action, GcAction::Retained);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn run_gc_prune_now_removes_unreachable_object() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("unreachable");
+        save_object(&blob, &blob.id).unwrap();
+
+        let output = run_gc(&GcArgs {
+            dry_run: false,
+            prune: "now".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.loose_objects.pruned, 1);
+        assert!(!storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn run_gc_warns_for_compatibility_flags() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let output = run_gc(&GcArgs {
+            dry_run: true,
+            prune: "never".to_string(),
+            no_prune: false,
+            aggressive: true,
+            auto: true,
+            force: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.warnings.len(), 3);
+    }
+
+    #[test]
