@@ -10,7 +10,7 @@ import {
   submitMessage,
   subscribeEvents,
 } from "./client";
-import type { CodeUiEventEnvelope } from "./types";
+import type { CodeUiEventEnvelope, CodeUiSessionSnapshot } from "./types";
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -56,6 +56,39 @@ class FakeEventSource {
       listener.call(this as unknown as EventSource, event);
     }
   }
+}
+
+function snapshot(status: CodeUiSessionSnapshot["status"]): CodeUiSessionSnapshot {
+  return {
+    sessionId: "session-1",
+    threadId: "11111111-1111-4111-8111-111111111111",
+    workingDir: "/repo",
+    provider: { provider: "test", model: "fixture" },
+    capabilities: {
+      messageInput: true,
+      streamingText: true,
+      planUpdates: false,
+      toolCalls: false,
+      patchsets: false,
+      interactiveApprovals: false,
+      structuredQuestions: false,
+      providerSessionResume: false,
+    },
+    controller: {
+      kind: "browser",
+      canWrite: true,
+      loopbackOnly: true,
+      ownerLabel: "browser",
+    },
+    status,
+    transcript: [],
+    plans: [],
+    tasks: [],
+    toolCalls: [],
+    patchsets: [],
+    interactions: [],
+    updatedAt: "2026-05-14T00:00:00Z",
+  };
 }
 
 afterEach(() => {
@@ -186,7 +219,7 @@ describe("Code UI SSE client", () => {
       seq: 7,
       type: "session_updated",
       at: "2026-05-14T00:00:00Z",
-      data: { status: "idle" },
+      data: snapshot("idle"),
     } satisfies CodeUiEventEnvelope;
     source.dispatch("session_updated", JSON.stringify(event));
     source.dispatch("status_changed", "{not-json");

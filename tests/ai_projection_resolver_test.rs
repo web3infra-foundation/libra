@@ -218,6 +218,46 @@ async fn scheduler_repository_loads_selected_plan_set_and_enforces_cas() {
     ));
 }
 
+/// Scenario: when both thread and scheduler projection rows exist,
+/// `ProjectionResolver::load_thread_bundle` must return a Fresh bundle that
+/// preserves the thread identity, selected plan ordering, and live context
+/// window exactly as stored. This is the formal read contract consumed by
+/// resume, diagnostics, and Code UI projection surfaces.
+#[tokio::test]
+async fn projection_resolver_loads_fresh_thread_scheduler_and_live_context_window() {
+    let db = setup_db().await;
+    let thread_id = id("12121212-1212-4121-8121-121212121212");
+    let thread = sample_thread(thread_id);
+    thread.create(&db).await.unwrap();
+    let scheduler = sample_scheduler(thread_id);
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let bundle = resolver
+        .load_thread_bundle(thread_id)
+        .await
+        .unwrap()
+        .expect("thread bundle");
+
+    assert_eq!(bundle.freshness, ProjectionFreshness::Fresh);
+    assert_eq!(bundle.thread.thread_id, thread.thread_id);
+    assert_eq!(bundle.thread.current_intent_id, thread.current_intent_id);
+    assert_eq!(
+        bundle.scheduler.selected_plan_ids,
+        scheduler.selected_plan_ids
+    );
+    assert_eq!(
+        bundle.scheduler.live_context_window,
+        scheduler.live_context_window
+    );
+    assert_eq!(
+        bundle.scheduler.live_context_window[0].source_kind,
+        LiveContextSourceKind::Planning
+    );
+}
+
 /// Scenario: when a thread projection row exists but its scheduler row is missing,
 /// `ProjectionResolver::load_thread_bundle` must return a `StaleReadOnly` bundle with
 /// an empty selected-plan set rather than an error. This is the contract the runtime
@@ -307,6 +347,40 @@ async fn projection_resolver_query_indexes_diagnose_missing_scheduler_links() {
     assert!(
         codes.contains(&"missing_active_run_index"),
         "expected missing run index diagnostic, got {:#?}",
+        indexes.diagnostics
+    );
+}
+
+/// Scenario: live context frames carried by the scheduler must be reachable
+/// through the intent-context-frame query index. Without this diagnostic, a
+/// resume surface can show a fresh live context window while the read-side
+/// indexes cannot rebuild or explain where that context came from.
+#[tokio::test]
+async fn projection_resolver_query_indexes_diagnose_missing_live_context_frame_links() {
+    let db = setup_db().await;
+    let thread_id = id("afafafaf-afaf-4afa-8afa-afafafafafaf");
+    sample_thread(thread_id).create(&db).await.unwrap();
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    let scheduler = sample_scheduler(thread_id);
+    let frame_id = scheduler.live_context_window[0].context_frame_id;
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let indexes = resolver
+        .load_query_indexes(thread_id)
+        .await
+        .unwrap()
+        .expect("query indexes");
+
+    assert_eq!(indexes.freshness, ProjectionFreshness::Fresh);
+    assert!(
+        indexes.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_live_context_frame_index"
+                && diagnostic.index_name == "ai_index_intent_context_frame"
+                && diagnostic.subject_id == frame_id
+        }),
+        "expected missing live-context-frame diagnostic, got {:#?}",
         indexes.diagnostics
     );
 }

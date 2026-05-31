@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053001,
+            2026053001, 2026053101,
         ]
     );
     assert_eq!(
@@ -62,13 +62,14 @@ fn builtin_migrations_register_current_schema_migrations() {
             "agent_usage_stats_agent_name",
             "source_call_log",
             "notes",
+            "ai_final_decision",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 8);
-    assert_eq!(runner.max_registered_version(), Some(2026053001));
+    assert_eq!(runner.len(), 9);
+    assert_eq!(runner.max_registered_version(), Some(2026053101));
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,10 +1042,11 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053001,
+            2026053001, 2026053101,
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
+    assert!(table_exists(&conn, "ai_final_decision").await);
     assert!(table_exists(&conn, "automation_log").await);
     assert!(table_exists(&conn, "agent_usage_stats").await);
     assert!(table_exists(&conn, "agent_session").await);
@@ -1080,7 +1082,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .rollback_to(&conn, 2026050501)
         .await
         .expect("rollback past approved_permission");
-    assert_eq!(rolled, vec![2026053001, 2026052301, 2026050801, 2026050601]);
+    assert_eq!(rolled, vec![2026053101, 2026053001, 2026052301, 2026050801, 2026050601]);
     assert!(
         !table_exists(&conn, "approved_permission").await,
         "down migration must drop the table"
@@ -1099,10 +1101,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .run_pending(&conn)
         .await
         .expect("second up reapplies cleanly");
-    assert_eq!(
-        reapplied,
-        vec![2026050601, 2026050801, 2026052301, 2026053001]
-    );
+    assert_eq!(reapplied, vec![2026050601, 2026050801, 2026052301, 2026053001, 2026053101]);
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);
     assert!(column_exists(&conn, "agent_usage_stats", "agent_name").await);

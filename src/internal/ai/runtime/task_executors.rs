@@ -7,58 +7,93 @@
 //! [`crate::internal::ai::runtime::contracts`] so the runtime can address
 //! all task executors through a single trait object.
 //!
-//! This module landed the shared impl shapes first. The Codex executor
-//! remains schema-only and returns a structured [`TaskExecutionError::Provider`]
-//! pointing at the substantive wiring work. The generic completion executor
-//! now has a minimal single-shot body for no-tool tasks; it calls the provider,
-//! stitches assistant text into the task summary, and fails closed if the
-//! response asks for tool execution that this minimal adapter cannot mediate.
-//! The remaining body fill-in has to:
+//! The Codex executor delegates to a configured Code UI provider adapter, which
+//! is the shared surface used by the managed Codex app-server WebSocket driver.
+//! The generic completion executor has a minimal single-shot body for no-tool
+//! tasks; it calls the provider, stitches assistant text into the task summary,
+//! and fails closed if the response asks for tool execution that this minimal
+//! adapter cannot mediate. The remaining body fill-in has to:
 //!
-//! - **Codex path**: take the existing Codex app-server WebSocket driver
-//!   (today living inside `src/internal/ai/codex/mod.rs::
-//!   CodexCodeUiAdapter`), extract the per-attempt slice into a free
-//!   function, and have `CodexTaskExecutor::execute_task_attempt`
-//!   delegate to it.
 //! - **Completion path**: take the existing tool-loop runtime, build a
 //!   tool-enabled task from `TaskExecutionContext`, and route the completion
 //!   model + tool registry through sandbox and approval mediation.
 //!
-//! The remaining Codex WebSocket adapter and full completion tool-loop are
-//! non-trivial cross-cutting refactors. Splitting impl-shape, no-tool
-//! completion execution, and full tool-enabled execution across patches keeps
-//! downstream readiness rows moving without misrepresenting either executor as
-//! production-ready for every task shape.
+//! The remaining full completion tool-loop is a non-trivial cross-cutting
+//! refactor. Splitting Codex adapter delegation, no-tool completion execution,
+//! and full tool-enabled execution across patches keeps downstream readiness
+//! rows moving without misrepresenting every executor as production-ready for
+//! every task shape.
+
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::internal::ai::{
     completion::CompletionModel,
     runtime::contracts::{
-        TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor,
+        TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutionStatus,
+        TaskExecutor,
+    },
+    web::code_ui::{
+        CodeUiInteractionStatus, CodeUiProviderAdapter, CodeUiSessionSnapshot, CodeUiSessionStatus,
+        CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
     },
 };
 
-/// Schema-only `TaskExecutor` adapter for the Codex backend.
+const CODEX_ATTEMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn default_codex_attempt_timeout() -> Duration {
+    Duration::from_secs(300)
+}
+
+/// `TaskExecutor` adapter for the Codex backend.
 ///
-/// **State:** Wave 1B impl-shape only. Calls to
-/// [`Self::execute_task_attempt`] return a structured
-/// [`TaskExecutionError::Provider`] pointing at the wiring follow-up;
-/// callers should NOT route real task attempts through this struct yet.
+/// The executor drives a single task attempt through the configured
+/// [`CodeUiProviderAdapter`]. For managed Codex sessions that adapter is backed
+/// by `CodexCodeUiAdapter`, which speaks to the Codex app-server over
+/// WebSocket. The executor submits the prompt text, observes Code UI snapshots,
+/// and returns a terminal [`TaskExecutionResult`] once the attempt settles.
 ///
-/// The struct has no fields today because the real wiring will pull
-/// runtime configuration from a future `RuntimeConfig` extension; keeping
-/// the type unit-like avoids freezing field-name decisions before that
-/// extension is designed.
-#[derive(Default)]
-pub struct CodexTaskExecutor;
+/// Construct with [`Self::from_code_ui_adapter`] for real execution. The
+/// zero-argument [`Self::new`] constructor is retained for trait-object and
+/// compatibility tests, but it fails with a configuration error until an
+/// adapter is supplied.
+pub struct CodexTaskExecutor {
+    adapter: Option<Arc<dyn CodeUiProviderAdapter>>,
+    terminal_timeout: Duration,
+}
+
+impl Default for CodexTaskExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CodexTaskExecutor {
-    /// Construct a schema-only `CodexTaskExecutor`.
-    ///
-    /// See the struct docs for the "what's missing" contract.
+    /// Construct an unconfigured `CodexTaskExecutor`.
     pub fn new() -> Self {
-        Self
+        Self {
+            adapter: None,
+            terminal_timeout: default_codex_attempt_timeout(),
+        }
+    }
+
+    /// Construct a `CodexTaskExecutor` over an existing Code UI provider
+    /// adapter.
+    pub fn from_code_ui_adapter(adapter: Arc<dyn CodeUiProviderAdapter>) -> Self {
+        Self {
+            adapter: Some(adapter),
+            terminal_timeout: default_codex_attempt_timeout(),
+        }
+    }
+
+    /// Override the terminal wait timeout. Intended for tests and narrow
+    /// runtime wiring where the caller already owns a stricter budget.
+    pub fn with_terminal_timeout(mut self, timeout: Duration) -> Self {
+        self.terminal_timeout = timeout;
+        self
     }
 }
 
@@ -66,15 +101,156 @@ impl CodexTaskExecutor {
 impl TaskExecutor for CodexTaskExecutor {
     async fn execute_task_attempt(
         &self,
-        _context: TaskExecutionContext,
+        context: TaskExecutionContext,
     ) -> Result<TaskExecutionResult, TaskExecutionError> {
-        Err(TaskExecutionError::Provider(
-            "CodexTaskExecutor::execute_task_attempt is a Wave 1B schema-only stub; \
-             the Codex WebSocket-driven per-attempt loop will land in a follow-up \
-             patch (see src/internal/ai/runtime/task_executors.rs module docs)."
-                .to_string(),
-        ))
+        let adapter = self.adapter.as_ref().ok_or_else(|| {
+            TaskExecutionError::Environment(
+                "CodexTaskExecutor is not configured with a Code UI provider adapter".to_string(),
+            )
+        })?;
+        let task_id = context.task_id;
+        let run_id = context.run_id.unwrap_or_else(Uuid::new_v4);
+        let prompt = codex_prompt_from_context(&context);
+        let baseline_transcript_len = adapter.snapshot().await.transcript.len();
+        let mut events = adapter.subscribe();
+
+        adapter.submit_message(prompt).await.map_err(|error| {
+            TaskExecutionError::Provider(format!("Codex Code UI submit failed: {error}"))
+        })?;
+
+        wait_for_codex_code_ui_result(
+            adapter,
+            &mut events,
+            baseline_transcript_len,
+            task_id,
+            run_id,
+            self.terminal_timeout,
+        )
+        .await
     }
+}
+
+fn codex_prompt_from_context(context: &TaskExecutionContext) -> String {
+    let mut parts = Vec::new();
+    if !context.prompt.preamble.trim().is_empty() {
+        parts.push(context.prompt.preamble.clone());
+    }
+    parts.extend(
+        context
+            .prompt
+            .messages
+            .iter()
+            .filter(|message| !message.trim().is_empty())
+            .cloned(),
+    );
+    if parts.is_empty() {
+        format!("Execute task {}", context.task_id)
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+async fn wait_for_codex_code_ui_result(
+    adapter: &Arc<dyn CodeUiProviderAdapter>,
+    events: &mut broadcast::Receiver<crate::internal::ai::web::code_ui::CodeUiEventEnvelope>,
+    baseline_transcript_len: usize,
+    task_id: Uuid,
+    run_id: Uuid,
+    terminal_timeout: Duration,
+) -> Result<TaskExecutionResult, TaskExecutionError> {
+    let started = tokio::time::Instant::now();
+    let mut poll = tokio::time::interval(CODEX_ATTEMPT_POLL_INTERVAL);
+
+    loop {
+        let snapshot = adapter.snapshot().await;
+        if let Some(result) =
+            classify_codex_snapshot(&snapshot, baseline_transcript_len, task_id, run_id)
+        {
+            return result;
+        }
+        if started.elapsed() >= terminal_timeout {
+            return Err(TaskExecutionError::Provider(format!(
+                "Codex Code UI attempt did not reach a terminal snapshot within {} ms",
+                terminal_timeout.as_millis()
+            )));
+        }
+
+        tokio::select! {
+            _ = poll.tick() => {}
+            event = events.recv() => {
+                match event {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(TaskExecutionError::Provider(
+                            "Codex Code UI event stream closed before the attempt completed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn classify_codex_snapshot(
+    snapshot: &CodeUiSessionSnapshot,
+    baseline_transcript_len: usize,
+    task_id: Uuid,
+    run_id: Uuid,
+) -> Option<Result<TaskExecutionResult, TaskExecutionError>> {
+    if snapshot
+        .interactions
+        .iter()
+        .any(|interaction| interaction.status == CodeUiInteractionStatus::Pending)
+    {
+        return Some(Err(TaskExecutionError::ToolPolicy(
+            "Codex task attempt is awaiting interactive input; route this task through a runtime \
+             path that can mediate Code UI interactions"
+                .to_string(),
+        )));
+    }
+
+    let new_entries = snapshot
+        .transcript
+        .iter()
+        .skip(baseline_transcript_len)
+        .collect::<Vec<_>>();
+    let has_non_user_entry = new_entries
+        .iter()
+        .any(|entry| !matches!(entry.kind, CodeUiTranscriptEntryKind::UserMessage));
+    let has_error_entry = new_entries
+        .iter()
+        .any(|entry| matches!(entry.status.as_deref(), Some("error" | "failed")));
+    let has_cancelled_entry = new_entries
+        .iter()
+        .any(|entry| matches!(entry.status.as_deref(), Some("cancelled")));
+
+    let status = match snapshot.status {
+        CodeUiSessionStatus::Error => TaskExecutionStatus::Failed,
+        CodeUiSessionStatus::Completed => TaskExecutionStatus::Completed,
+        CodeUiSessionStatus::Idle if has_error_entry => TaskExecutionStatus::Failed,
+        CodeUiSessionStatus::Idle if has_cancelled_entry => TaskExecutionStatus::Cancelled,
+        CodeUiSessionStatus::Idle if has_non_user_entry => TaskExecutionStatus::Completed,
+        _ => return None,
+    };
+
+    Some(Ok(TaskExecutionResult {
+        task_id,
+        run_id,
+        status,
+        evidence: Vec::new(),
+        summary: codex_summary_from_entries(&new_entries),
+    }))
+}
+
+fn codex_summary_from_entries(entries: &[&CodeUiTranscriptEntry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| !matches!(entry.kind, CodeUiTranscriptEntryKind::UserMessage))
+        .and_then(|entry| entry.content.as_deref())
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToString::to_string)
 }
 
 /// Minimal `TaskExecutor` adapter that calls a generic
@@ -226,8 +402,9 @@ impl<M: CompletionModel + Send + Sync + 'static> TaskExecutor for CompletionTask
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc, time::Duration};
 
+    use chrono::Utc;
     use uuid::Uuid;
 
     use super::*;
@@ -237,6 +414,11 @@ mod tests {
             CompletionUsageSummary,
         },
         runtime::contracts::{ApprovalMediationState, PromptPackage, WorkflowPhase},
+        web::code_ui::{
+            CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind,
+            CodeUiInteractionRequest, CodeUiProviderInfo, CodeUiReadModel, CodeUiSession,
+            initial_snapshot,
+        },
     };
 
     /// Test fixture: returns the configured assistant text as a single
@@ -333,6 +515,116 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    enum ScriptedCodeUiOutcome {
+        Complete(String),
+        AwaitInteraction,
+    }
+
+    #[derive(Clone)]
+    struct ScriptedCodeUiAdapter {
+        session: Arc<CodeUiSession>,
+        submitted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        outcome: ScriptedCodeUiOutcome,
+    }
+
+    impl ScriptedCodeUiAdapter {
+        fn complete(summary: impl Into<String>) -> Arc<Self> {
+            Self::new(ScriptedCodeUiOutcome::Complete(summary.into()))
+        }
+
+        fn await_interaction() -> Arc<Self> {
+            Self::new(ScriptedCodeUiOutcome::AwaitInteraction)
+        }
+
+        fn new(outcome: ScriptedCodeUiOutcome) -> Arc<Self> {
+            let snapshot = initial_snapshot(
+                ".",
+                CodeUiProviderInfo {
+                    provider: "codex".to_string(),
+                    model: Some("codex-test".to_string()),
+                    mode: Some("test".to_string()),
+                    managed: true,
+                },
+                CodeUiCapabilities::default(),
+            );
+            Arc::new(Self {
+                session: CodeUiSession::new(snapshot),
+                submitted: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                outcome,
+            })
+        }
+
+        async fn submitted_messages(&self) -> Vec<String> {
+            self.submitted.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CodeUiReadModel for ScriptedCodeUiAdapter {
+        fn session(&self) -> Arc<CodeUiSession> {
+            self.session.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CodeUiCommandAdapter for ScriptedCodeUiAdapter {
+        fn capabilities(&self) -> CodeUiCapabilities {
+            CodeUiCapabilities::default()
+        }
+
+        async fn submit_message(&self, text: String) -> anyhow::Result<()> {
+            self.submitted.lock().await.push(text);
+            self.session.set_status(CodeUiSessionStatus::Thinking).await;
+            match &self.outcome {
+                ScriptedCodeUiOutcome::Complete(summary) => {
+                    self.session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: "assistant-1".to_string(),
+                            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                            title: None,
+                            content: Some(summary.clone()),
+                            status: Some("completed".to_string()),
+                            streaming: false,
+                            metadata: serde_json::Value::Null,
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    self.session.set_status(CodeUiSessionStatus::Idle).await;
+                }
+                ScriptedCodeUiOutcome::AwaitInteraction => {
+                    self.session
+                        .upsert_interaction(CodeUiInteractionRequest {
+                            id: "approval-1".to_string(),
+                            kind: CodeUiInteractionKind::Approval,
+                            title: Some("Approval required".to_string()),
+                            description: None,
+                            prompt: Some("approve?".to_string()),
+                            options: Vec::new(),
+                            status: CodeUiInteractionStatus::Pending,
+                            metadata: serde_json::Value::Null,
+                            requested_at: Utc::now(),
+                            resolved_at: None,
+                        })
+                        .await;
+                    self.session
+                        .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                        .await;
+                }
+            }
+            Ok(())
+        }
+
+        async fn respond_interaction(
+            &self,
+            _interaction_id: &str,
+            _response: crate::internal::ai::web::code_ui::CodeUiInteractionResponse,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn dummy_prompt() -> PromptPackage {
         PromptPackage {
             phase: WorkflowPhase::Execution,
@@ -355,27 +647,76 @@ mod tests {
         }
     }
 
-    /// `CodexTaskExecutor::execute_task_attempt` must return a structured
-    /// `TaskExecutionError::Provider` rather than `Ok(...)`. The error
-    /// message must mention "Wave 1B schema-only stub" so a future
-    /// reviewer encountering the error in logs can trace it back to this
-    /// module.
+    /// `CodexTaskExecutor::new()` is intentionally unconfigured. It should fail
+    /// with a user-routable environment error instead of pretending a provider
+    /// attempt ran.
     #[tokio::test]
-    async fn codex_task_executor_attempt_returns_schema_only_stub_error() {
+    async fn codex_task_executor_without_adapter_errors() {
         let executor = CodexTaskExecutor::new();
         let result = executor.execute_task_attempt(dummy_context()).await;
 
-        let error = result.expect_err("schema-only stub must return Err");
-        let TaskExecutionError::Provider(message) = error else {
-            panic!("expected TaskExecutionError::Provider, got: {error:?}");
+        let error = result.expect_err("unconfigured executor must return Err");
+        let TaskExecutionError::Environment(message) = error else {
+            panic!("expected TaskExecutionError::Environment, got: {error:?}");
         };
         assert!(
-            message.contains("CodexTaskExecutor"),
-            "error message must self-identify (got {message:?})"
+            message.contains("Code UI provider adapter"),
+            "error message must identify the missing adapter (got {message:?})"
         );
+    }
+
+    /// Configured `CodexTaskExecutor` must drive the Code UI adapter instead
+    /// of returning the historical schema-only stub. The test fixture simulates
+    /// the managed Codex WebSocket adapter by accepting a submitted prompt,
+    /// appending an assistant transcript entry, and returning to Idle.
+    #[tokio::test]
+    async fn codex_task_executor_submits_prompt_and_returns_terminal_snapshot() {
+        let adapter = ScriptedCodeUiAdapter::complete("codex attempt complete");
+        let executor = CodexTaskExecutor::from_code_ui_adapter(adapter.clone())
+            .with_terminal_timeout(Duration::from_secs(1));
+        let mut context = dummy_context();
+        context.prompt.preamble = "system preamble".to_string();
+        context.prompt.messages = vec!["first user instruction".to_string(), "second".to_string()];
+        let task_id = context.task_id;
+        let run_id = Uuid::new_v4();
+        context.run_id = Some(run_id);
+
+        let result = executor
+            .execute_task_attempt(context)
+            .await
+            .expect("scripted Code UI adapter reaches Idle");
+
+        assert_eq!(result.task_id, task_id);
+        assert_eq!(result.run_id, run_id);
+        assert_eq!(result.status, TaskExecutionStatus::Completed);
+        assert_eq!(result.summary.as_deref(), Some("codex attempt complete"));
+        let submitted = adapter.submitted_messages().await;
+        assert_eq!(submitted.len(), 1);
+        assert!(submitted[0].contains("system preamble"));
+        assert!(submitted[0].contains("first user instruction"));
+        assert!(submitted[0].contains("second"));
+    }
+
+    /// If Codex reaches an interactive approval/question state, this executor
+    /// must fail closed. A caller that can mediate interactions should route
+    /// through the full Code UI runtime instead of treating the attempt as
+    /// completed.
+    #[tokio::test]
+    async fn codex_task_executor_fails_closed_on_pending_interaction() {
+        let adapter = ScriptedCodeUiAdapter::await_interaction();
+        let executor = CodexTaskExecutor::from_code_ui_adapter(adapter)
+            .with_terminal_timeout(Duration::from_secs(1));
+
+        let error = executor
+            .execute_task_attempt(dummy_context())
+            .await
+            .expect_err("pending interaction must fail closed");
+        let TaskExecutionError::ToolPolicy(message) = error else {
+            panic!("expected TaskExecutionError::ToolPolicy, got: {error:?}");
+        };
         assert!(
-            message.contains("Wave 1B schema-only stub"),
-            "error message must mark itself as Wave 1B stub (got {message:?})"
+            message.contains("awaiting interactive input"),
+            "error should explain why the attempt cannot be completed (got {message:?})"
         );
     }
 

@@ -10,15 +10,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::internal::{
-    ai::runtime::{
-        contracts::FinalDecisionVerdict,
-        derived_records::ensure_runtime_thread,
-        phase3::{
-            ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
-            serialize_summary, timestamp_from_row,
+    ai::{
+        runtime::{
+            contracts::FinalDecisionVerdict,
+            derived_records::ensure_runtime_thread,
+            phase3::{
+                ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
+                serialize_summary, timestamp_from_row,
+            },
         },
+        session::jsonl::{AiArtifactEvent, SessionEvent, SessionJsonlStore},
     },
-    model::{ai_decision_proposal, ai_risk_score_breakdown},
+    model::{ai_decision_proposal, ai_final_decision, ai_risk_score_breakdown},
 };
 
 pub const DEFAULT_DECISION_POLICY_VERSION: &str = "decision:v1";
@@ -304,6 +307,17 @@ impl DecisionProposalStore {
         Ok(())
     }
 
+    pub async fn write_latest_with_session_mirror(
+        &self,
+        risk: &RiskScoreBreakdown,
+        proposal: &DecisionProposal,
+        session_store: &SessionJsonlStore,
+    ) -> Result<()> {
+        self.write_latest(risk, proposal).await?;
+        append_decision_session_mirror(session_store, risk, proposal)?;
+        Ok(())
+    }
+
     pub async fn load_latest_risk(&self, thread_id: Uuid) -> Result<Option<RiskScoreBreakdown>> {
         ai_risk_score_breakdown::Entity::find()
             .filter(ai_risk_score_breakdown::Column::ThreadId.eq(thread_id.to_string()))
@@ -327,6 +341,72 @@ impl DecisionProposalStore {
             .map(proposal_from_model)
             .transpose()
     }
+}
+
+pub fn append_decision_session_mirror(
+    session_store: &SessionJsonlStore,
+    risk: &RiskScoreBreakdown,
+    proposal: &DecisionProposal,
+) -> Result<()> {
+    if risk.thread_id != proposal.thread_id {
+        bail!(
+            "Risk score thread {} does not match decision proposal thread {}",
+            risk.thread_id,
+            proposal.thread_id
+        );
+    }
+
+    let risk_event = SessionEvent::ai_artifact(risk_score_artifact_event(risk)?);
+    session_store.append(&risk_event).with_context(|| {
+        format!(
+            "Failed to append risk score {} session artifact mirror for thread {} to {}",
+            risk.breakdown_id,
+            risk.thread_id,
+            session_store.events_path().display()
+        )
+    })?;
+
+    let proposal_event = SessionEvent::ai_artifact(decision_proposal_artifact_event(proposal)?);
+    session_store.append(&proposal_event).with_context(|| {
+        format!(
+            "Failed to append decision proposal {} session artifact mirror for thread {} to {}",
+            proposal.proposal_id,
+            proposal.thread_id,
+            session_store.events_path().display()
+        )
+    })
+}
+
+pub fn risk_score_artifact_event(risk: &RiskScoreBreakdown) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: risk.thread_id,
+        artifact_kind: "risk_score_breakdown".to_string(),
+        artifact_id: Some(risk.breakdown_id.to_string()),
+        payload: serde_json::to_value(risk).with_context(|| {
+            format!(
+                "Failed to serialize risk score {} for session artifact mirror",
+                risk.breakdown_id
+            )
+        })?,
+    })
+}
+
+pub fn decision_proposal_artifact_event(proposal: &DecisionProposal) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: proposal.thread_id,
+        artifact_kind: "decision_proposal".to_string(),
+        artifact_id: Some(proposal.proposal_id.to_string()),
+        payload: serde_json::to_value(proposal).with_context(|| {
+            format!(
+                "Failed to serialize decision proposal {} for session artifact mirror",
+                proposal.proposal_id
+            )
+        })?,
+    })
 }
 
 fn risk_to_active_model(risk: &RiskScoreBreakdown) -> Result<ai_risk_score_breakdown::ActiveModel> {
@@ -401,6 +481,238 @@ fn proposal_from_model(row: ai_decision_proposal::Model) -> Result<DecisionPropo
         summary: deserialize_summary(&row.summary_json, "decision proposal summary")?,
         created_at: timestamp_from_row(row.created_at, "decision created_at")?,
         updated_at: timestamp_from_row(row.updated_at, "decision updated_at")?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 completion: the formal final `Decision` artifact.
+//
+// Terminal link in the ValidationReport -> RiskScoreBreakdown ->
+// DecisionProposal -> Decision chain. A `DecisionProposal` recommends a
+// route + verdict; when that route is `AutoAccept` (no human gate), the
+// runtime finalises it into a `FinalDecision` recording the resolved verdict.
+// Human-gated routes (HumanReview / RequestChanges) are finalised later by the
+// CEX-S2-13 human-gated merge flow, which owns the approval interaction.
+// ---------------------------------------------------------------------------
+
+/// Richer detail persisted alongside a [`FinalDecision`] in `summary_json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalDecisionSummary {
+    /// The proposal route that produced this decision (e.g. `AutoAccept`).
+    pub route: DecisionProposalRoute,
+    /// Aggregate risk score carried over from the proposal.
+    pub risk_score: u8,
+    /// Human-readable rationale lines carried over from the proposal.
+    #[serde(default)]
+    pub rationale: Vec<String>,
+}
+
+/// The runtime's formal, persisted final decision for a thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalDecision {
+    pub decision_id: Uuid,
+    pub thread_id: Uuid,
+    pub decision_proposal_id: Option<Uuid>,
+    pub validation_report_id: Option<Uuid>,
+    pub policy_version: String,
+    pub verdict: FinalDecisionVerdict,
+    pub stale: bool,
+    pub is_latest: bool,
+    pub summary: FinalDecisionSummary,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl FinalDecision {
+    /// Finalise an `AutoAccept` [`DecisionProposal`] into a [`FinalDecision`].
+    ///
+    /// Returns `None` when the proposal must not be auto-finalised:
+    /// - its route is not [`AutoAccept`](DecisionProposalRoute::AutoAccept) —
+    ///   human-gated routes resolve through the CEX-S2-13 human-gated merge
+    ///   flow; or
+    /// - the proposal is `stale`. The Phase-4 projection-freshness contract
+    ///   (`docs/improvement/agent.md`, `ProjectionFreshness` table) forbids
+    ///   writing a final `Decision` from a stale `ValidationReport` /
+    ///   `RiskScoreBreakdown` / `DecisionProposal`; such a proposal must be
+    ///   replayed / recomputed (or escalated to human review) first, never
+    ///   silently promoted to a fresh terminal decision.
+    ///
+    /// `now` is supplied by the caller so the timestamps are testable.
+    pub fn finalize_auto_accept(proposal: &DecisionProposal, now: DateTime<Utc>) -> Option<Self> {
+        if !proposal.summary.route.is_auto_accept() || proposal.stale {
+            return None;
+        }
+        Some(Self {
+            decision_id: Uuid::new_v4(),
+            thread_id: proposal.thread_id,
+            decision_proposal_id: Some(proposal.proposal_id),
+            validation_report_id: proposal.validation_report_id,
+            policy_version: proposal.policy_version.clone(),
+            verdict: proposal.summary.proposed_verdict.clone(),
+            stale: false,
+            is_latest: true,
+            summary: FinalDecisionSummary {
+                route: proposal.summary.route,
+                risk_score: proposal.summary.risk_score,
+                rationale: proposal.summary.rationale.clone(),
+            },
+            created_at: now,
+            updated_at: now,
+        })
+    }
+}
+
+/// Persistence for [`FinalDecision`], mirroring [`DecisionProposalStore`]'s
+/// per-thread latest-pointer pattern.
+#[derive(Clone)]
+pub struct FinalDecisionStore {
+    db: DatabaseConnection,
+}
+
+impl FinalDecisionStore {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db }
+    }
+
+    /// Insert `decision` as the thread's latest final decision, clearing the
+    /// previous `is_latest` flag in the same transaction so the partial unique
+    /// index (`is_latest = 1`) holds.
+    pub async fn write_latest(&self, decision: &FinalDecision) -> Result<()> {
+        let txn = self
+            .db
+            .begin()
+            .await
+            .context("Failed to start final decision transaction")?;
+
+        ensure_runtime_thread(&txn, decision.thread_id).await?;
+
+        ai_final_decision::Entity::update_many()
+            .col_expr(ai_final_decision::Column::IsLatest, Expr::value(0))
+            .filter(ai_final_decision::Column::ThreadId.eq(decision.thread_id.to_string()))
+            .exec(&txn)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to clear previous latest final decision for thread {}",
+                    decision.thread_id
+                )
+            })?;
+
+        final_decision_to_active_model(decision)?
+            .insert(&txn)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to insert final decision {} for thread {}",
+                    decision.decision_id, decision.thread_id
+                )
+            })?;
+
+        txn.commit()
+            .await
+            .context("Failed to commit final decision transaction")?;
+        Ok(())
+    }
+
+    /// Persist `decision` and mirror it to the session JSONL stream as an
+    /// `ai_artifact` event (kind `final_decision`), matching how
+    /// ValidationReport / RiskScoreBreakdown / DecisionProposal are mirrored.
+    pub async fn write_latest_with_session_mirror(
+        &self,
+        decision: &FinalDecision,
+        session_store: &SessionJsonlStore,
+    ) -> Result<()> {
+        self.write_latest(decision).await?;
+        let event = SessionEvent::ai_artifact(final_decision_artifact_event(decision)?);
+        session_store.append(&event).with_context(|| {
+            format!(
+                "Failed to append final decision {} session artifact mirror for thread {} to {}",
+                decision.decision_id,
+                decision.thread_id,
+                session_store.events_path().display()
+            )
+        })?;
+        Ok(())
+    }
+
+    pub async fn load_latest(&self, thread_id: Uuid) -> Result<Option<FinalDecision>> {
+        ai_final_decision::Entity::find()
+            .filter(ai_final_decision::Column::ThreadId.eq(thread_id.to_string()))
+            .filter(ai_final_decision::Column::IsLatest.eq(1))
+            .order_by_desc(ai_final_decision::Column::CreatedAt)
+            .one(&self.db)
+            .await
+            .with_context(|| format!("Failed to load latest final decision for {thread_id}"))?
+            .map(final_decision_from_model)
+            .transpose()
+    }
+}
+
+pub fn final_decision_artifact_event(decision: &FinalDecision) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: decision.thread_id,
+        artifact_kind: "final_decision".to_string(),
+        artifact_id: Some(decision.decision_id.to_string()),
+        payload: serde_json::to_value(decision).with_context(|| {
+            format!(
+                "Failed to serialize final decision {} for session artifact mirror",
+                decision.decision_id
+            )
+        })?,
+    })
+}
+
+fn final_decision_to_active_model(
+    decision: &FinalDecision,
+) -> Result<ai_final_decision::ActiveModel> {
+    Ok(ai_final_decision::ActiveModel {
+        decision_id: Set(decision.decision_id.to_string()),
+        thread_id: Set(decision.thread_id.to_string()),
+        decision_proposal_id: Set(decision.decision_proposal_id.map(|id| id.to_string())),
+        validation_report_id: Set(decision.validation_report_id.map(|id| id.to_string())),
+        policy_version: Set(decision.policy_version.clone()),
+        verdict: Set(decision.verdict.variant_name().to_string()),
+        stale: Set(bool_to_row(decision.stale)),
+        is_latest: Set(bool_to_row(decision.is_latest)),
+        summary_json: Set(serialize_summary(
+            &decision.summary,
+            "final decision summary",
+        )?),
+        created_at: Set(decision.created_at.timestamp()),
+        updated_at: Set(decision.updated_at.timestamp()),
+    })
+}
+
+fn final_decision_from_model(row: ai_final_decision::Model) -> Result<FinalDecision> {
+    let verdict = FinalDecisionVerdict::from_variant_name(&row.verdict).ok_or_else(|| {
+        anyhow::anyhow!(
+            "final decision {} carries unknown verdict tag '{}'",
+            row.decision_id,
+            row.verdict
+        )
+    })?;
+    Ok(FinalDecision {
+        decision_id: parse_uuid(&row.decision_id, "final decision_id")?,
+        thread_id: parse_uuid(&row.thread_id, "final decision thread_id")?,
+        decision_proposal_id: row
+            .decision_proposal_id
+            .as_deref()
+            .map(|raw| parse_uuid(raw, "final decision decision_proposal_id"))
+            .transpose()?,
+        validation_report_id: row
+            .validation_report_id
+            .as_deref()
+            .map(|raw| parse_uuid(raw, "final decision validation_report_id"))
+            .transpose()?,
+        policy_version: row.policy_version,
+        verdict,
+        stale: row.stale != 0,
+        is_latest: row.is_latest != 0,
+        summary: deserialize_summary(&row.summary_json, "final decision summary")?,
+        created_at: timestamp_from_row(row.created_at, "final decision created_at")?,
+        updated_at: timestamp_from_row(row.updated_at, "final decision updated_at")?,
     })
 }
 
@@ -525,6 +837,71 @@ mod tests {
         );
         assert!(infra_proposal.summary.requires_human_review);
         assert!(!infra_proposal.is_auto_accept());
+    }
+
+    /// `FinalDecision::finalize_auto_accept` finalises an AutoAccept proposal
+    /// (carrying over verdict / route / risk_score / rationale) and refuses to
+    /// finalise human-gated routes (returns None — those resolve via the
+    /// CEX-S2-13 human-gated merge flow).
+    #[test]
+    fn finalize_auto_accept_only_finalises_auto_accept_route() {
+        let policy = DecisionPolicy::default();
+        let now = Utc::now();
+
+        // Passed → AutoAccept → finalisable into an Accepted decision.
+        let passed_report = sample_report(ValidationStatus::Passed);
+        let passed_risk = aggregate_risk_score(&passed_report, &policy);
+        let passed_proposal = build_decision_proposal(&passed_report, &passed_risk, &policy);
+        assert!(passed_proposal.is_auto_accept());
+
+        let decision = FinalDecision::finalize_auto_accept(&passed_proposal, now)
+            .expect("AutoAccept proposal must finalise into a decision");
+        assert_eq!(decision.verdict, FinalDecisionVerdict::Accepted);
+        assert_eq!(decision.thread_id, passed_proposal.thread_id);
+        assert_eq!(
+            decision.decision_proposal_id,
+            Some(passed_proposal.proposal_id)
+        );
+        assert_eq!(
+            decision.validation_report_id,
+            passed_proposal.validation_report_id
+        );
+        assert_eq!(decision.policy_version, passed_proposal.policy_version);
+        assert_eq!(decision.summary.route, DecisionProposalRoute::AutoAccept);
+        assert_eq!(
+            decision.summary.risk_score,
+            passed_proposal.summary.risk_score
+        );
+        assert!(decision.is_latest);
+        assert!(!decision.stale);
+
+        // Human-gated routes must NOT be auto-finalised.
+        let blocking_report = sample_report(ValidationStatus::BlockingFailed);
+        let blocking_risk = aggregate_risk_score(&blocking_report, &policy);
+        let blocking_proposal = build_decision_proposal(&blocking_report, &blocking_risk, &policy);
+        assert!(!blocking_proposal.is_auto_accept());
+        assert!(
+            FinalDecision::finalize_auto_accept(&blocking_proposal, now).is_none(),
+            "a RequestChanges proposal must not auto-finalise"
+        );
+
+        let infra_report = sample_report(ValidationStatus::InfrastructureFailed);
+        let infra_risk = aggregate_risk_score(&infra_report, &policy);
+        let infra_proposal = build_decision_proposal(&infra_report, &infra_risk, &policy);
+        assert!(
+            FinalDecision::finalize_auto_accept(&infra_proposal, now).is_none(),
+            "a HumanReview proposal must not auto-finalise"
+        );
+
+        // Freshness contract: a *stale* AutoAccept proposal must NOT be
+        // auto-finalised — it must be replayed / recomputed first.
+        let mut stale_proposal = passed_proposal.clone();
+        stale_proposal.stale = true;
+        assert!(stale_proposal.is_auto_accept());
+        assert!(
+            FinalDecision::finalize_auto_accept(&stale_proposal, now).is_none(),
+            "a stale AutoAccept proposal must not auto-finalise"
+        );
     }
 
     /// When validation passes but the risk score crosses the

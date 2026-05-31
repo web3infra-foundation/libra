@@ -5,36 +5,31 @@
 //! single task attempt, and produces a [`TaskExecutionResult`] alongside the
 //! attempt-lifecycle formal writes (start / finish / patchset / evidence).
 //!
-//! # Schema vs. wiring
+//! # Runtime-owned contract, transitional storage
 //!
-//! This module is intentionally **schema-only** at this stage:
-//! [`AttemptWriteOutcome`] freezes the shape callers will rely on once the
-//! `write_attempt_start` / `write_attempt_finish` entry points are wired up.
-//! The current attempt-lifecycle persistence path lives on
+//! [`AttemptWriteOutcome`], [`write_attempt_start`], and
+//! [`write_attempt_finish`] are the pure Runtime-owned Phase 2 contract
+//! surface. [`write_attempt_start_with_session`] and
+//! [`write_attempt_finish_with_session`] currently delegate into
 //! [`crate::internal::ai::orchestrator::persistence::ExecutionAuditSession`]
-//! (the `RuntimeAuditCommand::TaskRuntime` channel plus
-//! `RuntimeAuditObserver`); a future Wave 1B patch will either:
+//! so the existing Run / TaskEvent / RunEvent / PlanStepEvent plumbing stays
+//! in the orchestrator persistence layer while provider/UI callers target the
+//! Runtime entry points. Once that storage code is folded into this module,
+//! callers keep the same outcome type and lifecycle semantics.
 //!
-//! 1. expose the session-bound recording helpers as `pub(crate)` free
-//!    functions and have `phase2::write_attempt_*` delegate to them, **or**
-//! 2. lift the channel-based runtime audit machinery into this module so
-//!    the Runtime owns the only Execution formal-write entry point.
-//!
-//! Until that lift happens, callers still go through
-//! [`crate::internal::ai::orchestrator::executor::execute_task`] and the
-//! session observer. This module freezes the contract shape so the
-//! eventual cutover is a mechanical redirect rather than an API redesign.
-//!
-//! # Why ship the schema now
-//!
-//! agent.md:161 lists `phase2.rs` as a Wave 1B blocker; flipping that row
-//! from "缺失" to "schema 已落地" unblocks downstream documentation rows
-//! (e.g. agent.md:153 已落地的 runtime 子模块 list) without bundling the
-//! wiring change. The wiring patch can then focus on a single concern.
+//! The important invariant is that a start write creates or reuses exactly one
+//! persisted attempt run for the logical task, and a finish write appends the
+//! terminal lifecycle facts against that same run id.
 
 use uuid::Uuid;
 
-use crate::internal::ai::runtime::contracts::TaskExecutionStatus;
+use crate::internal::ai::{
+    orchestrator::{
+        persistence::ExecutionAuditSession,
+        types::{OrchestratorError, TaskSpec},
+    },
+    runtime::contracts::TaskExecutionStatus,
+};
 
 /// Outcome of [`write_attempt_finish`]: the attempt's terminal status plus
 /// the formal-write identifiers downstream observers / audit sinks need to
@@ -205,6 +200,38 @@ pub fn write_attempt_finish(
         status,
         summary,
     }
+}
+
+/// Stateful Phase 2 attempt-start bridge.
+///
+/// Delegates to the current [`ExecutionAuditSession`] storage path, which
+/// persists the per-task `Run` plus the start-side TaskEvent / PlanStepEvent
+/// lifecycle facts, then returns the same [`AttemptWriteOutcome`] shape as the
+/// pure constructor.
+pub async fn write_attempt_start_with_session(
+    session: &ExecutionAuditSession,
+    task: &TaskSpec,
+    model_name: &str,
+    summary: Option<String>,
+) -> Result<AttemptWriteOutcome, OrchestratorError> {
+    session
+        .record_attempt_start(task, model_name, summary)
+        .await
+}
+
+/// Stateful Phase 2 attempt-finish bridge.
+///
+/// Delegates to the current [`ExecutionAuditSession`] storage path, appending
+/// terminal TaskEvent / RunEvent / PlanStepEvent facts against the run created
+/// by [`write_attempt_start_with_session`], then returns the same
+/// [`AttemptWriteOutcome`] shape as the pure constructor.
+pub async fn write_attempt_finish_with_session(
+    session: &ExecutionAuditSession,
+    task: &TaskSpec,
+    status: TaskExecutionStatus,
+    summary: Option<String>,
+) -> Result<AttemptWriteOutcome, OrchestratorError> {
+    session.record_attempt_finish(task, status, summary).await
 }
 
 #[cfg(test)]

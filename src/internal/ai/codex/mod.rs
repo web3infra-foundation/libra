@@ -107,7 +107,7 @@ use crate::{
             mcp::server::LibraMcpServer,
             runtime::PlanningPromptBuilder,
             web::code_ui::{
-                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter,
+                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiEventType,
                 CodeUiInitialController, CodeUiInteractionKind, CodeUiInteractionOption,
                 CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
                 CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep,
@@ -1471,7 +1471,7 @@ async fn publish_code_ui_snapshot(
     let current = code_ui_session.snapshot().await;
     let snapshot = build_code_ui_snapshot_from_codex_session(&session, &current, working_dir);
     code_ui_session
-        .replace_snapshot("session_updated", snapshot)
+        .replace_snapshot(CodeUiEventType::SessionUpdated, snapshot)
         .await;
 }
 

@@ -1,40 +1,25 @@
-//! Phase 1 Plan — formal write helpers (schema-only landing).
+//! Phase 1 Plan — formal write helpers.
 //!
 //! The Code UI Phase Workflow models Phase 1 as the **Plan** phase: the
 //! Phase 0 [`IntentSpec`] gets compiled into an `ExecutionPlanSpec` which is
 //! persisted as a paired execution / test plan revision and then folded into
 //! the scheduler state machine.
 //!
-//! # Schema vs. wiring
+//! # Runtime-owned contract, transitional storage
 //!
-//! This module is intentionally **schema-only** at this stage:
-//! [`PlanWriteOutcome`] declares the stable contract callers can rely on
-//! once the formal-write entry point (`write_plan_set`) is wired up. The
-//! current Plan persistence path lives on
-//! [`crate::internal::ai::orchestrator::persistence::ExecutionAuditSession::record_plan_compiled`]
-//! (a session method) plus private free functions
-//! (`create_plan_set_revision`, `build_plan_set`); a future Wave 1B patch
-//! will either:
+//! [`PlanWriteOutcome`] and [`write_plan_set`] are the Runtime-owned Phase 1
+//! contract surface. `write_plan_set` currently delegates into
+//! [`crate::internal::ai::orchestrator::persistence::write_plan_set_with_outcome`]
+//! so the existing `PersistedPlanRevision` / step-id plumbing stays in the
+//! orchestrator persistence layer while provider/UI callers target the Runtime
+//! entry point. Once that storage code is folded into this module, callers keep
+//! the same signature and outcome type.
 //!
-//! 1. expose the free-function path with `pub(crate)` visibility and have
-//!    `phase1::write_plan_set` delegate to it, **or**
-//! 2. lift the session-bound `record_plan_compiled` into a free function on
-//!    this module so the Runtime owns the only Plan formal-write entry
-//!    point.
-//!
-//! Until that lift happens, callers still go through
-//! `ExecutionAuditSession::record_plan_compiled` directly. This module
-//! freezes the contract shape so the eventual cutover is a mechanical
-//! redirect rather than an API redesign.
-//!
-//! # Why ship the schema now
-//!
-//! agent.md:160 lists `phase1.rs` as a Wave 1B blocker; flipping that row
-//! from "缺失" to "schema 已落地" unblocks downstream documentation rows
-//! (e.g. agent.md:153 已落地的 runtime 子模块 list) without bundling the
-//! wiring change. The wiring patch can then focus on a single concern.
+//! The important invariant is that Phase 1 always writes an execution/test plan
+//! pair and returns scheduler-facing IDs for both plans; callers must not fall
+//! back to a single-plan write path.
 
-/// Outcome of the planned [`write_plan_set`] entry point: identifiers for
+/// Outcome of the [`write_plan_set`] entry point: identifiers for
 /// the paired execution / test plan revisions and the
 /// `task_id → plan_id` map the scheduler will use to advance.
 ///
@@ -444,11 +429,25 @@ impl PlanWriteOutcome {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
+    use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
     use uuid::Uuid;
 
     use super::*;
+    use crate::{
+        internal::{
+            ai::{
+                history::HistoryManager,
+                mcp::{resource::CreateIntentParams, server::LibraMcpServer},
+                orchestrator::types::{
+                    ExecutionPlanSpec, GateStage, TaskContract, TaskKind, TaskSpec,
+                },
+            },
+            db,
+        },
+        utils::storage::local::LocalStorage,
+    };
 
     /// `ordered_plan_ids()` must return `(execution, test)` so it lines up
     /// with [`SelectedPlanSet::ordered_ids`] downstream.
@@ -484,6 +483,176 @@ mod tests {
             cloned.plan_id_by_task_id.get(&task_id).map(String::as_str),
             Some("plan-exec-1")
         );
+    }
+
+    async fn setup_mcp_server() -> (Arc<LibraMcpServer>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let temp_path = temp_dir.path().to_path_buf();
+        let db_path = temp_path.join("libra.db");
+        let db = db::create_database(db_path.to_str().expect("utf-8 db path"))
+            .await
+            .expect("db");
+        let storage = Arc::new(LocalStorage::new(temp_path.join("objects")));
+        let history = Arc::new(HistoryManager::new(
+            storage.clone(),
+            temp_path,
+            Arc::new(db),
+        ));
+        (
+            Arc::new(LibraMcpServer::new(Some(history), Some(storage))),
+            temp_dir,
+        )
+    }
+
+    fn created_id(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .and_then(|text| text.text.split("ID:").nth(1))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .expect("created id")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn write_plan_set_persists_execution_and_test_plan_pair() {
+        use crate::internal::ai::runtime::contracts::{
+            ProjectionVersions, SchedulerMutation, SelectedPlanSet,
+        };
+
+        let (server, _temp_dir) = setup_mcp_server().await;
+        let actor = ActorRef::agent("phase1-test").expect("actor");
+        let intent = server
+            .create_intent_impl(
+                CreateIntentParams {
+                    content: "implement feature and verify it".to_string(),
+                    structured_content: None,
+                    parent_id: None,
+                    parent_ids: None,
+                    analysis_context_frame_ids: None,
+                    status: Some("active".to_string()),
+                    commit_sha: None,
+                    reason: None,
+                    next_intent_id: None,
+                    actor_kind: Some("agent".to_string()),
+                    actor_id: Some("phase1-test".to_string()),
+                },
+                actor,
+            )
+            .await
+            .expect("create intent");
+        let intent_id = created_id(&intent);
+
+        let impl_task = {
+            let actor = ActorRef::agent("phase1-test").expect("actor");
+            GitTask::new(actor, "Edit source", None).expect("task")
+        };
+        let impl_task_id = impl_task.header().object_id();
+        let mut gate_task = {
+            let actor = ActorRef::agent("phase1-test").expect("actor");
+            GitTask::new(actor, "Run verification", None).expect("task")
+        };
+        gate_task.add_dependency(impl_task_id);
+        let gate_task_id = gate_task.header().object_id();
+
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: intent_id.clone(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![
+                TaskSpec {
+                    step: PlanStep::new("Edit source"),
+                    task: impl_task,
+                    objective: "Update source".to_string(),
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".to_string()),
+                    scope_in: vec!["src/".to_string()],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+                TaskSpec {
+                    step: PlanStep::new("Run verification"),
+                    task: gate_task,
+                    objective: "Verify the change".to_string(),
+                    kind: TaskKind::Gate,
+                    gate_stage: Some(GateStage::Fast),
+                    owner_role: Some("verifier".to_string()),
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+            ],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+
+        let outcome = write_plan_set(&server, &intent_id, None, None, &plan)
+            .await
+            .expect("write plan set");
+
+        assert_ne!(outcome.execution_plan_id, outcome.test_plan_id);
+        assert_eq!(
+            outcome
+                .plan_id_by_task_id
+                .get(&impl_task_id)
+                .map(String::as_str),
+            Some(outcome.execution_plan_id.as_str())
+        );
+        assert_eq!(
+            outcome
+                .plan_id_by_task_id
+                .get(&gate_task_id)
+                .map(String::as_str),
+            Some(outcome.test_plan_id.as_str())
+        );
+
+        let history = server.intent_history_manager.as_ref().expect("history");
+        assert_eq!(history.list_objects("plan").await.expect("plans").len(), 2);
+        for (object_type, object_id) in [
+            ("plan", outcome.execution_plan_id.as_str()),
+            ("plan", outcome.test_plan_id.as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(object_type, object_id)
+                    .await
+                    .expect("history lookup")
+                    .is_some(),
+                "expected Phase 1 {object_type} id {object_id} to resolve in history",
+            );
+        }
+
+        let current = dummy_scheduler_state(1);
+        let execution_plan_id =
+            Uuid::parse_str(&outcome.execution_plan_id).expect("execution plan id");
+        let test_plan_id = Uuid::parse_str(&outcome.test_plan_id).expect("test plan id");
+        let next = apply_scheduler_mutation(
+            &current,
+            SchedulerMutation::SelectPlanSet {
+                expected: ProjectionVersions {
+                    thread: 0,
+                    scheduler: 1,
+                    live_context_window: 0,
+                },
+                selected: SelectedPlanSet {
+                    execution_plan_id,
+                    test_plan_id,
+                },
+            },
+        )
+        .expect("selected plan set should apply");
+        assert_eq!(next.selected_plan_ids.len(), 2);
+        assert_eq!(next.selected_plan_ids[0].plan_id, execution_plan_id);
+        assert_eq!(next.selected_plan_ids[0].ordinal, 0);
+        assert_eq!(next.selected_plan_ids[1].plan_id, test_plan_id);
+        assert_eq!(next.selected_plan_ids[1].ordinal, 1);
+        assert_eq!(next.selected_plan_id, Some(execution_plan_id));
     }
 
     use chrono::Utc;

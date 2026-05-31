@@ -10,6 +10,7 @@ use super::types::{Check, IntentSpec};
 pub fn build_intentspec_review(
     spec: &IntentSpec,
     intent_id: Option<&str>,
+    context_snapshot_id: Option<&str>,
     warnings: &[String],
 ) -> String {
     let mut out = String::new();
@@ -17,6 +18,11 @@ pub fn build_intentspec_review(
     out.push_str("| Field | Value |\n");
     out.push_str("| --- | --- |\n");
     push_table_row(&mut out, "Intent ID", intent_id.unwrap_or("not-persisted"));
+    push_table_row(
+        &mut out,
+        "Context Snapshot ID",
+        context_snapshot_id.unwrap_or("not-frozen"),
+    );
     push_table_row(&mut out, "Spec ID", &spec.metadata.id);
     push_table_row(&mut out, "Repository", &spec.metadata.target.repo.locator);
     push_table_row(&mut out, "Base Ref", &spec.metadata.target.base_ref);
@@ -272,10 +278,11 @@ mod tests {
             },
         );
 
-        let review = build_intentspec_review(&spec, Some("intent-123"), &[]);
+        let review = build_intentspec_review(&spec, Some("intent-123"), None, &[]);
 
         assert!(review.contains("# IntentSpec Review"));
         assert!(review.contains("Intent ID"));
+        assert!(review.contains("| Context Snapshot ID | not-frozen |"));
         assert!(review.contains("Fix the Ollama planner flow"));
         assert!(review.contains("Confirm this IntentSpec to generate an execution plan"));
         assert!(!review.contains("Execution plan ready"));
@@ -288,10 +295,20 @@ mod tests {
     #[test]
     fn review_renders_not_persisted_marker_when_intent_id_is_none() {
         let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
-        let review = build_intentspec_review(&spec, None, &[]);
+        let review = build_intentspec_review(&spec, None, None, &[]);
         assert!(
             review.contains("| Intent ID | not-persisted |"),
             "review must render the not-persisted sentinel for absent intent_id; got:\n{review}",
+        );
+    }
+
+    #[test]
+    fn review_renders_context_snapshot_id_when_present() {
+        let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
+        let review = build_intentspec_review(&spec, Some("intent-1"), Some("snapshot-123"), &[]);
+        assert!(
+            review.contains("| Context Snapshot ID | snapshot-123 |"),
+            "review must render the persisted ContextSnapshot id; got:\n{review}",
         );
     }
 
@@ -304,7 +321,7 @@ mod tests {
             "stale linter config".to_string(),
             "missing changelog entry".to_string(),
         ];
-        let review = build_intentspec_review(&spec, Some("intent-1"), &warnings);
+        let review = build_intentspec_review(&spec, Some("intent-1"), None, &warnings);
         assert!(
             review.contains("### Warnings"),
             "Warnings heading must render; got:\n{review}",
@@ -320,7 +337,7 @@ mod tests {
     #[test]
     fn review_omits_warnings_section_when_empty() {
         let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
-        let review = build_intentspec_review(&spec, Some("intent-1"), &[]);
+        let review = build_intentspec_review(&spec, Some("intent-1"), None, &[]);
         assert!(
             !review.contains("### Warnings"),
             "Warnings heading must NOT render for empty warnings; got:\n{review}",
@@ -333,7 +350,7 @@ mod tests {
     #[test]
     fn review_renders_none_placeholder_for_empty_lists() {
         let spec = minimal_spec_with_scope(vec!["src".to_string()], RiskLevel::Low);
-        let review = build_intentspec_review(&spec, Some("intent-1"), &[]);
+        let review = build_intentspec_review(&spec, Some("intent-1"), None, &[]);
         assert!(
             review.contains("### Out Of Scope\n\n- none\n"),
             "empty list must render '- none' placeholder; got:\n{review}",
@@ -444,7 +461,7 @@ mod tests {
             },
         );
 
-        let review = build_intentspec_review(&spec, Some("intent-123"), &[]);
+        let review = build_intentspec_review(&spec, Some("intent-123"), None, &[]);
 
         assert!(review.contains("repository-wide write scope"));
     }

@@ -52,10 +52,10 @@ pub enum SessionEvent {
     /// `goal_event` payloads via the `parse_session_event_value` `unknown`
     /// branch.
     Goal(GoalEventEnvelope),
-    /// OC-Phase 4 ArtifactLedger JSONL projection (v0.17.810). The
-    /// `phase3.rs::write_validation_report` and
-    /// `phase4.rs::write_decision_proposal` / `write_risk_score_breakdown`
-    /// paths persist artefacts to `ai_validation_report` /
+    /// OC-Phase 4 ArtifactLedger JSONL projection. The
+    /// `ValidationReportStore::write_latest_with_session_mirror` and
+    /// `DecisionProposalStore::write_latest_with_session_mirror` paths
+    /// persist artefacts to `ai_validation_report` /
     /// `ai_decision_proposal` / `ai_risk_score_breakdown` SQLite
     /// tables; this variant projects the same write into the
     /// session JSONL stream so a single tail of the session log
@@ -458,6 +458,16 @@ impl SessionJsonlStore {
             }
         }
         Ok(replay)
+    }
+
+    pub fn load_ai_artifacts(&self) -> io::Result<Vec<AiArtifactEvent>> {
+        let mut artifacts = Vec::new();
+        for event in self.load_events()? {
+            if let SessionEvent::AiArtifact(artifact) = event {
+                artifacts.push(artifact);
+            }
+        }
+        Ok(artifacts)
     }
 
     pub fn has_events(&self) -> io::Result<bool> {

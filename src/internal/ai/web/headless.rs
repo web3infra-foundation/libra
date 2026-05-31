@@ -48,11 +48,11 @@ use tokio::{
 };
 
 use super::code_ui::{
-    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiInteractionKind,
-    CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
-    CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
-    CodeUiPlanStep, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
-    CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiEventType,
+    CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
+    CodeUiInteractionResponse, CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot,
+    CodeUiPlanSnapshot, CodeUiPlanStep, CodeUiReadModel, CodeUiSession, CodeUiSessionSnapshot,
+    CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
 };
 use crate::internal::ai::{
     agent::runtime::run_tool_loop_with_history_and_observer,
@@ -688,7 +688,7 @@ async fn finalize_assistant_entry(
     let text = text.to_string();
     let status = status.to_string();
     session
-        .mutate("session_updated", |snapshot| {
+        .mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(entry) = snapshot.transcript.iter_mut().find(|e| e.id == entry_id) {
                 entry.content = Some(text.clone());
                 entry.status = Some(status.clone());

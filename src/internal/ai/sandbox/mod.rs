@@ -1777,13 +1777,7 @@ fn resolve_linux_sandbox_exe(sandbox_runtime: Option<&SandboxRuntimeConfig>) -> 
 
     #[cfg(target_os = "linux")]
     {
-        if candidate
-            .as_ref()
-            .is_some_and(|path| is_executable_file(path))
-        {
-            return candidate;
-        }
-        return None;
+        candidate.filter(|path| is_executable_file(path))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -3033,7 +3027,7 @@ mod tests {
 
         let sink = Arc::new(InMemorySandboxEvidenceSink::new());
         let sandbox_runtime = SandboxRuntimeConfig {
-            enforcement: runtime::SandboxEnforcement::Required,
+            enforcement: SandboxEnforcement::Required,
             evidence_sink: Some(sink.clone()),
             ..SandboxRuntimeConfig::default()
         };
@@ -3148,7 +3142,18 @@ mod tests {
         assert_eq!(events.len(), 1, "exactly one Evidence event per rejection");
         match &events[0] {
             SandboxEvidenceEvent::WritableRootRejected { root, reason } => {
-                assert_eq!(root, &dangerous_root);
+                // The recorded root is canonicalised before validation
+                // (see `push_root_unique` in policy.rs), so on hosts
+                // where `/var/run` is a symlink to `/run` it surfaces as
+                // `/run/docker.sock` rather than the requested
+                // `/var/run/docker.sock`. Assert the stable, symlink-
+                // independent property: the rejected root is the Docker
+                // socket by file name.
+                assert_eq!(
+                    root.file_name(),
+                    dangerous_root.file_name(),
+                    "rejected root should be the docker socket (canonicalised path may differ by host symlink layout): {root:?}"
+                );
                 assert!(
                     !reason.is_empty(),
                     "rejection must include a non-empty reason"

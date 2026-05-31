@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::internal::{
-    ai::runtime::{contracts::EvidenceKind, derived_records::ensure_runtime_thread},
+    ai::{
+        runtime::{contracts::EvidenceKind, derived_records::ensure_runtime_thread},
+        session::jsonl::{AiArtifactEvent, SessionEvent, SessionJsonlStore},
+    },
     model::ai_validation_report,
 };
 
@@ -34,6 +37,44 @@ pub struct TaskArtifactRefs {
     pub context_frame_ids: Vec<Uuid>,
     #[serde(default)]
     pub usage_ids: Vec<Uuid>,
+}
+
+impl ArtifactLedger {
+    pub fn new(thread_id: Uuid) -> Self {
+        Self {
+            thread_id,
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn push_task(&mut self, task: TaskArtifactRefs) {
+        self.tasks.push(task);
+    }
+
+    pub fn has_patchset(&self, patchset_id: Uuid) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.patchset_ids.contains(&patchset_id))
+    }
+
+    pub fn release_candidate_patchset_id(&self) -> Option<Uuid> {
+        self.tasks
+            .iter()
+            .rev()
+            .find_map(|task| task.patchset_ids.last().copied())
+    }
+}
+
+impl TaskArtifactRefs {
+    pub fn new(task_id: Uuid) -> Self {
+        Self {
+            task_id,
+            patchset_ids: Vec::new(),
+            evidence: Vec::new(),
+            context_frame_ids: Vec::new(),
+            usage_ids: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +262,16 @@ impl ValidationReportStore {
         Ok(())
     }
 
+    pub async fn write_latest_with_session_mirror(
+        &self,
+        report: &ValidationReport,
+        session_store: &SessionJsonlStore,
+    ) -> Result<()> {
+        self.write_latest(report).await?;
+        append_validation_report_session_mirror(session_store, report)?;
+        Ok(())
+    }
+
     pub async fn load_latest(&self, thread_id: Uuid) -> Result<Option<ValidationReport>> {
         ai_validation_report::Entity::find()
             .filter(ai_validation_report::Column::ThreadId.eq(thread_id.to_string()))
@@ -232,6 +283,37 @@ impl ValidationReportStore {
             .map(report_from_model)
             .transpose()
     }
+}
+
+pub fn append_validation_report_session_mirror(
+    session_store: &SessionJsonlStore,
+    report: &ValidationReport,
+) -> Result<()> {
+    let event = SessionEvent::ai_artifact(validation_report_artifact_event(report)?);
+    session_store.append(&event).with_context(|| {
+        format!(
+            "Failed to append validation report {} session artifact mirror for thread {} to {}",
+            report.report_id,
+            report.thread_id,
+            session_store.events_path().display()
+        )
+    })
+}
+
+pub fn validation_report_artifact_event(report: &ValidationReport) -> Result<AiArtifactEvent> {
+    Ok(AiArtifactEvent {
+        event_id: Uuid::new_v4(),
+        recorded_at: Utc::now(),
+        thread_id: report.thread_id,
+        artifact_kind: "validation_report".to_string(),
+        artifact_id: Some(report.report_id.to_string()),
+        payload: serde_json::to_value(report).with_context(|| {
+            format!(
+                "Failed to serialize validation report {} for session artifact mirror",
+                report.report_id
+            )
+        })?,
+    })
 }
 
 fn validation_status(stages: &[ValidationStageResult]) -> ValidationStatus {
@@ -438,6 +520,33 @@ mod tests {
         );
         assert!(!failing.is_passing());
         assert_eq!(failing.summary.status, ValidationStatus::BlockingFailed);
+    }
+
+    /// ArtifactLedger exposes the latest task patchset as the release
+    /// candidate and can prove that a selected patchset belongs to the
+    /// ledger before Phase 3 marks validation as passing.
+    #[test]
+    fn artifact_ledger_tracks_release_candidate_patchset() {
+        let thread_id = Uuid::new_v4();
+        let first_patchset_id = Uuid::new_v4();
+        let release_patchset_id = Uuid::new_v4();
+        let mut ledger = ArtifactLedger::new(thread_id);
+
+        let mut first = TaskArtifactRefs::new(Uuid::new_v4());
+        first.patchset_ids.push(first_patchset_id);
+        ledger.push_task(first);
+
+        let mut second = TaskArtifactRefs::new(Uuid::new_v4());
+        second.patchset_ids.push(release_patchset_id);
+        ledger.push_task(second);
+
+        assert!(ledger.has_patchset(first_patchset_id));
+        assert!(ledger.has_patchset(release_patchset_id));
+        assert!(!ledger.has_patchset(Uuid::new_v4()));
+        assert_eq!(
+            ledger.release_candidate_patchset_id(),
+            Some(release_patchset_id)
+        );
     }
 
     /// `ValidatorEngine::default_policy` must use the

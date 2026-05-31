@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -304,14 +304,33 @@ impl Default for CodeUiSessionSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeUiEventType {
+    #[default]
+    SessionUpdated,
+    StatusChanged,
+    ControllerChanged,
+}
+
+impl CodeUiEventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUpdated => "session_updated",
+            Self::StatusChanged => "status_changed",
+            Self::ControllerChanged => "controller_changed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiEventEnvelope {
     pub seq: u64,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: CodeUiEventType,
     pub at: DateTime<Utc>,
-    pub data: serde_json::Value,
+    pub data: CodeUiSessionSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,7 +488,7 @@ impl CodeUiSession {
         self.tx.subscribe()
     }
 
-    pub async fn mutate<F>(&self, event_type: &str, f: F)
+    pub async fn mutate<F>(&self, event_type: CodeUiEventType, f: F)
     where
         F: FnOnce(&mut CodeUiSessionSnapshot),
     {
@@ -482,7 +501,11 @@ impl CodeUiSession {
         self.broadcast_snapshot(event_type, &snapshot);
     }
 
-    pub async fn replace_snapshot(&self, event_type: &str, snapshot: CodeUiSessionSnapshot) {
+    pub async fn replace_snapshot(
+        &self,
+        event_type: CodeUiEventType,
+        snapshot: CodeUiSessionSnapshot,
+    ) {
         {
             let mut current = self.snapshot.write().await;
             *current = snapshot;
@@ -492,14 +515,14 @@ impl CodeUiSession {
     }
 
     pub async fn set_controller_state(&self, controller: CodeUiControllerState) {
-        self.mutate("controller_changed", |snapshot| {
+        self.mutate(CodeUiEventType::ControllerChanged, |snapshot| {
             snapshot.controller = controller;
         })
         .await;
     }
 
     pub async fn set_status(&self, status: CodeUiSessionStatus) {
-        self.mutate("status_changed", |snapshot| {
+        self.mutate(CodeUiEventType::StatusChanged, |snapshot| {
             snapshot.status = status;
         })
         .await;
@@ -507,7 +530,7 @@ impl CodeUiSession {
 
     pub async fn cancel_active_turn(&self, message: impl Into<String>) {
         let message = message.into();
-        self.mutate("session_updated", move |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, move |snapshot| {
             let now = Utc::now();
             snapshot.status = CodeUiSessionStatus::Idle;
             for tool_call in &mut snapshot.tool_calls {
@@ -541,14 +564,14 @@ impl CodeUiSession {
     }
 
     pub async fn upsert_transcript_entry(&self, entry: CodeUiTranscriptEntry) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.transcript, entry, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn append_assistant_delta(&self, entry_id: &str, delta: &str) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(entry) = snapshot
                 .transcript
                 .iter_mut()
@@ -577,7 +600,7 @@ impl CodeUiSession {
     }
 
     pub async fn upsert_interaction(&self, request: CodeUiInteractionRequest) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.interactions, request, |item| item.id.as_str());
         })
         .await;
@@ -585,7 +608,7 @@ impl CodeUiSession {
 
     pub async fn resolve_interaction(&self, interaction_id: &str) {
         let interaction_id = interaction_id.to_string();
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             if let Some(interaction) = snapshot
                 .interactions
                 .iter_mut()
@@ -600,7 +623,7 @@ impl CodeUiSession {
 
     pub async fn clear_interaction(&self, interaction_id: &str) {
         let interaction_id = interaction_id.to_string();
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             snapshot
                 .interactions
                 .retain(|interaction| interaction.id != interaction_id);
@@ -609,45 +632,45 @@ impl CodeUiSession {
     }
 
     pub async fn upsert_plan(&self, plan: CodeUiPlanSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.plans, plan, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_task(&self, task: CodeUiTaskSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.tasks, task, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_tool_call(&self, tool_call: CodeUiToolCallSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.tool_calls, tool_call, |item| item.id.as_str());
         })
         .await;
     }
 
     pub async fn upsert_patchset(&self, patchset: CodeUiPatchsetSnapshot) {
-        self.mutate("session_updated", |snapshot| {
+        self.mutate(CodeUiEventType::SessionUpdated, |snapshot| {
             upsert_by_id(&mut snapshot.patchsets, patchset, |item| item.id.as_str());
         })
         .await;
     }
 
-    pub async fn emit_current_snapshot(&self, event_type: &str) {
+    pub async fn emit_current_snapshot(&self, event_type: CodeUiEventType) {
         let snapshot = self.snapshot().await;
         self.broadcast_snapshot(event_type, &snapshot);
     }
 
-    fn broadcast_snapshot(&self, event_type: &str, snapshot: &CodeUiSessionSnapshot) {
+    fn broadcast_snapshot(&self, event_type: CodeUiEventType, snapshot: &CodeUiSessionSnapshot) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let event = CodeUiEventEnvelope {
             seq,
-            event_type: event_type.to_string(),
+            event_type,
             at: Utc::now(),
-            data: serde_json::to_value(snapshot).unwrap_or_else(|_| json!({})),
+            data: snapshot.clone(),
         };
         let _ = self.tx.send(event);
     }
@@ -1612,7 +1635,7 @@ pub fn browser_controller_token_from_headers(headers: &axum::http::HeaderMap) ->
 }
 
 pub fn snapshot_from_event(event: &CodeUiEventEnvelope) -> anyhow::Result<CodeUiSessionSnapshot> {
-    serde_json::from_value(event.data.clone()).context("failed to parse Code UI event snapshot")
+    Ok(event.data.clone())
 }
 
 impl CodeUiControllerKind {
@@ -1632,10 +1655,9 @@ pub fn ensure_session_updated_event(
 ) -> anyhow::Result<CodeUiEventEnvelope> {
     Ok(CodeUiEventEnvelope {
         seq: 0,
-        event_type: "session_updated".to_string(),
+        event_type: CodeUiEventType::SessionUpdated,
         at: Utc::now(),
-        data: serde_json::to_value(snapshot)
-            .map_err(|error| anyhow!("failed to serialize Code UI snapshot: {error}"))?,
+        data: snapshot.clone(),
     })
 }
 
@@ -1721,6 +1743,40 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "clientId": "browser-1" })).unwrap();
 
         assert_eq!(request.kind, CodeUiControllerKind::Browser);
+    }
+
+    #[tokio::test]
+    async fn interaction_update_broadcasts_typed_session_snapshot_event() {
+        let session = test_session();
+        let mut rx = session.subscribe();
+        let requested_at = Utc::now();
+
+        session
+            .upsert_interaction(CodeUiInteractionRequest {
+                id: "interaction-1".to_string(),
+                kind: CodeUiInteractionKind::RequestUserInput,
+                title: Some("Pick one".to_string()),
+                description: None,
+                prompt: Some("Continue?".to_string()),
+                options: vec![CodeUiInteractionOption {
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
+                    description: None,
+                }],
+                status: CodeUiInteractionStatus::Pending,
+                metadata: json!({"source": "test"}),
+                requested_at,
+                resolved_at: None,
+            })
+            .await;
+
+        let event = rx.recv().await.expect("interaction update event");
+        assert_eq!(event.event_type, CodeUiEventType::SessionUpdated);
+        assert_eq!(event.data.interactions.len(), 1);
+        let interaction = &event.data.interactions[0];
+        assert_eq!(interaction.id, "interaction-1");
+        assert_eq!(interaction.kind, CodeUiInteractionKind::RequestUserInput);
+        assert_eq!(interaction.status, CodeUiInteractionStatus::Pending);
     }
 
     /// Wave 2 / PR 2 — error code source-of-truth contract.

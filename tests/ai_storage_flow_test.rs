@@ -10,12 +10,13 @@
 //! requires `R2_ENDPOINT`. Both tests are `#[serial]` because they mutate the
 //! process CWD.
 
-use std::{str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc};
 
 use git_internal::{
     hash::ObjectHash,
     internal::object::{
-        plan::Plan,
+        context::SelectionStrategy,
+        plan::{Plan, PlanStep},
         run::Run,
         task::{GoalType, Task},
         types::{ActorRef, ObjectType},
@@ -23,7 +24,32 @@ use git_internal::{
 };
 use libra::{
     command::commit::CommitArgs,
-    internal::{ai::history::HistoryManager, head::Head},
+    internal::{
+        ai::{
+            history::HistoryManager,
+            intentspec::{
+                IntentSpec, ResolveContext, RiskLevel,
+                draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
+                resolve_intentspec,
+                types::{ChangeType, Objective, ObjectiveKind},
+            },
+            mcp::server::LibraMcpServer,
+            orchestrator::{
+                persistence::ExecutionAuditSession,
+                types::{
+                    ExecutionPlanSpec, GateStage, PersistedPlanReviewBundle, TaskContract,
+                    TaskKind, TaskSpec,
+                },
+            },
+            runtime::{
+                contracts::TaskExecutionStatus,
+                phase0::{ContextSnapshotRequest, write_context_snapshot_if_needed, write_intent},
+                phase1::write_plan_set,
+                phase2::{write_attempt_finish_with_session, write_attempt_start_with_session},
+            },
+        },
+        head::Head,
+    },
     utils::{
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         storage_ext::StorageExt,
@@ -165,6 +191,145 @@ async fn test_ai_flow_local() {
     assert_eq!(loaded_blob, blob_content);
 }
 
+/// Runtime formal writes should compose without duplicating the core AI object
+/// graph: one Intent, two role-split Plans, one root Task plus compiled tasks,
+/// and one root Run plus the per-task attempt Run.
+#[tokio::test]
+#[serial]
+async fn runtime_formal_writes_preserve_order_and_minimal_object_set() {
+    let dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(dir.path());
+
+    test::setup_with_new_libra_in(dir.path()).await;
+
+    let libra_dir = dir.path().join(".libra");
+    let objects_dir = libra_dir.join("objects");
+    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let db_path = libra_dir.join("libra.db");
+    let db_conn = Arc::new(
+        libra::internal::db::establish_connection(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let ai_history = Arc::new(HistoryManager::new(storage.clone(), libra_dir, db_conn));
+    let mcp_server = Arc::new(LibraMcpServer::new(
+        Some(ai_history.clone()),
+        Some(storage.clone()),
+    ));
+
+    let spec = sample_runtime_storage_spec();
+    let intent = write_intent(&spec, &mcp_server)
+        .await
+        .expect("Phase 0 write should persist the Intent exactly once");
+    assert_history_count(&ai_history, "intent", 1).await;
+    assert_history_count(&ai_history, "snapshot", 0).await;
+    assert_history_count(&ai_history, "plan", 0).await;
+    assert_history_count(&ai_history, "task", 0).await;
+    assert_history_count(&ai_history, "run", 0).await;
+
+    let skipped_snapshot = write_context_snapshot_if_needed(
+        ContextSnapshotRequest {
+            items: Vec::new(),
+            selection_strategy: SelectionStrategy::Explicit,
+            summary: None,
+            actor: ActorRef::system("runtime-storage-test").unwrap(),
+        },
+        &mcp_server,
+    )
+    .await
+    .expect("empty snapshot request should not fail");
+    assert!(skipped_snapshot.is_none());
+    assert_history_count(&ai_history, "snapshot", 0).await;
+
+    let plan_spec = sample_runtime_plan_spec(&intent.intent_id);
+    let implementation_task_id = plan_spec.tasks[0].id();
+    let gate_task_id = plan_spec.tasks[1].id();
+    let plan_outcome = write_plan_set(&mcp_server, &intent.intent_id, None, None, &plan_spec)
+        .await
+        .expect("Phase 1 plan-set write should persist the execution/test pair");
+    assert_ne!(plan_outcome.execution_plan_id, plan_outcome.test_plan_id);
+    assert_eq!(
+        plan_outcome
+            .plan_id_by_task_id
+            .get(&implementation_task_id)
+            .map(String::as_str),
+        Some(plan_outcome.execution_plan_id.as_str())
+    );
+    assert_eq!(
+        plan_outcome
+            .plan_id_by_task_id
+            .get(&gate_task_id)
+            .map(String::as_str),
+        Some(plan_outcome.test_plan_id.as_str())
+    );
+    assert_history_count(&ai_history, "intent", 1).await;
+    assert_history_count(&ai_history, "plan", 2).await;
+    assert_history_count(&ai_history, "task", 0).await;
+    assert_history_count(&ai_history, "run", 0).await;
+
+    let preview_bundle = PersistedPlanReviewBundle {
+        plan_id: plan_outcome.execution_plan_id.clone(),
+        test_plan_id: plan_outcome.test_plan_id.clone(),
+        step_ids: Default::default(),
+        task_ids: Default::default(),
+        plan_id_by_task_id: plan_outcome.plan_id_by_task_id.clone(),
+    };
+    let session = ExecutionAuditSession::start(
+        mcp_server.clone(),
+        &spec,
+        Path::new("."),
+        Some(&intent.intent_id),
+        Some(preview_bundle),
+        None,
+    )
+    .await
+    .expect("Runtime session should reuse the persisted Intent and Plan set");
+    assert_history_count(&ai_history, "intent", 1).await;
+    assert_history_count(&ai_history, "plan", 2).await;
+    assert_history_count(&ai_history, "task", 1).await;
+    assert_history_count(&ai_history, "run", 1).await;
+
+    session
+        .record_plan_compiled(&plan_spec)
+        .await
+        .expect("compiled plan should bind the existing execution/test plans");
+    assert_history_count(&ai_history, "intent", 1).await;
+    assert_history_count(&ai_history, "plan", 2).await;
+    assert_history_count(&ai_history, "task", 3).await;
+    assert_history_count(&ai_history, "run", 1).await;
+
+    let implementation_task = &plan_spec.tasks[0];
+    let start = write_attempt_start_with_session(
+        &session,
+        implementation_task,
+        "runtime-storage-test-model",
+        Some("starting implementation attempt".to_string()),
+    )
+    .await
+    .expect("Phase 2 attempt start should create the task run");
+    assert_eq!(start.task_id, implementation_task_id);
+    assert_eq!(start.status, TaskExecutionStatus::Interrupted);
+    assert!(!start.is_terminal());
+
+    let finish = write_attempt_finish_with_session(
+        &session,
+        implementation_task,
+        TaskExecutionStatus::Completed,
+        Some("implementation attempt completed".to_string()),
+    )
+    .await
+    .expect("Phase 2 attempt finish should update the same task run");
+    assert_eq!(finish.task_id, implementation_task_id);
+    assert_eq!(finish.run_id, start.run_id);
+    assert_eq!(finish.status, TaskExecutionStatus::Completed);
+    assert!(finish.is_terminal());
+    assert!(!finish.is_failure());
+    assert_history_count(&ai_history, "intent", 1).await;
+    assert_history_count(&ai_history, "plan", 2).await;
+    assert_history_count(&ai_history, "task", 3).await;
+    assert_history_count(&ai_history, "run", 2).await;
+}
+
 /// Integration test for AI storage flow using Cloudflare R2 (S3-compatible).
 ///
 /// Scenario: with a live R2 (or any S3-compatible) endpoint configured via env, write
@@ -239,4 +404,102 @@ async fn test_ai_flow_r2() {
     let artifact_hash = ObjectHash::from_str(artifact.key()).unwrap();
     let (data, _) = storage.get(&artifact_hash).await.unwrap();
     assert_eq!(data, artifact_content);
+}
+
+async fn assert_history_count(history: &HistoryManager, object_type: &str, expected: usize) {
+    let actual = history.list_objects(object_type).await.unwrap().len();
+    assert_eq!(
+        actual, expected,
+        "expected {expected} {object_type} objects in AI history, got {actual}"
+    );
+}
+
+fn sample_runtime_storage_spec() -> IntentSpec {
+    resolve_intentspec(
+        IntentDraft {
+            intent: DraftIntent {
+                summary: "Exercise Runtime storage writes".to_string(),
+                problem_statement: "Runtime formal writes must preserve object identity"
+                    .to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Persist formal writes without duplicates".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src/internal/ai/runtime".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["Object counts remain minimal across phases".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "storage-flow regression test".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        },
+        RiskLevel::Low,
+        ResolveContext {
+            working_dir: ".".to_string(),
+            base_ref: "HEAD".to_string(),
+            created_by_id: "ai-storage-flow-test".to_string(),
+        },
+    )
+}
+
+fn sample_runtime_plan_spec(intent_id: &str) -> ExecutionPlanSpec {
+    let implementation_task = Task::new(
+        ActorRef::agent("runtime-storage-test").unwrap(),
+        "Edit runtime storage path",
+        None,
+    )
+    .unwrap();
+    let implementation_task_id = implementation_task.header().object_id();
+    let mut gate_task = Task::new(
+        ActorRef::agent("runtime-storage-test").unwrap(),
+        "Run runtime storage verification",
+        None,
+    )
+    .unwrap();
+    gate_task.add_dependency(implementation_task_id);
+
+    ExecutionPlanSpec {
+        intent_spec_id: intent_id.to_string(),
+        revision: 1,
+        parent_revision: None,
+        replan_reason: None,
+        tasks: vec![
+            TaskSpec {
+                step: PlanStep::new("Edit runtime storage path"),
+                task: implementation_task,
+                objective: "Persist the implementation-side formal writes".to_string(),
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".to_string()),
+                scope_in: vec!["src/internal/ai/runtime".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            },
+            TaskSpec {
+                step: PlanStep::new("Run runtime storage verification"),
+                task: gate_task,
+                objective: "Verify the storage object graph remains minimal".to_string(),
+                kind: TaskKind::Gate,
+                gate_stage: Some(GateStage::Fast),
+                owner_role: Some("tester".to_string()),
+                scope_in: vec!["tests/ai_storage_flow_test.rs".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            },
+        ],
+        max_parallel: 1,
+        checkpoints: vec![],
+    }
 }

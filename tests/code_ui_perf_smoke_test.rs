@@ -190,8 +190,8 @@ fn perf_threads_endpoint_handles_10_concurrent_readers_within_2s() -> Result<()>
 fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Result<()> {
     use chrono::Utc;
     use libra::internal::ai::web::code_ui::{
-        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, CodeUiTranscriptEntry,
-        CodeUiTranscriptEntryKind, initial_snapshot,
+        CodeUiCapabilities, CodeUiEventType, CodeUiProviderInfo, CodeUiSession,
+        CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, initial_snapshot,
     };
 
     if !perf_mode_enabled() {
@@ -225,7 +225,7 @@ fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Resul
     let now = Utc::now();
     rt.block_on(async {
         session
-            .mutate("seed", |snapshot| {
+            .mutate(CodeUiEventType::SessionUpdated, |snapshot| {
                 snapshot.transcript.reserve(100_000);
                 for idx in 0..100_000 {
                     snapshot.transcript.push(CodeUiTranscriptEntry {
@@ -302,7 +302,7 @@ fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Resul
 #[serial]
 fn perf_sse_broadcast_delivers_1k_events_in_monotonic_seq_order() -> Result<()> {
     use libra::internal::ai::web::code_ui::{
-        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, initial_snapshot,
+        CodeUiCapabilities, CodeUiEventType, CodeUiProviderInfo, CodeUiSession, initial_snapshot,
     };
     use tokio::sync::broadcast::error::TryRecvError;
 
@@ -337,7 +337,7 @@ fn perf_sse_broadcast_delivers_1k_events_in_monotonic_seq_order() -> Result<()> 
         let mut events: Vec<u64> = Vec::with_capacity(EVENT_COUNT);
         for idx in 0..EVENT_COUNT {
             session
-                .mutate("status_changed", |snapshot| {
+                .mutate(CodeUiEventType::StatusChanged, |snapshot| {
                     snapshot.updated_at = chrono::Utc::now();
                     let _ = idx; // mutate body kept minimal; the broadcast itself is the contract under test.
                 })
