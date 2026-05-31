@@ -4260,7 +4260,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 
 补充规则：
 
-1. `load_for_resume()` 的输出必须包含 `phase_at_resume`、`resume_reason`、`resume_actions`；v0.17.1110 已把这三类字段提升为 `ResumeBundle` typed contract，`ContextFrame[E]` 恢复审计仍是后续事件化收口项。
+1. `load_for_resume()` 的输出必须包含 `phase_at_resume`、`resume_reason`、`resume_actions`；v0.17.1175 已把这三类字段提升为 `ResumeBundle` typed contract，并将 `ContextFrame[E]` 恢复审计写入 session JSONL。
 2. 只要发现 projection 缺失/过期，先按 Snapshot + Event targeted rebuild，再执行 phase-specific resume；不允许因 projection 缺失阻塞恢复。
 3. 恢复过程中的任何状态修复（如 interrupted 标记、queue 重建、review reopening）都必须事件化；projection 只缓存“当前视图”。
 4. Phase 0 / Phase 1 的恢复默认是“重开 review gate”，不是“自动重放 provider 输出”；只有执行阶段和系统验证阶段才允许进入 phase-aware rerun / resume 逻辑。
@@ -4313,7 +4313,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | **两套执行引擎共存** | 高 | `Orchestrator<M>` 与 Codex TUI turn loop 完全分离，持久化、控制流、resume 和审计语义已经分叉 |
 | **McpExecutionTracker 旁路写入** | 高 | TUI 层监听 Codex 事件并写 formal objects，UI 与核心模型严重耦合，formal writes 无法统一收口到共享 `Runtime` |
 | **Phase 3/4 formal pipeline 未落地** | 高 | 系统验证仍主要依赖 planner / gate task 与现有 Orchestrator 路径，`ArtifactLedger`、`ValidatorEngine`、`DecisionProposal` 尚未形成可重放、可恢复、可供 UI/MCP 直接消费的正式闭环 |
-| **`--resume` / phase-aware recovery 合同部分落地** | 高 | v0.17.1110 已新增 `ProjectionResolver::load_for_resume(thread_id, rebuilder)` 与 `ResumeBundle { phase_at_resume, resume_reason, resume_actions }`，并覆盖 Fresh / InterruptedRun / StaleReadOnly / Unavailable 的恢复动作；non-terminal run 的事件化 interrupted 标记、ready-queue 重建和 `ContextFrame[E]` 恢复审计仍待收口 |
+| **`--resume` / phase-aware recovery 合同已落地** | 高 | v0.17.1175 已将 `ProjectionResolver::load_for_resume(thread_id, rebuilder)` 与 `ResumeBundle { phase_at_resume, resume_reason, resume_actions }` 贯通到 `libra code --resume`，并覆盖 Fresh / InterruptedRun / StaleReadOnly / Unavailable 的恢复动作；non-terminal run 的事件化 interrupted 标记、ready-queue 重建和 `ContextFrame[E]` 恢复审计均已落到 session JSONL |
 | **Query Index / Rebuild 合同部分落地** | 高 | v0.17.1113 起 `ProjectionResolver::{load_query_indexes, load_or_rebuild_query_indexes}` 返回 `ThreadQueryIndexes { freshness, ... }`，并复用 targeted rebuild / `StaleReadOnly` / `Unavailable` 降级合同；v0.17.1127 新增 `ThreadQueryIndexes::diagnostics`，对 scheduler 引用的 plan/task/run 缺失 denormalized index row 以及 targeted rebuild failure 给出结构化诊断。v0.17.1141 起同一诊断层也覆盖 `live_context_window` 指向的 ContextFrame 缺失 `ai_index_intent_context_frame` row。剩余项收窄为 formal object 存在性 / Snapshot 全量一致性深查 |
 | **Phase 2 的 DAG runtime 合同未完全收敛** | 高 | `dagrs` 依赖与 spike 已收敛到 `0.8.1`，但 Phase 2 graph build / event / report / retry / resume 语义仍需正式提升为共享 Runtime contract |
 | **Code UI 尚未收敛到共享 read model / interaction state / controller lease** | 高 | TUI / Web 仍各自维护 session snapshot 与交互状态，`pending_post_plan`、`pending_plan_revision`、approval、`request_user_input` 等还未进入共享 schema |

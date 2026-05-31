@@ -1,7 +1,10 @@
 //! Main application structure and event loop.
+//! 中文：该注释与英文“Main application structure and event loop.”含义一致。
 //!
 //! The `App` struct manages the TUI state and coordinates between
+//! 中文：该注释与英文“The `App` struct manages the TUI state and coordinates between”含义一致。
 //! user input, agent execution, and UI rendering.
+//! 中文：该注释与英文“user input, agent execution, and UI rendering.”含义一致。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -134,7 +137,7 @@ use crate::{
             CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
             CodeUiPlanStep, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot,
             CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry,
-            CodeUiTranscriptEntryKind, snapshot_from_event,
+            CodeUiTranscriptEntryKind, CodeUiUsageSnapshot, snapshot_from_event,
         },
     },
 };
@@ -267,40 +270,54 @@ fn render_mcp_error(context: &str, content: Vec<rmcp::model::Content>) {
 }
 
 /// The reason for exiting the application.
+/// 中文：该注释与英文“The reason for exiting the application.”含义一致。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
     /// User requested exit.
+    /// 中文：该注释与英文“User requested exit.”含义一致。
     UserRequested,
     /// Fatal error occurred.
+    /// 中文：该注释与英文“Fatal error occurred.”含义一致。
     Fatal(String),
 }
 
 /// Information about the app exit state.
+/// 中文：该注释与英文“Information about the app exit state.”含义一致。
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
     /// The reason for exiting.
+    /// 中文：该注释与英文“The reason for exiting.”含义一致。
     pub reason: ExitReason,
     /// Canonical thread id that can be inspected with `libra graph`, when known.
+    /// 中文：该注释与英文“Canonical thread id that can be inspected with `libra graph`, when known.”含义一致。
     pub thread_id: Option<String>,
 }
 
 /// Pending user-input state while the TUI waits for the user to answer.
+/// 中文：该注释与英文“Pending user-input state while the TUI waits for the user to answer.”含义一致。
 struct PendingUserInput {
     /// The original request (questions, etc.).
+    /// 中文：该注释与英文“The original request (questions, etc.).”含义一致。
     request: UserInputRequest,
     /// Index of the question currently being answered.
+    /// 中文：该注释与英文“Index of the question currently being answered.”含义一致。
     current_question: usize,
     /// Answers collected so far, keyed by question id.
+    /// 中文：该注释与英文“Answers collected so far, keyed by question id.”含义一致。
     answers: HashMap<String, UserInputAnswer>,
     /// Currently selected option index (0-based) for the active question.
+    /// 中文：该注释与英文“Currently selected option index (0-based) for the active question.”含义一致。
     selected_option: usize,
     /// Whether the notes input is currently focused (Tab toggles).
+    /// 中文：该注释与英文“Whether the notes input is currently focused (Tab toggles).”含义一致。
     notes_focused: bool,
     /// Notes text being composed for the current question.
+    /// 中文：该注释与英文“Notes text being composed for the current question.”含义一致。
     notes_text: String,
 }
 
 /// Post-plan dialog state: stores the spec and user selection.
+/// 中文：该注释与英文“Post-plan dialog state: stores the spec and user selection.”含义一致。
 struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
@@ -316,12 +333,14 @@ struct PendingPostPlan {
 }
 
 /// Network policy dialog state after the user approves the execution plan.
+/// 中文：该注释与英文“Network policy dialog state after the user approves the execution plan.”含义一致。
 struct PendingNetworkPolicyChoice {
     post_plan: PendingPostPlan,
     selected: usize, // 0=Deny, 1=Allow, 2=Back
 }
 
 /// Execution-plan revision state after the user chooses Modify on the plan review.
+/// 中文：该注释与英文“Execution-plan revision state after the user chooses Modify on the plan review.”含义一致。
 struct PendingExecutionPlanRevision {
     spec_json: String,
     intent_id: Option<String>,
@@ -361,6 +380,7 @@ struct ExecuteWorkflowRequest {
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
+/// 中文：该注释与英文“IntentSpec review dialog state: stores the spec and user selection.”含义一致。
 struct PendingIntentReview {
     spec_json: String,
     intent_id: Option<String>,
@@ -396,6 +416,7 @@ fn review_scroll_action(key: crossterm::event::KeyEvent) -> Option<ReviewScrollA
 }
 
 /// Pending sandbox approval state.
+/// 中文：该注释与英文“Pending sandbox approval state.”含义一致。
 struct PendingExecApproval {
     request: ExecApprovalRequest,
     selected: usize,
@@ -403,12 +424,14 @@ struct PendingExecApproval {
 }
 
 /// Pending managed-provider interaction mirrored into the approval dialog.
+/// 中文：该注释与英文“Pending managed-provider interaction mirrored into the approval dialog.”含义一致。
 struct PendingManagedInteraction {
     interaction: CodeUiInteractionRequest,
     selected: usize,
 }
 
 /// Pending orchestrator Phase 3 / Phase 4 confirmation.
+/// 中文：该注释与英文“Pending orchestrator Phase 3 / Phase 4 confirmation.”含义一致。
 struct PendingPhaseConfirmation {
     prompt: PhaseConfirmationPrompt,
     response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
@@ -417,6 +440,7 @@ struct PendingPhaseConfirmation {
 }
 
 /// Configuration for creating an App.
+/// 中文：该注释与英文“Configuration for creating an App.”含义一致。
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
@@ -428,154 +452,232 @@ pub struct AppConfig {
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
     pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
+    /// 中文：该注释与英文“Display name of the active model (e.g. "gemini-2.5-flash").”含义一致。
     pub model_name: String,
     /// Provider identifier (e.g. "gemini", "anthropic").
+    /// 中文：该注释与英文“Provider identifier (e.g. "gemini", "anthropic").”含义一致。
     pub provider_name: String,
     /// MCP server instance for workflow tracking.
+    /// 中文：该注释与英文“MCP server instance for workflow tracking.”含义一致。
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional Code UI session mirror for the browser UI.
+    /// 中文：该注释与英文“Optional Code UI session mirror for the browser UI.”含义一致。
     pub code_ui_session: Option<Arc<CodeUiSession>>,
     /// Optional Code UI runtime handle for local controller operations.
+    /// 中文：该注释与英文“Optional Code UI runtime handle for local controller operations.”含义一致。
     pub code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Optional local automation command receiver.
+    /// 中文：该注释与英文“Optional local automation command receiver.”含义一致。
     pub code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Optional managed provider runtime controlled through the same TUI.
+    /// 中文：该注释与英文“Optional managed provider runtime controlled through the same TUI.”含义一致。
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
+    /// 中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
     pub default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
+    /// 中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
     pub auto_classify_first_user_message: bool,
     /// Goal objective supplied via `libra code --goal`, if any.
+    /// 中文：该注释与英文“Goal objective supplied via `libra code --goal`, if any.”含义一致。
     pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
+    /// 中文：该注释与英文“Source Pool control surface backing `/source` commands.”含义一致。
     pub source_pool: SourcePool,
 }
 
 /// The main application struct.
+/// 中文：该注释与英文“The main application struct.”含义一致。
 pub struct App<M: CompletionModel> {
     /// The TUI instance.
+    /// 中文：该注释与英文“The TUI instance.”含义一致。
     tui: Tui,
     /// The chat widget.
+    /// 中文：该注释与英文“The chat widget.”含义一致。
     widget: ChatWidget,
     /// The completion model used by the agent loop.
+    /// 中文：该注释与英文“The completion model used by the agent loop.”含义一致。
     model: RetryingCompletionModel<M>,
     /// The tool registry.
+    /// 中文：该注释与英文“The tool registry.”含义一致。
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
+    /// 中文：该注释与英文“Tool loop runtime config.”含义一致。
     config: ToolLoopConfig,
     /// Default tool allow-list for regular chat turns.
+    /// 中文：该注释与英文“Default tool allow-list for regular chat turns.”含义一致。
     default_allowed_tools: Vec<String>,
     /// Conversation history (model-facing).
+    /// 中文：该注释与英文“Conversation history (model-facing).”含义一致。
     history: Vec<Message>,
     /// Receiver for app events.
+    /// 中文：该注释与英文“Receiver for app events.”含义一致。
     app_event_rx: UnboundedReceiver<AppEvent>,
     /// Sender for app events.
+    /// 中文：该注释与英文“Sender for app events.”含义一致。
     app_event_tx: UnboundedSender<AppEvent>,
     /// The exit info, if any.
+    /// 中文：该注释与英文“The exit info, if any.”含义一致。
     exit_info: Option<AppExitInfo>,
     /// Last draw time for frame rate control.
+    /// 中文：该注释与英文“Last draw time for frame rate control.”含义一致。
     last_draw_time: Instant,
     /// Background agent task handle (used for interrupt).
+    /// 中文：该注释与英文“Background agent task handle (used for interrupt).”含义一致。
     agent_task: Option<JoinHandle<()>>,
     /// Per-turn `AbortToken` shared with `config.subagent_runtime`'s
+    /// 中文：该注释与英文“Per-turn `AbortToken` shared with `config.subagent_runtime`'s”含义一致。
     /// (v0.17.786). `cancel_current_turn` cancels this so any
+    /// 中文：该注释与英文“(v0.17.786). `cancel_current_turn` cancels this so any”含义一致。
     /// in-flight sub-agent dispatch short-circuits via the
+    /// 中文：该注释与英文“in-flight sub-agent dispatch short-circuits via the”含义一致。
     /// runner's `tokio::select!` (v0.17.767). Reset at every
+    /// 中文：该注释与英文“runner's `tokio::select!` (v0.17.767). Reset at every”含义一致。
     /// turn start; cleared when the turn ends.
+    /// 中文：该注释与英文“turn start; cleared when the turn ends.”含义一致。
     current_turn_abort_token: Option<crate::internal::ai::agent::runtime::AbortToken>,
     /// Delayed draw task for frame coalescing inside frame interval.
+    /// 中文：该注释与英文“Delayed draw task for frame coalescing inside frame interval.”含义一致。
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
+    /// 中文：该注释与英文“Initial welcome message.”含义一致。
     welcome_message: String,
     /// Whether the animated welcome screen is shown.
+    /// 中文：该注释与英文“Whether the animated welcome screen is shown.”含义一致。
     welcome_active: bool,
     /// Slash command dispatcher.
+    /// 中文：该注释与英文“Slash command dispatcher.”含义一致。
     command_dispatcher: CommandDispatcher,
     /// Markdown skill dispatcher.
+    /// 中文：该注释与英文“Markdown skill dispatcher.”含义一致。
     skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
+    /// 中文：该注释与英文“Agent router for auto-selection.”含义一致。
     agent_router: AgentProfileRouter,
     /// Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.
+    /// 中文：该注释与英文“Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.”含义一致。
     agents_config: AgentsConfig,
     /// In-memory budget totals for this TUI session.
+    /// 中文：该注释与英文“In-memory budget totals for this TUI session.”含义一致。
     budget_tracker: BudgetTracker,
     /// Session state for persistence.
+    /// 中文：该注释与英文“Session state for persistence.”含义一致。
     session: SessionState,
     /// Session store for saving/loading.
+    /// 中文：该注释与英文“Session store for saving/loading.”含义一致。
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
+    /// 中文：该注释与英文“Receiver for user-input requests from the `request_user_input` tool handler.”含义一致。
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Receiver for exec-approval requests from sandbox-governed handlers.
+    /// 中文：该注释与英文“Receiver for exec-approval requests from sandbox-governed handlers.”含义一致。
     exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
+    /// 中文：该注释与英文“Currently pending user-input interaction, if any.”含义一致。
     pending_user_input: Option<PendingUserInput>,
     /// Currently pending exec approval interaction, if any.
+    /// 中文：该注释与英文“Currently pending exec approval interaction, if any.”含义一致。
     pending_exec_approval: Option<PendingExecApproval>,
     /// Currently pending managed-provider approval interaction, if any.
+    /// 中文：该注释与英文“Currently pending managed-provider approval interaction, if any.”含义一致。
     pending_managed_interaction: Option<PendingManagedInteraction>,
     /// Currently pending Phase 3 / Phase 4 confirmation, if any.
+    /// 中文：该注释与英文“Currently pending Phase 3 / Phase 4 confirmation, if any.”含义一致。
     pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
+    /// 中文：该注释与英文“Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).”含义一致。
     pending_post_plan: Option<PendingPostPlan>,
     /// Network policy dialog state after the user has chosen to execute the plan.
+    /// 中文：该注释与英文“Network policy dialog state after the user has chosen to execute the plan.”含义一致。
     pending_network_policy: Option<PendingNetworkPolicyChoice>,
     /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
+    /// 中文：该注释与英文“IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).”含义一致。
     pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
+    /// 中文：该注释与英文“Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.”含义一致。
     pending_plan_revision: Option<String>,
     /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
+    /// 中文：该注释与英文“Base execution plan for the next plan-revision request, if the user chose Modify Plan.”含义一致。
     pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
     /// Auto-execute the next generated plan as an execution-failure repair attempt.
+    /// 中文：该注释与英文“Auto-execute the next generated plan as an execution-failure repair attempt.”含义一致。
     pending_auto_plan_repair_execution: Option<PendingAutoPlanRepairExecution>,
     /// Display name of the active model.
+    /// 中文：该注释与英文“Display name of the active model.”含义一致。
     model_name: String,
     /// Provider identifier.
+    /// 中文：该注释与英文“Provider identifier.”含义一致。
     provider_name: String,
     /// Session-level model usage rendered in the compact bottom-pane line.
+    /// 中文：该注释与英文“Session-level model usage rendered in the compact bottom-pane line.”含义一致。
     usage_snapshot: UsageDisplaySnapshot,
     /// Estimated output tokens already added from streaming text deltas for
+    /// 中文：该注释与英文“Estimated output tokens already added from streaming text deltas for”含义一致。
     /// the active turn. Final provider usage replaces this estimate.
+    /// 中文：该注释与英文“the active turn. Final provider usage replaces this estimate.”含义一致。
     pending_stream_output_tokens: u64,
     /// Arguments used to render the currently open usage detail panel.
+    /// 中文：该注释与英文“Arguments used to render the currently open usage detail panel.”含义一致。
     usage_detail_args: Option<String>,
     /// MCP server instance for writing data.
+    /// 中文：该注释与英文“MCP server instance for writing data.”含义一致。
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// Latest execution plan ID for attaching new turn runs.
+    /// 中文：该注释与英文“Latest execution plan ID for attaching new turn runs.”含义一致。
     mcp_plan_id: Option<String>,
     /// Active turn run ID for appending decisions and tool invocations.
+    /// 中文：该注释与英文“Active turn run ID for appending decisions and tool invocations.”含义一致。
     mcp_run_id: Option<String>,
     /// Pending detached MCP write operations that must finish before shutdown.
+    /// 中文：该注释与英文“Pending detached MCP write operations that must finish before shutdown.”含义一致。
     mcp_write_tracker: McpWriteTracker,
     /// Current active async turn. Events from stale turns are ignored.
+    /// 中文：该注释与英文“Current active async turn. Events from stale turns are ignored.”含义一致。
     active_turn_id: Option<TurnId>,
     /// Monotonic turn counter.
+    /// 中文：该注释与英文“Monotonic turn counter.”含义一致。
     next_turn_id: TurnId,
     /// Shared view of active turn for global retry observer callbacks.
+    /// 中文：该注释与英文“Shared view of active turn for global retry observer callbacks.”含义一致。
     active_turn_signal: Arc<AtomicU64>,
     /// Number of tool calls currently running in UI.
+    /// 中文：该注释与英文“Number of tool calls currently running in UI.”含义一致。
     running_tool_calls: usize,
     /// Shared run-id slot for the active turn, backfilled by MCP tracking.
+    /// 中文：该注释与英文“Shared run-id slot for the active turn, backfilled by MCP tracking.”含义一致。
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
     /// Provider-agnostic web snapshot state shared with the browser UI.
+    /// 中文：该注释与英文“Provider-agnostic web snapshot state shared with the browser UI.”含义一致。
     code_ui_session: Option<Arc<CodeUiSession>>,
     /// Provider-agnostic web runtime state shared with the browser UI.
+    /// 中文：该注释与英文“Provider-agnostic web runtime state shared with the browser UI.”含义一致。
     code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Receiver for local automation commands from the Code UI adapter.
+    /// 中文：该注释与英文“Receiver for local automation commands from the Code UI adapter.”含义一致。
     code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Managed provider runtime for providers that own their own tool loop.
+    /// 中文：该注释与英文“Managed provider runtime for providers that own their own tool loop.”含义一致。
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
+    /// 中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
     default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
+    /// 中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
     auto_classify_first_user_message: bool,
     /// Monotonic id source for browser transcript artifacts.
+    /// 中文：该注释与英文“Monotonic id source for browser transcript artifacts.”含义一致。
     next_code_ui_item_id: u64,
     /// Active Goal session for this `libra code` invocation, if any
+    /// 中文：该注释与英文“Active Goal session for this `libra code` invocation, if any”含义一致。
     /// (`/goal start <objective>` or `--goal "<objective>"`).
+    /// 中文：该注释与英文“(`/goal start <objective>` or `--goal "<objective>"`).”含义一致。
     /// Shared by both the TUI slash-command surface and the Code
+    /// 中文：该注释与英文“Shared by both the TUI slash-command surface and the Code”含义一致。
     /// Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).
+    /// 中文：该注释与英文“Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).”含义一致。
     goal_session: Option<super::goal_session::GoalSession>,
     /// Source Pool control state for this TUI session.
+    /// 中文：该注释与英文“Source Pool control state for this TUI session.”含义一致。
     source_pool: SourcePool,
 }
 
@@ -584,6 +686,7 @@ where
     M::Response: CompletionUsage,
 {
     /// Create a new App instance.
+    /// 中文：该注释与英文“Create a new App instance.”含义一致。
     pub fn new(
         tui: Tui,
         model: M,
@@ -660,14 +763,23 @@ where
             }
         });
         // OC-Phase 6 P6.7 — `--resume <thread>` replays the
+        // 中文：该注释与英文“OC-Phase 6 P6.7 — `--resume <thread>` replays the”含义一致。
         // session's Goal envelope stream so the resumed TUI shows
+        // 中文：该注释与英文“session's Goal envelope stream so the resumed TUI shows”含义一致。
         // the same active Goal it left. We only do this when no
+        // 中文：该注释与英文“the same active Goal it left. We only do this when no”含义一致。
         // `--goal "..."` flag was supplied (the explicit-objective
+        // 中文：该注释与英文“`--goal "..."` flag was supplied (the explicit-objective”含义一致。
         // path takes precedence so the user can start a fresh Goal
+        // 中文：该注释与英文“path takes precedence so the user can start a fresh Goal”含义一致。
         // even mid-thread). The replay surfaces `GoalReplayOutcome`'s
+        // 中文：该注释与英文“even mid-thread). The replay surfaces `GoalReplayOutcome`'s”含义一致。
         // rejection list as a single warn-level trace event so a
+        // 中文：该注释与英文“rejection list as a single warn-level trace event so a”含义一致。
         // forged JSONL slice is observable without crashing the
+        // 中文：该注释与英文“forged JSONL slice is observable without crashing the”含义一致。
         // resume.
+        // 中文：该注释与英文“resume.”含义一致。
         let initial_goal_session = initial_goal_session.or_else(|| {
             let session_root = app_config
                 .session_store
@@ -678,8 +790,11 @@ where
             && app_config.initial_goal.is_some()
         {
             // Only persist when we built the session from a fresh
+            // 中文：该注释与英文“Only persist when we built the session from a fresh”含义一致。
             // `--goal` flag; a resumed session already has its
+            // 中文：该注释与英文“`--goal` flag; a resumed session already has its”含义一致。
             // events on disk.
+            // 中文：该注释与英文“events on disk.”含义一致。
             let session_root = app_config
                 .session_store
                 .session_root(&app_config.session.id);
@@ -759,8 +874,10 @@ where
     }
 
     /// Run the main event loop.
+    /// 中文：该注释与英文“Run the main event loop.”含义一致。
     pub async fn run(&mut self) -> anyhow::Result<AppExitInfo> {
         // Enter alternate screen
+        // 中文：该注释与英文“Enter alternate screen”含义一致。
         self.tui.enter_alt_screen()?;
         let run_result = self.run_in_alt_screen().await;
         self.interrupt_agent_task();
@@ -768,6 +885,7 @@ where
         self.sweep_fuse_task_worktrees_on_shutdown().await;
 
         // Save session on exit (best-effort)
+        // 中文：该注释与英文“Save session on exit (best-effort)”含义一致。
         if self.session.message_count() > 0
             && let Err(e) = self.session_store.save(&self.session)
         {
@@ -835,6 +953,7 @@ where
         self.tui.clear()?;
 
         // Set up slash-command autocomplete hints (built-in + YAML-defined).
+        // 中文：该注释与英文“Set up slash-command autocomplete hints (built-in + YAML-defined).”含义一致。
         let mut hints: Vec<(String, String)> = super::slash_command::BuiltinCommand::all_hints();
         hints.extend(
             self.command_dispatcher
@@ -850,14 +969,19 @@ where
         }));
         self.widget.bottom_pane.set_command_hints(hints);
         // Seed the bottom-pane Goal indicator so a `libra code --goal "..."`
+        // 中文：该注释与英文“Seed the bottom-pane Goal indicator so a `libra code --goal "..."`”含义一致。
         // launch shows the active Goal on the very first frame (no
+        // 中文：该注释与英文“launch shows the active Goal on the very first frame (no”含义一致。
         // need to wait for the first slash-command refresh).
+        // 中文：该注释与英文“need to wait for the first slash-command refresh).”含义一致。
         self.refresh_bottom_pane_goal_status();
 
         // Initial draw - ensure UI is rendered immediately
+        // 中文：该注释与英文“Initial draw - ensure UI is rendered immediately”含义一致。
         self.draw()?;
 
         // Get the event stream
+        // 中文：该注释与英文“Get the event stream”含义一致。
         let mut event_stream = self.tui.event_stream();
         let mut animation_tick = interval(Duration::from_millis(120));
         let (managed_event_tx, mut managed_event_rx) =
@@ -882,22 +1006,26 @@ where
 
         loop {
             // Check if we should exit
+            // 中文：该注释与英文“Check if we should exit”含义一致。
             if self.exit_info.is_some() {
                 break;
             }
 
             tokio::select! {
                 // Handle terminal events
+                // 中文：该注释与英文“Handle terminal events”含义一致。
                 Some(event) = event_stream.next() => {
                     self.handle_tui_event(event).await?;
                 }
 
                 // Handle app events
+                // 中文：该注释与英文“Handle app events”含义一致。
                 Some(event) = self.app_event_rx.recv() => {
                     self.handle_app_event(event).await?;
                 }
 
                 // Mirror managed provider snapshots into the local TUI.
+                // 中文：该注释与英文“Mirror managed provider snapshots into the local TUI.”含义一致。
                 Some(event) = managed_event_rx.recv(), if self.managed_code_ui_runtime.is_some() => {
                     self.handle_managed_code_ui_event(event).await?;
                 }
@@ -912,18 +1040,21 @@ where
                 }
 
                 // Handle user-input requests from the tool handler
+                // 中文：该注释与英文“Handle user-input requests from the tool handler”含义一致。
                 Some(request) = self.user_input_rx.recv() => {
                     self.drain_pending_app_events().await?;
                     self.handle_user_input_request(request);
                 }
 
                 // Handle exec-approval requests from sandbox-governed handlers.
+                // 中文：该注释与英文“Handle exec-approval requests from sandbox-governed handlers.”含义一致。
                 Some(request) = self.exec_approval_rx.recv() => {
                     self.drain_pending_app_events().await?;
                     self.handle_exec_approval_request(request);
                 }
 
                 // Drive subtle status/tool animations while the agent is active.
+                // 中文：该注释与英文“Drive subtle status/tool animations while the agent is active.”含义一致。
                 _ = animation_tick.tick() => {
                     if matches!(
                         self.widget.bottom_pane.status,
@@ -991,6 +1122,7 @@ where
     }
 
     /// Handle a terminal event.
+    /// 中文：该注释与英文“Handle a terminal event.”含义一致。
     async fn handle_tui_event(&mut self, event: TuiEvent) -> anyhow::Result<()> {
         match event {
             TuiEvent::Key(key) => {
@@ -1104,10 +1236,15 @@ where
     }
 
     /// `goal.start { objective }` — create an active Goal mirroring
+    /// 中文：该注释与英文“`goal.start { objective }` — create an active Goal mirroring”含义一致。
     /// `/goal start <objective>`. Refuses if a Goal is already
+    /// 中文：该注释与英文“`/goal start <objective>`. Refuses if a Goal is already”含义一致。
     /// active in this session. The Code Control client receives
+    /// 中文：该注释与英文“active in this session. The Code Control client receives”含义一致。
     /// the rendered status so it can display the goal id without a
+    /// 中文：该注释与英文“the rendered status so it can display the goal id without a”含义一致。
     /// follow-up `goal.status` call.
+    /// 中文：该注释与英文“follow-up `goal.status` call.”含义一致。
     fn goal_session_start_from_control(
         &mut self,
         objective: String,
@@ -1117,9 +1254,13 @@ where
             return Err(TuiControlError::GoalAlreadyActive);
         }
         // Reuse the session id for both `thread_id` and
+        // 中文：该注释与英文“Reuse the session id for both `thread_id` and”含义一致。
         // `session_id` on the spec — the schema accepts any string
+        // 中文：该注释与英文“`session_id` on the spec — the schema accepts any string”含义一致。
         // for those fields, and this keeps the in-memory Goal
+        // 中文：该注释与英文“for those fields, and this keeps the in-memory Goal”含义一致。
         // bound to the running TUI session.
+        // 中文：该注释与英文“bound to the running TUI session.”含义一致。
         let session_id = self.session.id.clone();
         let actor = goal_actor_for_session(self);
         match GoalSession::create(session_id.clone(), session_id, objective, actor) {
@@ -1142,7 +1283,9 @@ where
     }
 
     /// `goal.status` — render the active Goal's snapshot, or
+    /// 中文：该注释与英文“`goal.status` — render the active Goal's snapshot, or”含义一致。
     /// `GoalNotActive` if none.
+    /// 中文：该注释与英文“`GoalNotActive` if none.”含义一致。
     fn goal_session_status_from_control(&self) -> Result<String, TuiControlError> {
         use super::goal_session::render_goal_status;
         match self.goal_session.as_ref() {
@@ -1152,8 +1295,11 @@ where
     }
 
     /// `goal.cancel { reason }` — append `GoalEvent::Cancelled` to
+    /// 中文：该注释与英文“`goal.cancel { reason }` — append `GoalEvent::Cancelled` to”含义一致。
     /// the active session and clear the slot. Refuses if no Goal is
+    /// 中文：该注释与英文“the active session and clear the slot. Refuses if no Goal is”含义一致。
     /// active or if the active Goal is already terminal.
+    /// 中文：该注释与英文“active or if the active Goal is already terminal.”含义一致。
     fn goal_session_cancel_from_control(
         &mut self,
         reason: String,
@@ -1175,9 +1321,13 @@ where
                 }
                 let rendered = render_goal_status(&outcome.state);
                 // Per opencode.md:665 a Cancelled session is
+                // 中文：该注释与英文“Per opencode.md:665 a Cancelled session is”含义一致。
                 // terminal; clear the slot so a subsequent
+                // 中文：该注释与英文“terminal; clear the slot so a subsequent”含义一致。
                 // `goal.start` succeeds without an explicit
+                // 中文：该注释与英文“`goal.start` succeeds without an explicit”含义一致。
                 // teardown call.
+                // 中文：该注释与英文“teardown call.”含义一致。
                 self.goal_session = None;
                 self.refresh_bottom_pane_goal_status();
                 Ok(rendered)
@@ -1192,12 +1342,19 @@ where
     }
 
     /// `/goal criteria add <text>` — append a single user-authored
+    /// 中文：该注释与英文“`/goal criteria add <text>` — append a single user-authored”含义一致。
     /// acceptance criterion to the active Goal via a
+    /// 中文：该注释与英文“acceptance criterion to the active Goal via a”含义一致。
     /// `CriteriaRevised` envelope. The dispatcher delegates id
+    /// 中文：该注释与英文“`CriteriaRevised` envelope. The dispatcher delegates id”含义一致。
     /// minting to `GoalSession::revise_criteria_add`; the user only
+    /// 中文：该注释与英文“minting to `GoalSession::revise_criteria_add`; the user only”含义一致。
     /// supplies the natural-language description. Refuses with
+    /// 中文：该注释与英文“supplies the natural-language description. Refuses with”含义一致。
     /// `GoalNotActive` when no Goal is in flight (mirrors the
+    /// 中文：该注释与英文“`GoalNotActive` when no Goal is in flight (mirrors the”含义一致。
     /// `/goal status` and `/goal cancel` shape).
+    /// 中文：该注释与英文“`/goal status` and `/goal cancel` shape).”含义一致。
     fn goal_session_criteria_add_from_control(
         &mut self,
         description: String,
@@ -1237,12 +1394,19 @@ where
     }
 
     /// Refresh the bottom-pane Goal indicator from the current
+    /// 中文：该注释与英文“Refresh the bottom-pane Goal indicator from the current”含义一致。
     /// `goal_session` slot. Call after every mutation
+    /// 中文：该注释与英文“`goal_session` slot. Call after every mutation”含义一致。
     /// (`start` / `cancel` / `criteria add` / supervisor envelope
+    /// 中文：该注释与英文“(`start` / `cancel` / `criteria add` / supervisor envelope”含义一致。
     /// fold) so the user sees the live state without invoking
+    /// 中文：该注释与英文“fold) so the user sees the live state without invoking”含义一致。
     /// `/goal status`. Setting the line to `None` when there is no
+    /// 中文：该注释与英文“`/goal status`. Setting the line to `None` when there is no”含义一致。
     /// active Goal hides the row entirely so the layout shrinks
+    /// 中文：该注释与英文“active Goal hides the row entirely so the layout shrinks”含义一致。
     /// back to its non-Goal height.
+    /// 中文：该注释与英文“back to its non-Goal height.”含义一致。
     fn refresh_bottom_pane_goal_status(&mut self) {
         use super::goal_session::render_goal_status_line;
         let line = self
@@ -1511,13 +1675,21 @@ where
         self.cancel_pending_phase_confirmation_for_control();
         self.clear_pending_code_ui_dialogs().await;
         // OC-Phase 5 P5.4 usage-row backfill (v0.17.797): when a
+        // 中文：该注释与英文“OC-Phase 5 P5.4 usage-row backfill (v0.17.797): when a”含义一致。
         // turn is cancelled, the tool_loop's `record_summary` /
+        // 中文：该注释与英文“turn is cancelled, the tool_loop's `record_summary` /”含义一致。
         // `record_failure` path never fires (the future tree is
+        // 中文：该注释与英文“`record_failure` path never fires (the future tree is”含义一致。
         // dropped). Record the cancellation as a failure row so
+        // 中文：该注释与英文“dropped). Record the cancellation as a failure row so”含义一致。
         // the `agent_usage_stats` audit reflects the abandoned
+        // 中文：该注释与英文“the `agent_usage_stats` audit reflects the abandoned”含义一致。
         // turn — error_kind carries the CancelSource so an
+        // 中文：该注释与英文“turn — error_kind carries the CancelSource so an”含义一致。
         // operator can distinguish Esc / SlashQuit / Automation /
+        // 中文：该注释与英文“operator can distinguish Esc / SlashQuit / Automation /”含义一致。
         // Budget abandons in the rollup.
+        // 中文：该注释与英文“Budget abandons in the rollup.”含义一致。
         if let (Some(recorder), Some(context)) = (
             self.config.usage_recorder.as_ref(),
             self.config.usage_context.as_ref(),
@@ -1607,21 +1779,27 @@ where
     }
 
     /// Handle a key press event.
+    /// 中文：该注释与英文“Handle a key press event.”含义一致。
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
+        // 中文：该注释与英文“Check for Ctrl+C first (always handled)”含义一致。
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.request_user_exit();
             return Ok(());
         }
 
         // `/quit` is a local TUI command and must preempt every interaction
+        // 中文：该注释与英文“`/quit` is a local TUI command and must preempt every interaction”含义一致。
         // state, including a running workflow mux. Otherwise it is treated as
+        // 中文：该注释与英文“state, including a running workflow mux. Otherwise it is treated as”含义一致。
         // ordinary shared-input text while the orchestrator keeps running.
+        // 中文：该注释与英文“ordinary shared-input text while the orchestrator keeps running.”含义一致。
         if key.code == KeyCode::Enter && self.try_handle_global_quit_command() {
             return Ok(());
         }
 
         // Handle input based on agent status
+        // 中文：该注释与英文“Handle input based on agent status”含义一致。
         match self.widget.bottom_pane.status {
             AgentStatus::Idle => match key.code {
                 KeyCode::Esc if self.widget.bottom_pane.is_usage_detail_panel_visible() => {
@@ -1630,6 +1808,7 @@ where
                     self.schedule_draw();
                 }
                 // ── Command popup intercepts (when visible) ──────────
+                // 中文：该注释与英文“── Command popup intercepts (when visible) ──────────”含义一致。
                 KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.complete_command();
                     self.widget.bottom_pane.sync_command_popup();
@@ -1648,6 +1827,7 @@ where
                     self.schedule_draw();
                 }
                 // ── Normal idle handlers ─────────────────────────────
+                // 中文：该注释与英文“── Normal idle handlers ─────────────────────────────”含义一致。
                 KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
                     let text = self.widget.bottom_pane.take_input();
                     if self.automation_controller_active().await
@@ -1667,6 +1847,7 @@ where
                     self.submit_message(text).await;
                 }
                 // Clear screen (Ctrl+K) - must come before generic Char handler
+                // 中文：该注释与英文“Clear screen (Ctrl+K) - must come before generic Char handler”含义一致。
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
                     self.widget.bottom_pane.clear();
@@ -1674,16 +1855,19 @@ where
                     self.schedule_draw();
                 }
                 // Scroll to top (Home)
+                // 中文：该注释与英文“Scroll to top (Home)”含义一致。
                 KeyCode::Home => {
                     self.widget.scroll_to_top();
                     self.schedule_draw();
                 }
                 // Scroll to bottom (End)
+                // 中文：该注释与英文“Scroll to bottom (End)”含义一致。
                 KeyCode::End => {
                     self.widget.scroll_to_bottom();
                     self.schedule_draw();
                 }
                 // Scroll
+                // 中文：该注释与英文“Scroll”含义一致。
                 KeyCode::PageUp => {
                     self.widget.scroll_up_lines(10);
                     self.schedule_draw();
@@ -1701,11 +1885,13 @@ where
                     self.schedule_draw();
                 }
                 // Cursor to beginning of input (Ctrl+A)
+                // 中文：该注释与英文“Cursor to beginning of input (Ctrl+A)”含义一致。
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.bottom_pane.cursor_home();
                     self.schedule_draw();
                 }
                 // Cursor to end of input (Ctrl+E)
+                // 中文：该注释与英文“Cursor to end of input (Ctrl+E)”含义一致。
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.bottom_pane.cursor_end();
                     self.schedule_draw();
@@ -1962,6 +2148,7 @@ where
     }
 
     /// Handle keyboard input while in the AwaitingUserInput state.
+    /// 中文：该注释与英文“Handle keyboard input while in the AwaitingUserInput state.”含义一致。
     fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
         let is_freeform = self.pending_user_input.as_ref().is_some_and(|p| {
             let q = &p.request.questions[p.current_question];
@@ -1969,6 +2156,7 @@ where
         });
 
         // If notes are focused, route most keys to the input field.
+        // 中文：该注释与英文“If notes are focused, route most keys to the input field.”含义一致。
         let notes_focused = self
             .pending_user_input
             .as_ref()
@@ -1976,6 +2164,7 @@ where
 
         match key.code {
             // Tab: toggle between options and notes
+            // 中文：该注释与英文“Tab: toggle between options and notes”含义一致。
             KeyCode::Tab if !is_freeform => {
                 if let Some(ref mut pending) = self.pending_user_input {
                     pending.notes_focused = !pending.notes_focused;
@@ -1984,6 +2173,7 @@ where
                 self.schedule_draw();
             }
             // Navigate options with Up/Down (only when options focused)
+            // 中文：该注释与英文“Navigate options with Up/Down (only when options focused)”含义一致。
             KeyCode::Up if !notes_focused => {
                 if let Some(ref mut pending) = self.pending_user_input
                     && pending.selected_option > 0
@@ -2006,6 +2196,7 @@ where
                 self.schedule_draw();
             }
             // Quick-select by number key (1-9), only when options focused
+            // 中文：该注释与英文“Quick-select by number key (1-9), only when options focused”含义一致。
             KeyCode::Char(c @ '1'..='9') if !notes_focused && !is_freeform => {
                 let idx = (c as usize) - ('1' as usize);
                 if let Some(ref mut pending) = self.pending_user_input {
@@ -2020,6 +2211,7 @@ where
                 self.schedule_draw();
             }
             // Type text (notes when notes_focused, or freeform input)
+            // 中文：该注释与英文“Type text (notes when notes_focused, or freeform input)”含义一致。
             KeyCode::Char(c) if notes_focused || is_freeform => {
                 if notes_focused {
                     if let Some(ref mut pending) = self.pending_user_input {
@@ -2043,10 +2235,12 @@ where
                 self.schedule_draw();
             }
             // Submit answer
+            // 中文：该注释与英文“Submit answer”含义一致。
             KeyCode::Enter => {
                 self.submit_user_input_answer();
             }
             // Cancel
+            // 中文：该注释与英文“Cancel”含义一致。
             KeyCode::Esc => {
                 self.cancel_pending_user_input();
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -2058,6 +2252,7 @@ where
     }
 
     /// Submit the currently selected answer for the active question.
+    /// 中文：该注释与英文“Submit the currently selected answer for the active question.”含义一致。
     fn submit_user_input_answer(&mut self) {
         let interaction_id = self
             .pending_user_input
@@ -2070,19 +2265,23 @@ where
 
             if options.is_empty() {
                 // Freeform question: take text from input field
+                // 中文：该注释与英文“Freeform question: take text from input field”含义一致。
                 let text = self.widget.bottom_pane.take_input();
                 if !text.is_empty() {
                     answer_list.push(text);
                 }
             } else if pending.selected_option < options.len() {
                 // Predefined option selected
+                // 中文：该注释与英文“Predefined option selected”含义一致。
                 answer_list.push(options[pending.selected_option].label.clone());
             } else if q.is_other && pending.selected_option == options.len() {
                 // "None of the above"
+                // 中文：该注释与英文“"None of the above"”含义一致。
                 answer_list.push("None of the above".to_string());
             }
 
             // Append notes if present
+            // 中文：该注释与英文“Append notes if present”含义一致。
             if !pending.notes_text.is_empty() {
                 answer_list.push(format!("user_note: {}", pending.notes_text));
             }
@@ -2129,6 +2328,7 @@ where
 
         if done {
             // Send the response back to the handler.
+            // 中文：该注释与英文“Send the response back to the handler.”含义一致。
             let Some(pending) = self.pending_user_input.take() else {
                 return;
             };
@@ -2157,6 +2357,7 @@ where
     }
 
     /// Cancel the pending user-input interaction (drops the oneshot sender).
+    /// 中文：该注释与英文“Cancel the pending user-input interaction (drops the oneshot sender).”含义一致。
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
             let interaction_id = pending.request.call_id.clone();
@@ -2168,6 +2369,7 @@ where
                 "tui user-input request cancelled"
             );
             // Dropping response_tx signals cancellation to the handler.
+            // 中文：该注释与英文“Dropping response_tx signals cancellation to the handler.”含义一致。
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
             if let Some(code_ui_session) = self.code_ui_session.clone() {
@@ -2179,6 +2381,7 @@ where
     }
 
     /// Sync the pending user-input state to the bottom pane for rendering.
+    /// 中文：该注释与英文“Sync the pending user-input state to the bottom pane for rendering.”含义一致。
     fn sync_user_input_to_pane(&mut self) {
         if let Some(ref pending) = self.pending_user_input {
             self.widget.bottom_pane.user_input_current_question = pending.current_question;
@@ -2189,6 +2392,7 @@ where
     }
 
     /// Handle a user-input request from the tool handler.
+    /// 中文：该注释与英文“Handle a user-input request from the tool handler.”含义一致。
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
         let first_question = request.questions.first();
         tracing::debug!(
@@ -2251,6 +2455,7 @@ where
         };
 
         // Store question info for the bottom pane to render.
+        // 中文：该注释与英文“Store question info for the bottom pane to render.”含义一致。
         self.widget
             .bottom_pane
             .set_user_input_questions(Some(&request.questions));
@@ -2783,6 +2988,7 @@ where
     }
 
     /// Handle an app event.
+    /// 中文：该注释与英文“Handle an app event.”含义一致。
     async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         if !self.is_active_turn(event.turn_id()) {
             return Ok(());
@@ -2820,15 +3026,18 @@ where
                     updated_at: Utc::now(),
                 };
                 // Track in session
+                // 中文：该注释与英文“Track in session”含义一致。
                 self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
                 self.save_session_snapshot_after_user_message();
 
                 // Add user cell immediately
+                // 中文：该注释与英文“Add user cell immediately”含义一致。
                 self.widget
                     .add_cell(Box::new(UserHistoryCell::new(text.clone())));
 
                 // Add streaming assistant placeholder (kept as the last cell).
+                // 中文：该注释与英文“Add streaming assistant placeholder (kept as the last cell).”含义一致。
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -2882,6 +3091,7 @@ where
                 }
 
                 // Prepare components for background task
+                // 中文：该注释与英文“Prepare components for background task”含义一致。
                 let model = self.model.clone();
                 let registry = self.registry.clone();
                 let mut config = self.config.clone();
@@ -2889,13 +3099,21 @@ where
                     apply_automation_approval_scope(&mut config, turn_id);
                 }
                 // OC-Phase 3 P3.7 per-turn abort token (v0.17.786):
+                // 中文：该注释与英文“OC-Phase 3 P3.7 per-turn abort token (v0.17.786):”含义一致。
                 // attach a fresh `AbortToken` to the sub-agent
+                // 中文：该注释与英文“attach a fresh `AbortToken` to the sub-agent”含义一致。
                 // runtime via the v0.17.779 `with_abort_token`
+                // 中文：该注释与英文“runtime via the v0.17.779 `with_abort_token`”含义一致。
                 // builder. `cancel_current_turn` cancels this
+                // 中文：该注释与英文“builder. `cancel_current_turn` cancels this”含义一致。
                 // token to short-circuit any in-flight sub-agent
+                // 中文：该注释与英文“token to short-circuit any in-flight sub-agent”含义一致。
                 // dispatch independent of the session-level token,
+                // 中文：该注释与英文“dispatch independent of the session-level token,”含义一致。
                 // while the session token survives for subsequent
+                // 中文：该注释与英文“while the session token survives for subsequent”含义一致。
                 // turns. No-op when sub-agents are disabled.
+                // 中文：该注释与英文“turns. No-op when sub-agents are disabled.”含义一致。
                 if let Some(rt) = config.subagent_runtime.clone() {
                     let turn_token = crate::internal::ai::agent::runtime::AbortToken::new();
                     self.current_turn_abort_token = Some(turn_token.clone());
@@ -2942,6 +3160,7 @@ where
                 let working_dir = registry.working_dir().to_path_buf();
 
                 // Execute agent call in background task
+                // 中文：该注释与英文“Execute agent call in background task”含义一致。
                 let handle = tokio::spawn(async move {
                     struct UiObserver {
                         tx: UnboundedSender<AppEvent>,
@@ -3025,19 +3244,33 @@ where
                             usage: &crate::internal::ai::completion::CompletionUsageSummary,
                         ) {
                             // OC-Phase 5 P5.3 per-agent budget
+                            // 中文：该注释与英文“OC-Phase 5 P5.3 per-agent budget”含义一致。
                             // attribution. The dispatcher already
+                            // 中文：该注释与英文“attribution. The dispatcher already”含义一致。
                             // returned the sub-agent's accumulated
+                            // 中文：该注释与英文“returned the sub-agent's accumulated”含义一致。
                             // usage on the TaskResult; route it
+                            // 中文：该注释与英文“usage on the TaskResult; route it”含义一致。
                             // through a dedicated AppEvent so the
+                            // 中文：该注释与英文“through a dedicated AppEvent so the”含义一致。
                             // budget tracker can call
+                            // 中文：该注释与英文“budget tracker can call”含义一致。
                             // `accumulate(usage, _, Some(agent))`
+                            // 中文：该注释与英文“`accumulate(usage, _, Some(agent))`”含义一致。
                             // and `check_agent` enforces per-agent
+                            // 中文：该注释与英文“and `check_agent` enforces per-agent”含义一致。
                             // caps. The trait's default impl folds
+                            // 中文：该注释与英文“caps. The trait's default impl folds”含义一致。
                             // this into the parent's anonymous
+                            // 中文：该注释与英文“this into the parent's anonymous”含义一致。
                             // bucket via `on_model_usage`, so a
+                            // 中文：该注释与英文“bucket via `on_model_usage`, so a”含义一致。
                             // future regression that drops this
+                            // 中文：该注释与英文“future regression that drops this”含义一致。
                             // override would silently degrade to
+                            // 中文：该注释与英文“override would silently degrade to”含义一致。
                             // session-only enforcement.
+                            // 中文：该注释与英文“session-only enforcement.”含义一致。
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::SubAgentUsageUpdated {
@@ -3081,6 +3314,7 @@ where
                             });
 
                             // Record tool invocation via MCP with final status.
+                            // 中文：该注释与英文“Record tool invocation via MCP with final status.”含义一致。
                             let run_id = self.run_id.lock().ok().and_then(|slot| slot.clone());
                             if let (Some(mcp_server), Some(run_id)) =
                                 (self.mcp_server.clone(), run_id)
@@ -3294,13 +3528,21 @@ where
                 match agent_event {
                     AgentEvent::SubAgentUsageUpdated { agent_name, usage } => {
                         // OC-Phase 5 P5.3: attribute the sub-agent's
+                        // 中文：该注释与英文“OC-Phase 5 P5.3: attribute the sub-agent's”含义一致。
                         // cost to the per-agent bucket so
+                        // 中文：该注释与英文“cost to the per-agent bucket so”含义一致。
                         // `check_agent` enforces per-agent caps.
+                        // 中文：该注释与英文“`check_agent` enforces per-agent caps.”含义一致。
                         // wall_clock_ms = None (the dispatcher does
+                        // 中文：该注释与英文“wall_clock_ms = None (the dispatcher does”含义一致。
                         // not yet thread the wall-clock through;
+                        // 中文：该注释与英文“not yet thread the wall-clock through;”含义一致。
                         // child loop turns each record their own
+                        // 中文：该注释与英文“child loop turns each record their own”含义一致。
                         // wall-clock via the parent observer's
+                        // 中文：该注释与英文“wall-clock via the parent observer's”含义一致。
                         // `on_model_usage_recorded`).
+                        // 中文：该注释与英文“`on_model_usage_recorded`).”含义一致。
                         self.budget_tracker
                             .accumulate(&usage, None, Some(agent_name.as_str()));
                         for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
@@ -3325,26 +3567,43 @@ where
                         self.budget_tracker
                             .accumulate(&usage, Some(wall_clock_ms), None);
                         // OC-Phase 5 budget warnings: surface any axis
+                        // 中文：该注释与英文“OC-Phase 5 budget warnings: surface any axis”含义一致。
                         // that just crossed its `warn_*` threshold via
+                        // 中文：该注释与英文“that just crossed its `warn_*` threshold via”含义一致。
                         // a one-shot history cell so the operator sees
+                        // 中文：该注释与英文“a one-shot history cell so the operator sees”含义一致。
                         // the alert inline with the conversation. The
+                        // 中文：该注释与英文“the alert inline with the conversation. The”含义一致。
                         // tracker's `warnings_emitted` table guarantees
+                        // 中文：该注释与英文“tracker's `warnings_emitted` table guarantees”含义一致。
                         // each (scope, axis) fires at most once per
+                        // 中文：该注释与英文“each (scope, axis) fires at most once per”含义一致。
                         // session — back-to-back UsageUpdated events
+                        // 中文：该注释与英文“session — back-to-back UsageUpdated events”含义一致。
                         // do not spam.
+                        // 中文：该注释与英文“do not spam.”含义一致。
                         for warning in self.budget_tracker.drain_warnings(&self.agents_config) {
                             self.widget
                                 .add_cell(Box::new(AssistantHistoryCell::new(warning.to_string())));
                         }
                         // OC-Phase 5 budget enforcement: any
+                        // 中文：该注释与英文“OC-Phase 5 budget enforcement: any”含义一致。
                         // `max_*_cost_usd` / `max_session_tokens` /
+                        // 中文：该注释与英文“`max_*_cost_usd` / `max_session_tokens` /”含义一致。
                         // `max_wall_clock_minutes` breach surfaces as
+                        // 中文：该注释与英文“`max_wall_clock_minutes` breach surfaces as”含义一致。
                         // an inline error cell **and** interrupts the
+                        // 中文：该注释与英文“an inline error cell **and** interrupts the”含义一致。
                         // current turn so the model cannot keep
+                        // 中文：该注释与英文“current turn so the model cannot keep”含义一致。
                         // burning budget. `check_session` returns the
+                        // 中文：该注释与英文“burning budget. `check_session` returns the”含义一致。
                         // first cap that was crossed; `check_goal`
+                        // 中文：该注释与英文“first cap that was crossed; `check_goal`”含义一致。
                         // covers the Goal-mode wall-clock / cost cap
+                        // 中文：该注释与英文“covers the Goal-mode wall-clock / cost cap”含义一致。
                         // independently of the session-wide one.
+                        // 中文：该注释与英文“independently of the session-wide one.”含义一致。
                         let budget_breach = self
                             .budget_tracker
                             .check_session(&self.agents_config)
@@ -3366,6 +3625,11 @@ where
                             .bottom_pane
                             .set_usage_line(Some(usage_badge.clone()));
                         self.widget.set_usage_header(Some(usage_badge));
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .set_usage(Some(code_ui_usage_snapshot(&self.usage_snapshot)))
+                                .await;
+                        }
                         self.refresh_usage_detail_panel().await;
                         self.schedule_draw();
                     }
@@ -3415,7 +3679,9 @@ where
                                 return Ok(());
                             }
                             // The supervisor returns its own projection so callers can
+                            // 中文：该注释与英文“The supervisor returns its own projection so callers can”含义一致。
                             // verify the App-side replay stayed aligned.
+                            // 中文：该注释与英文“verify the App-side replay stayed aligned.”含义一致。
                             debug_assert_eq!(session.state(), goal_state.as_ref());
                         } else {
                             tracing::warn!(
@@ -3430,9 +3696,13 @@ where
                             );
                         }
                         // Supervisor envelope fold changed the active
+                        // 中文：该注释与英文“Supervisor envelope fold changed the active”含义一致。
                         // Goal's progress / blocker / completion state;
+                        // 中文：该注释与英文“Goal's progress / blocker / completion state;”含义一致。
                         // refresh the bottom-pane indicator so the
+                        // 中文：该注释与英文“refresh the bottom-pane indicator so the”含义一致。
                         // next frame reflects the new short-line.
+                        // 中文：该注释与英文“next frame reflects the new short-line.”含义一致。
                         self.refresh_bottom_pane_goal_status();
 
                         self.session.add_assistant_message(&rendered_text);
@@ -3479,6 +3749,7 @@ where
                         self.history = new_history;
 
                         // Track in session
+                        // 中文：该注释与英文“Track in session”含义一致。
                         self.session.add_assistant_message(&text);
                         self.complete_streaming_assistant_cell(text);
                         if let Some(code_ui_session) = self.code_ui_session.clone() {
@@ -3544,6 +3815,11 @@ where
                             .bottom_pane
                             .set_usage_line(Some(usage_badge.clone()));
                         self.widget.set_usage_header(Some(usage_badge));
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .set_usage(Some(code_ui_usage_snapshot(&self.usage_snapshot)))
+                                .await;
+                        }
                         self.append_streaming_assistant_delta(&delta);
                         if let Some(code_ui_session) = self.code_ui_session.clone() {
                             code_ui_session
@@ -3836,6 +4112,7 @@ where
                 }
 
                 // Show post-plan dialog instead of returning to Idle
+                // 中文：该注释与英文“Show post-plan dialog instead of returning to Idle”含义一致。
                 self.pending_post_plan = Some(PendingPostPlan {
                     spec_json,
                     intent_id,
@@ -4141,6 +4418,7 @@ where
                 if !already_visible {
                     if tool_name == "update_plan" {
                         // Parse the plan arguments and render a specialised cell.
+                        // 中文：该注释与英文“Parse the plan arguments and render a specialised cell.”含义一致。
                         let (explanation, steps) = parse_update_plan_arguments(&arguments);
                         let cell = Box::new(PlanUpdateHistoryCell::new(
                             call_id.clone(),
@@ -4279,6 +4557,7 @@ where
                     "tui tool call result displayed"
                 );
                 // For successful apply_patch, insert a visual diff cell.
+                // 中文：该注释与英文“For successful apply_patch, insert a visual diff cell.”含义一致。
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
                 {
@@ -4286,6 +4565,7 @@ where
                 }
 
                 // Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.
+                // 中文：该注释与英文“Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.”含义一致。
                 let mut found = false;
                 for cell in self.widget.cells.iter_mut().rev() {
                     if let Some(plan_cell) =
@@ -4787,6 +5067,7 @@ where
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
+    /// 中文：该注释与英文“Submit a user message, expanding slash commands and applying agent context.”含义一致。
     async fn submit_message(&mut self, text: String) {
         self.submit_message_from_source(text, TurnInputSource::Local)
             .await;
@@ -4794,6 +5075,7 @@ where
 
     async fn submit_message_from_source(&mut self, text: String, source: TurnInputSource) {
         // 1. Check for built-in TUI commands first.
+        // 中文：该注释与英文“1. Check for built-in TUI commands first.”含义一致。
         if let Some((cmd, args)) = super::slash_command::parse_builtin(&text) {
             self.handle_builtin_command(cmd, args).await;
             return;
@@ -4841,6 +5123,7 @@ where
         }
 
         // 2. Try YAML-defined slash commands (sent to model).
+        // 中文：该注释与英文“2. Try YAML-defined slash commands (sent to model).”含义一致。
         let (effective_text, agent_name) =
             if let Some(result) = self.command_dispatcher.dispatch(&text) {
                 (result.prompt, result.agent)
@@ -4849,6 +5132,7 @@ where
             };
 
         // Agent is only selected via slash command, not auto-detected
+        // 中文：该注释与英文“Agent is only selected via slash command, not auto-detected”含义一致。
         let agent = agent_name
             .as_deref()
             .and_then(|name| self.agent_router.get(name));
@@ -4857,6 +5141,7 @@ where
         let allowed_tools = agent.map(|a| a.tools.clone()).filter(|t| !t.is_empty());
 
         // If an agent was selected, prepend its system prompt to the user message
+        // 中文：该注释与英文“If an agent was selected, prepend its system prompt to the user message”含义一致。
         let final_text = if let Some(prompt) = agent_prompt {
             format!("{prompt}\n\n---\n\n{effective_text}")
         } else {
@@ -4884,6 +5169,7 @@ where
     }
 
     /// Handle a built-in TUI command (does not send to model).
+    /// 中文：该注释与英文“Handle a built-in TUI command (does not send to model).”含义一致。
     async fn handle_builtin_command(
         &mut self,
         cmd: super::slash_command::BuiltinCommand,
@@ -4894,10 +5180,12 @@ where
             BuiltinCommand::Help => {
                 let mut lines = String::from("Available commands:\n");
                 // Built-in commands
+                // 中文：该注释与英文“Built-in commands”含义一致。
                 for b in BuiltinCommand::all() {
                     lines.push_str(&format!("  /{:<14} {}\n", b.name(), b.description()));
                 }
                 // YAML-defined commands
+                // 中文：该注释与英文“YAML-defined commands”含义一致。
                 for c in self.command_dispatcher.commands() {
                     lines.push_str(&format!("  /{:<14} {}\n", c.name, c.description));
                 }
@@ -4940,14 +5228,23 @@ where
             }
             BuiltinCommand::Run => {
                 // `/run` mirrors `/chat`'s plan-bypass but defers
+                // 中文：该注释与英文“`/run` mirrors `/chat`'s plan-bypass but defers”含义一致。
                 // the allowed-tool decision to the launch-time
+                // 中文：该注释与英文“the allowed-tool decision to the launch-time”含义一致。
                 // `--context` / `--agent` selection rather than
+                // 中文：该注释与英文“`--context` / `--agent` selection rather than”含义一致。
                 // pinning a read-only set. Passing `None` lets
+                // 中文：该注释与英文“pinning a read-only set. Passing `None` lets”含义一致。
                 // `default_chat_allowed_tools` pick up
+                // 中文：该注释与英文“`default_chat_allowed_tools` pick up”含义一致。
                 // `config.allowed_tools` (set from
+                // 中文：该注释与英文“`config.allowed_tools` (set from”含义一致。
                 // `registry.filter_by_intent(...)` at startup).
+                // 中文：该注释与英文“`registry.filter_by_intent(...)` at startup).”含义一致。
                 // Wave 5 generation matrix uses this so
+                // 中文：该注释与英文“Wave 5 generation matrix uses this so”含义一致。
                 // `--context dev` actually exposes `apply_patch`.
+                // 中文：该注释与英文“`--context dev` actually exposes `apply_patch`.”含义一致。
                 let request = args.trim();
                 if request.is_empty() {
                     self.widget.add_cell(Box::new(AssistantHistoryCell::new(
@@ -5181,14 +5478,23 @@ where
     }
 
     /// Render the response cell for a `/goal …` invocation. The
+    /// 中文：该注释与英文“Render the response cell for a `/goal …` invocation. The”含义一致。
     /// parser lives in [`super::goal_command::parse_goal_subcommand`];
+    /// 中文：该注释与英文“parser lives in [`super::goal_command::parse_goal_subcommand`];”含义一致。
     /// this helper dispatches the typed result into the App's
+    /// 中文：该注释与英文“this helper dispatches the typed result into the App's”含义一致。
     /// goal-session methods (the same methods the Code Control
+    /// 中文：该注释与英文“goal-session methods (the same methods the Code Control”含义一致。
     /// NDJSON `goal.*` handlers call), so both surfaces share one
+    /// 中文：该注释与英文“NDJSON `goal.*` handlers call), so both surfaces share one”含义一致。
     /// authority for state mutation (OC-Phase 6 P6.5 / P6.6). The
+    /// 中文：该注释与英文“authority for state mutation (OC-Phase 6 P6.5 / P6.6). The”含义一致。
     /// `criteria add` arm stays parse-only because `CriteriaRevised`
+    /// 中文：该注释与英文“`criteria add` arm stays parse-only because `CriteriaRevised`”含义一致。
     /// envelopes flow through the supervisor's apply path —
+    /// 中文：该注释与英文“envelopes flow through the supervisor's apply path —”含义一致。
     /// integration ships once `run_tool_loop` integrates.
+    /// 中文：该注释与英文“integration ships once `run_tool_loop` integrates.”含义一致。
     fn format_goal_command_response(&mut self, args: &str) -> String {
         use super::goal_command::{GoalSubcommand, parse_goal_subcommand};
         match parse_goal_subcommand(args) {
@@ -5219,12 +5525,18 @@ where
     }
 
     /// Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.
+    /// 中文：该注释与英文“Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.”含义一致。
     ///
     /// This is the OC-Phase 3 P3.6 user entry point: it skips the
+    /// 中文：该注释与英文“This is the OC-Phase 3 P3.6 user entry point: it skips the”含义一致。
     /// LLM-initiated permission dialog because the human explicitly
+    /// 中文：该注释与英文“LLM-initiated permission dialog because the human explicitly”含义一致。
     /// requested the sub-agent, while keeping all other dispatcher
+    /// 中文：该注释与英文“requested the sub-agent, while keeping all other dispatcher”含义一致。
     /// gates (feature flag, depth, concurrency, safety, permission
+    /// 中文：该注释与英文“gates (feature flag, depth, concurrency, safety, permission”含义一致。
     /// escalation, model build, child loop) intact.
+    /// 中文：该注释与英文“escalation, model build, child loop) intact.”含义一致。
     async fn task_command_message(&self, args: &str) -> String {
         let invocation = match parse_task_command_args(args) {
             Ok(invocation) => invocation,
@@ -5241,13 +5553,21 @@ where
 
         let subagent_name = invocation.subagent_type.clone();
         // The `/task` slash command runs outside a turn loop, so there
+        // 中文：该注释与英文“The `/task` slash command runs outside a turn loop, so there”含义一致。
         // is no per-turn `ToolLoopConfig` carrying a file-history batch.
+        // 中文：该注释与英文“is no per-turn `ToolLoopConfig` carrying a file-history batch.”含义一致。
         // Derive a per-invocation context from the session's base
+        // 中文：该注释与英文“Derive a per-invocation context from the session's base”含义一致。
         // runtime context (sandbox / approval authority) and attach a
+        // 中文：该注释与英文“runtime context (sandbox / approval authority) and attach a”含义一致。
         // fresh file-history batch so a child `apply_patch` records undo
+        // 中文：该注释与英文“fresh file-history batch so a child `apply_patch` records undo”含义一致。
         // preimages — matching the per-turn LLM-initiated path
+        // 中文：该注释与英文“preimages — matching the per-turn LLM-initiated path”含义一致。
         // (S2-INV-06). Falls back to the runtime's stored snapshot when
+        // 中文：该注释与英文“(S2-INV-06). Falls back to the runtime's stored snapshot when”含义一致。
         // the session has no base runtime context.
+        // 中文：该注释与英文“the session has no base runtime context.”含义一致。
         let user_task_id = uuid::Uuid::new_v4();
         let live_runtime_context = self.config.runtime_context.clone().map(|mut ctx| {
             ctx.file_history = Some(FileHistoryRuntimeContext {
@@ -5405,9 +5725,13 @@ where
             }
 
             // Allow-all decisions live in a separate map and were previously
+            // 中文：该注释与英文“Allow-all decisions live in a separate map and were previously”含义一致。
             // unrevocable from the UI — once `ApprovedForAllCommands` was
+            // 中文：该注释与英文“unrevocable from the UI — once `ApprovedForAllCommands` was”含义一致。
             // chosen the cache stayed open for the whole session. The
+            // 中文：该注释与英文“chosen the cache stayed open for the whole session. The”含义一致。
             // `revoke allow-all <scope>` form clears that record.
+            // 中文：该注释与英文“`revoke allow-all <scope>` form clears that record.”含义一致。
             if let Some(scope_arg) = prefix.strip_prefix("allow-all").map(str::trim) {
                 if scope_arg.is_empty() {
                     return "Usage: /approvals revoke allow-all <scope>".to_string();
@@ -5880,6 +6204,7 @@ where
     }
 
     // ── IntentSpec review dialog ────────────────────────────────────
+    // 中文：该注释与英文“── IntentSpec review dialog ────────────────────────────────────”含义一致。
 
     async fn handle_intent_review_choice(&mut self) {
         let pending = match self.pending_intent_review.take() {
@@ -6373,6 +6698,7 @@ where
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
+    // 中文：该注释与英文“── Post-plan dialog ────────────────────────────────────────────”含义一致。
 
     async fn handle_post_plan_choice(&mut self) {
         let pending = match self.pending_post_plan.take() {
@@ -6869,7 +7195,9 @@ where
                         turn_id: self.turn_id,
                     });
                     // The right-side workflow graph tracks whether Phase 3 ran.
+                    // 中文：该注释与英文“The right-side workflow graph tracks whether Phase 3 ran.”含义一致。
                     // Pass/fail details remain in the verification summary.
+                    // 中文：该注释与英文“Pass/fail details remain in the verification summary.”含义一致。
                     let _ = self.tx.send(AppEvent::DagValidationStatus {
                         turn_id: self.turn_id,
                         passed: true,
@@ -6879,7 +7207,9 @@ where
 
                 fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
                     // The release row represents Phase 4 completion, not whether
+                    // 中文：该注释与英文“The release row represents Phase 4 completion, not whether”含义一致。
                     // the decision was Commit, HumanReviewRequired, or Abandon.
+                    // 中文：该注释与英文“the decision was Commit, HumanReviewRequired, or Abandon.”含义一致。
                     let _ = self.tx.send(AppEvent::DagReleaseStatus {
                         turn_id: self.turn_id,
                         passed: true,
@@ -7588,10 +7918,15 @@ where
 
     fn interrupt_agent_task(&mut self) {
         // v0.17.786: cancel the per-turn sub-agent abort token
+        // 中文：该注释与英文“v0.17.786: cancel the per-turn sub-agent abort token”含义一致。
         // BEFORE aborting the JoinHandle so cooperative-cancel
+        // 中文：该注释与英文“BEFORE aborting the JoinHandle so cooperative-cancel”含义一致。
         // paths (the runner's `tokio::select!`) get the signal
+        // 中文：该注释与英文“paths (the runner's `tokio::select!`) get the signal”含义一致。
         // even when the JoinHandle drop alone wouldn't unwind a
+        // 中文：该注释与英文“even when the JoinHandle drop alone wouldn't unwind a”含义一致。
         // detached worker future.
+        // 中文：该注释与英文“detached worker future.”含义一致。
         if let Some(token) = self.current_turn_abort_token.take() {
             token.cancel();
         }
@@ -7643,7 +7978,9 @@ where
     }
 
     /// Extract diff metadata from a successful `apply_patch` result and insert
+    /// 中文：该注释与英文“Extract diff metadata from a successful `apply_patch` result and insert”含义一致。
     /// a [`DiffHistoryCell`] for visual diff rendering.
+    /// 中文：该注释与英文“a [`DiffHistoryCell`] for visual diff rendering.”含义一致。
     fn try_insert_diff_cell(&mut self, result: &ToolOutput) {
         let ToolOutput::Function {
             metadata: Some(meta),
@@ -7882,6 +8219,7 @@ where
     }
 
     /// Schedule a frame draw with frame rate limiting.
+    /// 中文：该注释与英文“Schedule a frame draw with frame rate limiting.”含义一致。
     fn schedule_draw(&mut self) {
         if self
             .scheduled_draw_task
@@ -7914,6 +8252,7 @@ where
     }
 
     /// Draw the current frame.
+    /// 中文：该注释与英文“Draw the current frame.”含义一致。
     fn draw(&mut self) -> anyhow::Result<()> {
         self.tui.draw(|frame| {
             let area = frame.area();
@@ -8451,6 +8790,20 @@ fn apply_final_usage_update(
         (None, Some(next)) => Some(next),
         (None, None) => None,
     };
+}
+
+fn code_ui_usage_snapshot(snapshot: &UsageDisplaySnapshot) -> CodeUiUsageSnapshot {
+    let total_tokens = snapshot
+        .prompt_tokens
+        .saturating_add(snapshot.completion_tokens);
+    CodeUiUsageSnapshot {
+        provider: snapshot.provider.clone(),
+        model: snapshot.model.clone(),
+        prompt_tokens: snapshot.prompt_tokens,
+        completion_tokens: snapshot.completion_tokens,
+        total_tokens,
+        cost_usd: snapshot.cost_usd,
+    }
 }
 
 fn estimate_streamed_output_tokens(delta: &str) -> u64 {
@@ -9014,6 +9367,8 @@ mod tests {
         }
     }
 
+    // Test scenario: verifies `usage_grouping_parser_accepts_tui_flags` covers the usage grouping parser accepts tui flags behavior.
+    // 测试场景：验证 `usage_grouping_parser_accepts_tui_flags` 覆盖 usage grouping parser accepts tui flags 对应的行为。
     #[test]
     fn usage_grouping_parser_accepts_tui_flags() {
         assert_eq!(
@@ -9031,6 +9386,8 @@ mod tests {
         assert!(parse_usage_grouping("--bad").is_err());
     }
 
+    // Test scenario: verifies `task_command_parser_requires_agent_and_prompt` covers the task command parser requires agent and prompt behavior.
+    // 测试场景：验证 `task_command_parser_requires_agent_and_prompt` 覆盖 task command parser requires agent and prompt 对应的行为。
     #[test]
     fn task_command_parser_requires_agent_and_prompt() {
         assert_eq!(
@@ -9049,6 +9406,8 @@ mod tests {
         assert!(invocation.task_id.is_none());
     }
 
+    // Test scenario: verifies `task_description_from_prompt_is_bounded_to_first_line` covers the task description from prompt is bounded to first line behavior.
+    // 测试场景：验证 `task_description_from_prompt_is_bounded_to_first_line` 覆盖 task description from prompt is bounded to first line 对应的行为。
     #[test]
     fn task_description_from_prompt_is_bounded_to_first_line() {
         assert_eq!(
@@ -9061,6 +9420,8 @@ mod tests {
         assert!(description.chars().count() <= 96);
     }
 
+    // Test scenario: verifies `usage_detail_popup_config_defaults_to_enabled` covers the usage detail popup config defaults to enabled behavior.
+    // 测试场景：验证 `usage_detail_popup_config_defaults_to_enabled` 覆盖 usage detail popup config defaults to enabled 对应的行为。
     #[test]
     fn usage_detail_popup_config_defaults_to_enabled() {
         assert!(usage_detail_popup_enabled_from_toml("").unwrap());
@@ -9072,6 +9433,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `streaming_usage_delta_updates_estimate_until_final_usage_arrives` covers the streaming usage delta updates estimate until final usage arrives behavior.
+    // 测试场景：验证 `streaming_usage_delta_updates_estimate_until_final_usage_arrives` 覆盖 streaming usage delta updates estimate until final usage arrives 对应的行为。
     #[test]
     fn streaming_usage_delta_updates_estimate_until_final_usage_arrives() {
         let mut snapshot = UsageDisplaySnapshot {
@@ -9119,6 +9482,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `review_scroll_keys_preserve_plain_selection_arrows` covers the review scroll keys preserve plain selection arrows behavior.
+    // 测试场景：验证 `review_scroll_keys_preserve_plain_selection_arrows` 覆盖 review scroll keys preserve plain selection arrows 对应的行为。
     #[test]
     fn review_scroll_keys_preserve_plain_selection_arrows() {
         assert_eq!(
@@ -9283,6 +9648,8 @@ mod tests {
         None
     }
 
+    // Test scenario: verifies `provider_plan_draft_steps_replace_objectives_for_execution_plan_compile` covers the provider plan draft steps replace objectives for execution plan compile behavior.
+    // 测试场景：验证 `provider_plan_draft_steps_replace_objectives_for_execution_plan_compile` 覆盖 provider plan draft steps replace objectives for execution plan compile 对应的行为。
     #[test]
     fn provider_plan_draft_steps_replace_objectives_for_execution_plan_compile() {
         let spec = minimal_intentspec(vec![Objective {
@@ -9317,6 +9684,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `developer_network_choice_updates_intentspec_network_policy` covers the developer network choice updates intentspec network policy behavior.
+    // 测试场景：验证 `developer_network_choice_updates_intentspec_network_policy` 覆盖 developer network choice updates intentspec network policy 对应的行为。
     #[test]
     fn developer_network_choice_updates_intentspec_network_policy() {
         let mut spec = minimal_intentspec(vec![Objective {
@@ -9341,6 +9710,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `execution_plan_prompt_requires_submit_plan_draft_after_intentspec_confirmation` covers the execution plan prompt requires submit plan draft after intentspec confirmation behavior.
+    // 测试场景：验证 `execution_plan_prompt_requires_submit_plan_draft_after_intentspec_confirmation` 覆盖 execution plan prompt requires submit plan draft after intentspec confirmation 对应的行为。
     #[test]
     fn execution_plan_prompt_requires_submit_plan_draft_after_intentspec_confirmation() {
         let prompt = build_execution_plan_prompt("{\"kind\":\"IntentSpec\"}");
@@ -9353,6 +9724,8 @@ mod tests {
         assert!(prompt.contains("Do not call submit_intent_draft"));
     }
 
+    // Test scenario: verifies `execution_plan_revision_prompt_includes_existing_plan_and_change_request` covers the execution plan revision prompt includes existing plan and change request behavior.
+    // 测试场景：验证 `execution_plan_revision_prompt_includes_existing_plan_and_change_request` 覆盖 execution plan revision prompt includes existing plan and change request 对应的行为。
     #[test]
     fn execution_plan_revision_prompt_includes_existing_plan_and_change_request() {
         let plan = provider_plan_draft(&["Inspect current flow"]);
@@ -9370,6 +9743,8 @@ mod tests {
         assert!(!prompt.contains("call update_plan exactly once"));
     }
 
+    // Test scenario: verifies `execution_plan_revision_prompt_includes_previous_failure_context` covers the execution plan revision prompt includes previous failure context behavior.
+    // 测试场景：验证 `execution_plan_revision_prompt_includes_previous_failure_context` 覆盖 execution plan revision prompt includes previous failure context 对应的行为。
     #[test]
     fn execution_plan_revision_prompt_includes_previous_failure_context() {
         let plan = provider_plan_draft(&["Run failing check"]);
@@ -9387,6 +9762,8 @@ mod tests {
         assert!(prompt.contains("addresses the concrete failure"));
     }
 
+    // Test scenario: verifies `phase1_plan_draft_tool_is_suppressed_from_generic_transcript` covers the phase1 plan draft tool is suppressed from generic transcript behavior.
+    // 测试场景：验证 `phase1_plan_draft_tool_is_suppressed_from_generic_transcript` 覆盖 phase1 plan draft tool is suppressed from generic transcript 对应的行为。
     #[test]
     fn phase1_plan_draft_tool_is_suppressed_from_generic_transcript() {
         assert!(is_phase1_plan_draft_tool("submit_plan_draft"));
@@ -9400,6 +9777,8 @@ mod tests {
         ));
     }
 
+    // Test scenario: verifies `phase0_tool_loop_config_stops_after_submit_intent_draft` covers the phase0 tool loop config stops after submit intent draft behavior.
+    // 测试场景：验证 `phase0_tool_loop_config_stops_after_submit_intent_draft` 覆盖 phase0 tool loop config stops after submit intent draft 对应的行为。
     #[test]
     fn phase0_tool_loop_config_stops_after_submit_intent_draft() {
         let config = phase0_plan_tool_loop_config(ToolLoopConfig::default());
@@ -9417,6 +9796,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `phase0_review_persistence_uses_runtime_write_helper` covers the phase0 review persistence uses runtime write helper behavior.
+    // 测试场景：验证 `phase0_review_persistence_uses_runtime_write_helper` 覆盖 phase0 review persistence uses runtime write helper 对应的行为。
     #[test]
     fn phase0_review_persistence_uses_runtime_write_helper() {
         let source = include_str!("app.rs");
@@ -9441,6 +9822,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `phase0_context_snapshot_request_skips_clean_worktree` covers the phase0 context snapshot request skips clean worktree behavior.
+    // 测试场景：验证 `phase0_context_snapshot_request_skips_clean_worktree` 覆盖 phase0 context snapshot request skips clean worktree 对应的行为。
     #[test]
     fn phase0_context_snapshot_request_skips_clean_worktree() {
         let spec = minimal_intentspec(vec![Objective {
@@ -9454,6 +9837,8 @@ mod tests {
         assert!(request.is_none());
     }
 
+    // Test scenario: verifies `phase0_context_snapshot_request_captures_changed_paths` covers the phase0 context snapshot request captures changed paths behavior.
+    // 测试场景：验证 `phase0_context_snapshot_request_captures_changed_paths` 覆盖 phase0 context snapshot request captures changed paths 对应的行为。
     #[test]
     fn phase0_context_snapshot_request_captures_changed_paths() {
         let spec = minimal_intentspec(vec![Objective {
@@ -9481,6 +9866,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `phase1_tool_loop_config_stops_after_submit_plan_draft` covers the phase1 tool loop config stops after submit plan draft behavior.
+    // 测试场景：验证 `phase1_tool_loop_config_stops_after_submit_plan_draft` 覆盖 phase1 tool loop config stops after submit plan draft 对应的行为。
     #[test]
     fn phase1_tool_loop_config_stops_after_submit_plan_draft() {
         let config = phase1_plan_tool_loop_config(ToolLoopConfig::default());
@@ -9498,6 +9885,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `phase0_intentspec_generation_does_not_forward_provider_text` covers the phase0 intentspec generation does not forward provider text behavior.
+    // 测试场景：验证 `phase0_intentspec_generation_does_not_forward_provider_text` 覆盖 phase0 intentspec generation does not forward provider text 对应的行为。
     #[test]
     fn phase0_intentspec_generation_does_not_forward_provider_text() {
         assert!(!should_forward_phase0_model_text_delta(
@@ -9515,6 +9904,8 @@ mod tests {
         assert!(is_default_chat_tool("web_search"));
     }
 
+    // Test scenario: verifies `goal_tools_are_visible_only_when_goal_is_active` covers the goal tools are visible only when goal is active behavior.
+    // 测试场景：验证 `goal_tools_are_visible_only_when_goal_is_active` 覆盖 goal tools are visible only when goal is active 对应的行为。
     #[test]
     fn goal_tools_are_visible_only_when_goal_is_active() {
         let registry = ToolRegistryBuilder::with_working_dir(std::path::PathBuf::from("/tmp"))
@@ -9548,6 +9939,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `goal_stop_policy_is_bound_into_tool_loop_config` covers the goal stop policy is bound into tool loop config behavior.
+    // 测试场景：验证 `goal_stop_policy_is_bound_into_tool_loop_config` 覆盖 goal stop policy is bound into tool loop config 对应的行为。
     #[test]
     fn goal_stop_policy_is_bound_into_tool_loop_config() {
         let goal_id = uuid::Uuid::new_v4();
@@ -9562,6 +9955,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `short_status_parser_extracts_changed_path` covers the short status parser extracts changed path behavior.
+    // 测试场景：验证 `short_status_parser_extracts_changed_path` 覆盖 short status parser extracts changed path 对应的行为。
     #[test]
     fn short_status_parser_extracts_changed_path() {
         assert_eq!(
@@ -9575,6 +9970,8 @@ mod tests {
         assert_eq!(changed_path_from_short_status_line("## main"), None);
     }
 
+    // Test scenario: verifies `default_chat_allowed_tools_prefers_launch_config_policy` covers the default chat allowed tools prefers launch config policy behavior.
+    // 测试场景：验证 `default_chat_allowed_tools_prefers_launch_config_policy` 覆盖 default chat allowed tools prefers launch config policy 对应的行为。
     #[test]
     fn default_chat_allowed_tools_prefers_launch_config_policy() {
         let registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
@@ -9647,6 +10044,8 @@ mod tests {
         }
     }
 
+    // Test scenario: verifies `first_turn_classifier_updates_prompt_and_direct_chat_tool_policy` covers the first turn classifier updates prompt and direct chat tool policy behavior.
+    // 测试场景：验证 `first_turn_classifier_updates_prompt_and_direct_chat_tool_policy` 覆盖 first turn classifier updates prompt and direct chat tool policy 对应的行为。
     #[tokio::test]
     async fn first_turn_classifier_updates_prompt_and_direct_chat_tool_policy() {
         let temp = tempfile::tempdir().unwrap();
@@ -9704,6 +10103,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `first_turn_auto_classification_is_only_for_unprofiled_empty_history` covers the first turn auto classification is only for unprofiled empty history behavior.
+    // 测试场景：验证 `first_turn_auto_classification_is_only_for_unprofiled_empty_history` 覆盖 first turn auto classification is only for unprofiled empty history 对应的行为。
     #[test]
     fn first_turn_auto_classification_is_only_for_unprofiled_empty_history() {
         assert!(should_auto_classify_first_user_message(true, &[], None));
@@ -9720,6 +10121,8 @@ mod tests {
         ));
     }
 
+    // Test scenario: verifies `undo_prefers_vcs_rollback_only_for_clean_committed_worktree` covers the undo prefers vcs rollback only for clean committed worktree behavior.
+    // 测试场景：验证 `undo_prefers_vcs_rollback_only_for_clean_committed_worktree` 覆盖 undo prefers vcs rollback only for clean committed worktree 对应的行为。
     #[test]
     fn undo_prefers_vcs_rollback_only_for_clean_committed_worktree() {
         let repo = tempfile::tempdir().unwrap();
@@ -9737,6 +10140,8 @@ mod tests {
         assert!(!undo_should_prefer_vcs_rollback(repo.path()));
     }
 
+    // Test scenario: verifies `provider_plan_draft_from_args_rejects_empty_titles` covers the provider plan draft from args rejects empty titles behavior.
+    // 测试场景：验证 `provider_plan_draft_from_args_rejects_empty_titles` 覆盖 provider plan draft from args rejects empty titles 对应的行为。
     #[test]
     fn provider_plan_draft_from_args_rejects_empty_titles() {
         let result = provider_plan_draft_from_args(SubmitPlanDraftArgs {
@@ -9749,6 +10154,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Test scenario: verifies `execution_plan_revision_help_is_plan_specific` covers the execution plan revision help is plan specific behavior.
+    // 测试场景：验证 `execution_plan_revision_help_is_plan_specific` 覆盖 execution plan revision help is plan specific 对应的行为。
     #[test]
     fn execution_plan_revision_help_is_plan_specific() {
         let help = pending_execution_plan_revision_help_message();
@@ -9758,6 +10165,8 @@ mod tests {
         assert!(help.contains("/plan modify <changes>"));
     }
 
+    // Test scenario: verifies `automatic_plan_repair_request_includes_failure_report_and_attempt` covers the automatic plan repair request includes failure report and attempt behavior.
+    // 测试场景：验证 `automatic_plan_repair_request_includes_failure_report_and_attempt` 覆盖 automatic plan repair request includes failure report and attempt 对应的行为。
     #[test]
     fn automatic_plan_repair_request_includes_failure_report_and_attempt() {
         let mut result = orchestrator_fixture();
@@ -9792,6 +10201,8 @@ mod tests {
         assert!(request.contains("cannot find value"));
     }
 
+    // Test scenario: verifies `automatic_plan_repair_default_threshold_is_ten` covers the automatic plan repair default threshold is ten behavior.
+    // 测试场景：验证 `automatic_plan_repair_default_threshold_is_ten` 覆盖 automatic plan repair default threshold is ten 对应的行为。
     #[test]
     fn automatic_plan_repair_default_threshold_is_ten() {
         assert_eq!(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 10);
@@ -9816,6 +10227,8 @@ mod tests {
         assert!(message.contains("Plan repair guidance"));
     }
 
+    // Test scenario: verifies `automatic_plan_repair_uses_orchestrator_errors_before_a_final_decision` covers the automatic plan repair uses orchestrator errors before a final decision behavior.
+    // 测试场景：验证 `automatic_plan_repair_uses_orchestrator_errors_before_a_final_decision` 覆盖 automatic plan repair uses orchestrator errors before a final decision 对应的行为。
     #[test]
     fn automatic_plan_repair_uses_orchestrator_errors_before_a_final_decision() {
         let summary = "Orchestrator failed: config error: persisted plan not found: 019dbb06-b68c-72f3-b17a-47c46e7b7328";
@@ -9832,6 +10245,8 @@ mod tests {
         assert!(request.contains("persisted plan not found"));
     }
 
+    // Test scenario: verifies `automatic_plan_repair_only_runs_for_plan_revision_route` covers the automatic plan repair only runs for plan revision route behavior.
+    // 测试场景：验证 `automatic_plan_repair_only_runs_for_plan_revision_route` 覆盖 automatic plan repair only runs for plan revision route 对应的行为。
     #[test]
     fn automatic_plan_repair_only_runs_for_plan_revision_route() {
         assert!(should_auto_repair_execution_failure(
@@ -9851,6 +10266,8 @@ mod tests {
         ));
     }
 
+    // Test scenario: verifies `execution_failure_classification_routes_plan_repairs_only_for_plan_failures` covers the execution failure classification routes plan repairs only for plan failures behavior.
+    // 测试场景：验证 `execution_failure_classification_routes_plan_repairs_only_for_plan_failures` 覆盖 execution failure classification routes plan repairs only for plan failures 对应的行为。
     #[test]
     fn execution_failure_classification_routes_plan_repairs_only_for_plan_failures() {
         let mut result = orchestrator_fixture();
@@ -9863,6 +10280,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `execution_failure_classification_routes_artifact_failure_to_intentspec_revision` covers the execution failure classification routes artifact failure to intentspec revision behavior.
+    // 测试场景：验证 `execution_failure_classification_routes_artifact_failure_to_intentspec_revision` 覆盖 execution failure classification routes artifact failure to intentspec revision 对应的行为。
     #[test]
     fn execution_failure_classification_routes_artifact_failure_to_intentspec_revision() {
         let result = orchestrator_fixture();
@@ -9873,6 +10292,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `execution_failure_classification_routes_policy_failures_to_intentspec_revision` covers the execution failure classification routes policy failures to intentspec revision behavior.
+    // 测试场景：验证 `execution_failure_classification_routes_policy_failures_to_intentspec_revision` 覆盖 execution failure classification routes policy failures to intentspec revision 对应的行为。
     #[test]
     fn execution_failure_classification_routes_policy_failures_to_intentspec_revision() {
         for code in [
@@ -9903,6 +10324,8 @@ mod tests {
         }
     }
 
+    // Test scenario: verifies `intentspec_revision_message_uses_intent_commands` covers the intentspec revision message uses intent commands behavior.
+    // 测试场景：验证 `intentspec_revision_message_uses_intent_commands` 覆盖 intentspec revision message uses intent commands 对应的行为。
     #[test]
     fn intentspec_revision_message_uses_intent_commands() {
         let message = intentspec_failure_revision_message_from_report(
@@ -9915,6 +10338,8 @@ mod tests {
         assert!(!message.contains("/plan modify"));
     }
 
+    // Test scenario: verifies `abandoned_execution_requires_plan_repair_loop` covers the abandoned execution requires plan repair loop behavior.
+    // 测试场景：验证 `abandoned_execution_requires_plan_repair_loop` 覆盖 abandoned execution requires plan repair loop 对应的行为。
     #[test]
     fn abandoned_execution_requires_plan_repair_loop() {
         let result = orchestrator_fixture();
@@ -9928,6 +10353,8 @@ mod tests {
         assert!(message.contains("/plan cancel"));
     }
 
+    // Test scenario: verifies `failed_execution_revision_message_includes_gate_error_evidence` covers the failed execution revision message includes gate error evidence behavior.
+    // 测试场景：验证 `failed_execution_revision_message_includes_gate_error_evidence` 覆盖 failed execution revision message includes gate error evidence 对应的行为。
     #[test]
     fn failed_execution_revision_message_includes_gate_error_evidence() {
         let mut result = orchestrator_fixture();
@@ -9958,6 +10385,8 @@ mod tests {
         assert!(message.contains("compile error first"));
     }
 
+    // Test scenario: verifies `failed_execution_revision_message_prioritizes_dependency_network_hint` covers the failed execution revision message prioritizes dependency network hint behavior.
+    // 测试场景：验证 `failed_execution_revision_message_prioritizes_dependency_network_hint` 覆盖 failed execution revision message prioritizes dependency network hint 对应的行为。
     #[test]
     fn failed_execution_revision_message_prioritizes_dependency_network_hint() {
         let mut result = orchestrator_fixture();
@@ -9986,6 +10415,8 @@ mod tests {
         assert!(!message.contains("compile error first"));
     }
 
+    // Test scenario: verifies `failed_execution_revision_message_includes_tool_and_policy_evidence` covers the failed execution revision message includes tool and policy evidence behavior.
+    // 测试场景：验证 `failed_execution_revision_message_includes_tool_and_policy_evidence` 覆盖 failed execution revision message includes tool and policy evidence 对应的行为。
     #[test]
     fn failed_execution_revision_message_includes_tool_and_policy_evidence() {
         let mut result = orchestrator_fixture();
@@ -10018,6 +10449,8 @@ mod tests {
         assert!(message.contains("compile error first"));
     }
 
+    // Test scenario: verifies `successful_or_reviewable_execution_does_not_force_plan_repair_loop` covers the successful or reviewable execution does not force plan repair loop behavior.
+    // 测试场景：验证 `successful_or_reviewable_execution_does_not_force_plan_repair_loop` 覆盖 successful or reviewable execution does not force plan repair loop 对应的行为。
     #[test]
     fn successful_or_reviewable_execution_does_not_force_plan_repair_loop() {
         let mut result = orchestrator_fixture();
@@ -10031,6 +10464,8 @@ mod tests {
         assert!(execution_requires_plan_repair(None));
     }
 
+    // Test scenario: verifies `failed_execution_revision_uses_latest_plan_tasks_as_draft` covers the failed execution revision uses latest plan tasks as draft behavior.
+    // 测试场景：验证 `failed_execution_revision_uses_latest_plan_tasks_as_draft` 覆盖 failed execution revision uses latest plan tasks as draft 对应的行为。
     #[test]
     fn failed_execution_revision_uses_latest_plan_tasks_as_draft() {
         let result = orchestrator_fixture();
@@ -10045,6 +10480,8 @@ mod tests {
         assert_eq!(titles, vec!["Inspect sources", "Run checks"]);
     }
 
+    // Test scenario: verifies `appends_to_last_matching_tool_group_before_streaming_cell` covers the appends to last matching tool group before streaming cell behavior.
+    // 测试场景：验证 `appends_to_last_matching_tool_group_before_streaming_cell` 覆盖 appends to last matching tool group before streaming cell 对应的行为。
     #[test]
     fn appends_to_last_matching_tool_group_before_streaming_cell() {
         let mut cells: Vec<Box<dyn HistoryCell>> = vec![
@@ -10071,6 +10508,8 @@ mod tests {
         assert!(tool_cell.contains_call_id("2"));
     }
 
+    // Test scenario: verifies `does_not_append_across_non_tool_cells` covers the does not append across non tool cells behavior.
+    // 测试场景：验证 `does_not_append_across_non_tool_cells` 覆盖 does not append across non tool cells 对应的行为。
     #[test]
     fn does_not_append_across_non_tool_cells() {
         let mut cells: Vec<Box<dyn HistoryCell>> = vec![
@@ -10091,6 +10530,8 @@ mod tests {
         ));
     }
 
+    // Test scenario: verifies `appends_preview_to_last_matching_tool_group_before_streaming_cell` covers the appends preview to last matching tool group before streaming cell behavior.
+    // 测试场景：验证 `appends_preview_to_last_matching_tool_group_before_streaming_cell` 覆盖 appends preview to last matching tool group before streaming cell 对应的行为。
     #[test]
     fn appends_preview_to_last_matching_tool_group_before_streaming_cell() {
         let mut cells: Vec<Box<dyn HistoryCell>> = vec![
@@ -10117,6 +10558,8 @@ mod tests {
         assert!(tool_cell.contains_call_id("2"));
     }
 
+    // Test scenario: verifies `marks_preview_tool_call_running_without_duplication` covers the marks preview tool call running without duplication behavior.
+    // 测试场景：验证 `marks_preview_tool_call_running_without_duplication` 覆盖 marks preview tool call running without duplication 对应的行为。
     #[test]
     fn marks_preview_tool_call_running_without_duplication() {
         let mut cells: Vec<Box<dyn HistoryCell>> =
@@ -10151,6 +10594,8 @@ mod tests {
         assert!(!rendered.contains("Preparing explore"));
     }
 
+    // Test scenario: verifies `orchestrator_result_markdown_uses_tables_and_sections` covers the orchestrator result markdown uses tables and sections behavior.
+    // 测试场景：验证 `orchestrator_result_markdown_uses_tables_and_sections` 覆盖 orchestrator result markdown uses tables and sections 对应的行为。
     #[test]
     fn orchestrator_result_markdown_uses_tables_and_sections() {
         let rendered = format_orchestrator_result(&orchestrator_fixture());
@@ -10163,6 +10608,8 @@ mod tests {
         assert!(rendered.contains("### Missing Artifacts"));
     }
 
+    // Test scenario: verifies `orchestrator_result_includes_graph_command_for_persisted_thread` covers the orchestrator result includes graph command for persisted thread behavior.
+    // 测试场景：验证 `orchestrator_result_includes_graph_command_for_persisted_thread` 覆盖 orchestrator result includes graph command for persisted thread 对应的行为。
     #[test]
     fn orchestrator_result_includes_graph_command_for_persisted_thread() {
         let thread_id = "11111111-1111-4111-8111-111111111111";
@@ -10182,6 +10629,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `orchestrator_result_thread_id_updates_session_graph_hint` covers the orchestrator result thread id updates session graph hint behavior.
+    // 测试场景：验证 `orchestrator_result_thread_id_updates_session_graph_hint` 覆盖 orchestrator result thread id updates session graph hint 对应的行为。
     #[test]
     fn orchestrator_result_thread_id_updates_session_graph_hint() {
         let thread_id = "11111111-1111-4111-8111-111111111111";
@@ -10201,6 +10650,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `orchestrator_stage_notes_surface_later_phases` covers the orchestrator stage notes surface later phases behavior.
+    // 测试场景：验证 `orchestrator_stage_notes_surface_later_phases` 覆盖 orchestrator stage notes surface later phases 对应的行为。
     #[test]
     fn orchestrator_stage_notes_surface_later_phases() {
         let result = orchestrator_fixture();
@@ -10224,6 +10675,8 @@ mod tests {
         assert!(decision.contains("Abandon"));
     }
 
+    // Test scenario: verifies `keeps_failed_tool_calls_visible` covers the keeps failed tool calls visible behavior.
+    // 测试场景：验证 `keeps_failed_tool_calls_visible` 覆盖 keeps failed tool calls visible 对应的行为。
     #[test]
     fn keeps_failed_tool_calls_visible() {
         let mut cell = ToolCallHistoryCell::new(
@@ -10246,6 +10699,8 @@ mod tests {
         assert!(joined.contains("file not found"));
     }
 
+    // Test scenario: verifies `plan_revision_prompt_uses_current_spec_as_baseline` covers the plan revision prompt uses current spec as baseline behavior.
+    // 测试场景：验证 `plan_revision_prompt_uses_current_spec_as_baseline` 覆盖 plan revision prompt uses current spec as baseline 对应的行为。
     #[test]
     fn plan_revision_prompt_uses_current_spec_as_baseline() {
         let prompt = build_plan_revision_prompt(
@@ -10262,6 +10717,8 @@ mod tests {
         assert!(prompt.contains("prefer std::env"));
     }
 
+    // Test scenario: verifies `plain_developer_messages_are_routed_through_plan_workflow` covers the plain developer messages are routed through plan workflow behavior.
+    // 测试场景：验证 `plain_developer_messages_are_routed_through_plan_workflow` 覆盖 plain developer messages are routed through plan workflow 对应的行为。
     #[test]
     fn plain_developer_messages_are_routed_through_plan_workflow() {
         assert!(should_route_plain_message_to_plan(
@@ -10286,6 +10743,8 @@ mod tests {
         assert!(prompt.contains("prefer std::env"));
     }
 
+    // Test scenario: verifies `quit_command_is_global_local_input` covers the quit command is global local input behavior.
+    // 测试场景：验证 `quit_command_is_global_local_input` 覆盖 quit command is global local input 对应的行为。
     #[test]
     fn quit_command_is_global_local_input() {
         assert!(is_global_quit_command_input("/quit"));
@@ -10295,6 +10754,8 @@ mod tests {
         assert!(!is_global_quit_command_input("/plan quit"));
     }
 
+    // Test scenario: verifies `terminal_paste_normalizes_crlf` covers the terminal paste normalizes crlf behavior.
+    // 测试场景：验证 `terminal_paste_normalizes_crlf` 覆盖 terminal paste normalizes crlf 对应的行为。
     #[test]
     fn terminal_paste_normalizes_crlf() {
         assert_eq!(
@@ -10303,6 +10764,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `parses_pending_revision_builtin_commands` covers the parses pending revision builtin commands behavior.
+    // 测试场景：验证 `parses_pending_revision_builtin_commands` 覆盖 parses pending revision builtin commands 对应的行为。
     #[test]
     fn parses_pending_revision_builtin_commands() {
         assert!(matches!(
@@ -10347,6 +10810,8 @@ mod tests {
         ));
     }
 
+    // Test scenario: verifies `pending_revision_help_mentions_escape_hatch` covers the pending revision help mentions escape hatch behavior.
+    // 测试场景：验证 `pending_revision_help_mentions_escape_hatch` 覆盖 pending revision help mentions escape hatch 对应的行为。
     #[test]
     fn pending_revision_help_mentions_escape_hatch() {
         let help = pending_plan_revision_help_message();
@@ -10356,6 +10821,8 @@ mod tests {
         assert!(!help.contains("/plan modify"));
     }
 
+    // Test scenario: verifies `intent_mismatch_message_mentions_current_and_stored_bindings` covers the intent mismatch message mentions current and stored bindings behavior.
+    // 测试场景：验证 `intent_mismatch_message_mentions_current_and_stored_bindings` 覆盖 intent mismatch message mentions current and stored bindings 对应的行为。
     #[test]
     fn intent_mismatch_message_mentions_current_and_stored_bindings() {
         let message = format_intentspec_target_mismatch(
@@ -10374,6 +10841,8 @@ mod tests {
         assert!(message.contains("different workspace or HEAD"));
     }
 
+    // Test scenario: verifies `managed_assistant_text_ignores_baseline_transcript_entries` covers the managed assistant text ignores baseline transcript entries behavior.
+    // 测试场景：验证 `managed_assistant_text_ignores_baseline_transcript_entries` 覆盖 managed assistant text ignores baseline transcript entries 对应的行为。
     #[test]
     fn managed_assistant_text_ignores_baseline_transcript_entries() {
         let now = chrono::Utc::now();
@@ -10424,6 +10893,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `managed_approval_selection_maps_apply_to_future` covers the managed approval selection maps apply to future behavior.
+    // 测试场景：验证 `managed_approval_selection_maps_apply_to_future` 覆盖 managed approval selection maps apply to future 对应的行为。
     #[test]
     fn managed_approval_selection_maps_apply_to_future() {
         let interaction = CodeUiInteractionRequest {
@@ -10465,6 +10936,8 @@ mod tests {
         assert_eq!(response.selected_option.as_deref(), Some("approve_all"));
     }
 
+    // Test scenario: verifies `exec_approval_selection_maps_allow_all_commands` covers the exec approval selection maps allow all commands behavior.
+    // 测试场景：验证 `exec_approval_selection_maps_allow_all_commands` 覆盖 exec approval selection maps allow all commands 对应的行为。
     #[test]
     fn exec_approval_selection_maps_allow_all_commands() {
         assert_eq!(
@@ -11823,20 +12296,33 @@ fn persist_goal_events_to_session_root(
 }
 
 /// Replay the resumed session's Goal envelope stream into a fresh
+/// 中文：该注释与英文“Replay the resumed session's Goal envelope stream into a fresh”含义一致。
 /// [`super::goal_session::GoalSession`].
+/// 中文：该注释与英文“[`super::goal_session::GoalSession`].”含义一致。
 ///
 /// Returns `None` when:
+/// 中文：该注释与英文“Returns `None` when:”含义一致。
 /// * The session JSONL is missing or has no [`SessionEvent::Goal`]
+/// 中文：列表项说明与英文“The session JSONL is missing or has no [`SessionEvent::Goal`]”含义一致。
 ///   envelopes (the resumed thread never started a Goal).
+/// 中文：该注释与英文“envelopes (the resumed thread never started a Goal).”含义一致。
 /// * The envelope stream fails `goal::state::replay`'s shape checks
+/// 中文：列表项说明与英文“The envelope stream fails `goal::state::replay`'s shape checks”含义一致。
 ///   (no leading `Created`, mismatched `goal_id`, invalid spec).
+/// 中文：该注释与英文“(no leading `Created`, mismatched `goal_id`, invalid spec).”含义一致。
 ///
 /// On success the projected state is logged together with the
+/// 中文：该注释与英文“On success the projected state is logged together with the”含义一致。
 /// rejection count so a forged or corrupted JSONL slice surfaces
+/// 中文：该注释与英文“rejection count so a forged or corrupted JSONL slice surfaces”含义一致。
 /// in `tracing` instead of silently producing a nonsense state.
+/// 中文：该注释与英文“in `tracing` instead of silently producing a nonsense state.”含义一致。
 /// I/O failures are downgraded to a warn-level trace and an
+/// 中文：该注释与英文“I/O failures are downgraded to a warn-level trace and an”含义一致。
 /// empty-replay return because the resume path must not abort on
+/// 中文：该注释与英文“empty-replay return because the resume path must not abort on”含义一致。
 /// a broken events.jsonl.
+/// 中文：该注释与英文“a broken events.jsonl.”含义一致。
 fn replay_goal_session_from_session_root(
     session_root: &Path,
 ) -> Option<super::goal_session::GoalSession> {
@@ -12079,10 +12565,15 @@ fn should_route_plain_message_to_plan(text: &str) -> bool {
 }
 
 /// Build the [`GoalActor`] attribution for actions taken inside the
+/// 中文：该注释与英文“Build the [`GoalActor`] attribution for actions taken inside the”含义一致。
 /// active session. Today we always attribute to the local user;
+/// 中文：该注释与英文“active session. Today we always attribute to the local user;”含义一致。
 /// once the controller-lease layer threads automation actor metadata
+/// 中文：该注释与英文“once the controller-lease layer threads automation actor metadata”含义一致。
 /// through (P6.6 follow-up for the `Automation` actor variant), this
+/// 中文：该注释与英文“through (P6.6 follow-up for the `Automation` actor variant), this”含义一致。
 /// function will branch on the active controller.
+/// 中文：该注释与英文“function will branch on the active controller.”含义一致。
 fn goal_actor_for_session<M: CompletionModel>(
     _app: &App<M>,
 ) -> crate::internal::ai::goal::GoalActor {
@@ -12871,6 +13362,8 @@ mod orchestrator_result_tests {
         }
     }
 
+    // Test scenario: verifies `failed_task_note_includes_review_summary` covers the failed task note includes review summary behavior.
+    // 测试场景：验证 `failed_task_note_includes_review_summary` 覆盖 failed task note includes review summary 对应的行为。
     #[test]
     fn failed_task_note_includes_review_summary() {
         let note = format_task_completion_note(
@@ -12897,6 +13390,8 @@ mod orchestrator_result_tests {
         assert!(note.contains("issues · missing final diagnosis"));
     }
 
+    // Test scenario: verifies `failed_task_note_falls_back_to_failure_reason_when_review_is_missing` covers the failed task note falls back to failure reason when review is missing behavior.
+    // 测试场景：验证 `failed_task_note_falls_back_to_failure_reason_when_review_is_missing` 覆盖 failed task note falls back to failure reason when review is missing 对应的行为。
     #[test]
     fn failed_task_note_falls_back_to_failure_reason_when_review_is_missing() {
         let note = format_task_completion_note(
@@ -12918,6 +13413,8 @@ mod orchestrator_result_tests {
         assert!(note.contains("reason · reviewer pass failed: invalid reviewer JSON"));
     }
 
+    // Test scenario: verifies `failed_gate_note_includes_gate_failure_reason` covers the failed gate note includes gate failure reason behavior.
+    // 测试场景：验证 `failed_gate_note_includes_gate_failure_reason` 覆盖 failed gate note includes gate failure reason 对应的行为。
     #[test]
     fn failed_gate_note_includes_gate_failure_reason() {
         let note = format_task_completion_note(
@@ -12951,6 +13448,8 @@ mod orchestrator_result_tests {
         assert!(note.contains("reason · cargo-test (exit 101: tests failed)"));
     }
 
+    // Test scenario: verifies `workspace_note_includes_mode_and_directory` covers the workspace note includes mode and directory behavior.
+    // 测试场景：验证 `workspace_note_includes_mode_and_directory` 覆盖 workspace note includes mode and directory 对应的行为。
     #[test]
     fn workspace_note_includes_mode_and_directory() {
         let isolated_note = format_task_workspace_note(
@@ -12977,6 +13476,8 @@ mod orchestrator_result_tests {
         assert!(shared_note.contains("/tmp/libra"));
     }
 
+    // Test scenario: verifies `intentspec_match_requires_same_workspace_and_head` covers the intentspec match requires same workspace and head behavior.
+    // 测试场景：验证 `intentspec_match_requires_same_workspace_and_head` 覆盖 intentspec match requires same workspace and head 对应的行为。
     #[test]
     fn intentspec_match_requires_same_workspace_and_head() {
         let workspace = tempfile::tempdir().unwrap();
@@ -12986,6 +13487,8 @@ mod orchestrator_result_tests {
         assert!(!intentspec_matches_workspace(&spec, &locator, "def456"));
     }
 
+    // Test scenario: verifies `intentspec_match_rejects_other_worktree_locator` covers the intentspec match rejects other worktree locator behavior.
+    // 测试场景：验证 `intentspec_match_rejects_other_worktree_locator` 覆盖 intentspec match rejects other worktree locator 对应的行为。
     #[test]
     fn intentspec_match_rejects_other_worktree_locator() {
         let workspace = tempfile::tempdir().unwrap();
@@ -12996,6 +13499,8 @@ mod orchestrator_result_tests {
         assert!(!intentspec_matches_workspace(&spec, &locator, "abc123"));
     }
 
+    // Test scenario: verifies `latest_intentspec_binding_requires_exact_worktree_head_and_branch` covers the latest intentspec binding requires exact worktree head and branch behavior.
+    // 测试场景：验证 `latest_intentspec_binding_requires_exact_worktree_head_and_branch` 覆盖 latest intentspec binding requires exact worktree head and branch 对应的行为。
     #[test]
     fn latest_intentspec_binding_requires_exact_worktree_head_and_branch() {
         let mut metadata = HashMap::new();
@@ -13046,6 +13551,8 @@ mod orchestrator_result_tests {
         ));
     }
 
+    // Test scenario: verifies `orchestrator_result_includes_task_review_and_failure_reason` covers the orchestrator result includes task review and failure reason behavior.
+    // 测试场景：验证 `orchestrator_result_includes_task_review_and_failure_reason` 覆盖 orchestrator result includes task review and failure reason 对应的行为。
     #[test]
     fn orchestrator_result_includes_task_review_and_failure_reason() {
         let reviewed_task = test_task_spec("Summarize findings", TaskKind::Analysis);
@@ -13120,6 +13627,8 @@ mod orchestrator_result_tests {
         );
     }
 
+    // Test scenario: verifies `orchestrator_result_includes_gate_failure_reason` covers the orchestrator result includes gate failure reason behavior.
+    // 测试场景：验证 `orchestrator_result_includes_gate_failure_reason` 覆盖 orchestrator result includes gate failure reason 对应的行为。
     #[test]
     fn orchestrator_result_includes_gate_failure_reason() {
         let gate_task = test_task_spec("Integration gate", TaskKind::Gate);

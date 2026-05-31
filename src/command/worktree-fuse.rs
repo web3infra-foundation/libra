@@ -9,12 +9,14 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
+    time::Duration,
 };
 
 use clap::{Parser, Subcommand};
 use libfuse_fs::overlayfs::{OverlayArgs, mount_fs};
 use rfuse3::raw::MountHandle;
 use serde::{Deserialize, Serialize};
+use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
 
 #[path = "worktree.rs"]
@@ -25,6 +27,10 @@ mod legacy;
 // `worktree-fuse` feature routed compilation through this file or directly
 // through `worktree.rs`.
 pub use legacy::WORKTREE_EXAMPLES;
+
+const FUSE_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
+const FUSE_UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
+const FUSE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::{
     command::{
@@ -249,9 +255,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                     .map_err(|e| CliError::fatal(e.to_string()))
             }
         }
-        WorktreeSubcommand::List => list_all_worktrees(output)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string())),
+        WorktreeSubcommand::List => list_all_worktrees(output).await,
         WorktreeSubcommand::Lock { path, reason } => {
             if lock_fuse_worktree(&path, reason.clone())
                 .map_err(|e| CliError::fatal(e.to_string()))?
@@ -363,8 +367,8 @@ fn load_fuse_state() -> io::Result<FuseWorktreeState> {
     if data.is_empty() {
         return Ok(FuseWorktreeState::default());
     }
-    let state: FuseWorktreeState =
-        serde_json::from_slice(&data).map_err(|e| io::Error::other(e.to_string()))?;
+    let state: FuseWorktreeState = serde_json::from_slice(&data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(state)
 }
 
@@ -385,9 +389,48 @@ fn save_fuse_state(state: &FuseWorktreeState) -> io::Result<()> {
     fs::rename(tmp, path)
 }
 
-fn verify_mount_health(mountpoint: &Path) -> io::Result<()> {
-    fs::read_dir(mountpoint)?;
-    Ok(())
+async fn verify_mount_health(mountpoint: &Path) -> io::Result<()> {
+    let mountpoint = mountpoint.to_path_buf();
+    let deadline = Instant::now() + FUSE_HEALTH_TIMEOUT;
+
+    loop {
+        let probe_path = mountpoint.clone();
+        match timeout(
+            FUSE_HEALTH_TIMEOUT,
+            tokio::task::spawn_blocking(move || fs::read_dir(probe_path)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(_))) => return Ok(()),
+            Ok(Ok(Err(err))) => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "FUSE mount did not become ready within {} seconds: {err}",
+                            FUSE_HEALTH_TIMEOUT.as_secs()
+                        ),
+                    ));
+                }
+            }
+            Ok(Err(err)) => {
+                return Err(io::Error::other(format!(
+                    "FUSE mount health check task failed: {err}"
+                )));
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "FUSE mount health check timed out after {} seconds",
+                        FUSE_HEALTH_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn add_fuse_worktree(
@@ -456,10 +499,22 @@ async fn add_fuse_worktree(
         name: Some("libra-worktree-fuse"),
         allow_other,
     };
-    let mount_handle = mount_fs(mount_args).await.into_mount_handle_result()?;
+    let mount_handle = timeout(FUSE_MOUNT_TIMEOUT, mount_fs(mount_args))
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "FUSE mount timed out after {} seconds for {}",
+                    FUSE_MOUNT_TIMEOUT.as_secs(),
+                    target.display()
+                ),
+            )
+        })?
+        .into_mount_handle_result()?;
 
-    if let Err(err) = verify_mount_health(&target) {
-        let _ = mount_handle.unmount().await;
+    if let Err(err) = verify_mount_health(&target).await {
+        let _ = timeout(FUSE_UNMOUNT_TIMEOUT, mount_handle.unmount()).await;
         let _ = fs::remove_dir_all(&upper_dir);
         if created_target {
             let _ = fs::remove_dir_all(&target);
@@ -479,7 +534,7 @@ async fn add_fuse_worktree(
         })
         .await
     {
-        let _ = mount_handle.unmount().await;
+        let _ = timeout(FUSE_UNMOUNT_TIMEOUT, mount_handle.unmount()).await;
         let _ = fs::remove_dir_all(&upper_dir);
         if created_target {
             let _ = fs::remove_dir_all(&target);
@@ -537,17 +592,47 @@ async fn add_fuse_worktree(
     Ok(())
 }
 
-async fn list_all_worktrees(output: &OutputConfig) -> io::Result<()> {
-    legacy::execute_safe(
-        legacy::WorktreeArgs {
-            command: legacy::WorktreeSubcommand::List,
-        },
-        output,
-    )
-    .await
-    .map_err(|e| io::Error::other(e.to_string()))?;
+async fn list_all_worktrees(output: &OutputConfig) -> CliResult<()> {
+    let mut result = legacy::run_list_worktrees().map_err(legacy::WorktreeError::into_cli_error)?;
+    let state = load_fuse_state().map_err(fuse_state_read_error)?;
+    if output.is_json() {
+        for entry in state.worktrees {
+            result.worktrees.push(legacy::WorktreeListEntry {
+                kind: "worktree",
+                path: entry.path.clone(),
+                is_main: false,
+                locked: entry.locked,
+                lock_reason: entry.lock_reason.clone(),
+                exists: Path::new(&entry.path).exists(),
+            });
+        }
+        return emit_json_data("worktree.list", &result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
 
-    let state = load_fuse_state()?;
+    for entry in result.worktrees {
+        let mut line = String::new();
+        if entry.is_main {
+            line.push_str("main ");
+        } else {
+            line.push_str("worktree ");
+        }
+        line.push_str(&entry.path);
+        if entry.locked {
+            line.push_str(" [locked");
+            if let Some(reason) = entry.lock_reason.as_ref()
+                && !reason.is_empty()
+            {
+                line.push_str(": ");
+                line.push_str(reason);
+            }
+            line.push(']');
+        }
+        println!("{}", line);
+    }
+
     for entry in state.worktrees {
         let mounted = if fuse_utils::is_mount_active(Path::new(&entry.path)) {
             "mounted"
@@ -572,6 +657,27 @@ async fn list_all_worktrees(output: &OutputConfig) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn fuse_state_read_error(source: io::Error) -> CliError {
+    let path = fuse_state_path();
+    let message = if source.kind() == io::ErrorKind::InvalidData {
+        format!(
+            "FUSE worktree state '{}' is corrupt: {source}",
+            path.display()
+        )
+    } else {
+        format!(
+            "failed to read FUSE worktree state '{}': {source}",
+            path.display()
+        )
+    };
+    let code = if source.kind() == io::ErrorKind::InvalidData {
+        StableErrorCode::RepoCorrupt
+    } else {
+        StableErrorCode::IoReadFailed
+    };
+    CliError::fatal(message).with_stable_code(code)
 }
 
 fn lock_fuse_worktree(path: &str, reason: Option<String>) -> io::Result<bool> {
@@ -711,9 +817,9 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
         .ok()
         .and_then(|mut mounts| mounts.remove(&path.to_string_lossy().to_string()));
     if let Some(handle) = handle {
-        match handle.unmount().await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
+        match timeout(FUSE_UNMOUNT_TIMEOUT, handle.unmount()).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => {
                 let ioe: io::Error = e;
                 if matches!(
                     ioe.raw_os_error(),
@@ -727,6 +833,19 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
                         "failed to unmount FUSE worktree: {ioe}"
                     )));
                 }
+            }
+            Err(_) => {
+                if !fuse_utils::is_mount_active(&path) {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "failed to unmount FUSE worktree {} within {} seconds",
+                        path.display(),
+                        FUSE_UNMOUNT_TIMEOUT.as_secs()
+                    ),
+                ));
             }
         }
     }

@@ -143,7 +143,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。后续仅剩 patchsets / richer plan metadata 映射进详情页。
+- Workflow：`plans[].steps[].status`、`tasks[]` 与 `toolCalls[].status` 已映射到 phase strip / task card / execution runs；`completed` / `succeeded` tool calls 会投影为 passed runs，`failed` / `error` / `cancelled` 投影为 failed runs；detail panel 不再渲染旧 optimistic-mutation demo，run output 来自 tool snapshot details。当前卡片与 step detail 已显示 live `Plan.title` / `Plan.summary`，review diff 按 patchset 维度展示 id / status / file counts，task/run detail output 也已按长内容折叠展开，header token badge 会在 snapshot 里存在 usage 时显示真实 token summary、否则回落到 neutral dash，sidebar 提供手动 refresh thread list affordance，Summary 也保留手动 refresh repo status affordance。
 - Summary：继续以 `/api/repo/status` 为 branch source；保留文件计数，不做 mock 的行级 `+812 -214` shortstat；PR 字段 v1 不显示。
 - Diff：统一 diff parser，支持多文件、binary/no diff、large diff collapse；解析失败 fail-open。
 - Terminal：Sandbox / Tools / Agent tab 已展示真实 tool 与 info transcript；tool details 超过 200 KiB 默认截断并可展开；v0.17.1049 已把 `/api/code/diagnostics` best-effort 映射进 Agent 行（pid、web/mcp 端口、log file、active interaction、last error）。
@@ -166,7 +166,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 - [x] 继续检查 `web/out/` 与 source 变更同步；CI 的 Web build job 在 `pnpm --dir web build` 后运行 `scripts/check_web_out_clean.sh`，同时检查 tracked diff 与 untracked `web/out` 文件。
 - [x] 增加 browser smoke：`browser_static_app_loads_and_submit_updates_snapshot` 打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread 内容，发送 browser message 后 snapshot 更新。
 - [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
-- [x] `docs/automation/local-tui-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致；`compat_matrix_alignment::docs_consistency_script_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `scripts/check_docs_consistency.sh` 覆盖全部端点。
+- [x] [`docs/automation/local-tui-control.md`](../automation/local-tui-control.md) 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致；`compat_matrix_alignment::docs_consistency_script_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `scripts/check_docs_consistency.sh` 覆盖全部端点。
 
 **验收命令：**
 

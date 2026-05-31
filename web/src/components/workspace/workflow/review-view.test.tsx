@@ -92,8 +92,55 @@ describe("ReviewView", () => {
 
     const { container, unmount } = render(<ReviewView />);
 
+    expect(container.textContent).toContain("PatchSet patch-1");
+    expect(container.textContent).toContain("ready · 1 files · +0 −0");
     expect(container.textContent).toContain("empty.txt");
     expect(container.textContent).toContain("No inline diff for this change.");
+
+    unmount();
+  });
+
+  it("renders patchset grouping and keeps duplicate file paths distinct", () => {
+    const snapshot = baseSnapshot();
+    snapshot.patchsets = [
+      {
+        id: "patch-a",
+        status: "ready",
+        updatedAt: "2026-05-14T00:00:00Z",
+        changes: [
+          {
+            path: "shared.txt",
+            changeType: "modified",
+            diff: ["@@ -1 +1 @@", "-old", "+new"].join("\n"),
+          },
+        ],
+      },
+      {
+        id: "patch-b",
+        status: "released",
+        updatedAt: "2026-05-14T00:00:00Z",
+        changes: [
+          {
+            path: "shared.txt",
+            changeType: "modified",
+            diff: ["@@ -1 +1 @@", "-alpha", "+beta"].join("\n"),
+          },
+        ],
+      },
+    ];
+    storeState.snapshot = snapshot;
+
+    const { container, unmount } = render(<ReviewView />);
+
+    expect(container.textContent).toContain("2 PatchSets");
+    expect(container.textContent).toContain("PatchSet patch-a");
+    expect(container.textContent).toContain("PatchSet patch-b");
+    expect(container.textContent).toContain("ready · 1 files · +1 −1");
+    expect(container.textContent).toContain("released · 1 files · +1 −1");
+    expect(container.querySelectorAll("button").length).toBeGreaterThanOrEqual(3);
+    expect(container.textContent).toContain("shared.txt");
+    expect(container.textContent).toContain("old");
+    expect(container.textContent).toContain("alpha");
 
     unmount();
   });
