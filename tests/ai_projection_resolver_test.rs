@@ -218,6 +218,46 @@ async fn scheduler_repository_loads_selected_plan_set_and_enforces_cas() {
     ));
 }
 
+/// Scenario: when both thread and scheduler projection rows exist,
+/// `ProjectionResolver::load_thread_bundle` must return a Fresh bundle that
+/// preserves the thread identity, selected plan ordering, and live context
+/// window exactly as stored. This is the formal read contract consumed by
+/// resume, diagnostics, and Code UI projection surfaces.
+#[tokio::test]
+async fn projection_resolver_loads_fresh_thread_scheduler_and_live_context_window() {
+    let db = setup_db().await;
+    let thread_id = id("12121212-1212-4121-8121-121212121212");
+    let thread = sample_thread(thread_id);
+    thread.create(&db).await.unwrap();
+    let scheduler = sample_scheduler(thread_id);
+
+    let repo = SchedulerStateRepository::new(db.clone());
+    repo.insert_initial(&scheduler).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db);
+    let bundle = resolver
+        .load_thread_bundle(thread_id)
+        .await
+        .unwrap()
+        .expect("thread bundle");
+
+    assert_eq!(bundle.freshness, ProjectionFreshness::Fresh);
+    assert_eq!(bundle.thread.thread_id, thread.thread_id);
+    assert_eq!(bundle.thread.current_intent_id, thread.current_intent_id);
+    assert_eq!(
+        bundle.scheduler.selected_plan_ids,
+        scheduler.selected_plan_ids
+    );
+    assert_eq!(
+        bundle.scheduler.live_context_window,
+        scheduler.live_context_window
+    );
+    assert_eq!(
+        bundle.scheduler.live_context_window[0].source_kind,
+        LiveContextSourceKind::Planning
+    );
+}
+
 /// Scenario: when a thread projection row exists but its scheduler row is missing,
 /// `ProjectionResolver::load_thread_bundle` must return a `StaleReadOnly` bundle with
 /// an empty selected-plan set rather than an error. This is the contract the runtime

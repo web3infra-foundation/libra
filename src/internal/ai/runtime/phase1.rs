@@ -485,9 +485,9 @@ mod tests {
         );
     }
 
-    async fn setup_mcp_server() -> Arc<LibraMcpServer> {
+    async fn setup_mcp_server() -> (Arc<LibraMcpServer>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let temp_path = temp_dir.keep();
+        let temp_path = temp_dir.path().to_path_buf();
         let db_path = temp_path.join("libra.db");
         let db = db::create_database(db_path.to_str().expect("utf-8 db path"))
             .await
@@ -498,7 +498,10 @@ mod tests {
             temp_path,
             Arc::new(db),
         ));
-        Arc::new(LibraMcpServer::new(Some(history), Some(storage)))
+        (
+            Arc::new(LibraMcpServer::new(Some(history), Some(storage))),
+            temp_dir,
+        )
     }
 
     fn created_id(result: &rmcp::model::CallToolResult) -> String {
@@ -515,7 +518,11 @@ mod tests {
 
     #[tokio::test]
     async fn write_plan_set_persists_execution_and_test_plan_pair() {
-        let server = setup_mcp_server().await;
+        use crate::internal::ai::runtime::contracts::{
+            ProjectionVersions, SchedulerMutation, SelectedPlanSet,
+        };
+
+        let (server, _temp_dir) = setup_mcp_server().await;
         let actor = ActorRef::agent("phase1-test").expect("actor");
         let intent = server
             .create_intent_impl(
@@ -607,6 +614,45 @@ mod tests {
 
         let history = server.intent_history_manager.as_ref().expect("history");
         assert_eq!(history.list_objects("plan").await.expect("plans").len(), 2);
+        for (object_type, object_id) in [
+            ("plan", outcome.execution_plan_id.as_str()),
+            ("plan", outcome.test_plan_id.as_str()),
+        ] {
+            assert!(
+                history
+                    .get_object_hash(object_type, object_id)
+                    .await
+                    .expect("history lookup")
+                    .is_some(),
+                "expected Phase 1 {object_type} id {object_id} to resolve in history",
+            );
+        }
+
+        let current = dummy_scheduler_state(1);
+        let execution_plan_id =
+            Uuid::parse_str(&outcome.execution_plan_id).expect("execution plan id");
+        let test_plan_id = Uuid::parse_str(&outcome.test_plan_id).expect("test plan id");
+        let next = apply_scheduler_mutation(
+            &current,
+            SchedulerMutation::SelectPlanSet {
+                expected: ProjectionVersions {
+                    thread: 0,
+                    scheduler: 1,
+                    live_context_window: 0,
+                },
+                selected: SelectedPlanSet {
+                    execution_plan_id,
+                    test_plan_id,
+                },
+            },
+        )
+        .expect("selected plan set should apply");
+        assert_eq!(next.selected_plan_ids.len(), 2);
+        assert_eq!(next.selected_plan_ids[0].plan_id, execution_plan_id);
+        assert_eq!(next.selected_plan_ids[0].ordinal, 0);
+        assert_eq!(next.selected_plan_ids[1].plan_id, test_plan_id);
+        assert_eq!(next.selected_plan_ids[1].ordinal, 1);
+        assert_eq!(next.selected_plan_id, Some(execution_plan_id));
     }
 
     use chrono::Utc;

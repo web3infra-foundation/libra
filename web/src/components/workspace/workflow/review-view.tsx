@@ -6,6 +6,8 @@ import { IconChev } from "@/components/icons";
 import { useCodeUiStore } from "@/lib/code-ui/store";
 import { cn } from "@/lib/utils";
 
+import type { CodeUiPatchsetSnapshot } from "@/lib/code-ui/types";
+
 import { parseUnifiedDiff, type DiffFile, type DiffLine } from "./diff-parser";
 
 const MAX_RENDERED_DIFF_LINES = 300;
@@ -13,16 +15,17 @@ const MAX_RENDERED_RAW_DIFF_CHARS = 20_000;
 
 export function ReviewView() {
   const { snapshot } = useCodeUiStore();
-  const files = useMemo<DiffFile[]>(() => {
+  const patchsets = useMemo<RenderedPatchset[]>(() => {
     if (!snapshot) return [];
-    return snapshot.patchsets.flatMap((patchset) =>
-      patchset.changes.map((change) =>
+    return snapshot.patchsets.map((patchset) => ({
+      patchset,
+      files: patchset.changes.map((change) =>
         parseUnifiedDiff(change.path, change.diff ?? null, change.changeType),
       ),
-    );
+    }));
   }, [snapshot]);
 
-  if (files.length === 0) {
+  if (patchsets.length === 0) {
     return (
       <div className="px-[18px] pb-6 pt-4 text-[12.5px] italic text-ink-3">
         No PatchSet diffs to review yet.
@@ -30,21 +33,96 @@ export function ReviewView() {
     );
   }
 
-  const totals = files.reduce(
-    (acc, f) => ({ files: acc.files + 1, add: acc.add + f.add, del: acc.del + f.del }),
+  const totals = patchsets.reduce(
+    (acc, patchset) => {
+      const patchsetTotals = patchset.files.reduce(
+        (fileAcc, file) => ({
+          files: fileAcc.files + 1,
+          add: fileAcc.add + file.add,
+          del: fileAcc.del + file.del,
+        }),
+        { files: 0, add: 0, del: 0 },
+      );
+      return {
+        files: acc.files + patchsetTotals.files,
+        add: acc.add + patchsetTotals.add,
+        del: acc.del + patchsetTotals.del,
+      };
+    },
     { files: 0, add: 0, del: 0 },
   );
 
   return (
     <div className="px-[18px] pb-6 pt-4">
       <div className="mb-1 flex items-center gap-2.5 px-0.5 pb-2.5">
+        <span className="mono text-[11px] text-ink-3">
+          {patchsets.length} PatchSets
+        </span>
         <span className="mono text-[11px] text-ink-3">{totals.files} files</span>
         <span className="mono text-[11px] text-good">+{totals.add}</span>
         <span className="mono text-[11px] text-bad">−{totals.del}</span>
       </div>
-      {files.map((f) => (
-        <FileDiff key={`${f.path}-${f.changeType}`} file={f} />
+      {patchsets.map(({ patchset, files }) => (
+        <PatchsetGroup key={patchset.id} patchset={patchset} files={files} />
       ))}
+    </div>
+  );
+}
+
+type RenderedPatchset = {
+  patchset: CodeUiPatchsetSnapshot;
+  files: DiffFile[];
+};
+
+function PatchsetGroup({
+  patchset,
+  files,
+}: {
+  patchset: CodeUiPatchsetSnapshot;
+  files: DiffFile[];
+}) {
+  const [open, setOpen] = useState(true);
+  const totals = files.reduce(
+    (acc, f) => ({ files: acc.files + 1, add: acc.add + f.add, del: acc.del + f.del }),
+    { files: 0, add: 0, del: 0 },
+  );
+
+  return (
+    <div className="mb-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 border-b border-rule bg-paper-2 px-2.5 py-2"
+      >
+        <div
+          className={cn(
+            "text-ink-3 transition-transform duration-150",
+            open ? "rotate-90" : "rotate-0",
+          )}
+        >
+          <IconChev size={12} />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left">
+          <span className="mono overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-ink">
+            PatchSet {patchset.id}
+          </span>
+          <span className="mono overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px] text-ink-3">
+            {patchset.status} · {totals.files} files · +{totals.add} −{totals.del}
+          </span>
+        </div>
+      </button>
+      {open && files.length === 0 && (
+        <div className="px-2.5 py-2 text-[11px] italic text-ink-3">
+          No file diffs in this PatchSet yet.
+        </div>
+      )}
+      {open && (
+        <div className="mt-2 flex flex-col">
+          {files.map((file) => (
+            <FileDiff key={`${patchset.id}:${file.path}:${file.changeType}`} file={file} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

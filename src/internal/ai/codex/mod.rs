@@ -107,14 +107,14 @@ use crate::{
             mcp::server::LibraMcpServer,
             runtime::PlanningPromptBuilder,
             web::code_ui::{
-                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter,
+                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter, CodeUiEventType,
                 CodeUiInitialController, CodeUiInteractionKind, CodeUiInteractionOption,
                 CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
                 CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep,
                 CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiReadModel, CodeUiRuntimeHandle,
                 CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTaskSnapshot,
                 CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
-                initial_snapshot,
+                CodeUiUsageSnapshot, initial_snapshot,
             },
         },
         db,
@@ -153,14 +153,22 @@ const COMMAND_DIFF_MAX_FILES: usize = 512;
 // ---------------------------------------------------------------------------
 
 /// Returns `true` for high-frequency Codex notifications whose only effect is
+/// 中文：该注释与英文“Returns `true` for high-frequency Codex notifications whose only effect is”含义一致。
 /// to append a streaming delta to in-memory state.
+/// 中文：该注释与英文“to append a streaming delta to in-memory state.”含义一致。
 ///
 /// Delta events fire at every streamed token, so publishing a fresh
+/// 中文：该注释与英文“Delta events fire at every streamed token, so publishing a fresh”含义一致。
 /// `CodeUiSession` snapshot for each one causes a deep clone of the entire
+/// 中文：该注释与英文“`CodeUiSession` snapshot for each one causes a deep clone of the entire”含义一致。
 /// `CodexSession` per token — a major source of latency under fast-streaming
+/// 中文：该注释与英文“`CodexSession` per token — a major source of latency under fast-streaming”含义一致。
 /// models. Skipping the publish for these methods lets the next non-delta
+/// 中文：该注释与英文“models. Skipping the publish for these methods lets the next non-delta”含义一致。
 /// event (item completion, turn completion, approval request) flush the
+/// 中文：该注释与英文“event (item completion, turn completion, approval request) flush the”含义一致。
 /// accumulated state to subscribers in one shot.
+/// 中文：该注释与英文“accumulated state to subscribers in one shot.”含义一致。
 fn is_streaming_delta_method(method: MethodKind) -> bool {
     matches!(
         method,
@@ -172,12 +180,18 @@ fn is_streaming_delta_method(method: MethodKind) -> bool {
 }
 
 /// Truncates a string for safe inclusion in tracing logs.
+/// 中文：该注释与英文“Truncates a string for safe inclusion in tracing logs.”含义一致。
 ///
 /// Codex emits long reasoning chunks, agent messages, file diffs, and command
+/// 中文：该注释与英文“Codex emits long reasoning chunks, agent messages, file diffs, and command”含义一致。
 /// output that would otherwise dominate the log file and slow down tracing-fmt
+/// 中文：该注释与英文“output that would otherwise dominate the log file and slow down tracing-fmt”含义一致。
 /// formatting. This helper bounds each entry to `max_chars` Unicode scalar
+/// 中文：该注释与英文“formatting. This helper bounds each entry to `max_chars` Unicode scalar”含义一致。
 /// values and replaces non-display-friendly whitespace (newlines, carriage
+/// 中文：该注释与英文“values and replaces non-display-friendly whitespace (newlines, carriage”含义一致。
 /// returns) with literal `\n` / `\r` so the entry stays on a single log line.
+/// 中文：该注释与英文“returns) with literal `\n` / `\r` so the entry stays on a single log line.”含义一致。
 fn truncate_for_log(input: &str, max_chars: usize) -> String {
     let escaped: String = input
         .chars()
@@ -203,7 +217,9 @@ fn truncate_for_log(input: &str, max_chars: usize) -> String {
 ///
 /// Safe mutex locking wrapper: returns `None` and prints a warning when the
 /// mutex is poisoned (i.e., the previous lock-holder panicked), preventing
+/// 中文：该注释与英文“mutex is poisoned (i.e., the previous lock-holder panicked), preventing”含义一致。
 /// cascading panics from unwrap() calls throughout the codebase.
+/// 中文：该注释与英文“cascading panics from unwrap() calls throughout the codebase.”含义一致。
 ///
 /// # Arguments
 ///
@@ -244,8 +260,11 @@ fn history_append_lock() -> &'static AsyncMutex<()> {
 ///
 /// Merges streaming file changes into the final completed-patchset changes.
 /// If the completed payload omits diff text (only lists touched paths), the
+/// 中文：该注释与英文“If the completed payload omits diff text (only lists touched paths), the”含义一致。
 /// previously captured streaming diffs are preserved so the stored PatchSet
+/// 中文：该注释与英文“previously captured streaming diffs are preserved so the stored PatchSet”含义一致。
 /// always contains actual patch content.
+/// 中文：该注释与英文“always contains actual patch content.”含义一致。
 ///
 /// # Arguments
 /// * `existing_changes` — 流式阶段已捕获的文件变更列表（含 diff）。
@@ -261,7 +280,9 @@ fn merge_patchset_changes(
     let mut merged = completed_changes.to_vec();
 
     // Preserve any previously captured streaming diff if the completed payload
+    // 中文：该注释与英文“Preserve any previously captured streaming diff if the completed payload”含义一致。
     // only summarizes touched files and omits the actual patch text.
+    // 中文：该注释与英文“only summarizes touched files and omits the actual patch text.”含义一致。
     let has_completed_diff = merged.iter().any(|change| !change.diff.is_empty());
     if !has_completed_diff {
         for existing_change in existing_changes {
@@ -281,6 +302,7 @@ fn merge_patchset_changes(
 ///
 /// Maps a raw patch-status string received from the Codex server to the
 /// typed `PatchStatus` enum. Unrecognised strings default to `Pending`.
+/// 中文：该注释与英文“typed `PatchStatus` enum. Unrecognised strings default to `Pending`.”含义一致。
 fn patch_status_from_str(status: &str) -> PatchStatus {
     match status {
         "in_progress" | "inProgress" | "started" => PatchStatus::InProgress,
@@ -298,7 +320,9 @@ fn patch_status_from_str(status: &str) -> PatchStatus {
 ///
 /// Parses a list of `FileChange` from a JSON array where each element is an
 /// object with `path`, `diff`, and a change-type field (supports multiple
+/// 中文：该注释与英文“object with `path`, `diff`, and a change-type field (supports multiple”含义一致。
 /// naming conventions: `change_type`, `changeType`, `kind.type`).
+/// 中文：该注释与英文“naming conventions: `change_type`, `changeType`, `kind.type`).”含义一致。
 fn parse_patchset_changes_from_array(changes: Option<&serde_json::Value>) -> Vec<FileChange> {
     changes
         .and_then(|value| value.as_array())
@@ -337,7 +361,9 @@ fn parse_patchset_changes_from_array(changes: Option<&serde_json::Value>) -> Vec
 ///
 /// Parses a list of `FileChange` from a JSON object where keys are file paths
 /// and values are objects containing diff content. Supports multiple diff-field
+/// 中文：该注释与英文“and values are objects containing diff content. Supports multiple diff-field”含义一致。
 /// names: `unified_diff`, `unifiedDiff`, `diff`, `content`.
+/// 中文：该注释与英文“names: `unified_diff`, `unifiedDiff`, `diff`, `content`.”含义一致。
 fn parse_patchset_changes_from_map(changes: Option<&serde_json::Value>) -> Vec<FileChange> {
     changes
         .and_then(|value| value.as_object())
@@ -374,10 +400,15 @@ fn parse_patchset_changes_from_map(changes: Option<&serde_json::Value>) -> Vec<F
 ///
 /// Asynchronously persists a `PatchSet` and its associated evidence to MCP storage.
 /// Spawns a background task that:
+/// 中文：该注释与英文“Spawns a background task that:”含义一致。
 /// 1. Stores the raw `PatchSet` object to `.libra/objects/`.
+/// 中文：该注释与英文“1. Stores the raw `PatchSet` object to `.libra/objects/`.”含义一致。
 /// 2. Appends a `ToolInvocationStatus` event to the `HistoryRecorder`.
+/// 中文：该注释与英文“2. Appends a `ToolInvocationStatus` event to the `HistoryRecorder`.”含义一致。
 /// 3. Writes a `PatchSetSnapshot` (with file-change list) to history.
+/// 中文：该注释与英文“3. Writes a `PatchSetSnapshot` (with file-change list) to history.”含义一致。
 /// 4. Writes an `EvidenceEvent` (recording touched-file counts) to history.
+/// 中文：该注释与英文“4. Writes an `EvidenceEvent` (recording touched-file counts) to history.”含义一致。
 ///
 /// # Arguments
 /// * `mcp_server`     — MCP 存储服务实例（`Arc` 共享）。Shared MCP server.
@@ -446,8 +477,11 @@ fn persist_patchset_snapshot_and_evidence(
 /// `.git`、`.libra`、`node_modules`、`target`、`dist`、`build`。
 ///
 /// Returns `true` if the path should be excluded from workspace snapshots.
+/// 中文：该注释与英文“Returns `true` if the path should be excluded from workspace snapshots.”含义一致。
 /// Skips paths whose components include well-known non-source directories:
+/// 中文：该注释与英文“Skips paths whose components include well-known non-source directories:”含义一致。
 /// `.git`, `.libra`, `node_modules`, `target`, `dist`, `build`.
+/// 中文：该注释与英文“`.git`, `.libra`, `node_modules`, `target`, `dist`, `build`.”含义一致。
 fn should_skip_diff_path(relative_path: &Path) -> bool {
     relative_path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy();
@@ -464,6 +498,7 @@ fn should_skip_diff_path(relative_path: &Path) -> bool {
 ///
 /// Heuristic check: returns `true` when the byte slice contains no null bytes
 /// and is valid UTF-8, indicating it is likely a text file rather than binary.
+/// 中文：该注释与英文“and is valid UTF-8, indicating it is likely a text file rather than binary.”含义一致。
 fn is_probably_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
@@ -481,8 +516,11 @@ fn is_probably_text(bytes: &[u8]) -> bool {
 ///
 /// Captures a before/after workspace snapshot as a `{relative_path -> content}`
 /// map. Used together with `build_file_changes_from_snapshots` to compute diffs
+/// 中文：该注释与英文“map. Used together with `build_file_changes_from_snapshots` to compute diffs”含义一致。
 /// when Codex does not emit structured `fileChange` events (e.g., applies patches
+/// 中文：该注释与英文“when Codex does not emit structured `fileChange` events (e.g., applies patches”含义一致。
 /// via shell commands).
+/// 中文：该注释与英文“via shell commands).”含义一致。
 fn capture_workspace_snapshot(cwd: &Path) -> HashMap<String, String> {
     let mut snapshot = HashMap::new();
     if !cwd.exists() || !cwd.is_dir() {
@@ -537,7 +575,9 @@ fn capture_workspace_snapshot(cwd: &Path) -> HashMap<String, String> {
 ///
 /// Generates a unified-format diff string for a single file transition.
 /// An empty `before` or `after` string represents a non-existent file
+/// 中文：该注释与英文“An empty `before` or `after` string represents a non-existent file”含义一致。
 /// (used for file creation and deletion cases).
+/// 中文：该注释与英文“(used for file creation and deletion cases).”含义一致。
 fn render_snapshot_diff(before: &str, after: &str) -> String {
     create_patch(before, after).to_string()
 }
@@ -552,8 +592,11 @@ fn render_snapshot_diff(before: &str, after: &str) -> String {
 ///
 /// Builds a `Vec<FileChange>` by diffing two workspace snapshots.
 /// Files present only in `after` are additions, files only in `before` are
+/// 中文：该注释与英文“Files present only in `after` are additions, files only in `before` are”含义一致。
 /// deletions, and files present in both with differing content are updates.
+/// 中文：该注释与英文“deletions, and files present in both with differing content are updates.”含义一致。
 /// Unchanged files are omitted.
+/// 中文：该注释与英文“Unchanged files are omitted.”含义一致。
 ///
 /// # Arguments
 /// * `before` — AI 命令执行前的快照。Snapshot taken before execution.
@@ -598,6 +641,7 @@ fn build_file_changes_from_snapshots(
 ///
 /// Returns the ID of the most recently created `Intent` in the given thread,
 /// optionally excluding a specific ID (to avoid self-referential linking).
+/// 中文：该注释与英文“optionally excluding a specific ID (to avoid self-referential linking).”含义一致。
 ///
 /// # Arguments
 /// * `session`      — 当前会话状态。Current session state.
@@ -626,6 +670,7 @@ fn latest_thread_intent_id(
 ///
 /// Converts a `ToolInvocation` (in-memory session state) into a
 /// `ToolInvocationEvent` suitable for writing to the history store.
+/// 中文：该注释与英文“`ToolInvocationEvent` suitable for writing to the history store.”含义一致。
 fn build_tool_invocation_event(invocation: &ToolInvocation) -> ToolInvocationEvent {
     ToolInvocationEvent {
         id: invocation.id.clone(),
@@ -652,7 +697,9 @@ fn build_tool_invocation_event(invocation: &ToolInvocation) -> ToolInvocationEve
 ///
 /// Generates a unique object ID for a `ToolInvocationEvent`. The millisecond
 /// timestamp suffix ensures that events for the same invocation at different
+/// 中文：该注释与英文“timestamp suffix ensures that events for the same invocation at different”含义一致。
 /// status transitions produce distinct storage keys.
+/// 中文：该注释与英文“status transitions produce distinct storage keys.”含义一致。
 fn next_tool_invocation_event_object_id(invocation_id: &str, status: &str) -> String {
     format!(
         "tool_invocation_event_{}_{}_{}",
@@ -673,6 +720,7 @@ fn next_tool_invocation_event_object_id(invocation_id: &str, status: &str) -> St
 ///
 /// Maps a raw plan-status string from a Codex event to the typed `PlanStatus`
 /// enum. Unrecognised strings default to `Pending`.
+/// 中文：该注释与英文“enum. Unrecognised strings default to `Pending`.”含义一致。
 fn plan_status_from_event(status: &str) -> PlanStatus {
     match status {
         "completed" => PlanStatus::Completed,
@@ -688,6 +736,7 @@ fn plan_status_from_event(status: &str) -> PlanStatus {
 ///
 /// Maps a raw task-status string from a Codex event to the typed `TaskStatus`
 /// enum. Unrecognised strings default to `Pending`.
+/// 中文：该注释与英文“enum. Unrecognised strings default to `Pending`.”含义一致。
 fn task_status_from_event(status: &str) -> TaskStatus {
     match status {
         "completed" => TaskStatus::Completed,
@@ -704,6 +753,7 @@ fn task_status_from_event(status: &str) -> TaskStatus {
 ///
 /// Maps a raw run-status string from a Codex event to the typed `RunStatus`
 /// enum. Unrecognised strings default to `Pending`.
+/// 中文：该注释与英文“enum. Unrecognised strings default to `Pending`.”含义一致。
 fn run_status_from_event(status: &str) -> RunStatus {
     match status {
         "completed" => RunStatus::Completed,
@@ -727,12 +777,18 @@ fn run_status_from_event(status: &str) -> RunStatus {
 ///
 /// Appends an object hash to the history index only when the hash differs from
 /// the currently stored value, providing idempotent (deduplicated) writes.
+/// 中文：该注释与英文“the currently stored value, providing idempotent (deduplicated) writes.”含义一致。
 ///
 /// Steps:
+/// 中文：该注释与英文“Steps:”含义一致。
 /// 1. Return `Ok(())` early if no `intent_history_manager` is configured.
+/// 中文：该注释与英文“1. Return `Ok(())` early if no `intent_history_manager` is configured.”含义一致。
 /// 2. Acquire `HISTORY_APPEND_LOCK` to prevent concurrent race conditions.
+/// 中文：该注释与英文“2. Acquire `HISTORY_APPEND_LOCK` to prevent concurrent race conditions.”含义一致。
 /// 3. Look up the existing hash for `(object_type, object_id)`.
+/// 中文：该注释与英文“3. Look up the existing hash for `(object_type, object_id)`.”含义一致。
 /// 4. Append the new hash only when it differs from (or is absent from) the index.
+/// 中文：该注释与英文“4. Append the new hash only when it differs from (or is absent from) the index.”含义一致。
 ///
 /// # Arguments
 /// * `mcp_server`   — MCP 服务器实例（提供 `intent_history_manager`）。
@@ -782,7 +838,9 @@ async fn append_history_hash_if_changed(
 ///
 /// Extracts the thread ID from a Codex notification `params` object.
 /// Tries multiple field-name conventions in priority order before falling back
+/// 中文：该注释与英文“Tries multiple field-name conventions in priority order before falling back”含义一致。
 /// to the current `session.thread.id`.
+/// 中文：该注释与英文“to the current `session.thread.id`.”含义一致。
 ///
 /// # Arguments
 /// * `params`  — 通知消息中的 `params` JSON 值。
@@ -825,7 +883,9 @@ fn extract_thread_id(params: &serde_json::Value, session: Option<&CodexSession>)
 ///
 /// Extracts the task ID from a Codex notification `params` object.
 /// Tries `taskId`, `task_id`, `id`, `task.id`, `task.taskId` in order.
+/// 中文：该注释与英文“Tries `taskId`, `task_id`, `id`, `task.id`, `task.taskId` in order.”含义一致。
 /// Returns an empty string if none of the fields are present.
+/// 中文：该注释与英文“Returns an empty string if none of the fields are present.”含义一致。
 fn extract_task_id(params: &serde_json::Value) -> String {
     params
         .get("taskId")
@@ -846,7 +906,9 @@ fn extract_task_id(params: &serde_json::Value) -> String {
 ///
 /// Extracts the task name from a Codex notification `params` object.
 /// Tries `taskName`, `task_name`, `name`, `title`, `task.name`, `task.title`
+/// 中文：该注释与英文“Tries `taskName`, `task_name`, `name`, `title`, `task.name`, `task.title`”含义一致。
 /// in order. Returns an empty string if none are present.
+/// 中文：该注释与英文“in order. Returns an empty string if none are present.”含义一致。
 fn extract_task_name(params: &serde_json::Value) -> String {
     params
         .get("taskName")
@@ -871,7 +933,9 @@ fn extract_task_name(params: &serde_json::Value) -> String {
 ///
 /// Normalises a plan-step status string to a canonical internal representation.
 /// Maps camelCase variants (`"inProgress"`) to snake_case and defaults
+/// 中文：该注释与英文“Maps camelCase variants (`"inProgress"`) to snake_case and defaults”含义一致。
 /// unknown values to `"pending"`.
+/// 中文：该注释与英文“unknown values to `"pending"`.”含义一致。
 fn normalize_plan_step_status(status: &str) -> &'static str {
     match status {
         "completed" => "completed",
@@ -888,7 +952,9 @@ fn normalize_plan_step_status(status: &str) -> &'static str {
 ///
 /// Truncates `text` to at most `max_chars` Unicode scalar values for display.
 /// Returns `(truncated_string, was_truncated)`. Truncation occurs on Unicode
+/// 中文：该注释与英文“Returns `(truncated_string, was_truncated)`. Truncation occurs on Unicode”含义一致。
 /// character boundaries so the result is always valid UTF-8.
+/// 中文：该注释与英文“character boundaries so the result is always valid UTF-8.”含义一致。
 fn truncate_for_display(text: &str, max_chars: usize) -> (String, bool) {
     match text.char_indices().nth(max_chars) {
         Some((idx, _)) => (text[..idx].to_string(), true),
@@ -903,6 +969,7 @@ fn truncate_for_display(text: &str, max_chars: usize) -> (String, bool) {
 ///
 /// Maps a plan-step status string to `TaskStatus` by first normalising it
 /// via `normalize_plan_step_status`, then converting to the enum variant.
+/// 中文：该注释与英文“via `normalize_plan_step_status`, then converting to the enum variant.”含义一致。
 fn task_status_from_plan_step(status: &str) -> TaskStatus {
     match normalize_plan_step_status(status) {
         "completed" => TaskStatus::Completed,
@@ -921,7 +988,9 @@ fn task_status_from_plan_step(status: &str) -> TaskStatus {
 ///
 /// Aggregates the overall `PlanStatus` from a slice of plan steps.
 /// Priority: any `in_progress` step → `InProgress`; all `completed` → `Completed`;
+/// 中文：该注释与英文“Priority: any `in_progress` step → `InProgress`; all `completed` → `Completed`;”含义一致。
 /// otherwise (or empty) → `Pending`.
+/// 中文：该注释与英文“otherwise (or empty) → `Pending`.”含义一致。
 fn aggregate_plan_status(plan_steps: &[TurnPlanStep]) -> PlanStatus {
     if plan_steps
         .iter()
@@ -981,12 +1050,19 @@ fn build_plan_text(explanation: Option<&String>, plan_steps: &[TurnPlanStep]) ->
 /// Initialises the `LibraMcpServer` used by the Codex agent for data persistence.
 ///
 /// The function:
+/// 中文：该注释与英文“The function:”含义一致。
 /// 1. Resolves the `.libra/` storage directory via `try_get_storage_path`.
+/// 中文：该注释与英文“1. Resolves the `.libra/` storage directory via `try_get_storage_path`.”含义一致。
 /// 2. Creates the `objects/` sub-directory (falls back to read-only on failure).
+/// 中文：该注释与英文“2. Creates the `objects/` sub-directory (falls back to read-only on failure).”含义一致。
 /// 3. Establishes a SQLite connection to `libra.db` (falls back to read-only).
+/// 中文：该注释与英文“3. Establishes a SQLite connection to `libra.db` (falls back to read-only).”含义一致。
 /// 4. Sets up `LocalStorage` (content-addressable object store).
+/// 中文：该注释与英文“4. Sets up `LocalStorage` (content-addressable object store).”含义一致。
 /// 5. Creates `HistoryManager` (manages the history index in SQLite).
+/// 中文：该注释与英文“5. Creates `HistoryManager` (manages the history index in SQLite).”含义一致。
 /// 6. Returns a fully initialised `Arc<LibraMcpServer>`.
+/// 中文：该注释与英文“6. Returns a fully initialised `Arc<LibraMcpServer>`.”含义一致。
 ///
 /// # Arguments
 /// * `working_dir` — 代理的工作目录，用于定位 `.libra/` 存储路径。
@@ -996,6 +1072,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
 
     // Try to create the directory
+    // 中文：该注释与英文“Try to create the directory”含义一致。
     if let Err(error) = std::fs::create_dir_all(&objects_dir) {
         tracing::warn!(
             target: "libra::internal::ai::codex",
@@ -1011,6 +1088,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     }
 
     // Connect to DB
+    // 中文：该注释与英文“Connect to DB”含义一致。
     let db_path = dot_libra.join("libra.db");
     let db_path_str = db_path.to_str().unwrap_or_default();
 
@@ -1037,6 +1115,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     };
 
     // Initialize storage
+    // 中文：该注释与英文“Initialize storage”含义一致。
     let storage: Arc<dyn Storage + Send + Sync> = Arc::new(ClientStorage::init(objects_dir));
 
     let intent_history_manager = Arc::new(HistoryManager::new(
@@ -1071,45 +1150,56 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
 ///
 /// Command-line argument struct for the Codex agent (`libra code --provider=codex`),
 /// parsed by `clap`. See field-level doc comments for details.
+/// 中文：该注释与英文“parsed by `clap`. See field-level doc comments for details.”含义一致。
 #[derive(Parser, Debug, Clone)]
 pub struct AgentCodexArgs {
     /// Codex WebSocket URL
+    /// 中文：该注释与英文“Codex WebSocket URL”含义一致。
     #[arg(long, default_value = CODEX_WS_URL)]
     pub url: String,
 
     /// Working directory for the agent
+    /// 中文：该注释与英文“Working directory for the agent”含义一致。
     #[arg(long, default_value = ".")]
     pub cwd: String,
 
     /// Approval mode: ask (prompt), accept (auto-accept), decline (auto-decline)
+    /// 中文：该注释与英文“Approval mode: ask (prompt), accept (auto-accept), decline (auto-decline)”含义一致。
     #[arg(long, default_value = "accept")]
     pub approval: String,
 
     /// Model provider identifier passed to Codex
+    /// 中文：该注释与英文“Model provider identifier passed to Codex”含义一致。
     #[arg(long)]
     pub model_provider: Option<String>,
 
     /// Service tier identifier passed to Codex
+    /// 中文：该注释与英文“Service tier identifier passed to Codex”含义一致。
     #[arg(long)]
     pub service_tier: Option<String>,
 
     /// Personality identifier passed to Codex
+    /// 中文：该注释与英文“Personality identifier passed to Codex”含义一致。
     #[arg(long)]
     pub personality: Option<String>,
 
     /// Model identifier passed to Codex
+    /// 中文：该注释与英文“Model identifier passed to Codex”含义一致。
     #[arg(long)]
     pub model: Option<String>,
 
     /// Require Codex to produce a plan before attempting execution.
+    /// 中文：该注释与英文“Require Codex to produce a plan before attempting execution.”含义一致。
     #[arg(long, default_value_t = false)]
     pub plan_mode: bool,
 
     /// Debug mode: print collected data
+    /// 中文：该注释与英文“Debug mode: print collected data”含义一致。
     #[arg(long, default_value = "false")]
     pub debug: bool,
 
     /// UI mode for the embedded Code UI read model.
+    /// 中文：该注释与英文“UI mode for the embedded Code UI read model.”含义一致。
     #[arg(skip)]
     pub ui_mode: Option<String>,
 }
@@ -1126,9 +1216,13 @@ pub struct AgentCodexArgs {
 ///
 /// Returns the detailed developer-role system prompt for plan-first mode.
 /// Injected as a `system`/`developer` instruction when `--plan-mode` is active.
+/// 中文：该注释与英文“Injected as a `system`/`developer` instruction when `--plan-mode` is active.”含义一致。
 /// Enforces structured plan generation before execution, prohibits Markdown
+/// 中文：该注释与英文“Enforces structured plan generation before execution, prohibits Markdown”含义一致。
 /// formatting, and guides the model to use `fileChange`-emitting edit paths
+/// 中文：该注释与英文“formatting, and guides the model to use `fileChange`-emitting edit paths”含义一致。
 /// rather than `apply_patch`-style shell commands.
+/// 中文：该注释与英文“rather than `apply_patch`-style shell commands.”含义一致。
 fn plan_mode_developer_instructions() -> &'static str {
     PlanningPromptBuilder::codex_plan_mode_developer_instructions()
 }
@@ -1141,8 +1235,11 @@ fn plan_mode_developer_instructions() -> &'static str {
 ///
 /// Returns the concise base-role system prompt for plan-first mode.
 /// Shorter than `plan_mode_developer_instructions`; suitable for injection into
+/// 中文：该注释与英文“Shorter than `plan_mode_developer_instructions`; suitable for injection into”含义一致。
 /// non-developer role contexts. Same constraints apply: structured plan before
+/// 中文：该注释与英文“non-developer role contexts. Same constraints apply: structured plan before”含义一致。
 /// execution, plain text only, prefer `fileChange`-emitting edit paths.
+/// 中文：该注释与英文“execution, plain text only, prefer `fileChange`-emitting edit paths.”含义一致。
 fn plan_mode_base_instructions() -> &'static str {
     PlanningPromptBuilder::codex_plan_mode_base_instructions()
 }
@@ -1162,7 +1259,9 @@ fn plan_mode_base_instructions() -> &'static str {
 ///
 /// Writes any `Serialize` value to the MCP content-addressable object store and
 /// updates the history index. Skips objects with an empty `object_id` to avoid
+/// 中文：该注释与英文“updates the history index. Skips objects with an empty `object_id` to avoid”含义一致。
 /// creating un-addressable entries.
+/// 中文：该注释与英文“creating un-addressable entries.”含义一致。
 ///
 /// # Arguments
 /// * `mcp_server`   — MCP 服务器实例（提供 `storage` 和历史索引）。
@@ -1341,6 +1440,7 @@ fn build_code_ui_snapshot_from_codex_session(
         controller: current.controller.clone(),
         status: codex_code_ui_status(session),
         transcript,
+        usage: code_ui_usage_snapshot(session, &current.provider).or_else(|| current.usage.clone()),
         plans: session
             .plans
             .iter()
@@ -1471,8 +1571,38 @@ async fn publish_code_ui_snapshot(
     let current = code_ui_session.snapshot().await;
     let snapshot = build_code_ui_snapshot_from_codex_session(&session, &current, working_dir);
     code_ui_session
-        .replace_snapshot("session_updated", snapshot)
+        .replace_snapshot(CodeUiEventType::SessionUpdated, snapshot)
         .await;
+}
+
+fn code_ui_usage_snapshot(
+    session: &CodexSession,
+    provider: &CodeUiProviderInfo,
+) -> Option<CodeUiUsageSnapshot> {
+    let usage = session.token_usages.last()?;
+    let prompt_tokens = positive_i64_to_u64(usage.total.input_tokens);
+    let completion_tokens = positive_i64_to_u64(usage.total.output_tokens);
+    let total_tokens = positive_i64_to_u64(usage.total.total_tokens)
+        .max(prompt_tokens.saturating_add(completion_tokens));
+    Some(CodeUiUsageSnapshot {
+        provider: provider.provider.clone(),
+        model: provider
+            .model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cost_usd: None,
+    })
+}
+
+fn positive_i64_to_u64(value: Option<i64>) -> u64 {
+    value
+        .unwrap_or_default()
+        .max(0)
+        .try_into()
+        .unwrap_or_default()
 }
 
 async fn send_request(
@@ -1592,11 +1722,17 @@ impl CodeUiCommandAdapter for CodexCodeUiAdapter {
         response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
         // Validate the decision and locate the pending sender BEFORE mutating
+        // 中文：该注释与英文“Validate the decision and locate the pending sender BEFORE mutating”含义一致。
         // shared `approval_mode`. Otherwise a malformed response (no decision,
+        // 中文：该注释与英文“shared `approval_mode`. Otherwise a malformed response (no decision,”含义一致。
         // unknown interaction id, or already-resolved approval) would still
+        // 中文：该注释与英文“unknown interaction id, or already-resolved approval) would still”含义一致。
         // flip future Codex approvals to accept-all / decline-all, which is a
+        // 中文：该注释与英文“flip future Codex approvals to accept-all / decline-all, which is a”含义一致。
         // privilege-escalation risk. Mutate `approval_mode` only after we have
+        // 中文：该注释与英文“privilege-escalation risk. Mutate `approval_mode` only after we have”含义一致。
         // committed to delivering the user's decision.
+        // 中文：该注释与英文“committed to delivering the user's decision.”含义一致。
         let Some(approved) = response
             .approved
             .or(match response.selected_option.as_deref() {
@@ -1774,9 +1910,13 @@ pub async fn start_code_ui_runtime(
 
     tokio::spawn(async move {
         // Drain the outbound channel as fast as it fills. Earlier code wrapped
+        // 中文：该注释与英文“Drain the outbound channel as fast as it fills. Earlier code wrapped”含义一致。
         // `rx.recv()` in a `tokio::select!` with a 1s timer, but `recv().await`
+        // 中文：该注释与英文“`rx.recv()` in a `tokio::select!` with a 1s timer, but `recv().await`”含义一致。
         // already wakes immediately on every message and exits cleanly once the
+        // 中文：该注释与英文“already wakes immediately on every message and exits cleanly once the”含义一致。
         // channel closes — the timer added cost without changing semantics.
+        // 中文：该注释与英文“channel closes — the timer added cost without changing semantics.”含义一致。
         while let Some(msg) = rx.recv().await {
             if let Err(error) = write.send(Message::Text(msg.into())).await {
                 tracing::warn!(
@@ -1809,13 +1949,21 @@ pub async fn start_code_ui_runtime(
     tokio::spawn(async move {
         let mut read = read;
         // When a streaming-delta event mutates in-memory state we deliberately
+        // 中文：该注释与英文“When a streaming-delta event mutates in-memory state we deliberately”含义一致。
         // skip the publish_code_ui_snapshot broadcast so subscribers don't pay
+        // 中文：该注释与英文“skip the publish_code_ui_snapshot broadcast so subscribers don't pay”含义一致。
         // a per-token deep clone of the entire CodexSession. This flag remembers
+        // 中文：该注释与英文“a per-token deep clone of the entire CodexSession. This flag remembers”含义一致。
         // whether at least one delta has been skipped since the last publish so
+        // 中文：该注释与英文“whether at least one delta has been skipped since the last publish so”含义一致。
         // that, if the WebSocket closes (clean disconnect, error abort) right
+        // 中文：该注释与英文“that, if the WebSocket closes (clean disconnect, error abort) right”含义一致。
         // after a delta — without ever emitting a non-delta event such as
+        // 中文：该注释与英文“after a delta — without ever emitting a non-delta event such as”含义一致。
         // ItemCompleted / TurnCompleted — we still flush the final accumulated
+        // 中文：该注释与英文“ItemCompleted / TurnCompleted — we still flush the final accumulated”含义一致。
         // text to subscribers before the reader task exits.
+        // 中文：该注释与英文“text to subscribers before the reader task exits.”含义一致。
         let mut delta_skipped_since_publish = false;
         while let Some(message) = read.next().await {
             let Ok(Message::Text(text)) = message else {
@@ -2269,10 +2417,15 @@ pub async fn start_code_ui_runtime(
                             )
                             .await;
                             // Default to *deny* when the approval channel is
+                            // 中文：该注释与英文“Default to *deny* when the approval channel is”含义一致。
                             // dropped (TUI exit, runtime teardown). Auto-
+                            // 中文：该注释与英文“dropped (TUI exit, runtime teardown). Auto-”含义一致。
                             // approving on cancellation could let a sandbox-
+                            // 中文：该注释与英文“approving on cancellation could let a sandbox-”含义一致。
                             // escaping command run after the operator already
+                            // 中文：该注释与英文“escaping command run after the operator already”含义一致。
                             // closed the session.
+                            // 中文：该注释与英文“closed the session.”含义一致。
                             match oneshot_rx.await {
                                 Ok(decision) => decision,
                                 Err(_) => {
@@ -2325,11 +2478,17 @@ pub async fn start_code_ui_runtime(
                 }
 
                 // Coalesce broadcast: streaming-delta methods (AgentMessageDelta,
+                // 中文：该注释与英文“Coalesce broadcast: streaming-delta methods (AgentMessageDelta,”含义一致。
                 // CommandExecutionOutputDelta, FileChangeOutputDelta, PlanDelta)
+                // 中文：该注释与英文“CommandExecutionOutputDelta, FileChangeOutputDelta, PlanDelta)”含义一致。
                 // can fire many times per second per item. Skipping the publish
+                // 中文：该注释与英文“can fire many times per second per item. Skipping the publish”含义一致。
                 // for those methods avoids per-token deep clones of the entire
+                // 中文：该注释与英文“for those methods avoids per-token deep clones of the entire”含义一致。
                 // CodexSession; the next item-completion / turn-completion /
+                // 中文：该注释与英文“CodexSession; the next item-completion / turn-completion /”含义一致。
                 // approval event flushes the accumulated state to subscribers.
+                // 中文：该注释与英文“approval event flushes the accumulated state to subscribers.”含义一致。
                 if is_streaming_delta_method(mk) {
                     delta_skipped_since_publish = true;
                 } else {
@@ -2352,11 +2511,17 @@ pub async fn start_code_ui_runtime(
         }
 
         // Final flush: the WebSocket has closed (clean disconnect, error abort,
+        // 中文：该注释与英文“Final flush: the WebSocket has closed (clean disconnect, error abort,”含义一致。
         // or peer EOF). If any streaming delta was skipped without being
+        // 中文：该注释与英文“or peer EOF). If any streaming delta was skipped without being”含义一致。
         // followed by a non-delta event, the broadcast snapshot is now stale.
+        // 中文：该注释与英文“followed by a non-delta event, the broadcast snapshot is now stale.”含义一致。
         // Publish once unconditionally so subscribers (e.g. the App's
+        // 中文：该注释与英文“Publish once unconditionally so subscribers (e.g. the App's”含义一致。
         // `start_managed_code_turn`) always observe the final agent text /
+        // 中文：该注释与英文“`start_managed_code_turn`) always observe the final agent text /”含义一致。
         // patchset content even on abrupt termination.
+        // 中文：该注释与英文“patchset content even on abrupt termination.”含义一致。
         if delta_skipped_since_publish {
             tracing::debug!(
                 target: "libra::internal::ai::codex",
@@ -2490,13 +2655,20 @@ pub async fn start_code_ui_runtime(
 /// # Legacy stdin loop
 ///
 /// `libra code --provider codex` does not call this path; it starts the default
+/// 中文：该注释与英文“`libra code --provider codex` does not call this path; it starts the default”含义一致。
 /// Libra TUI and uses [`start_code_ui_runtime`] as the managed execution
+/// 中文：该注释与英文“Libra TUI and uses [`start_code_ui_runtime`] as the managed execution”含义一致。
 /// backend. This function remains only for old internal callers that explicitly
+/// 中文：该注释与英文“backend. This function remains only for old internal callers that explicitly”含义一致。
 /// want Codex's stdin/stdout loop.
+/// 中文：该注释与英文“want Codex's stdin/stdout loop.”含义一致。
 ///
 /// The `mcp_server` parameter allows an HTTP-serving caller to share its
+/// 中文：该注释与英文“The `mcp_server` parameter allows an HTTP-serving caller to share its”含义一致。
 /// already-initialised `LibraMcpServer` instead of creating a duplicate. When
+/// 中文：该注释与英文“already-initialised `LibraMcpServer` instead of creating a duplicate. When”含义一致。
 /// `None`, a local-only instance is created for backward compatibility.
+/// 中文：该注释与英文“`None`, a local-only instance is created for backward compatibility.”含义一致。
 ///
 /// # Errors
 /// - WebSocket 连接失败时返回 `anyhow::Error`。
@@ -2849,6 +3021,7 @@ pub async fn execute(
                             let method_str = method.as_str().unwrap_or("");
 
                             // Debug: print all method names
+                            // 中文：该注释与英文“Debug: print all method names”含义一致。
                             // eprintln!("[DEBUG] Received method: {}", method_str);
 
                             // 将原始 method 字符串转换为类型安全的 MethodKind 枚举，
@@ -2858,6 +3031,7 @@ pub async fn execute(
                             let _is_noise = matches!(mk, MethodKind::TokenUsageUpdated);
 
                             // Extract and print useful info based on notification type
+                            // 中文：该注释与英文“Extract and print useful info based on notification type”含义一致。
                             if let Some(params_val) = json.get("params") {
                                 let params = params_val.clone();
                                 // 通知层次结构：Thread → Turn → Plan → Item → Detail
@@ -3896,6 +4070,7 @@ pub async fn execute(
                                     );
 
                                     // Store Task (tool_name stores task name)
+                                    // 中文：该注释与英文“Store Task (tool_name stores task name)”含义一致。
                                     let task = Task {
                                         id: task_id.clone(),
                                         tool_name: Some(task_name.clone()),
@@ -3952,6 +4127,7 @@ pub async fn execute(
                                     }
 
                                     // Store to MCP in background
+                                    // 中文：该注释与英文“Store to MCP in background”含义一致。
                                     let mcp_server_for_task = mcp_server_clone.clone();
                                     let history = history_recorder_clone.clone();
                                     tokio::spawn(async move {
@@ -5796,6 +5972,7 @@ Task Completed"
                                         | MethodKind::RequestApprovalExec
                                 ) {
                                     // Get request ID
+                                    // 中文：该注释与英文“Get request ID”含义一致。
                                     let request_id = params
                                         .get("requestId")
                                         .or_else(|| params.get("request_id"))
@@ -5810,6 +5987,7 @@ Task Completed"
                                         .unwrap_or(serde_json::json!({}));
 
                                     // Determine approval type
+                                    // 中文：该注释与英文“Determine approval type”含义一致。
                                     let approval_type = match mk {
                                         MethodKind::RequestApprovalCommandExecution => {
                                             ApprovalType::CommandExecution
@@ -5825,6 +6003,7 @@ Task Completed"
                                     };
 
                                     // Get item_id if available
+                                    // 中文：该注释与英文“Get item_id if available”含义一致。
                                     let item_id = approval_params
                                         .get("itemId")
                                         .or_else(|| approval_params.get("call_id"))
@@ -5834,6 +6013,7 @@ Task Completed"
                                         .unwrap_or_default();
 
                                     // Get thread_id if available
+                                    // 中文：该注释与英文“Get thread_id if available”含义一致。
                                     let thread_id = approval_params
                                         .get("threadId")
                                         .or_else(|| approval_params.get("conversationId"))
@@ -5842,6 +6022,7 @@ Task Completed"
                                         .unwrap_or_default();
 
                                     // Get command or changes from approval_params
+                                    // 中文：该注释与英文“Get command or changes from approval_params”含义一致。
                                     let command = approval_params
                                         .get("command")
                                         .and_then(|v| v.as_str())
@@ -5874,6 +6055,7 @@ Task Completed"
                                         .map(String::from);
 
                                     // Store approval request in session
+                                    // 中文：该注释与英文“Store approval request in session”含义一致。
                                     let approval_request = ApprovalRequest {
                                         id: request_id.clone(),
                                         approval_type: approval_type.clone(),
@@ -5896,6 +6078,7 @@ Task Completed"
                                     }
 
                                     // Store to MCP in background
+                                    // 中文：该注释与英文“Store to MCP in background”含义一致。
                                     let mcp_server_for_approval = mcp_server_clone.clone();
                                     tokio::spawn(async move {
                                         store_to_mcp(
@@ -5951,6 +6134,7 @@ Task Completed"
                                     };
 
                                     // Update approval request with decision and persist to MCP
+                                    // 中文：该注释与英文“Update approval request with decision and persist to MCP”含义一致。
                                     let approval_to_store = if let Some(mut session) =
                                         lock_or_warn(&session_clone, "approval decision update")
                                     {
@@ -5970,6 +6154,7 @@ Task Completed"
                                     };
 
                                     // Store updated approval to MCP
+                                    // 中文：该注释与英文“Store updated approval to MCP”含义一致。
                                     if let Some(approval) = approval_to_store {
                                         let approval_id = approval.id.clone();
                                         let mcp_server_for_approval = mcp_server_clone.clone();
@@ -6025,6 +6210,7 @@ Task Completed"
                                     }
 
                                     // Use the correct resolve method based on the request type
+                                    // 中文：该注释与英文“Use the correct resolve method based on the request type”含义一致。
                                     let resolve_method = match mk {
                                         MethodKind::RequestApprovalCommandExecution => {
                                             "item/commandExecution/requestApproval/resolve"
@@ -6107,6 +6293,7 @@ Task Completed"
         match timeout.await {
             Ok(_) => {
                 // Response arrived, get it from the map
+                // 中文：该注释与英文“Response arrived, get it from the map”含义一致。
                 let response =
                     if let Some(mut resp) = lock_or_warn(responses, "send_request response read") {
                         resp.remove(&id)
@@ -6127,6 +6314,7 @@ Task Completed"
             }
             Err(_) => {
                 // Timeout - clean up
+                // 中文：该注释与英文“Timeout - clean up”含义一致。
                 if let Some(mut notifs) =
                     lock_or_warn(notifies, "send_request notify cleanup timeout")
                 {
@@ -6209,6 +6397,7 @@ Task Completed"
     {
         Ok(resp) => {
             // Fallback chain: thread.id -> resp.threadId -> resp.thread_id
+            // 中文：该注释与英文“Fallback chain: thread.id -> resp.threadId -> resp.thread_id”含义一致。
             let thread_id_from_response = resp
                 .get("thread")
                 .and_then(|t| t.get("id"))
@@ -6331,6 +6520,7 @@ Task Completed"
                         println!("  Title: {}", title);
                     }
                     // Show more details if available
+                    // 中文：该注释与英文“Show more details if available”含义一致。
                     if let Some(details) = params.get("details") {
                         println!("  Details: {}", details);
                     }
@@ -6338,6 +6528,7 @@ Task Completed"
                     println!("\n  [a]ccept / [d]ecline / [A]ccept All / [D]ecline All: ");
 
                     // Read user input from the shared stdin channel instead of creating a new reader
+                    // 中文：该注释与英文“Read user input from the shared stdin channel instead of creating a new reader”含义一致。
                     let approved = if let Some(input) = stdin_rx.recv().await {
                         let choice = input.trim().to_lowercase();
                         match choice.as_str() {
@@ -6383,6 +6574,7 @@ Task Completed"
                     println!();
 
                     // Clear flag to resume chat input
+                    // 中文：该注释与英文“Clear flag to resume chat input”含义一致。
                     if let Some(mut flag) = lock_or_warn(
                         &waiting_for_approval_clone,
                         "waiting_for_approval set false",
@@ -6403,6 +6595,8 @@ mod tests {
     use super::{is_streaming_delta_method, truncate_for_log};
     use crate::internal::ai::codex::protocol::MethodKind;
 
+    // Test scenario: verifies `truncate_for_log_escapes_whitespace_and_caps_length` covers the truncate for log escapes whitespace and caps length behavior.
+    // 测试场景：验证 `truncate_for_log_escapes_whitespace_and_caps_length` 覆盖 truncate for log escapes whitespace and caps length 对应的行为。
     #[test]
     fn truncate_for_log_escapes_whitespace_and_caps_length() {
         let truncated = truncate_for_log("line1\nline2\rtab\there", 12);
@@ -6416,6 +6610,8 @@ mod tests {
         );
     }
 
+    // Test scenario: verifies `truncate_for_log_returns_full_string_when_under_limit` covers the truncate for log returns full string when under limit behavior.
+    // 测试场景：验证 `truncate_for_log_returns_full_string_when_under_limit` 覆盖 truncate for log returns full string when under limit 对应的行为。
     #[test]
     fn truncate_for_log_returns_full_string_when_under_limit() {
         let truncated = truncate_for_log("hi", 200);
@@ -6425,8 +6621,11 @@ mod tests {
     #[test]
     fn truncate_for_log_handles_multi_byte_unicode() {
         // 4 graphemes / 4 char codepoints / >= 8 bytes — we want the truncation
+        // 中文：该注释与英文“4 graphemes / 4 char codepoints / >= 8 bytes — we want the truncation”含义一致。
         // boundary to fall on a Unicode char boundary, not in the middle of a
+        // 中文：该注释与英文“boundary to fall on a Unicode char boundary, not in the middle of a”含义一致。
         // UTF-8 byte sequence.
+        // 中文：该注释与英文“UTF-8 byte sequence.”含义一致。
         let truncated = truncate_for_log("résumé你好", 3);
         assert!(
             truncated.starts_with("rés"),
@@ -6435,6 +6634,8 @@ mod tests {
         assert!(truncated.ends_with("…(truncated)"));
     }
 
+    // Test scenario: verifies `is_streaming_delta_method_covers_all_four_token_streams` covers the is streaming delta method covers all four token streams behavior.
+    // 测试场景：验证 `is_streaming_delta_method_covers_all_four_token_streams` 覆盖 is streaming delta method covers all four token streams 对应的行为。
     #[test]
     fn is_streaming_delta_method_covers_all_four_token_streams() {
         for method in [
@@ -6450,6 +6651,8 @@ mod tests {
         }
     }
 
+    // Test scenario: verifies `is_streaming_delta_method_excludes_lifecycle_events` covers the is streaming delta method excludes lifecycle events behavior.
+    // 测试场景：验证 `is_streaming_delta_method_excludes_lifecycle_events` 覆盖 is streaming delta method excludes lifecycle events 对应的行为。
     #[test]
     fn is_streaming_delta_method_excludes_lifecycle_events() {
         for method in [
@@ -6469,30 +6672,49 @@ mod tests {
     }
 
     /// Mirrors the reader-task publish book-keeping that lives in
+    /// 中文：该注释与英文“Mirrors the reader-task publish book-keeping that lives in”含义一致。
     /// `start_code_ui_runtime`.
+    /// 中文：该注释与英文“`start_code_ui_runtime`.”含义一致。
     ///
     /// Each non-delta method publishes once at the post-match coalescing branch
+    /// 中文：该注释与英文“Each non-delta method publishes once at the post-match coalescing branch”含义一致。
     /// (and clears `delta_skipped_since_publish`). Streaming-delta methods set
+    /// 中文：该注释与英文“(and clears `delta_skipped_since_publish`). Streaming-delta methods set”含义一致。
     /// the flag without publishing. After the loop exits, if the flag is still
+    /// 中文：该注释与英文“the flag without publishing. After the loop exits, if the flag is still”含义一致。
     /// set, the final flush adds one publish.
+    /// 中文：该注释与英文“set, the final flush adds one publish.”含义一致。
     ///
     /// Approval-request methods have an **extra** pre-publish inside the
+    /// 中文：该注释与英文“Approval-request methods have an **extra** pre-publish inside the”含义一致。
     /// approval handler — but **only** when the operator-facing approval mode
+    /// 中文：该注释与英文“approval handler — but **only** when the operator-facing approval mode”含义一致。
     /// is "ask" (i.e. neither auto-accept nor auto-decline). When the mode is
+    /// 中文：该注释与英文“is "ask" (i.e. neither auto-accept nor auto-decline). When the mode is”含义一致。
     /// "accept" / "decline" (e.g. `--approval-policy allow-all`) the pre-publish
+    /// 中文：该注释与英文“"accept" / "decline" (e.g. `--approval-policy allow-all`) the pre-publish”含义一致。
     /// is skipped. The `ask_mode_for_approvals` parameter models this branch
+    /// 中文：该注释与英文“is skipped. The `ask_mode_for_approvals` parameter models this branch”含义一致。
     /// so the helper stays a faithful mirror of the production reader.
+    /// 中文：该注释与英文“so the helper stays a faithful mirror of the production reader.”含义一致。
     fn simulate_reader_publish_count(methods: &[MethodKind], ask_mode_for_approvals: bool) -> u32 {
         let mut delta_skipped_since_publish = false;
         let mut publish_count: u32 = 0;
         for &m in methods {
             // Pre-publish: in ask mode the approval handler publishes once
+            // 中文：该注释与英文“Pre-publish: in ask mode the approval handler publishes once”含义一致。
             // before awaiting the operator decision so the approval prompt
+            // 中文：该注释与英文“before awaiting the operator decision so the approval prompt”含义一致。
             // appears in the broadcast snapshot. The post-match branch below
+            // 中文：该注释与英文“appears in the broadcast snapshot. The post-match branch below”含义一致。
             // unconditionally overwrites `delta_skipped_since_publish` for
+            // 中文：该注释与英文“unconditionally overwrites `delta_skipped_since_publish` for”含义一致。
             // this same iteration (every approval method is non-streaming),
+            // 中文：该注释与英文“this same iteration (every approval method is non-streaming),”含义一致。
             // so we don't need to clear the flag here — that would be a
+            // 中文：该注释与英文“so we don't need to clear the flag here — that would be a”含义一致。
             // dead store.
+            // 中文：该注释与英文“dead store.”含义一致。
             if ask_mode_for_approvals
                 && matches!(
                     m,
@@ -6519,23 +6741,34 @@ mod tests {
         publish_count
     }
 
+    // Test scenario: verifies `final_flush_runs_after_socket_close_with_dangling_deltas` covers the final flush runs after socket close with dangling deltas behavior.
+    // 测试场景：验证 `final_flush_runs_after_socket_close_with_dangling_deltas` 覆盖 final flush runs after socket close with dangling deltas 对应的行为。
     #[test]
     fn final_flush_runs_after_socket_close_with_dangling_deltas() {
         // Two streaming deltas with no lifecycle event between them and
+        // 中文：该注释与英文“Two streaming deltas with no lifecycle event between them and”含义一致。
         // socket close: the loop body would skip both publishes, so the
+        // 中文：该注释与英文“socket close: the loop body would skip both publishes, so the”含义一致。
         // final-flush branch must publish exactly once.
+        // 中文：该注释与英文“final-flush branch must publish exactly once.”含义一致。
         let methods = [MethodKind::AgentMessageDelta, MethodKind::AgentMessageDelta];
         assert_eq!(simulate_reader_publish_count(&methods, false), 1);
     }
 
+    // Test scenario: verifies `final_flush_does_not_duplicate_when_completion_already_flushed` covers the final flush does not duplicate when completion already flushed behavior.
+    // 测试场景：验证 `final_flush_does_not_duplicate_when_completion_already_flushed` 覆盖 final flush does not duplicate when completion already flushed 对应的行为。
     #[test]
     fn final_flush_does_not_duplicate_when_completion_already_flushed() {
         // Delta then ItemCompleted: ItemCompleted publishes once and clears
+        // 中文：该注释与英文“Delta then ItemCompleted: ItemCompleted publishes once and clears”含义一致。
         // the flag, so the post-loop flush must NOT add a second publish.
+        // 中文：该注释与英文“the flag, so the post-loop flush must NOT add a second publish.”含义一致。
         let methods = [MethodKind::AgentMessageDelta, MethodKind::ItemCompleted];
         assert_eq!(simulate_reader_publish_count(&methods, false), 1);
     }
 
+    // Test scenario: verifies `no_publish_at_all_when_stream_is_empty` covers the no publish at all when stream is empty behavior.
+    // 测试场景：验证 `no_publish_at_all_when_stream_is_empty` 覆盖 no publish at all when stream is empty 对应的行为。
     #[test]
     fn no_publish_at_all_when_stream_is_empty() {
         assert_eq!(simulate_reader_publish_count(&[], false), 0);
@@ -6554,22 +6787,32 @@ mod tests {
         assert_eq!(simulate_reader_publish_count(&methods, false), 5);
     }
 
+    // Test scenario: verifies `long_streaming_burst_followed_by_completion_publishes_twice` covers the long streaming burst followed by completion publishes twice behavior.
+    // 测试场景：验证 `long_streaming_burst_followed_by_completion_publishes_twice` 覆盖 long streaming burst followed by completion publishes twice 对应的行为。
     #[test]
     fn long_streaming_burst_followed_by_completion_publishes_twice() {
         let mut methods = vec![MethodKind::AgentMessageDelta; 100];
         methods.push(MethodKind::ItemCompleted);
         methods.extend(std::iter::repeat_n(MethodKind::AgentMessageDelta, 100));
         // First completion publishes (and clears the flag); the trailing
+        // 中文：该注释与英文“First completion publishes (and clears the flag); the trailing”含义一致。
         // 100-delta burst sets the flag and the final flush publishes once.
+        // 中文：该注释与英文“100-delta burst sets the flag and the final flush publishes once.”含义一致。
         assert_eq!(simulate_reader_publish_count(&methods, false), 2);
     }
 
+    // Test scenario: verifies `ask_mode_approval_event_publishes_twice_when_sandwiched_in_deltas` covers the ask mode approval event publishes twice when sandwiched in deltas behavior.
+    // 测试场景：验证 `ask_mode_approval_event_publishes_twice_when_sandwiched_in_deltas` 覆盖 ask mode approval event publishes twice when sandwiched in deltas 对应的行为。
     #[test]
     fn ask_mode_approval_event_publishes_twice_when_sandwiched_in_deltas() {
         // [delta, RequestApprovalCommandExecution, delta, close] under ask
+        // 中文：该注释与英文“[delta, RequestApprovalCommandExecution, delta, close] under ask”含义一致。
         // mode: pre-publish for the prompt + post-publish for the event +
+        // 中文：该注释与英文“mode: pre-publish for the prompt + post-publish for the event +”含义一致。
         // final flush for the dangling delta = 3 publishes total. This
+        // 中文：该注释与英文“final flush for the dangling delta = 3 publishes total. This”含义一致。
         // regression-tests the gap Codex flagged in round 4.
+        // 中文：该注释与英文“regression-tests the gap Codex flagged in round 4.”含义一致。
         let methods = [
             MethodKind::AgentMessageDelta,
             MethodKind::RequestApprovalCommandExecution,
@@ -6578,12 +6821,18 @@ mod tests {
         assert_eq!(simulate_reader_publish_count(&methods, true), 3);
     }
 
+    // Test scenario: verifies `auto_approve_mode_skips_the_approval_pre_publish` covers the auto approve mode skips the approval pre publish behavior.
+    // 测试场景：验证 `auto_approve_mode_skips_the_approval_pre_publish` 覆盖 auto approve mode skips the approval pre publish 对应的行为。
     #[test]
     fn auto_approve_mode_skips_the_approval_pre_publish() {
         // Same sequence as the ask-mode test, but the operator selected
+        // 中文：该注释与英文“Same sequence as the ask-mode test, but the operator selected”含义一致。
         // --approval-policy=allow-all so codex maps to "accept" and the
+        // 中文：列表项说明与英文“-approval-policy=allow-all so codex maps to "accept" and the”含义一致。
         // pre-publish is skipped. Result: post-publish for the event +
+        // 中文：该注释与英文“pre-publish is skipped. Result: post-publish for the event +”含义一致。
         // final flush = 2 publishes total.
+        // 中文：该注释与英文“final flush = 2 publishes total.”含义一致。
         let methods = [
             MethodKind::AgentMessageDelta,
             MethodKind::RequestApprovalCommandExecution,

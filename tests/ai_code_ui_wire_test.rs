@@ -11,11 +11,11 @@ use chrono::{DateTime, Utc};
 use libra::internal::ai::web::code_ui::{
     CodeUiAckResponse, CodeUiApplyToFuture, CodeUiCapabilities, CodeUiControllerAttachRequest,
     CodeUiControllerAttachResponse, CodeUiControllerKind, CodeUiControllerState,
-    CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
-    CodeUiInteractionResponse, CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot,
-    CodeUiPlanSnapshot, CodeUiPlanStep, CodeUiProviderInfo, CodeUiSessionSnapshot,
-    CodeUiSessionStatus, CodeUiTaskSnapshot, CodeUiToolCallSnapshot, CodeUiTranscriptEntry,
-    CodeUiTranscriptEntryKind,
+    CodeUiEventEnvelope, CodeUiEventType, CodeUiInteractionKind, CodeUiInteractionOption,
+    CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
+    CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep,
+    CodeUiProviderInfo, CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTaskSnapshot,
+    CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, CodeUiUsageSnapshot,
 };
 use serde_json::{Value, json};
 
@@ -68,6 +68,14 @@ fn fully_populated_snapshot() -> CodeUiSessionSnapshot {
             created_at: ts,
             updated_at: ts,
         }],
+        usage: Some(CodeUiUsageSnapshot {
+            provider: "ollama".to_string(),
+            model: "gemma4:31b".to_string(),
+            prompt_tokens: 12,
+            completion_tokens: 34,
+            total_tokens: 46,
+            cost_usd: Some(0.0012),
+        }),
         plans: vec![CodeUiPlanSnapshot {
             id: "plan-1".to_string(),
             title: Some("Execution".to_string()),
@@ -187,6 +195,14 @@ fn snapshot_round_trips_through_camel_case_wire_shape() {
         serialized["interactions"][0]["status"],
         Value::String("pending".into())
     );
+    assert_eq!(
+        serialized["usage"]["provider"],
+        Value::String("ollama".into())
+    );
+    assert_eq!(
+        serialized["usage"]["totalTokens"],
+        Value::Number(serde_json::Number::from(46))
+    );
 
     // Patchset path round-trips with `changeType` (camelCase from `change_type`).
     assert_eq!(
@@ -200,11 +216,53 @@ fn snapshot_round_trips_through_camel_case_wire_shape() {
     assert_eq!(round_tripped.session_id, "session-1");
     assert_eq!(round_tripped.transcript.len(), 1);
     assert!(round_tripped.transcript[0].streaming);
+    assert_eq!(
+        round_tripped.usage.as_ref().map(|usage| usage.total_tokens),
+        Some(46)
+    );
     assert_eq!(round_tripped.controller.kind, CodeUiControllerKind::Browser);
     assert!(round_tripped.controller.loopback_only);
     assert_eq!(
         round_tripped.patchsets[0].changes[0].change_type,
         "modified"
+    );
+}
+
+/// SSE envelopes must use the same closed event-name set the browser's
+/// `CodeUiEventType` union subscribes to, and the payload must remain a typed
+/// full snapshot instead of arbitrary JSON.
+#[test]
+fn event_envelope_round_trips_typed_event_and_snapshot_payload() {
+    let snapshot = fully_populated_snapshot();
+    let event = CodeUiEventEnvelope {
+        seq: 42,
+        event_type: CodeUiEventType::ControllerChanged,
+        at: fixed_ts(),
+        data: snapshot,
+    };
+
+    let serialized = serde_json::to_value(&event).expect("event envelope must serialize");
+    assert_eq!(
+        serialized["type"],
+        Value::String("controller_changed".into())
+    );
+    assert_eq!(
+        serialized["data"]["sessionId"],
+        Value::String("session-1".into())
+    );
+    assert_eq!(
+        serialized["data"]["interactions"][0]["kind"],
+        Value::String("post_plan_choice".into())
+    );
+
+    let round_tripped: CodeUiEventEnvelope =
+        serde_json::from_value(serialized).expect("event envelope must deserialize");
+    assert_eq!(round_tripped.event_type, CodeUiEventType::ControllerChanged);
+    assert_eq!(round_tripped.data.session_id, "session-1");
+    assert_eq!(round_tripped.data.interactions.len(), 1);
+    assert_eq!(
+        round_tripped.data.interactions[0].status,
+        CodeUiInteractionStatus::Pending
     );
 }
 

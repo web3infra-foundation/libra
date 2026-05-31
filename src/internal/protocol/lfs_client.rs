@@ -1390,4 +1390,54 @@ mod tests {
         );
         assert_eq!(err.oid.as_deref(), Some(test_oid));
     }
+
+    /// Batch protocol contract (lfs.md): when the `objects/batch` response
+    /// carries an explicit `error` object for the requested oid, `push_object`
+    /// must surface a typed [`LfsPushError`] whose detail echoes the remote
+    /// code/message and whose `oid` is the requested object — never panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_object_rejects_batch_response_with_error_object() {
+        use axum::{Router, routing::post};
+
+        let test_oid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        // Restricted sandboxes may forbid binding a loopback port; skip
+        // rather than fail, mirroring the guarded lock-API mock test above.
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipped (loopback bind not permitted in this environment)");
+                return;
+            }
+            Err(err) => panic!("failed to bind mock LFS listener: {err}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/objects/batch",
+            post(|| async {
+                // The object is returned with an explicit error block (e.g. the
+                // remote rejected the upload). No actions are provided.
+                r#"{"objects":[{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","size":5,"error":{"code":422,"message":"object is invalid"}}]}"#
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("payload.bin");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let base_url = format!("http://{addr}/");
+        let client = test_lfs_client(&base_url);
+        let err = client.push_object(test_oid, &file_path).await.expect_err(
+            "an error object in the batch response should surface a typed LfsPushError",
+        );
+        assert!(
+            err.detail.contains("remote reported error 422")
+                && err.detail.contains("object is invalid"),
+            "unexpected detail: {}",
+            err.detail
+        );
+        assert_eq!(err.oid.as_deref(), Some(test_oid));
+    }
 }

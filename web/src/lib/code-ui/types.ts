@@ -36,6 +36,15 @@ export type CodeUiProviderInfo = {
   managed?: boolean;
 };
 
+export type CodeUiUsageSnapshot = {
+  provider: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd?: number;
+};
+
 export type CodeUiControllerKind =
   | "none"
   | "browser"
@@ -166,6 +175,7 @@ export type CodeUiSessionSnapshot = {
   controller: CodeUiControllerState;
   status: CodeUiSessionStatus;
   transcript: CodeUiTranscriptEntry[];
+  usage?: CodeUiUsageSnapshot;
   plans: CodeUiPlanSnapshot[];
   tasks: CodeUiTaskSnapshot[];
   toolCalls: CodeUiToolCallSnapshot[];
@@ -186,8 +196,8 @@ export type CodeUiEventEnvelope = {
   seq: number;
   type: CodeUiEventType;
   at: string;
-  /** When `type === "session_updated"` the data is a full `CodeUiSessionSnapshot`. */
-  data: unknown;
+  /** Every Code UI SSE event carries the full typed snapshot for gap recovery. */
+  data: CodeUiSessionSnapshot;
 };
 
 export type CodeUiControllerAttachRequest = {

@@ -15,6 +15,7 @@ import {
 import { useBrowserController } from "@/lib/code-ui/controller";
 import { useCodeUiStore } from "@/lib/code-ui/store";
 import { deriveWorkflowSummary } from "@/lib/code-ui/view-model";
+import type { CodeUiUsageSnapshot } from "@/lib/code-ui/types";
 import { cn } from "@/lib/utils";
 
 import {
@@ -64,6 +65,7 @@ export function Workflow({ width }: Props) {
     snapshot.controller.canWrite &&
     snapshot.status === "awaiting_interaction" &&
     snapshot.capabilities.interactiveApprovals;
+  const usageBadge = formatUsageBadge(snapshot?.usage);
 
   return (
     <section
@@ -87,11 +89,11 @@ export function Workflow({ width }: Props) {
         </div>
         <div className="flex items-center gap-1.5 text-ink-3">
           <span
-            title="No token usage data yet — wire up in Phase 4."
+            title={usageTooltip(snapshot?.usage)}
             className="inline-flex items-center gap-1.5 rounded-sm border border-rule-2 bg-paper-2 px-2 py-1 text-[11px] text-ink-2"
           >
             <IconTokens size={11} />
-            <span className="mono">—</span>
+            <span className="mono">{usageBadge}</span>
             <span className="text-[10px] tracking-[0.04em] text-ink-3">Token</span>
           </span>
         </div>
@@ -201,7 +203,11 @@ export function Workflow({ width }: Props) {
         </div>
       </footer>
 
-      <DetailPanel detail={detail} onClose={() => setDetail(null)} />
+      <DetailPanel
+        detail={detail}
+        snapshot={snapshot}
+        onClose={() => setDetail(null)}
+      />
     </section>
   );
 }
@@ -227,6 +233,41 @@ function TabBtn({
       {children}
     </button>
   );
+}
+
+function formatUsageBadge(usage: CodeUiUsageSnapshot | undefined): string {
+  if (!usage) return "—";
+  const pieces = [`${usage.provider}/${usage.model}`, `${formatCompactCount(usage.totalTokens)} tok`];
+  if (usage.costUsd !== undefined) {
+    pieces.push(`$${usage.costUsd.toFixed(4)}`);
+  }
+  return pieces.join(" · ");
+}
+
+function usageTooltip(usage: CodeUiUsageSnapshot | undefined): string {
+  if (!usage) {
+    return "Token usage is not exposed in the current web snapshot yet.";
+  }
+  const pieces = [
+    `${usage.provider}/${usage.model}`,
+    `${usage.promptTokens} prompt`,
+    `${usage.completionTokens} completion`,
+    `${usage.totalTokens} total`,
+  ];
+  if (usage.costUsd !== undefined) {
+    pieces.push(`$${usage.costUsd.toFixed(4)}`);
+  }
+  return pieces.join(" · ");
+}
+
+function formatCompactCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}m`;
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}k`;
+  }
+  return `${value}`;
 }
 
 function PipelineView({

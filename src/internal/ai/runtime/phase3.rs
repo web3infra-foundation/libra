@@ -39,6 +39,44 @@ pub struct TaskArtifactRefs {
     pub usage_ids: Vec<Uuid>,
 }
 
+impl ArtifactLedger {
+    pub fn new(thread_id: Uuid) -> Self {
+        Self {
+            thread_id,
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn push_task(&mut self, task: TaskArtifactRefs) {
+        self.tasks.push(task);
+    }
+
+    pub fn has_patchset(&self, patchset_id: Uuid) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.patchset_ids.contains(&patchset_id))
+    }
+
+    pub fn release_candidate_patchset_id(&self) -> Option<Uuid> {
+        self.tasks
+            .iter()
+            .rev()
+            .find_map(|task| task.patchset_ids.last().copied())
+    }
+}
+
+impl TaskArtifactRefs {
+    pub fn new(task_id: Uuid) -> Self {
+        Self {
+            task_id,
+            patchset_ids: Vec::new(),
+            evidence: Vec::new(),
+            context_frame_ids: Vec::new(),
+            usage_ids: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStage {
@@ -482,6 +520,33 @@ mod tests {
         );
         assert!(!failing.is_passing());
         assert_eq!(failing.summary.status, ValidationStatus::BlockingFailed);
+    }
+
+    /// ArtifactLedger exposes the latest task patchset as the release
+    /// candidate and can prove that a selected patchset belongs to the
+    /// ledger before Phase 3 marks validation as passing.
+    #[test]
+    fn artifact_ledger_tracks_release_candidate_patchset() {
+        let thread_id = Uuid::new_v4();
+        let first_patchset_id = Uuid::new_v4();
+        let release_patchset_id = Uuid::new_v4();
+        let mut ledger = ArtifactLedger::new(thread_id);
+
+        let mut first = TaskArtifactRefs::new(Uuid::new_v4());
+        first.patchset_ids.push(first_patchset_id);
+        ledger.push_task(first);
+
+        let mut second = TaskArtifactRefs::new(Uuid::new_v4());
+        second.patchset_ids.push(release_patchset_id);
+        ledger.push_task(second);
+
+        assert!(ledger.has_patchset(first_patchset_id));
+        assert!(ledger.has_patchset(release_patchset_id));
+        assert!(!ledger.has_patchset(Uuid::new_v4()));
+        assert_eq!(
+            ledger.release_candidate_patchset_id(),
+            Some(release_patchset_id)
+        );
     }
 
     /// `ValidatorEngine::default_policy` must use the

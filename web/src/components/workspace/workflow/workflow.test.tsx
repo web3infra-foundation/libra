@@ -118,4 +118,83 @@ describe("Workflow", () => {
 
     unmount();
   });
+
+  it("renders live plan metadata in the workflow card and detail panel", () => {
+    const snapshot = baseSnapshot();
+    snapshot.plans = [
+      {
+        id: "plan-1",
+        title: "Execution plan",
+        summary: "Apply the live session snapshot to the workflow pane.",
+        status: "running",
+        steps: [
+          { step: "inspect", status: "in_progress" },
+          { step: "verify", status: "queued" },
+        ],
+        updatedAt: "2026-05-14T00:00:00Z",
+      },
+    ];
+    storeState.snapshot = snapshot;
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    expect(container.textContent).toContain("Execution plan");
+    expect(container.textContent).toContain("Apply the live session snapshot");
+
+    const stepButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("inspect"),
+    );
+    expect(stepButton).toBeDefined();
+
+    act(() => {
+      stepButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Plan title");
+    expect(container.textContent).toContain("Execution plan");
+    expect(container.textContent).toContain("Plan summary");
+    expect(container.textContent).toContain("Apply the live session snapshot to the workflow pane.");
+
+    unmount();
+  });
+
+  it("renders the live token usage badge when usage data is present", () => {
+    const snapshot = baseSnapshot();
+    snapshot.usage = {
+      provider: "ollama",
+      model: "gemma4:31b",
+      promptTokens: 12,
+      completionTokens: 34,
+      totalTokens: 46,
+      costUsd: 0.0012,
+    };
+    storeState.snapshot = snapshot;
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    const tokenBadge = Array.from(container.querySelectorAll("[title]")).find((node) =>
+      (node as HTMLElement).title.includes("ollama/gemma4:31b"),
+    ) as HTMLElement | undefined;
+    expect(tokenBadge).toBeDefined();
+    expect(tokenBadge?.textContent).toContain("ollama/gemma4:31b");
+    expect(tokenBadge?.textContent).toContain("46 tok");
+    expect(tokenBadge?.textContent).toContain("$0.0012");
+
+    unmount();
+  });
+
+  it("falls back to a neutral token usage placeholder when the snapshot lacks usage data", () => {
+    storeState.snapshot = baseSnapshot();
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    const tokenBadge = Array.from(container.querySelectorAll("[title]")).find(
+      (node) => (node as HTMLElement).title.includes("Token usage is not exposed"),
+    ) as HTMLElement | undefined;
+    expect(tokenBadge).toBeDefined();
+    expect(tokenBadge?.textContent).toContain("Token");
+    expect(tokenBadge?.textContent).toContain("—");
+
+    unmount();
+  });
 });
