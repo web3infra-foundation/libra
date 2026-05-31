@@ -158,7 +158,32 @@ describe("Workflow", () => {
     unmount();
   });
 
-  it("shows a neutral token usage placeholder when the snapshot lacks usage data", () => {
+  it("renders the live token usage badge when usage data is present", () => {
+    const snapshot = baseSnapshot();
+    snapshot.usage = {
+      provider: "ollama",
+      model: "gemma4:31b",
+      promptTokens: 12,
+      completionTokens: 34,
+      totalTokens: 46,
+      costUsd: 0.0012,
+    };
+    storeState.snapshot = snapshot;
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    const tokenBadge = Array.from(container.querySelectorAll("[title]")).find((node) =>
+      (node as HTMLElement).title.includes("ollama/gemma4:31b"),
+    ) as HTMLElement | undefined;
+    expect(tokenBadge).toBeDefined();
+    expect(tokenBadge?.textContent).toContain("ollama/gemma4:31b");
+    expect(tokenBadge?.textContent).toContain("46 tok");
+    expect(tokenBadge?.textContent).toContain("$0.0012");
+
+    unmount();
+  });
+
+  it("falls back to a neutral token usage placeholder when the snapshot lacks usage data", () => {
     storeState.snapshot = baseSnapshot();
 
     const { container, unmount } = render(<Workflow width={520} />);
