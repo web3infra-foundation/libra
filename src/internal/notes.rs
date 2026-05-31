@@ -279,17 +279,31 @@ pub async fn remove(
         to_delete.push((obj_str, blob_hash));
     }
 
-    // Phase 2: delete all verified rows inside a single transaction so a
-    // partial remove cannot survive a mid-delete failure (e.g. I/O error,
-    // lock timeout, or interruption).
+    // Phase 2: delete all verified rows inside a single transaction.
+    // Include `blob = ?` so that a concurrent `add -f` cannot overwrite
+    // the blob between Phase 1 and Phase 2 — if the blob hash changed,
+    // rows_affected() is 0 and we roll back the whole transaction.
     let txn = db.begin().await?;
-    for (obj_str, _blob_hash) in &to_delete {
-        txn.execute(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "DELETE FROM notes WHERE notes_ref = ? AND object = ?",
-            [notes_ref.into(), obj_str.clone().into()],
-        ))
-        .await?;
+    for (obj_str, blob_hash) in &to_delete {
+        let result = txn
+            .execute(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "DELETE FROM notes WHERE notes_ref = ? AND object = ? AND blob = ?",
+                [
+                    notes_ref.into(),
+                    obj_str.clone().into(),
+                    blob_hash.clone().into(),
+                ],
+            ))
+            .await?;
+
+        if result.rows_affected() == 0 {
+            txn.rollback().await?;
+            return Err(NotesError::NotFound {
+                notes_ref: notes_ref.to_string(),
+                object: obj_str.clone(),
+            });
+        }
     }
     txn.commit().await?;
 
