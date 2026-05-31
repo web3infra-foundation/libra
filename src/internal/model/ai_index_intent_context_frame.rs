@@ -1,4 +1,6 @@
 //! SeaORM entity for the intent -> context frame reverse index.
+//!
+//! 意图 -> 上下文框架反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

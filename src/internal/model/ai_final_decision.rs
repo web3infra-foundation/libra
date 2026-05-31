@@ -1,5 +1,7 @@
 //! SeaORM entity for the runtime-owned formal final decision.
 //!
+//! 运行时所有正式最终决策的 SeaORM 实体。
+//!
 //! The terminal artifact in the ValidationReport -> RiskScoreBreakdown ->
 //! DecisionProposal -> Decision chain (Implementation Phase 4). A row records
 //! the resolved [`FinalDecisionVerdict`](crate::internal::ai::runtime::contracts::FinalDecisionVerdict)
