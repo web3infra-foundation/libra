@@ -15,6 +15,20 @@
 //!   missing branch.
 //! - For listing, supports `--contains` / `--no-contains` commit filters
 //!   that BFS-walk the commit graph from each branch tip.
+//!
+//! 分支管理子命令（`libra branch`）。
+//!
+//! 实现创建、删除、列表、重命名、上游跟踪和当前分支报告。单个 [`run_branch`] 入口
+//! 检查已解析的 [`BranchArgs`] 并委托给 `*_impl` 帮助器之一。
+//!
+//! 不明显的职责：
+//! - 将 [`branch::BranchStoreError`] 映射到本地 [`BranchError`] 域，
+//!   以便 CLI 表面与存储层解耦；见 `map_branch_store_error`。
+//! - 对于删除，通过 [`get_reachable_commits`] 从 HEAD 遍历可到达的提交，
+//!   在允许删除之前检测"未完全合并"的分支（在 `-D` 下被跳过）。
+//! - 当用户命名缺失分支时，通过 Levenshtein 距离建议近似匹配。
+//! - 对于列表，支持 `--contains` / `--no-contains` 提交过滤器，
+//!   从每个分支尖端进行 BFS 遍历提交图。
 
 use std::collections::{HashSet, VecDeque};
 
@@ -205,6 +219,8 @@ pub struct BranchArgs {
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
+///
+/// 快速执行入口：将呈现的错误打印到 stderr，但不发送退出代码。
 pub async fn execute(args: BranchArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -219,6 +235,15 @@ pub async fn execute(args: BranchArgs) {
 /// Boundary conditions:
 /// - All [`BranchError`] variants are mapped to [`CliError`] via the
 ///   `From` impl which sets stable codes and hints.
+///
+/// 结构化入口：为分发器返回 [`CliResult`]。
+///
+/// 功能范围：
+/// - 运行 [`run_branch`] 然后转发到 [`render_branch_output`]。
+///
+/// 边界条件：
+/// - 所有 [`BranchError`] 变体通过 `From` impl 映射到 [`CliError`]，
+///   其设置稳定代码和提示。
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_branch(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, output)?;
@@ -233,6 +258,11 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
 /// `DelegatedCli` exists to forward already-built [`CliError`]s (typically
 /// from upstream helpers like [`get_reachable_commits`]) without
 /// double-wrapping their stable codes.
+///
+/// `libra branch` 的域错误。
+///
+/// `DelegatedCli` 存在于转发已构建的 [`CliError`]s（通常来自上游帮助器
+/// 如 [`get_reachable_commits`]）而不重复包装其稳定代码。
 #[derive(Debug, thiserror::Error)]
 enum BranchError {
     #[error("not a libra repository")]
