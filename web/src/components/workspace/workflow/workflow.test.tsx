@@ -118,4 +118,43 @@ describe("Workflow", () => {
 
     unmount();
   });
+
+  it("renders live plan metadata in the workflow card and detail panel", () => {
+    const snapshot = baseSnapshot();
+    snapshot.plans = [
+      {
+        id: "plan-1",
+        title: "Execution plan",
+        summary: "Apply the live session snapshot to the workflow pane.",
+        status: "running",
+        steps: [
+          { step: "inspect", status: "in_progress" },
+          { step: "verify", status: "queued" },
+        ],
+        updatedAt: "2026-05-14T00:00:00Z",
+      },
+    ];
+    storeState.snapshot = snapshot;
+
+    const { container, unmount } = render(<Workflow width={520} />);
+
+    expect(container.textContent).toContain("Execution plan");
+    expect(container.textContent).toContain("Apply the live session snapshot");
+
+    const stepButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("inspect"),
+    );
+    expect(stepButton).toBeDefined();
+
+    act(() => {
+      stepButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Plan title");
+    expect(container.textContent).toContain("Execution plan");
+    expect(container.textContent).toContain("Plan summary");
+    expect(container.textContent).toContain("Apply the live session snapshot to the workflow pane.");
+
+    unmount();
+  });
 });

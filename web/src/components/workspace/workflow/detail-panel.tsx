@@ -158,9 +158,15 @@ function IntentDetail({ intent }: { intent: IntentDoc }) {
 function PlanStepDetail({
   data,
 }: {
-  data: { step: PlanStep; planKind: "execution" | "test"; planId: string };
+  data: {
+    step: PlanStep;
+    planKind: "execution" | "test";
+    planId: string;
+    planTitle?: string;
+    planSummary?: string;
+  };
 }) {
-  const { step, planKind, planId } = data;
+  const { step, planKind, planId, planTitle, planSummary } = data;
   const meta = statusMeta(step.status);
   return (
     <>
@@ -182,9 +188,18 @@ function PlanStepDetail({
       <Section label="Metadata">
         <KV k="Step ID" v={step.id} />
         <KV k="Plan" v={planId} />
+        <KV k="Plan title" v={planTitle ?? "—"} />
         <KV k="Kind" v={planKind === "test" ? "test" : "execution"} />
         <KV k="Status" v={step.status} />
       </Section>
+
+      {planSummary?.trim() && (
+        <Section label="Plan summary">
+          <div className="text-[12.5px] leading-[1.55] text-ink-2">
+            {planSummary.trim()}
+          </div>
+        </Section>
+      )}
 
       <Section label="Purpose">
         <div className="text-[12.5px] leading-[1.55] text-ink-2">
