@@ -876,11 +876,11 @@ fn insert_json_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -
 #[derive(serde::Deserialize)]
 struct MergeStateRoots {
     /// Commit checked out before the merge started.
-    orig_head: String,
+    orig_head: Option<String>,
     /// Commit being merged into the current branch.
-    target: String,
+    target: Option<String>,
     /// Merge base recorded for conflict recovery.
-    base: String,
+    base: Option<String>,
 }
 
 /// Load object IDs from an in-progress merge state file.
@@ -897,9 +897,9 @@ fn merge_state_roots() -> CliResult<HashSet<ObjectHash>> {
         ))
         .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
-    insert_optional_root(&mut roots, Some(state.orig_head), "merge-state.orig_head")?;
-    insert_optional_root(&mut roots, Some(state.target), "merge-state.target")?;
-    insert_optional_root(&mut roots, Some(state.base), "merge-state.base")?;
+    insert_optional_root(&mut roots, state.orig_head, "merge-state.orig_head")?;
+    insert_optional_root(&mut roots, state.target, "merge-state.target")?;
+    insert_optional_root(&mut roots, state.base, "merge-state.base")?;
     Ok(roots)
 }
 
@@ -2987,7 +2987,65 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    /// Covers unsynced object-index rows and agent checkpoints as roots.
+    /// Covers older merge state files with missing optional object fields.
+    async fn merge_state_roots_tolerates_missing_fields() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let orig_head = test_hash(43);
+        fs::write(
+            util::storage_path().join("merge-state.json"),
+            serde_json::json!({
+                "head_name": "main",
+                "orig_head": orig_head.to_string(),
+                "conflicted_paths": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let roots = merge_state_roots().unwrap();
+
+        assert!(roots.contains(&orig_head));
+        assert_eq!(roots.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers local-only object-index rows not pinning ordinary unreachable garbage.
+    async fn object_index_protections_skip_local_only_repositories() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let _storage_type = test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "");
+        let _d1_account = test::ScopedEnvVar::set("LIBRA_D1_ACCOUNT_ID", "");
+        let _d1_token = test::ScopedEnvVar::set("LIBRA_D1_API_TOKEN", "");
+        let _d1_database = test::ScopedEnvVar::set("LIBRA_D1_DATABASE_ID", "");
+        let _endpoint = test::ScopedEnvVar::set("LIBRA_STORAGE_ENDPOINT", "");
+        let _access = test::ScopedEnvVar::set("LIBRA_STORAGE_ACCESS_KEY", "");
+        let _secret = test::ScopedEnvVar::set("LIBRA_STORAGE_SECRET_KEY", "");
+        ConfigKv::set("libra.repoid", "repo-a", false)
+            .await
+            .unwrap();
+        let db = get_db_conn_instance().await;
+        let unsynced = test_hash(57);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+             VALUES (?, 'blob', 1, 'repo-a', 1, 0)",
+            [unsynced.to_string().into()],
+        ))
+        .await
+        .unwrap();
+
+        let protected = object_index_prune_protections(&db).await.unwrap();
+
+        assert!(protected.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers cloud-pending object-index rows and agent checkpoints.
     async fn collect_roots_includes_cloud_and_agent_catalogs() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
