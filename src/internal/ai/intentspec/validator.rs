@@ -1,6 +1,8 @@
 //! Validation rules for canonical IntentSpecs before they are accepted by the
 //! scheduler and orchestrator.
 //!
+//! 在规范 IntentSpec 被调度器和编排器接受之前的验证规则。
+//!
 //! Boundary: validators report actionable defects without mutating the spec; callers
 //! that want fixups must run `repair` first. Regression tests cover missing goals,
 //! invalid artifact references, and acceptance criteria that cannot be converted into
