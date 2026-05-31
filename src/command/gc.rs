@@ -1242,3 +1242,228 @@ mod tests {
     }
 
     #[test]
+    fn render_gc_output_prints_human_dry_run_summary() {
+        let result = GcOutput {
+            prune: "now".into(),
+            dry_run: true,
+            loose_objects: LooseObjectStats {
+                scanned: 2,
+                reachable: 1,
+                unreachable: 1,
+                pruned: 0,
+                retained: 0,
+            },
+            reachable_objects: 1,
+            unreachable_objects: vec![GcObjectAction {
+                oid: "abc".into(),
+                object_type: "blob".into(),
+                action: GcAction::WouldPrune,
+                reason: "old".into(),
+            }],
+            pack_files: PackStats {
+                directory_exists: true,
+                packs_verified: 1,
+                objects_in_packs: 3,
+                stale_files: vec![PackFileAction {
+                    path: "pack/tmp".into(),
+                    action: PackAction::WouldPrune,
+                    reason: "tmp".into(),
+                }],
+            },
+            warnings: vec!["compat warning".into()],
+        };
+
+        render_gc_output(&result, &OutputConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn render_gc_output_prints_human_pruned_summary() {
+        let result = GcOutput {
+            prune: "now".into(),
+            dry_run: false,
+            loose_objects: LooseObjectStats {
+                scanned: 1,
+                reachable: 0,
+                unreachable: 1,
+                pruned: 1,
+                retained: 0,
+            },
+            reachable_objects: 0,
+            unreachable_objects: Vec::new(),
+            pack_files: PackStats {
+                directory_exists: true,
+                packs_verified: 0,
+                objects_in_packs: 0,
+                stale_files: vec![PackFileAction {
+                    path: "pack/tmp".into(),
+                    action: PackAction::Pruned,
+                    reason: "tmp".into(),
+                }],
+            },
+            warnings: Vec::new(),
+        };
+
+        render_gc_output(&result, &OutputConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn render_gc_output_respects_quiet_and_json_modes() {
+        let result = GcOutput {
+            prune: "never".into(),
+            dry_run: false,
+            loose_objects: LooseObjectStats::default(),
+            reachable_objects: 0,
+            unreachable_objects: Vec::new(),
+            pack_files: PackStats::default(),
+            warnings: Vec::new(),
+        };
+        let quiet = OutputConfig {
+            quiet: true,
+            ..Default::default()
+        };
+        render_gc_output(&result, &quiet).unwrap();
+
+        let json = OutputConfig {
+            json_format: Some(JsonFormat::Compact),
+            ..Default::default()
+        };
+        render_gc_output(&result, &json).unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn execute_maps_errors_to_strings() {
+        let dir = tempdir().unwrap();
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let error = execute(GcArgs {
+            dry_run: false,
+            prune: "now".into(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("not a libra repository"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn execute_safe_reports_missing_repository() {
+        let dir = tempdir().unwrap();
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let error = execute_safe(
+            GcArgs {
+                dry_run: false,
+                prune: "now".into(),
+                no_prune: false,
+                aggressive: false,
+                auto: false,
+                force: false,
+            },
+            &OutputConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::RepoNotFound);
+    }
+
+    #[test]
+    fn display_path_uses_path_display() {
+        assert!(display_path(Path::new("objects/pack")).contains("objects"));
+    }
+
+    #[test]
+    fn is_null_oid_requires_non_empty_zero_string() {
+        assert!(is_null_oid("0000"));
+        assert!(!is_null_oid(""));
+        assert!(!is_null_oid("0001"));
+    }
+
+    #[test]
+    fn format_io_error_normalizes_not_found() {
+        let error = io::Error::new(io::ErrorKind::NotFound, "missing");
+        assert_eq!(format_io_error(&error), "No such file or directory");
+    }
+
+    #[test]
+    fn loose_object_stats_default_is_zero() {
+        let stats = LooseObjectStats::default();
+        assert_eq!(stats.scanned, 0);
+        assert_eq!(stats.pruned, 0);
+    }
+
+    #[test]
+    fn pack_stats_default_has_no_directory() {
+        let stats = PackStats::default();
+        assert!(!stats.directory_exists);
+        assert!(stats.stale_files.is_empty());
+    }
+
+    #[test]
+    fn prune_policy_obeys_no_prune() {
+        let args = GcArgs {
+            dry_run: false,
+            prune: "now".into(),
+            no_prune: true,
+            aggressive: false,
+            auto: false,
+            force: false,
+        };
+        assert_eq!(prune_policy(&args).unwrap(), PrunePolicy::Never);
+    }
+
+    #[test]
+    fn parse_stored_hash_rejects_invalid_hash() {
+        let error = parse_stored_hash("not-a-hash", "reference").unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn collect_roots_includes_index_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        fs::write(repo.path().join("file.txt"), "indexed").unwrap();
+        util::working_dir();
+        let add = crate::command::add::AddArgs {
+            pathspec: vec!["file.txt".into()],
+            all: false,
+            update: false,
+            verbose: false,
+            dry_run: false,
+            refresh: false,
+            ignore_errors: false,
+            force: false,
+        };
+        crate::command::add::execute_safe(add, &OutputConfig::default())
+            .await
+            .unwrap();
+
+        let roots = collect_roots_from_database().await.unwrap();
+        assert!(!roots.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn execute_safe_rejects_invalid_prune() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let error = execute_safe(
+            GcArgs {
+                dry_run: false,
+                prune: "bad-date".to_string(),
+                no_prune: false,
+                aggressive: false,
+                auto: false,
+                force: false,
+            },
+            &OutputConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
+    }
