@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 import { IconX } from "@/components/icons";
@@ -16,6 +17,8 @@ import type {
   StepStatus,
   WorkflowTask,
 } from "./types";
+
+const MAX_DETAIL_PREVIEW_CHARS = 20 * 1024;
 
 type Props = {
   detail: DetailState | null;
@@ -251,9 +254,10 @@ function TaskDetail({ task }: { task: WorkflowTask }) {
 
       <Section label="Details" mono>
         {task.details ? (
-          <pre className="mono m-0 whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">
-            {task.details}
-          </pre>
+          <ExpandableTextBlock
+            text={task.details}
+            className="rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink"
+          />
         ) : (
           <div className="text-[12px] leading-[1.55] text-ink-3">
             No task details are attached to this snapshot.
@@ -298,9 +302,10 @@ function RunDetail({ run }: { run: ExecutionRun }) {
 
       <Section label="Output" mono>
         {run.details ? (
-          <pre className="mono m-0 whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink">
-            {run.details}
-          </pre>
+          <ExpandableTextBlock
+            text={run.details}
+            className="rounded-md border border-rule bg-paper-2 p-3 text-[11px] leading-[1.55] text-ink"
+          />
         ) : (
           <div className="text-[12px] leading-[1.55] text-ink-3">
             No detailed tool output is attached to this run.
@@ -368,6 +373,38 @@ function ReleaseDetail({ snapshot }: { snapshot: CodeUiSessionSnapshot | null })
           Release details are derived from the live session snapshot.
         </div>
       </Section>
+    </>
+  );
+}
+
+function ExpandableTextBlock({
+  text,
+  className,
+}: {
+  text: string;
+  className: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const hiddenChars = Math.max(0, text.length - MAX_DETAIL_PREVIEW_CHARS);
+  const displayText =
+    expanded || hiddenChars === 0 ? text : text.slice(0, MAX_DETAIL_PREVIEW_CHARS);
+
+  return (
+    <>
+      <pre className={cn("mono m-0 whitespace-pre-wrap break-words", className)}>
+        {displayText}
+      </pre>
+      {hiddenChars > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-2 rounded-sm border border-rule bg-paper px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 hover:text-ink"
+        >
+          {expanded
+            ? "Show less"
+            : `Show full output (${hiddenChars.toLocaleString()} chars hidden)`}
+        </button>
+      )}
     </>
   );
 }

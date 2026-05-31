@@ -78,6 +78,68 @@ describe("DetailPanel", () => {
     unmount();
   });
 
+  it("collapses oversized task and run details until explicitly expanded", () => {
+    const longTaskDetails = `task-start\n${"task-line\n".repeat(2600)}task-end`;
+    const longRunDetails = `run-start\n${"run-line\n".repeat(2600)}run-end`;
+
+    const taskView = render(
+      <DetailPanel
+        detail={{
+          kind: "task",
+          data: {
+            id: "task-1",
+            title: "Long task",
+            status: "running",
+            ago: "1m",
+            details: longTaskDetails,
+          },
+        }}
+        snapshot={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const taskToggle = Array.from(taskView.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Show full output"),
+    );
+    expect(taskView.container.textContent).toContain("Show full output");
+    expect(taskView.container.textContent).not.toContain("task-end");
+    act(() => {
+      taskToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(taskView.container.textContent).toContain("task-end");
+    taskView.unmount();
+
+    const runView = render(
+      <DetailPanel
+        detail={{
+          kind: "run",
+          data: {
+            id: "run-1",
+            step: "tool",
+            result: "pass",
+            ago: "1m",
+            label: "Long run",
+            details: longRunDetails,
+          },
+        }}
+        snapshot={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const runToggle = Array.from(runView.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Show full output"),
+    );
+    expect(runView.container.textContent).toContain("Show full output");
+    expect(runView.container.textContent).not.toContain("run-end");
+    act(() => {
+      runToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(runView.container.textContent).toContain("run-end");
+    runView.unmount();
+  });
+
   it("renders validation and release details from the live snapshot without placeholder identities", () => {
     const snapshot: CodeUiSessionSnapshot = {
       sessionId: "session-1",
