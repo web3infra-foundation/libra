@@ -195,7 +195,7 @@ async fn collect_reachable_objects(
     heads: &[String],
 ) -> CliResult<HashSet<ObjectHash>> {
     let starting_points = collect_starting_points(storage, heads).await?;
-    Ok(bfs_mark_reachable(&starting_points, storage))
+    bfs_mark_reachable(&starting_points, storage)
 }
 
 /// Collect objects already in packfiles.
@@ -412,6 +412,7 @@ fn normalize_tag_ref_name(object_ref: &str) -> String {
     }
 }
 
+/// Resolve a tag reference to the object hash it points to, if it exists.
 async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
     let full_ref_name = normalize_tag_ref_name(object_ref);
     let db_conn = db::get_db_conn_instance().await;
@@ -598,10 +599,10 @@ fn list_loose_objects(
                 continue;
             };
 
-            let obj_type = match storage.get_object_type(&hash) {
-                Ok(t) => t,
-                Err(_) => continue, // Skip files that don't parse as valid objects
-            };
+            let obj_type = storage.get_object_type(&hash).map_err(|error| {
+                CliError::fatal(format!("could not resolve object type for {hash}: {error}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
 
             let modified = if needs_mtime {
                 let metadata = sub_entry.metadata().map_err(|error| {
@@ -652,43 +653,50 @@ fn try_parse_loose_object(dir_name: &str, sub_path: &Path) -> Option<ObjectHash>
 
 /// Walk object references: returns objects referenced by the given object.
 /// For commits: returns tree and parent commits. For trees: returns child blobs and subtrees.
-fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> Vec<ObjectHash> {
+fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<Vec<ObjectHash>> {
     let mut refs = Vec::new();
 
-    let Ok(obj_type) = storage.get_object_type(hash) else {
-        return refs;
-    };
+    let obj_type = storage.get_object_type(hash).map_err(|error| {
+        CliError::fatal(format!("could not resolve object type for {hash}: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
 
     match obj_type {
         ObjectType::Commit => {
-            if let Ok(commit) = load_object::<Commit>(hash) {
-                refs.push(commit.tree_id);
-                refs.extend(commit.parent_commit_ids.iter().copied());
-            }
+            let commit = load_object::<Commit>(hash).map_err(|error| {
+                CliError::fatal(format!("failed to load commit {hash}: {error}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            refs.push(commit.tree_id);
+            refs.extend(commit.parent_commit_ids.iter().copied());
         }
         ObjectType::Tree => {
-            if let Ok(tree) = load_object::<Tree>(hash) {
-                for item in &tree.tree_items {
-                    refs.push(item.id);
-                }
+            let tree = load_object::<Tree>(hash).map_err(|error| {
+                CliError::fatal(format!("failed to load tree {hash}: {error}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            for item in &tree.tree_items {
+                refs.push(item.id);
             }
         }
         ObjectType::Tag => {
-            if let Ok(tag) = load_object::<Tag>(hash) {
-                refs.push(tag.object_hash);
-            }
+            let tag = load_object::<Tag>(hash).map_err(|error| {
+                CliError::fatal(format!("failed to load tag {hash}: {error}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            refs.push(tag.object_hash);
         }
         _ => {}
     }
 
-    refs
+    Ok(refs)
 }
 
 /// BFS to mark all objects reachable from starting points.
 fn bfs_mark_reachable(
     starting_points: &HashSet<ObjectHash>,
     storage: &ClientStorage,
-) -> HashSet<ObjectHash> {
+) -> CliResult<HashSet<ObjectHash>> {
     let mut reachable = HashSet::new();
     let mut queue: VecDeque<ObjectHash> = starting_points.iter().copied().collect();
 
@@ -698,7 +706,7 @@ fn bfs_mark_reachable(
         }
         reachable.insert(current);
 
-        let children = walk_object_refs(&current, storage);
+        let children = walk_object_refs(&current, storage)?;
         for child in children {
             if !reachable.contains(&child) {
                 queue.push_back(child);
@@ -706,7 +714,7 @@ fn bfs_mark_reachable(
         }
     }
 
-    reachable
+    Ok(reachable)
 }
 
 #[cfg(test)]

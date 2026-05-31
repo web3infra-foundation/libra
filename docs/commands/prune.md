@@ -137,8 +137,10 @@ Example:
 |----------|-----------------|------|
 | Not inside a Libra repository | `LBR-REPO-001` | 128 |
 | Invalid or missing `--expire` value | `LBR-CLI-002` | 129 |
-| Invalid `HEAD` argument or revision | `LBR-CLI-003` | 129 |
-| Refs/reflogs/HEAD metadata invalid or points to missing objects | `LBR-REPO-002` | 128 |
-| Failed to read objects directory, entries, or metadata | `LBR-IO-001` | 128 |
+| Ambiguous object name (matches multiple objects) | `LBR-CLI-002` | 129 |
+| Invalid `HEAD` argument or object name | `LBR-CLI-003` | 129 |
+| Refs/reflogs/HEAD metadata invalid, missing, or points to missing objects | `LBR-REPO-002` | 128 |
+| Failed to load commit/tree/tag data or resolve object type | `LBR-REPO-002` | 128 |
+| Failed to read objects directory, entries, metadata, or pack indexes | `LBR-IO-001` | 128 |
 | Failed to remove loose object or empty prefix directory | `LBR-IO-002` | 128 |
 | Internal invariant violated while pruning paths | `LBR-INTERNAL-001` | 128 |
