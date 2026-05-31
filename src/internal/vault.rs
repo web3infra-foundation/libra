@@ -1,7 +1,5 @@
 //! Vault integration module wrapping libvault for PGP key management.
 //!
-//! Vault 集成模块，包装 libvault 用于 PGP 密钥管理。
-//!
 //! Provides helpers to initialize a libvault instance backed by the repository's
 //! `.libra/vault.db` SQLite database, generate PGP keys, sign data, and verify
 //! signatures. The vault state (sealed/unsealed) is managed transparently.

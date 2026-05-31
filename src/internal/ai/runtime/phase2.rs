@@ -1,7 +1,5 @@
 //! Phase 2 Execution — formal write helpers (schema-only landing).
 //!
-//! 阶段 2 执行 — 正式写入助手（仅模式落地）。
-//!
 //! The Code UI Phase Workflow models Phase 2 as the **Execution** phase: a
 //! [`TaskExecutionContext`] is dispatched to a [`TaskExecutor`], runs a
 //! single task attempt, and produces a [`TaskExecutionResult`] alongside the

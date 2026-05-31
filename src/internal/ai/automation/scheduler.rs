@@ -1,7 +1,3 @@
-//! Automation scheduler for time-based rule execution.
-//!
-//! 基于时间的规则执行的自动化调度器。
-
 use chrono::{DateTime, Timelike, Utc};
 
 use crate::internal::ai::automation::{

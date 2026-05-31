@@ -1,7 +1,5 @@
 //! Goal event stream — append-only log of everything that happened.
 //!
-//! 目标事件流 — 发生的一切的仅追加日志。
-//!
 //! Per `docs/improvement/opencode.md` lines 578-590, every state change
 //! the supervisor records flows through a [`GoalEvent`] variant. Wrapped
 //! in a [`GoalEventEnvelope`] (id, goal_id, recorded_at), each event is

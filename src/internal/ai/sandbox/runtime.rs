@@ -1,7 +1,5 @@
 //! Runtime enforcement for sandboxed AI tool execution.
 //!
-//! 沙箱 AI 工具执行的运行时执行。
-//!
 //! Boundary: this module applies parsed policy to concrete process/file operations and
 //! must preserve explicit denial reasons for user-facing diagnostics. Hardening tests
 //! cover denied commands, allowed commands, and path escape attempts.

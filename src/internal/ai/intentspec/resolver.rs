@@ -1,8 +1,6 @@
 //! Resolver that locates IntentSpecs from user-supplied identifiers, stored objects,
 //! or active scheduler context.
 //!
-//! 从用户提供的标识符、存储对象或活动调度器上下文中定位 IntentSpec 的解析器。
-//!
 //! Boundary: resolution should be deterministic and must distinguish "not found" from
 //! malformed IDs so callers can show actionable errors. MCP and intent-flow tests cover
 //! plain UUIDs, prefixed object IDs, and absent references.

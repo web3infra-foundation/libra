@@ -1,7 +1,5 @@
 //! Automation MVP for CEX-15.
 //!
-//! CEX-15 的自动化 MVP。
-//!
 //! The first automation slice is deliberately small: parse project rules,
 //! simulate cron triggers, preflight shell actions through the existing safety
 //! classifier, isolate rule failures, and persist execution history through the

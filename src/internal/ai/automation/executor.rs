@@ -1,7 +1,3 @@
-//! Automation rule executor that runs triggered automation actions.
-//!
-//! 运行触发自动化操作的自动化规则执行器。
-
 use std::{path::PathBuf, time::Duration};
 
 use chrono::Utc;

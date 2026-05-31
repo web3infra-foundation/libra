@@ -1,6 +1,4 @@
 //! Tree helpers for converting index entries into git trees and recursively enumerating tree contents with modes and paths.
-//!
-//! 树助手，用于将索引条目转换为 git 树，并使用模式和路径递归枚举树内容。
 
 use std::{collections::HashMap, path::Path};
 

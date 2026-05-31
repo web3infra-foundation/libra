@@ -1,7 +1,5 @@
 //! Static command-safety checks for shell-like AI tool invocations.
 //!
-//! 类 shell AI 工具调用的静态命令安全检查。
-//!
 //! Boundary: checks identify obviously dangerous command forms before runtime launch,
 //! but they are not a replacement for filesystem sandbox enforcement. Hardening tests
 //! cover separators, redirects, destructive commands, and allowlisted cases.

@@ -1,6 +1,4 @@
 //! Implements `show-ref` to list all refs (branches, tags) with their object IDs.
-//!
-//! 实现 `show-ref` 以列出所有参考（分支、标记）及其对象 ID。
 
 use std::io::Write;
 

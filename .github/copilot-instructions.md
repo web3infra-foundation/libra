@@ -1,205 +1,99 @@
-# Libra - Repository Custom Instructions for GitHub Copilot
+# Libra – Repository Custom Instructions for GitHub Copilot
 
 ## What this repo is
 
-Libra is a Rust implementation of an AI agent-native version control system with
-Git on-disk compatibility, SQLite-backed repository metadata, durable AI runtime
-state, tiered local/S3/R2 object storage, and a Cloudflare-backed publish flow.
+This repository (“libra”) implements the core Git engine re-written and extended in Rust: object storage, commit-graph, packfile reader/writer, MIDX/multi-pack index, worktree semantics and transport layer. It’s foundational to the larger monorepo ecosystem at Web3Infra Foundation and is designed for large-scale, multi-client, content-addressed version control.
+When generating code or design suggestions, assume this context: high concurrency, large object graphs, cross-crate modular architecture, Git compatibility (SHA-1 & SHA-256), performance/memory sensitivity, and Rust ecosystem conventions.
 
-This is a single Rust package named `libra` plus two TypeScript/Next.js surfaces:
+## Languages & defaults
 
-- `web/`: the static Code UI exported by Next.js and embedded into the Rust binary.
-- `worker/`: the Libra publish Cloudflare Worker, backed by D1 and R2.
+- Primary language: Rust (edition 2021 or later).
+- Async runtime: Tokio. Logging/tracing: tracing crate.
+- Error handling: for libraries use thiserror; for binaries/tests/tools use anyhow.
+- Serialization: serde; CLI argument parsing: clap.
+- Use unsafe only when absolutely necessary — if used, include // SAFETY: comment with invariants and add tests.
+- Minor scripting / tooling around the engine may use Python or Bash, but core logic should stay in Rust.
 
-Do not assume the older multi-crate `engine/`, `delta/`, `transport/`, or
-`storage/` layout exists. The current implementation lives primarily under
-`src/`, with command handlers in `src/command/` and shared/runtime internals in
-`src/internal/` and `src/utils/`.
+## Build & run
 
-## Repository layout
+- Local iterative workflow: cargo build -p <crate>, cargo test -p <crate>, cargo bench -p <crate>.
 
-- `src/main.rs`: binary entry point.
-- `src/lib.rs`: embedding API (`exec`, `exec_async`) and public re-exports.
-- `src/cli.rs`: clap root grammar, global output flags, repository preflight, and
-  command dispatch.
-- `src/command/`: one module per `libra <subcommand>`, including Git-compatible
-  commands (`init`, `clone`, `add`, `commit`, `push`, `pull`, `status`, `log`,
-  `show`, `diff`, `branch`, `switch`, `checkout`, `merge`, `rebase`, `stash`,
-  `worktree`, etc.) and Libra-only commands (`code`, `code-control`, `agent`,
-  `automation`, `usage`, `graph`, `sandbox`, `cloud`, `publish`, `db`).
-- `src/internal/ai/`: AI runtime, providers, tools, MCP, session storage,
-  permissions, sandboxing, context budget, goal mode, orchestration, skills, and
-  web projections.
-- `src/internal/tui/`: terminal UI for `libra code`.
-- `src/internal/model/`: Sea-ORM models.
-- `src/internal/protocol/`: Git, HTTPS, SSH, LFS, and local protocol clients.
-- `src/internal/publish/`: publish snapshot/export pipeline.
-- `src/utils/`: object/path/storage/output/test helpers, tiered storage,
-  worktree utilities, pager support, and stable CLI error types.
-- `sql/`: SQLite bootstrap schemas and migrations; `sql/publish/` is the publish
-  Worker schema.
-- `tests/`: integration tests. `tests/INDEX.md` is the authoritative index of
-  every cargo `--test` target.
-- `tests/command/`: per-command integration suites and shared command helpers.
-- `tests/compat/`: cross-command compatibility guards that must also be
-  registered as `[[test]]` entries in `Cargo.toml`.
-- `docs/commands/`: user-facing command docs, kept in sync with the CLI surface.
-- `COMPATIBILITY.md`: compatibility matrix guarded by tests.
-- `.github/workflows/`: CI gates. `base.yml` is the main PR gate.
+## Repository architecture & major components
 
-## Languages and defaults
+- Crate layout:
+    - engine/ — core Git object engine (loose objects, object lookup, packfile read/write).
+    - delta/ — delta-chain rewrite engines, multi-pack index support.
+    - transport/ — network layer for fetch/push over Git protocol.
+    - storage/ — content-addressed storage abstraction, pack caches, object caches.
+    - cli/ — command-line utilities, interactive inspection, diagnostics.
+    - common/ — shared utilities (hashing, fan-out tables, error types).
+- Avoid hard-coding paths or assumptions about repository size; design for millions of objects, multiple packfiles, multi-client concurrency.
 
-- Rust edition: 2024.
-- Primary runtime: Tokio.
-- CLI parsing: clap derive in `src/cli.rs` and `src/command/*`.
-- Database: SQLite through Sea-ORM.
-- Serialization: serde and serde_json.
-- Logging/diagnostics: tracing and user-facing `CliError`/`CliResult`.
-- Frontend: Next.js 16, React 19, TypeScript, Tailwind CSS, pnpm.
-- Prefer existing helpers and local patterns over new abstractions. In particular,
-  use `src/utils/`, `src/internal/db.rs`, command test helpers, and AI runtime
-  helper APIs where they already model the behavior being changed.
+## Coding style & quality
 
-## Rust coding rules
+- Enforce rustfmt defaults. New/changed code should compile with zero warnings under cargo build --all-targets.
+- Treat clippy warnings as errors on new code (e.g., #![deny(clippy::all)] in new crates).
+- **Avoid `unwrap()` / `expect()`** in production code (library, CLI commands, internal modules, including startup/initialization). Prefer returning `Result` and propagating errors with `?`, attaching user-friendly context via `anyhow::Context` (`.context("...")` / `.with_context(|| format!(...))`) or domain-specific `thiserror` variants. `unwrap()`/`expect()` are acceptable only in **unit/integration tests** and where the logic is **obviously infallible** (e.g., compile-time-known constants) with a brief `// INVARIANT:` comment. All other code must use graceful error propagation with actionable, user-friendly messages. When reviewing code, flag `unwrap()` / `expect()` in other contexts and suggest a `Result`-based alternative.
+- All errors surfaced to the user must be human-readable and actionable. Avoid exposing raw internal errors; wrap them with context that explains what went wrong, which resource was affected, and how to fix it.
+- Prefer iterator/slice APIs over heap allocations in hot paths. Use SmallVec, bytes, or no-std-friendly patterns when relevant.
+- Document performance expectations for critical code paths (e.g., “expected throughput > X objects/second”, “allocation count < Y per object”).
 
-- Run `cargo +nightly fmt --all` formatting. `rustfmt.toml` groups imports as
-  standard, external, then crate imports.
-- CI treats clippy warnings as failures:
-  `cargo clippy --all-targets --all-features -- -D warnings`.
-- Avoid wildcard imports except in tests.
-- Prefer `anyhow::Result`/`anyhow::Context` for CLI flows and `thiserror` for
-  domain/library errors. User-facing errors must say what failed, which resource
-  was affected, and what the user can do next.
-- Production code must not use `unwrap()`, `expect()`, or `panic!()` unless the
-  case is obviously infallible and has a short `// INVARIANT:` comment. This
-  applies to startup and initialization paths too. Tests may use them.
-- When adding public enum contracts under `src/internal/ai/agent_run/`, preserve
-  additive compatibility with `#[non_exhaustive]` where the existing guard expects
-  it.
-- Respect the repository object format. Libra supports `sha1` and `sha256` via
-  `core.objectformat`; do not hard-code 20-byte object IDs.
-- Keep hot paths streaming and bounded. Avoid unbounded directory walks, retries,
-  buffers, allocations, or network calls in command paths unless clearly justified.
-- Do not log secrets, tokens, provider keys, vault material, full authorization
-  headers, or sensitive AI transcript details. Use existing redaction utilities.
+## Performance & memory
 
-## Build and test commands
+- This engine targets very large repositories — focus on streaming I/O, minimal copying, O(n) algorithms, bounded memory overhead.
+- When dealing with packfiles: consider fan-out tables, delta-chain depth, object reuse, object relocation, compression with zstd or deflate.
+- Support both SHA-1 and SHA-256 object IDs; avoid assumptions about 20-byte vs 32-byte lengths.
+- Provide micro-benchmarks (via criterion) for hot paths; include allocation and throughput metrics. If a change causes a regression (e.g., >5% drop in throughput or >10% increase in allocation count), document it in the PR description and update benchmark results files. Significant regressions (>10% performance drop or allocation increase) should also be noted in CHANGELOG.md.
 
-Use `LIBRA_SKIP_WEB_BUILD=1` for Rust-only iteration when the embedded Code UI is
-not the subject of the change.
+## Git compatibility & hashing
 
-```bash
-cargo +nightly fmt --all --check
-LIBRA_SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features -- -D warnings
-LIBRA_SKIP_WEB_BUILD=1 cargo test --all
-cargo run -- <cmd>
-```
+- Must interoperate with standard Git objects, refs, packfile formats, index formats.
+- Support both legacy SHA-1 and new SHA-256 object IDs; design migration paths and dual-stack invariants.
+- When generating code proposals: explicitly document trade-offs (compatibility vs performance).
+- Avoid assumptions like “object ID is 20 bytes” or “fan-out table always 256 entries” unless clearly parameterized.
 
-Feature-gated Rust tests:
+## API & CLI guidelines
 
-```bash
-cargo test --features test-network --test network_remotes_test
-cargo test --features test-live-ai --test ai_agent_test --test ai_chat_agent_test -- --test-threads=1
-cargo test --features test-live-cloud --test cloud_storage_backup_test --test publish_live_test --test storage_r2_test -- --test-threads=1
-LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider --test code_ui_scenarios --test harness_self_test -- --test-threads=1
-```
+- Public crates: define stable, versioned APIs; avoid leaking internal pack/graph structures unless explicitly marked unstable.
+- CLI tools: default to safe, read-only operations. Provide --dry-run, --json output where appropriate.
+- Tools should allow inspection of object graphs, packfiles, deltas, multi-pack indexes, and expose metrics (size, object count, duplicates).
 
-Web UI checks:
+## Testing & quality
 
-```bash
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web lint
-pnpm --dir web build
-pnpm --dir web test
-```
+- Include unit tests, integration tests, property-based tests (via proptest) especially for object graph, pack behaviour.
+- Use insta for snapshot testing when output is textual or structural.
+- For concurrency/async code (Tokio), include tests that simulate multiple tasks reading/writing/storage simultaneously.
+- For performance-critical modules: include benchmarks (criterion) and ensure no regressions on performance/memory.
 
-Worker checks:
+## Observability & errors
 
-```bash
-pnpm --dir worker lint
-pnpm --dir worker test
-pnpm --dir worker test:miniflare
-pnpm --dir worker build
-```
+- Use tracing spans and fields for operations (e.g., object lookup, pack read, delta apply). Avoid logging sensitive data.
+- Log errors with context, including object ID, ref name, and any relevant parameters. Error messages should be actionable: propagate context, specify which object ID/ref failed, suggest remediation.
+- Provide diagnostics tools/commands for users (e.g., libra inspect-pack, libra delta-stats), wiring logging and metrics.
 
-## Tests and docs synchronization
+## Documentation
 
-- Pair new or changed command behavior with focused tests in `tests/command/` and,
-  when behavior crosses command boundaries, a compat guard in `tests/compat/`.
-- When adding or renaming a top-level integration test target, update
-  `tests/INDEX.md` in the same change.
-- When adding a file under `tests/compat/`, add the corresponding `[[test]]`
-  entry in `Cargo.toml` and update `tests/compat/README.md`.
-- CLI help and docs are part of the public contract. New visible commands/flags
-  need examples, useful flag descriptions, and matching docs under
-  `docs/commands/` when user-facing.
-- New stable error codes such as `LBR-*-NNN` must be documented in
-  `docs/error-codes.md`.
-- Schema changes need SQL migrations under `sql/migrations/` or `sql/publish/`
-  as appropriate, plus migration/bootstrap tests.
-- Externally visible behavior changes should update README, command docs,
-  compatibility docs, or migration notes as needed.
+- Use /// comments on public items; //! at module tops for architecture overviews.
+- Provide README sections with architecture diagrams, sequence diagrams (e.g., pack read → object delta apply → commit lookup), and benchmarks summaries.
+- Use English for broad audience; internal/international teams may include Chinese remarks but primary docs should be English.
+- Suggest code examples for common tasks (e.g., “open packfile”, “iterate objects”, “resolve commit graph”).
 
-## AI runtime and security-sensitive code
+## Git workflow & Pull Requests
 
-- Treat `src/internal/ai/agent/`, `src/internal/ai/tools/`,
-  `src/internal/ai/permission/`, `src/internal/ai/sandbox/`,
-  `src/internal/ai/session/`, `src/internal/ai/providers/`, and
-  `src/command/code*` as security- and reliability-sensitive.
-- Preserve approval, sandbox, ACL, origin/token, redaction, cancellation, session
-  durability, and file-history authority checks unless a test explicitly proves
-  the new contract.
-- Live provider tests must remain feature- and secret-gated. Missing credentials
-  should skip with an explicit message, not fail or silently switch to a costlier
-  provider/model.
-- For provider changes, keep request/response transforms, retry taxonomy,
-  streaming behavior, and context-overflow compaction covered by the relevant
-  `ai_provider_*` tests.
-
-## Frontend and Worker guidance
-
-- `build.rs` embeds `web/out/` with `rust-embed`; setting
-  `LIBRA_SKIP_WEB_BUILD=1` writes a stub output for Rust-only builds. When
-  changing `web/`, run the real `pnpm --dir web build` and keep static export
-  drift clean.
-- The `web/` UI is an operational Code UI, not a marketing landing page. Favor
-  dense, predictable controls and existing components in `web/src/components/ui/`.
-- The `worker/` app serves publish snapshots from D1/R2. Validate request input,
-  preserve redaction and access checks, and keep wire types synchronized with the
-  Rust publish pipeline.
-
-## Git and PR workflow
-
-- This repository is intentionally used through Libra commands where practical:
-  `libra status`, `libra add`, `libra commit -a -s -m "<scope>: ..."`,
-  `libra push origin <branch>`.
-- Commit messages should use short conventional summaries such as
-  `feat(status): support porcelain v2` or `fix(push): record tracking reflog`.
-- Commits are expected to be DCO-signed and PGP-signed:
-  `git commit -S -s -m "scope: message"` when using git directly.
-- PR descriptions should list intent, linked issues, user-visible behavior,
-  tests run, and compatibility or migration impact.
+- Trunk-Based Development: use short-lived branches; merge into main frequently.
+- Commit messages: follow Conventional Commits (feat: …, fix: …, perf: …).
+- Each PR description should include: problem statement, design decision, performance/alloc benchmark (if applicable), tests added, backward-compatibility implications.
+- Update CHANGELOG.md for crates where public API is changed; follow semantic versioning.
 
 ## How Copilot should assist
 
-- Ground suggestions in the actual files in this repository. Do not invent
-  modules or crates that are not present.
-- For CLI work, include clap wiring, handler logic, JSON/machine output behavior
-  where relevant, docs updates, and integration tests.
-- For AI/runtime work, include failure modes, cancellation, persistence,
-  redaction, permissions, and deterministic tests before suggesting live tests.
-- For storage, cloud, and publish work, consider local fallback behavior, D1/R2
-  schema compatibility, retries, object integrity, and resource cleanup.
-- For reviews, use a high-recall production-risk mindset: flag plausible
-  security, correctness, data-loss, compatibility, performance, missing-test, and
-  missing-doc issues. Flag any production `unwrap()`/`expect()` without an
-  invariant comment.
+- When user asks for design or architecture advice: list multiple options, each with trade-offs (performance, memory, compatibility, complexity).
+- When user asks for tests or benchmarks: include criterion example or proptest snippet.
+- When user asks for CLI tool suggestions: include sample clap-derived argument parsing code + usage message + example invocation.
+- Always assume the context of large-scale Git internals (objects, packs, deltas, large monorepo) and include that assumption where relevant.
 
 ## Non-goals
 
-- Do not recommend moving core VCS, AI runtime, or storage logic out of Rust.
-- Do not bypass Git compatibility unless the user explicitly requests a
-  Libra-only behavior and tests/docs mark the boundary.
-- Do not add live network, live AI, or live cloud dependencies to default tests.
-- Do not weaken approval, sandbox, redaction, or secret-handling guarantees for
-  convenience.
+- Do not propose rewriting the entire Git protocol from scratch unless explicitly requested.
+- Do not recommend shifting core logic out of Rust to dynamic languages unless there’s a compelling integration reason.
+- Do not ignore compatibility with standard Git, unless the user explicitly states they are targeting a proprietary system only.

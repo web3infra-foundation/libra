@@ -1,7 +1,5 @@
 //! Config storage helpers backed by sea-orm.
 //!
-//! 由 sea-orm 支持的配置存储助手。
-//!
 //! Two APIs exist side-by-side:
 //!
 //! 1. [`ConfigKv`] (preferred) — flat dotted keys like `remote.origin.url` stored

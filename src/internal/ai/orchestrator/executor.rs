@@ -1,7 +1,5 @@
 //! Task executor for running planned AI work through providers and tool loops.
 //!
-//! 通过提供商和工具循环运行计划 AI 工作的任务执行器。
-//!
 //! Boundary: executor launches attempts and captures outputs, while policy, workspace
 //! sync, verification, and persistence remain separate. DAG/tool-loop and runtime
 //! tests cover tool events, provider errors, and timeout boundaries.

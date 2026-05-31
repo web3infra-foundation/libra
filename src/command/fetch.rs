@@ -1,7 +1,5 @@
 //! Fetch command to negotiate with remotes, download pack data, update
 //! remote-tracking refs, and honor prune/depth options.
-//!
-//! 获取命令，与远程协商、下载包数据、更新远程跟踪参考，并遵守修剪/深度选项。
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -735,8 +733,6 @@ fn is_timeout_io_error(error: &std::io::Error) -> bool {
     lower.contains("timeout") || lower.contains("timed out")
 }
 
-/// Fire-and-forget entry point for the fetch command.
-/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: FetchArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -756,21 +752,6 @@ pub async fn execute(args: FetchArgs) {
 /// Returns [`CliError`] when remote configuration is invalid or missing,
 /// authentication/network/pack negotiation fails, object writes fail, or
 /// remote-tracking refs cannot be updated.
-///
-/// 获取命令的快速执行入口。
-/// 委托给 execute_safe 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
-///
-/// # 副作用
-/// - 读取远程配置并与一个或多个远程协商参考。
-/// - 下载包数据并将接收的对象写入本地存储。
-/// - 更新已获取分支的远程跟踪参考。
-/// - 以请求的输出格式呈现获取状态。
-///
-/// # 错误
-/// 当远程配置无效或缺失、身份验证/网络/包协商失败、对象写入失败或
-/// 无法更新远程跟踪参考时返回 [`CliError`]。
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_fetch(args, output).await?;
     render_fetch_output(&result, output)

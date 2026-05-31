@@ -1,7 +1,5 @@
 //! Shared semantic theme for the TUI.
 //!
-//! TUI 的共享语义主题。
-//!
 //! The theme is organised by *role* rather than by colour name. Widgets call
 //! `theme::text::primary()` instead of `Color::White`, which means a single
 //! palette change here propagates everywhere automatically. Roles are grouped

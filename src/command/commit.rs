@@ -1,6 +1,4 @@
 //! Commit command that collects staged changes, builds tree and commit objects, validates messages (including GPG), and updates HEAD/refs.
-//!
-//! 提交命令，收集暂存的更改，构建树和提交对象，验证消息（包括 GPG），并更新 HEAD/参考。
 
 use std::{
     collections::HashSet,
@@ -781,8 +779,6 @@ fn render_commit_output(result: &CommitOutput, output: &OutputConfig) -> CliResu
     Ok(())
 }
 
-/// Fire-and-forget entry point for the commit command.
-/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: CommitArgs) {
     if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
         error.print_stderr();
@@ -803,20 +799,6 @@ pub async fn execute(args: CommitArgs) {
 /// Returns [`CliError`] when the repository is missing or corrupt, there is
 /// nothing to commit, identity/signing setup fails, object writes fail, or HEAD
 /// cannot be updated.
-///
-/// 提交命令的快速执行入口。
-/// 委托给 execute_safe 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
-///
-/// # 副作用
-/// - 读取索引和暂存对象以构建新的树和提交对象。
-/// - 解析作者/提交者身份，并在启用签名时可选地通过保险库签署提交。
-/// - 写入新对象，更新 HEAD/当前分支，记录 reflog 状态，并呈现请求的成功输出。
-///
-/// # 错误
-/// 当存储库缺失或损坏、没有要提交的内容、身份/签名设置失败、
-/// 对象写入失败或无法更新 HEAD 时返回 [`CliError`]。
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
     render_commit_output(&result, output)?;
@@ -826,9 +808,6 @@ pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<
 
 /// If vault signing is enabled, sign the commit content and return the
 /// formatted `gpgsig` header string. Returns `None` if vault is not configured.
-///
-/// 如果启用了保险库签名，对提交内容进行签名并返回格式化的 `gpgsig` 头字符串。
-/// 如果未配置保险库，返回 `None`。
 async fn vault_sign_commit(
     tree_id: &ObjectHash,
     parent_ids: &[ObjectHash],
@@ -1126,13 +1105,6 @@ mod test {
     use super::*;
     use crate::utils::test::*;
 
-    /// Test scenario: Verify that CommitError::NothingToCommit correctly maps to repo state error codes.
-    /// This test ensures the error produces the correct exit code (128) and stable error code
-    /// (LBR-REPO-003) when no changes are staged for commit.
-    ///
-    /// 测试场景：验证 CommitError::NothingToCommit 正确映射到仓库状态错误代码。
-    /// 此测试确保当没有暂存的更改用于提交时，错误生成正确的退出代码（128）
-    /// 和稳定错误代码（LBR-REPO-003）。
     #[test]
     fn test_commit_error_nothing_to_commit_maps_to_repo_state() {
         let err: CliError = CommitError::NothingToCommit.into();
@@ -1141,10 +1113,6 @@ mod test {
         assert!(err.message().contains("nothing to commit"));
     }
 
-    /// Test scenario: Verify that CommitError Display trait correctly renders static message variants.
-    /// This test pins the exact error message text that users will see in both human-readable
-    /// and JSON output formats. Source-chained variants with wrapped error details are intentionally skipped.
-    ///
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`CommitError`]. These strings are used as the
     /// `CliError` message via `From<CommitError> for CliError` and
@@ -1157,10 +1125,6 @@ mod test {
     /// MessageFileRead) wrap upstream error strings via `{0}` /
     /// `{detail}` and are intentionally skipped — their content is
     /// owned by the wrapped error type.
-    ///
-    /// 测试场景：验证 CommitError Display trait 正确呈现静态消息变体。
-    /// 此测试固定用户将在人类可读和 JSON 输出格式中看到的确切错误消息文本。
-    /// 具有包装错误详情的源链变体被有意跳过。
     #[test]
     fn commit_error_display_pins_static_message_variants() {
         assert_eq!(

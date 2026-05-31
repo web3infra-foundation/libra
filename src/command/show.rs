@@ -1,6 +1,4 @@
 //! Show command that resolves object IDs and prints commit, tree, blob, or ref details with formatting suitable for diffable objects.
-//!
-//! Show 命令，解析对象 ID 并打印提交、树、blob 或参考详情，格式适合可比较的对象。
 
 use std::{path::PathBuf, str::FromStr};
 

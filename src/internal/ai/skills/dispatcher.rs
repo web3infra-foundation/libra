@@ -1,6 +1,4 @@
 //! Skill dispatcher for `/skill <name> ...` invocations.
-//!
-//! `/skill <name> ...` 调用的技能调度程序。
 
 use super::{SkillDefinition, parser::render_skill_metadata_json};
 

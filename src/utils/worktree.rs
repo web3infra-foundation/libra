@@ -1,6 +1,4 @@
 //! Worktree helpers shared across commands.
-//!
-//! 在命令间共享的工作树助手。
 
 use std::path::{Path, PathBuf};
 

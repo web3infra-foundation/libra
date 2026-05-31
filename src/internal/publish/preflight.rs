@@ -1,8 +1,6 @@
 //! Publish preflight: ignore + deny-rule evaluation per
 //! `docs/improvement/publish.md`.
 //!
-//! 发布预检：根据 `docs/improvement/publish.md` 的忽略和拒绝规则评估。
-//!
 //! Phase 3 requires every file the snapshot builder considers to
 //! pass the built-in deny rules and the optional
 //! `.librapublishignore` overlay. The deny rules cover credential-

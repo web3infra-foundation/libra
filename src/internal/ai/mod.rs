@@ -1,7 +1,5 @@
 //! AI Agent Infrastructure for Libra.
 //!
-//! Libra 的 AI 代理基础设施。
-//!
 //! This module is the root of every AI-related capability used by `libra code`,
 //! the MCP server, and the workflow orchestrator. It is organised as a small set
 //! of focused submodules that snap together at runtime:

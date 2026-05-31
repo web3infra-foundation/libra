@@ -1,6 +1,4 @@
 //! SeaORM entity for the task -> run reverse index.
-//!
-//! 任务 -> 运行反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

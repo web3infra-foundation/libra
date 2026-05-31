@@ -1,6 +1,4 @@
 //! Core utility toolbox for repo detection, path conversion, ignore checking, storage access, hashing helpers, and miscellaneous formatting/time utilities.
-//!
-//! 核心实用程序工具箱，用于存储库检测、路径转换、忽略检查、存储访问、哈希助手和杂项格式化/时间实用程序。
 
 use std::{
     collections::{HashMap, HashSet},

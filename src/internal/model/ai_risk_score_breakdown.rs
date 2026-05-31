@@ -1,6 +1,4 @@
 //! SeaORM entity for runtime-owned risk score breakdowns.
-//!
-//! 运行时所有风险评分分解的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

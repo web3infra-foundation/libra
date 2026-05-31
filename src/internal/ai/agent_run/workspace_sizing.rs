@@ -1,8 +1,6 @@
 //! Filesystem sizing measurement for sub-agent workspace strategy
 //! selection (CEX-S2-11).
 //!
-//! 子代理工作区策略选择的文件系统大小测量 (CEX-S2-11)。
-//!
 //! This is the **I/O sibling** of the pure [`super::workspace_strategy`]
 //! module: it walks a source repository to measure the two dimensions
 //! [`select_preferred_strategy`] thresholds on — object-store byte size

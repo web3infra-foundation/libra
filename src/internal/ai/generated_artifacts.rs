@@ -1,7 +1,5 @@
 //! Heuristics for identifying machine-generated build artifact directories.
 //!
-//! 用于识别机器生成的构建工件目录的启发式方法。
-//!
 //! AI agents that snapshot a workspace must avoid mistaking compiler output
 //! for source. This module centralises the whitelist of directory names the
 //! Libra runtime considers "generated" — they are excluded from workspace

@@ -1,8 +1,6 @@
 //! Formal runtime contracts shared by prompt builders, execution phases, validators,
 //! and persistence.
 //!
-//! 提示构建器、执行阶段、验证器和持久化共享的正式运行时契约。
-//!
 //! Boundary: these structs are stable internal APIs. Additive fields need defaults and
 //! tests because persisted runs and projection rebuilds deserialize older records.
 //! Runtime contract tests cover phase transitions and required evidence fields.

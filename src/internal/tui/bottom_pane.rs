@@ -1,7 +1,5 @@
 //! Bottom pane component with input area and status bar.
 //!
-//! 带有输入区域和状态栏的底部窗格组件。
-//!
 //! Provides the user input area and status display at the bottom of the TUI.
 
 use std::{

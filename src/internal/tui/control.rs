@@ -1,7 +1,5 @@
 //! TUI automation control command channel.
 //!
-//! TUI 自动化控制命令通道。
-//!
 //! `TuiControlCommand` is deliberately independent of `AppEvent`. `AppEvent` carries
 //! turn-scoped events (each variant exposes a `turn_id`), whereas automation
 //! respond / cancel / reclaim are control-plane commands that may span turns or

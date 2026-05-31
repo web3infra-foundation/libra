@@ -1,7 +1,5 @@
 //! Allowlist for Libra VCS commands that external AI tool bridges may execute.
 //!
-//! 外部 AI 工具网桥可以执行的 Libra VCS 命令的允许列表。
-//!
 //! Boundary: the allowlist intentionally exposes repository-inspection and safe VCS
 //! commands only; raw shell/git execution stays outside this contract. MCP tests cover
 //! accepted commands, rejected commands, and argument normalization.

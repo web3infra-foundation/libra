@@ -13,10 +13,9 @@ use libra::internal::ai::web::code_ui::{
     CodeUiControllerAttachResponse, CodeUiControllerKind, CodeUiControllerState,
     CodeUiEventEnvelope, CodeUiEventType, CodeUiInteractionKind, CodeUiInteractionOption,
     CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
-    CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPendingPostPlanSnapshot, CodeUiPlanSnapshot,
-    CodeUiPlanStep, CodeUiProviderInfo, CodeUiSessionSnapshot, CodeUiSessionStatus,
-    CodeUiTaskSnapshot, CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
-    CodeUiUsageSnapshot,
+    CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep,
+    CodeUiProviderInfo, CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTaskSnapshot,
+    CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
 };
 use serde_json::{Value, json};
 
@@ -69,25 +68,6 @@ fn fully_populated_snapshot() -> CodeUiSessionSnapshot {
             created_at: ts,
             updated_at: ts,
         }],
-        usage: Some(CodeUiUsageSnapshot {
-            provider: "ollama".to_string(),
-            model: "gemma4:31b".to_string(),
-            prompt_tokens: 12,
-            completion_tokens: 34,
-            total_tokens: 46,
-            cost_usd: Some(0.0012),
-        }),
-        pending_plan_revision: Some("{\"title\":\"Revise current spec\"}".to_string()),
-        pending_post_plan: Some(CodeUiPendingPostPlanSnapshot {
-            spec_json: "{\"title\":\"Execute current plan\"}".to_string(),
-            intent_id: Some("intent-1".to_string()),
-            plan_id: Some("plan-1".to_string()),
-            selected: 1,
-            network_access: true,
-            warnings: vec!["needs-review".to_string()],
-            automatic_repair_attempts: 2,
-            automatic_repair_max_attempts: 4,
-        }),
         plans: vec![CodeUiPlanSnapshot {
             id: "plan-1".to_string(),
             title: Some("Execution".to_string()),
@@ -207,14 +187,6 @@ fn snapshot_round_trips_through_camel_case_wire_shape() {
         serialized["interactions"][0]["status"],
         Value::String("pending".into())
     );
-    assert_eq!(
-        serialized["usage"]["provider"],
-        Value::String("ollama".into())
-    );
-    assert_eq!(
-        serialized["usage"]["totalTokens"],
-        Value::Number(serde_json::Number::from(46))
-    );
 
     // Patchset path round-trips with `changeType` (camelCase from `change_type`).
     assert_eq!(
@@ -228,21 +200,6 @@ fn snapshot_round_trips_through_camel_case_wire_shape() {
     assert_eq!(round_tripped.session_id, "session-1");
     assert_eq!(round_tripped.transcript.len(), 1);
     assert!(round_tripped.transcript[0].streaming);
-    assert_eq!(
-        round_tripped.usage.as_ref().map(|usage| usage.total_tokens),
-        Some(46)
-    );
-    assert_eq!(
-        round_tripped.pending_plan_revision.as_deref(),
-        Some("{\"title\":\"Revise current spec\"}")
-    );
-    assert_eq!(
-        round_tripped
-            .pending_post_plan
-            .as_ref()
-            .map(|pending| pending.plan_id.as_deref()),
-        Some(Some("plan-1"))
-    );
     assert_eq!(round_tripped.controller.kind, CodeUiControllerKind::Browser);
     assert!(round_tripped.controller.loopback_only);
     assert_eq!(

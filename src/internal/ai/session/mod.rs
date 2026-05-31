@@ -1,7 +1,5 @@
 //! Session persistence for saving and restoring conversation state.
 //!
-//! 用于保存和恢复对话状态的会话持久化。
-//!
 //! Sessions capture conversation history, working directory, context mode,
 //! and metadata. They are stored as append-only JSONL event streams in
 //! `.libra/sessions/{session_id}/events.jsonl`.

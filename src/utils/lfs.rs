@@ -1,6 +1,4 @@
 //! LFS helpers to detect tracked files from attributes, compute SHA256 OIDs, build request payloads/headers, and stream uploads or downloads.
-//!
-//! LFS 助手，用于从属性检测跟踪的文件、计算 SHA256 OID、构建请求有效负载/头和流上传或下载。
 
 use std::{
     fs,

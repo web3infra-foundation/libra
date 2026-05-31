@@ -1,6 +1,4 @@
 //! Skill discovery from project and user skill directories.
-//!
-//! 从项目和用户技能目录中的技能发现。
 
 use std::{
     collections::HashSet,

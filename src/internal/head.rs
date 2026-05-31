@@ -1,6 +1,4 @@
 //! HEAD management backed by the database, supporting local and remote heads, detached states, and transaction-safe query/update helpers.
-//!
-//! 由数据库支持的 HEAD 管理，支持本地和远程 HEAD、分离状态以及事务安全查询/更新助手。
 
 use std::{str::FromStr, time::Duration};
 

@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 type ItemProps = {
   /** Primary text. */
   label: string;
-  /** Right-aligned secondary text. */
+  /** Right-aligned secondary text (e.g. account email or rate-limit %). */
   meta?: string;
   /** Right-aligned keyboard shortcut chip. */
   shortcut?: string;
@@ -21,7 +21,7 @@ type ItemProps = {
   active?: boolean;
   /** Tints the row as a destructive action. */
   danger?: boolean;
-  /** Renders `meta` in monospace (used for short codes). */
+  /** Renders `meta` in monospace (used for percentages and short codes). */
   mono?: boolean;
 };
 
@@ -57,7 +57,7 @@ function MenuItem({ label, meta, shortcut, active, danger, mono }: ItemProps) {
 }
 
 /**
- * Floating panel showing local session info and quick links.
+ * Floating panel showing account info, account switcher, and quick links.
  *
  * Positioned absolutely above the avatar button in the sidebar footer. The
  * outer click handler stops bubbling so the sidebar's outside-click guard
@@ -71,20 +71,21 @@ export function SettingsMenu() {
     >
       <div className="mb-1 flex items-center gap-2.5 border-b border-rule px-2 pb-2.5 pt-1.5">
         <div className="grid h-8 w-8 place-items-center rounded-full bg-ink text-[11px] font-semibold text-paper">
-          LC
+          EC
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-semibold">Local session</div>
-          <div className="text-[10.5px] text-ink-3">loopback-only</div>
+          <div className="text-[12.5px] font-semibold">Erin Chen</div>
+          <div className="text-[10.5px] text-ink-3">erin@web3infra.io</div>
         </div>
       </div>
       <div className="flex flex-col gap-px">
-        <MenuItem label="Session" meta="local" active />
-        <MenuItem label="Workspace" meta="libra" />
+        <MenuItem label="Personal account" meta="erin@web3infra.io" active />
+        <MenuItem label="web3infra / libra" meta="team" />
       </div>
       <div className="-mx-1.5 my-1 h-px bg-rule" />
       <MenuItem label="Settings" shortcut="⌘," />
       <MenuItem label="Integrations" />
+      <MenuItem label="Rate limits remaining" meta="84%" mono />
       <div className="-mx-1.5 my-1 h-px bg-rule" />
       <MenuItem label="Keyboard shortcuts" shortcut="⌘/" />
       <MenuItem label="Documentation" />

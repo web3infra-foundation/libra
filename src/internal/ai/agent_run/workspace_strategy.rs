@@ -1,8 +1,6 @@
 //! Workspace strategy selection for sub-agent isolated workspaces
 //! (CEX-S2-11).
 //!
-//! 子代理隔离工作区的工作区策略选择 (CEX-S2-11)。
-//!
 //! This module owns the **pure policy** that picks which materialization
 //! strategy a sub-agent should use for its isolated workspace, given the
 //! source repository's size. It deliberately carries no I/O: the actual

@@ -1,7 +1,5 @@
 //! Libra-side runtime projections over immutable AI history.
 //!
-//! Libra 端在不可变 AI 历史上的运行时投影。
-//!
 //! The types in this module implement the rebuildable Libra layer described in
 //! `docs/agent/agent.md` and `docs/agent/agent-workflow.md`.
 //! `git-internal` remains the source of truth for immutable snapshots and

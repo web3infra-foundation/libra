@@ -1,7 +1,5 @@
 //! Top-level `Snapshot` trait — CEX-00.5 deliverable.
 //!
-//! 顶层 `Snapshot` 特性 — CEX-00.5 可交付物。
-//!
 //! Every immutable Snapshot type the runtime stores (Plan, Task, Run,
 //! IntentSpec, AgentTask, AgentRun, …) should implement this trait so that
 //! projection rebuild and observability code can carry `&dyn Snapshot`

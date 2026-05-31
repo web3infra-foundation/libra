@@ -1,7 +1,5 @@
 //! Append-only per-run event store for sub-agent runs (CEX-S2-11 (3)).
 //!
-//! 子代理运行的每次运行仅追加事件存储 (CEX-S2-11 (3))。
-//!
 //! Every sub-agent lifecycle event — including the
 //! `workspace_materialized` event a workspace materialization emits —
 //! is written to a **per-run** JSONL transcript at

@@ -1,7 +1,3 @@
-//! Usage statistics query helpers for retrieving token consumption data.
-//!
-//! 用于检索令牌消耗数据的使用统计查询助手。
-
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
 use serde::Serialize;
 

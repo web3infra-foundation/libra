@@ -1,6 +1,4 @@
 //! SeaORM entity for the run -> event reverse index.
-//!
-//! 运行 -> 事件反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

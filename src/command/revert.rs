@@ -1,6 +1,4 @@
 //! Implements the revert command by parsing targets, reversing commit changes into the index/worktree, and optionally creating a new commit.
-//!
-//! 实现 revert 命令，通过解析目标、将提交更改反转到索引/工作树中，并可选地创建新提交。
 
 use std::{
     collections::HashSet,

@@ -1,6 +1,4 @@
 //! Implementation of `describe` command, which finds the most recent tag reachable from a commit.
-//!
-//! `describe` 命令的实现，它查找从提交可达的最新标记。
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clap::Parser;

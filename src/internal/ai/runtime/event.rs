@@ -1,7 +1,5 @@
 //! Top-level `Event` trait — CEX-00.5 deliverable.
 //!
-//! 顶层 `Event` 特性 — CEX-00.5 可交付物。
-//!
 //! All append-only event types in the agent runtime should implement this
 //! trait so that `AuditSink` and future projection rebuild code can treat
 //! them uniformly. The trait is dyn-compatible (no generics on methods, no

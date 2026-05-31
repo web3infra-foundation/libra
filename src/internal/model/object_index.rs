@@ -1,6 +1,4 @@
 //! SeaORM entity for object_index table storing Git object metadata for cloud backup synchronization.
-//!
-//! 用于存储 Git 对象元数据以进行云备份同步的 object_index 表的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 
