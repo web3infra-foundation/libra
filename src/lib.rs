@@ -1,3 +1,9 @@
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    reason = "Bilingual mirrored rustdoc keeps source comments readable but does not always map cleanly to Markdown list indentation"
+)]
+
 //! Library entry for the Libra CLI.
 //!
 //! Libra CLI 的库入口。
