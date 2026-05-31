@@ -19,12 +19,13 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
 use serde::Serialize;
 
 use crate::{
     command::{load_object, verify_pack},
     internal::{
+        config::ConfigKv,
         db::get_db_conn_instance,
         model::{object_index, reference, reflog},
     },
@@ -202,6 +203,8 @@ struct Reachability {
     roots: HashSet<ObjectHash>,
     /// Object IDs reached by graph traversal.
     reachable: HashSet<ObjectHash>,
+    /// Non-fatal graph traversal warnings.
+    warnings: Vec<String>,
 }
 
 /// Files in `.libra/objects/pack` grouped by shared pack stem.
@@ -247,7 +250,7 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let policy = prune_policy(args)?;
     let storage = ClientStorage::init(path::objects());
     let mut reachability = collect_reachability(&storage).await?;
-    trace_reachable(&storage, &mut reachability)?;
+    trace_reachable(&storage, &mut reachability);
 
     let loose =
         prune_unreachable_loose_objects(&storage, &reachability, policy, args.dry_run).await?;
@@ -271,7 +274,7 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
             .count(),
     };
 
-    let mut warnings = Vec::new();
+    let mut warnings = reachability.warnings.clone();
     if args.aggressive {
         warnings.push(
             "--aggressive is accepted for compatibility; Libra gc does not repack objects yet"
@@ -431,6 +434,7 @@ async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability
         loose,
         roots,
         reachable: HashSet::new(),
+        warnings: Vec::new(),
     })
 }
 
@@ -527,6 +531,262 @@ async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
 
     roots.extend(stash_roots()?);
     roots.extend(index_roots()?);
+    roots.extend(rebase_state_roots(&db).await?);
+    roots.extend(bisect_state_roots(&db).await?);
+    roots.extend(merge_state_roots()?);
+    roots.extend(object_index_roots(&db).await?);
+    roots.extend(agent_checkpoint_roots(&db).await?);
+    Ok(roots)
+}
+
+/// Check whether an optional SQLite table exists without creating it.
+async fn table_exists<C: ConnectionTrait>(db: &C, table: &str) -> CliResult<bool> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            [table.into()],
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to inspect database schema: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    Ok(row.is_some())
+}
+
+/// Add a hash to a root set when a nullable database value is present.
+fn insert_optional_root(
+    roots: &mut HashSet<ObjectHash>,
+    raw: Option<String>,
+    source: &str,
+) -> CliResult<()> {
+    if let Some(value) = raw {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && !is_null_oid(trimmed) {
+            roots.insert(parse_stored_hash(trimmed, source)?);
+        }
+    }
+    Ok(())
+}
+
+/// Add newline-separated object IDs to a root set.
+fn insert_line_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -> CliResult<()> {
+    for line in raw.lines() {
+        insert_optional_root(roots, Some(line.to_string()), source)?;
+    }
+    Ok(())
+}
+
+/// Load object IDs held by an in-progress rebase state row.
+async fn rebase_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    if !table_exists(db, "rebase_state").await? {
+        return Ok(roots);
+    }
+    let rows = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT onto, orig_head, current_head, todo, done, stopped_sha FROM rebase_state"
+                .to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load rebase_state roots: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    for row in rows {
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(0).ok(),
+            "rebase_state.onto",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(1).ok(),
+            "rebase_state.orig_head",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(2).ok(),
+            "rebase_state.current_head",
+        )?;
+        let todo: String = row.try_get_by_index(3).unwrap_or_default();
+        let done: String = row.try_get_by_index(4).unwrap_or_default();
+        insert_line_roots(&mut roots, &todo, "rebase_state.todo")?;
+        insert_line_roots(&mut roots, &done, "rebase_state.done")?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(5).ok().flatten(),
+            "rebase_state.stopped_sha",
+        )?;
+    }
+    Ok(roots)
+}
+
+/// Load object IDs held by bisect state.
+async fn bisect_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    if !table_exists(db, "bisect_state").await? {
+        return Ok(roots);
+    }
+    let rows = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT orig_head, bad, good, current, skipped FROM bisect_state".to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load bisect_state roots: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    for row in rows {
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(0).ok(),
+            "bisect_state.orig_head",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(1).ok().flatten(),
+            "bisect_state.bad",
+        )?;
+        let good_json: String = row.try_get_by_index(2).unwrap_or_default();
+        let skipped_json: Option<String> = row.try_get_by_index(4).ok().flatten();
+        insert_json_roots(&mut roots, &good_json, "bisect_state.good")?;
+        if let Some(skipped) = skipped_json {
+            insert_json_roots(&mut roots, &skipped, "bisect_state.skipped")?;
+        }
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(3).ok().flatten(),
+            "bisect_state.current",
+        )?;
+    }
+    Ok(roots)
+}
+
+/// Add object IDs from a JSON string array to a root set.
+fn insert_json_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -> CliResult<()> {
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let hashes: Vec<String> = serde_json::from_str(raw).map_err(|error| {
+        CliError::fatal(format!("invalid {source} object list: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    for hash in hashes {
+        insert_optional_root(roots, Some(hash), source)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct MergeStateRoots {
+    orig_head: String,
+    target: String,
+    base: String,
+}
+
+/// Load object IDs from an in-progress merge state file.
+fn merge_state_roots() -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    let path = util::storage_path().join("merge-state.json");
+    let Some(content) = read_optional_metadata_file(&path, "merge state")? else {
+        return Ok(roots);
+    };
+    let state: MergeStateRoots = serde_json::from_str(&content).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to parse merge state '{}': {error}",
+            path.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    insert_optional_root(&mut roots, Some(state.orig_head), "merge-state.orig_head")?;
+    insert_optional_root(&mut roots, Some(state.target), "merge-state.target")?;
+    insert_optional_root(&mut roots, Some(state.base), "merge-state.base")?;
+    Ok(roots)
+}
+
+/// Resolve the current repository ID used by object-index rows.
+async fn current_repo_id<C: ConnectionTrait>(db: &C) -> CliResult<String> {
+    let value = ConfigKv::get_with_conn(db, "libra.repoid")
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to read libra.repoid: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?
+        .map(|entry| entry.value)
+        .unwrap_or_else(|| "unknown-repo".to_string());
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Ok("unknown-repo".to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+/// Load unsynced local cloud index rows that still need object bytes.
+async fn object_index_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    if !table_exists(db, "object_index").await? {
+        return Ok(roots);
+    }
+    let repo_id = current_repo_id(db).await?;
+    let rows = object_index::Entity::find()
+        .filter(object_index::Column::RepoId.eq(repo_id))
+        .filter(object_index::Column::IsSynced.eq(0))
+        .all(db)
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load object_index roots: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    for row in rows {
+        roots.insert(parse_stored_hash(&row.o_id, "object_index.o_id")?);
+    }
+    Ok(roots)
+}
+
+/// Load objects explicitly referenced by the AI checkpoint catalog.
+async fn agent_checkpoint_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    if !table_exists(db, "agent_checkpoint").await? {
+        return Ok(roots);
+    }
+    let rows = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT parent_commit, tree_oid, metadata_blob_oid, traces_commit FROM agent_checkpoint"
+                .to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!("failed to load agent_checkpoint roots: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+    for row in rows {
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(0).ok().flatten(),
+            "agent_checkpoint.parent_commit",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(1).ok(),
+            "agent_checkpoint.tree_oid",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(2).ok(),
+            "agent_checkpoint.metadata_blob_oid",
+        )?;
+        insert_optional_root(
+            &mut roots,
+            row.try_get_by_index(3).ok(),
+            "agent_checkpoint.traces_commit",
+        )?;
+    }
     Ok(roots)
 }
 
@@ -609,19 +869,28 @@ fn index_roots() -> CliResult<HashSet<ObjectHash>> {
 }
 
 /// Traverse the object graph from roots and mark all reachable objects.
-fn trace_reachable(storage: &ClientStorage, reachability: &mut Reachability) -> CliResult<()> {
+fn trace_reachable(storage: &ClientStorage, reachability: &mut Reachability) {
     let mut queue = VecDeque::from_iter(reachability.roots.iter().copied());
     while let Some(hash) = queue.pop_front() {
         if !reachability.reachable.insert(hash) {
             continue;
         }
-        for child in object_children(storage, &hash)? {
-            if !reachability.reachable.contains(&child) {
-                queue.push_back(child);
+        match object_children(storage, &hash) {
+            Ok(children) => {
+                for child in children {
+                    if !reachability.reachable.contains(&child) {
+                        queue.push_back(child);
+                    }
+                }
+            }
+            Err(error) => {
+                reachability.warnings.push(format!(
+                    "skipping unreachable root expansion for {hash}: {}",
+                    error.render()
+                ));
             }
         }
     }
-    Ok(())
 }
 
 /// Return object IDs directly referenced by a commit, tree, tag, or blob.
@@ -689,7 +958,7 @@ async fn prune_unreachable_loose_objects(
             } else {
                 remove_file(&loose.path)?;
                 remove_empty_parent_dir(&loose.path)?;
-                if !storage.exist(&loose.hash) {
+                if !storage.local_exist(&loose.hash) {
                     remove_object_index_rows(&loose.hash).await?;
                 }
                 GcAction::Pruned
@@ -716,8 +985,10 @@ async fn prune_unreachable_loose_objects(
 /// Remove local cloud-backup index rows for an object no longer present locally.
 async fn remove_object_index_rows(hash: &ObjectHash) -> CliResult<()> {
     let db = get_db_conn_instance().await;
+    let repo_id = current_repo_id(&db).await?;
     object_index::Entity::delete_many()
         .filter(object_index::Column::OId.eq(hash.to_string()))
+        .filter(object_index::Column::RepoId.eq(repo_id))
         .exec(&db)
         .await
         .map_err(|error| {
@@ -994,6 +1265,19 @@ mod tests {
         }
     }
 
+    /// Mark a test object's local cloud index row as already synced.
+    async fn mark_object_index_synced(hash: ObjectHash) {
+        ClientStorage::wait_for_background_tasks();
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE object_index SET is_synced = 1 WHERE o_id = ?",
+            [hash.to_string().into()],
+        ))
+        .await
+        .unwrap();
+    }
+
     #[test]
     /// Covers `never` and immediate prune-date parsing.
     fn parse_prune_date_accepts_never_and_now() {
@@ -1163,8 +1447,9 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([commit.id]),
             reachable: HashSet::new(),
+            warnings: Vec::new(),
         };
-        trace_reachable(&storage, &mut reachability).unwrap();
+        trace_reachable(&storage, &mut reachability);
 
         assert!(reachability.reachable.contains(&commit.id));
         assert!(reachability.reachable.contains(&tree.id));
@@ -1206,8 +1491,9 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([commit.id]),
             reachable: HashSet::new(),
+            warnings: Vec::new(),
         };
-        trace_reachable(&storage, &mut reachability).unwrap();
+        trace_reachable(&storage, &mut reachability);
 
         assert!(reachability.reachable.contains(&blob.id));
         assert!(!reachability.reachable.contains(&gitlink));
@@ -1228,10 +1514,33 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([blob.id]),
             reachable: HashSet::from([blob.id]),
+            warnings: Vec::new(),
         };
-        trace_reachable(&storage, &mut reachability).unwrap();
+        trace_reachable(&storage, &mut reachability);
 
         assert_eq!(reachability.reachable.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers stale roots being retained without aborting graph traversal.
+    async fn trace_reachable_warns_for_missing_root() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let missing = test_hash(12);
+        let mut reachability = Reachability {
+            loose: Vec::new(),
+            roots: HashSet::from([missing]),
+            reachable: HashSet::new(),
+            warnings: Vec::new(),
+        };
+
+        trace_reachable(&storage, &mut reachability);
+
+        assert!(reachability.reachable.contains(&missing));
+        assert_eq!(reachability.warnings.len(), 1);
     }
 
     #[tokio::test]
@@ -1249,6 +1558,7 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
             reachable: HashSet::new(),
+            warnings: Vec::new(),
         };
 
         let actions = prune_unreachable_loose_objects(
@@ -1278,6 +1588,7 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
             reachable: HashSet::new(),
+            warnings: Vec::new(),
         };
 
         let actions = prune_unreachable_loose_objects(
@@ -1302,11 +1613,30 @@ mod tests {
         let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("indexed garbage");
+        ConfigKv::set("libra.repoid", "repo-a", false)
+            .await
+            .unwrap();
         storage.put(&blob.id, &blob.data, blob.get_type()).unwrap();
         ClientStorage::wait_for_background_tasks();
         let db = get_db_conn_instance().await;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE object_index SET is_synced = 1 WHERE o_id = ? AND repo_id = 'repo-a'",
+            [blob.id.to_string().into()],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+             VALUES (?, 'blob', 1, 'repo-b', 1, 1)",
+            [blob.id.to_string().into()],
+        ))
+        .await
+        .unwrap();
         let before = object_index::Entity::find()
             .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .filter(object_index::Column::RepoId.eq("repo-a"))
             .one(&db)
             .await
             .unwrap();
@@ -1316,6 +1646,7 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::new(),
             reachable: HashSet::new(),
+            warnings: Vec::new(),
         };
         let actions = prune_unreachable_loose_objects(
             &storage,
@@ -1329,10 +1660,18 @@ mod tests {
         assert_eq!(actions[0].action, GcAction::Pruned);
         let after = object_index::Entity::find()
             .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .filter(object_index::Column::RepoId.eq("repo-a"))
             .one(&db)
             .await
             .unwrap();
         assert!(after.is_none());
+        let other_repo = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .filter(object_index::Column::RepoId.eq("repo-b"))
+            .one(&db)
+            .await
+            .unwrap();
+        assert!(other_repo.is_some());
     }
 
     #[tokio::test]
@@ -1350,6 +1689,7 @@ mod tests {
             loose: list_loose_objects(&path::objects()).unwrap(),
             roots: HashSet::from([blob.id]),
             reachable: HashSet::from([blob.id]),
+            warnings: Vec::new(),
         };
 
         let actions = prune_unreachable_loose_objects(
@@ -1487,6 +1827,7 @@ mod tests {
 
         let blob = Blob::from_content("unreachable");
         save_object(&blob, &blob.id).unwrap();
+        mark_object_index_synced(blob.id).await;
 
         let output = run_gc(&GcArgs {
             dry_run: false,
@@ -1514,6 +1855,7 @@ mod tests {
 
         let blob = Blob::from_content("unreachable");
         save_object(&blob, &blob.id).unwrap();
+        mark_object_index_synced(blob.id).await;
 
         let output = run_gc(&GcArgs {
             dry_run: false,
@@ -1768,6 +2110,260 @@ mod tests {
 
         let roots = collect_roots_from_database().await.unwrap();
         assert!(!roots.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers rebase state commits being protected as roots.
+    async fn collect_roots_includes_rebase_state() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let onto = test_hash(20);
+        let orig_head = test_hash(21);
+        let current_head = test_hash(22);
+        let todo = test_hash(23);
+        let done = test_hash(24);
+        let stopped = test_hash(25);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS rebase_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                head_name TEXT NOT NULL,
+                onto TEXT NOT NULL,
+                orig_head TEXT NOT NULL,
+                current_head TEXT NOT NULL,
+                todo TEXT NOT NULL,
+                done TEXT NOT NULL,
+                stopped_sha TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM rebase_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO rebase_state
+                (head_name, onto, orig_head, current_head, todo, done, stopped_sha)
+             VALUES ('main', ?, ?, ?, ?, ?, ?)",
+            [
+                onto.to_string().into(),
+                orig_head.to_string().into(),
+                current_head.to_string().into(),
+                todo.to_string().into(),
+                done.to_string().into(),
+                stopped.to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let roots = collect_roots_from_database().await.unwrap();
+
+        for hash in [onto, orig_head, current_head, todo, done, stopped] {
+            assert!(roots.contains(&hash));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers bisect state commits being protected as roots.
+    async fn collect_roots_includes_bisect_state() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let orig_head = test_hash(30);
+        let bad = test_hash(31);
+        let good = test_hash(32);
+        let current = test_hash(33);
+        let skipped = test_hash(34);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE bisect_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                orig_head TEXT NOT NULL,
+                orig_head_name TEXT,
+                bad TEXT,
+                good TEXT NOT NULL,
+                current TEXT,
+                skipped TEXT,
+                steps INTEGER,
+                completed INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO bisect_state
+                (orig_head, orig_head_name, bad, good, current, skipped, steps, completed)
+             VALUES (?, 'main', ?, ?, ?, ?, 1, 0)",
+            [
+                orig_head.to_string().into(),
+                bad.to_string().into(),
+                serde_json::json!([good.to_string()]).to_string().into(),
+                current.to_string().into(),
+                serde_json::json!([skipped.to_string()]).to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let roots = collect_roots_from_database().await.unwrap();
+
+        for hash in [orig_head, bad, good, current, skipped] {
+            assert!(roots.contains(&hash));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers merge state commits being protected as roots.
+    async fn collect_roots_includes_merge_state_file() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let orig_head = test_hash(40);
+        let target = test_hash(41);
+        let base = test_hash(42);
+        fs::write(
+            util::storage_path().join("merge-state.json"),
+            serde_json::json!({
+                "head_name": "main",
+                "orig_head": orig_head.to_string(),
+                "target": target.to_string(),
+                "target_ref": "topic",
+                "base": base.to_string(),
+                "conflicted_paths": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let roots = collect_roots_from_database().await.unwrap();
+
+        assert!(roots.contains(&orig_head));
+        assert!(roots.contains(&target));
+        assert!(roots.contains(&base));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers unsynced object-index rows and agent checkpoints as roots.
+    async fn collect_roots_includes_cloud_and_agent_catalogs() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        ConfigKv::set("libra.repoid", "repo-a", false)
+            .await
+            .unwrap();
+        let db = get_db_conn_instance().await;
+        let unsynced = test_hash(50);
+        let other_repo = test_hash(51);
+        let synced = test_hash(52);
+        let parent = test_hash(53);
+        let tree = test_hash(54);
+        let metadata = test_hash(55);
+        let traces = test_hash(56);
+        for (hash, repo_id, is_synced) in [
+            (unsynced, "repo-a", 0),
+            (other_repo, "repo-b", 0),
+            (synced, "repo-a", 1),
+        ] {
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+                 VALUES (?, 'blob', 1, ?, 1, ?)",
+                [
+                    hash.to_string().into(),
+                    repo_id.into(),
+                    i64::from(is_synced).into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        }
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS agent_session (
+                session_id TEXT PRIMARY KEY,
+                agent_kind TEXT NOT NULL,
+                provider_session_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                redaction_report TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                schema_version INTEGER NOT NULL
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT OR IGNORE INTO agent_session (
+                session_id, agent_kind, provider_session_id, state, working_dir,
+                metadata_json, redaction_report, started_at, last_event_at, schema_version
+            ) VALUES ('session', 'codex', 'provider', 'active', '.', '{}', '{}', 1, 1, 1)",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS agent_checkpoint (
+                checkpoint_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                scope TEXT NOT NULL,
+                parent_commit TEXT,
+                tree_oid TEXT NOT NULL,
+                metadata_blob_oid TEXT NOT NULL,
+                traces_commit TEXT NOT NULL,
+                tool_use_id TEXT,
+                subagent_session_id TEXT,
+                description TEXT,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO agent_checkpoint
+                (checkpoint_id, session_id, scope, parent_commit, tree_oid,
+                 metadata_blob_oid, traces_commit, created_at)
+             VALUES ('cp', 'session', 'temporary', ?, ?, ?, ?, 1)",
+            [
+                parent.to_string().into(),
+                tree.to_string().into(),
+                metadata.to_string().into(),
+                traces.to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let roots = collect_roots_from_database().await.unwrap();
+
+        assert!(roots.contains(&unsynced));
+        assert!(!roots.contains(&other_repo));
+        assert!(!roots.contains(&synced));
+        for hash in [parent, tree, metadata, traces] {
+            assert!(roots.contains(&hash));
+        }
     }
 
     #[tokio::test]

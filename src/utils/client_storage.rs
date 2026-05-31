@@ -572,6 +572,19 @@ impl ClientStorage {
         self.block_on_storage(async move { storage.exist(&hash).await })
     }
 
+    /// Check whether an object exists in the local object database only.
+    ///
+    /// Boundary conditions:
+    /// - Ignores any configured remote tier. Maintenance commands use this when
+    ///   updating local metadata that must reflect `.libra/objects`, not cloud state.
+    /// - Pack lookup follows [`LocalStorage::exist`] semantics, including treating
+    ///   unreadable pack data as missing after logging a warning.
+    pub fn local_exist(&self, obj_id: &ObjectHash) -> bool {
+        let storage = LocalStorage::new(self.base_path.clone());
+        let hash = *obj_id;
+        self.block_on_storage(async move { storage.exist(&hash).await })
+    }
+
     /// Read just the `ObjectType` for `obj_id`.
     ///
     /// Boundary conditions:
