@@ -1,5 +1,7 @@
 //! AI object model export planning.
 //!
+//! AI 对象模型导出规划。
+//!
 //! This module is the bridge between redacted AI object envelopes and
 //! the publish artefacts written to R2/D1: per-object JSON keys,
 //! `ai/index.json`, the graph projection, and the revision bundle.

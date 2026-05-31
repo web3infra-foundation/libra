@@ -1,5 +1,7 @@
 //! Publish snapshot builder — Phase 3 of `docs/improvement/publish.md`.
 //!
+//! 发布快照构建器 — `docs/improvement/publish.md` 的第 3 阶段。
+//!
 //! The snapshot builder takes a list of refs (`refs/heads/*` and
 //! `refs/tags/*`), resolves each to a commit oid, dedupes by
 //! revision oid, and produces, for every unique revision:

@@ -1,5 +1,7 @@
 //! Date parsing helpers for log/reflog-style revision filters.
 //!
+//! 日志/reflog 样式修订版过滤器的日期解析助手。
+//!
 //! Boundary: parser accepts Git-like relative and absolute date strings, returning
 //! contextual errors for malformed input instead of silently broadening filters. Log
 //! command tests cover valid aliases, invalid dates, and timezone-sensitive cases.
