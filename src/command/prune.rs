@@ -202,9 +202,14 @@ async fn collect_reachable_objects(
 async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
     let mut packed_objects = HashSet::new();
     let pack_dir = storage.base_path().join("pack");
-    if pack_dir.exists()
-        && let Ok(entries) = fs::read_dir(&pack_dir)
-    {
+    if pack_dir.exists() {
+        let entries = fs::read_dir(&pack_dir).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read pack directory '{}': {error}",
+                pack_dir.display()
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "idx") {
@@ -330,9 +335,11 @@ async fn collect_starting_points(
 
     // Index
     let index_path = path::index();
-    if index_path.exists()
-        && let Ok(index) = Index::load(&index_path)
-    {
+    if index_path.exists() {
+        let index = Index::load(&index_path).map_err(|error| {
+            CliError::fatal(format!("failed to load index: {error}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
         for entry in index.tracked_entries(0) {
             starting_points.insert(entry.hash);
         }
