@@ -9,6 +9,16 @@
 //! attributes to bridge `snake_case` Rust identifiers with the API's `lowercase`
 //! conventions. None of these types perform I/O; they are pure data carriers used by
 //! [`crate::internal::protocol::lfs_client`] and [`crate::command::lfs`].
+//!
+//! Git LFS HTTP API 的数据结构。
+//!
+//! 这些类型编码/解码与 LFS 服务器交换的 JSON 有效负载：批处理请求、传输适配器选择、签名
+//! 操作 URL（下载/上传/验证）、文件锁和分块传输元数据。
+//!
+//! 所有结构都与 LFS 规范定义的线路格式匹配（<https://github.com/git-lfs/git-lfs/blob/main/docs/api>），
+//! 并依赖 `serde` 重命名属性来桥接 `snake_case` Rust 标识符与 API 的 `lowercase` 约定。
+//! 这些类型都不执行 I/O；它们是 [`crate::internal::protocol::lfs_client`] 和 [`crate::command::lfs`]
+//! 使用的纯数据载体。
 
 use std::collections::HashMap;
 
@@ -18,28 +28,40 @@ use serde::{Deserialize, Serialize};
 ///
 /// The LFS server advertises which adapters it supports; clients echo back the one
 /// they want to use. `BASIC` is the only adapter every server must implement.
+///
+/// 为批处理请求协商的传输适配器。
+///
+/// LFS 服务器声传它支持哪些适配器；客户端回应它想使用的。`BASIC` 是每个服务器必须实现的
+/// 唯一适配器。
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub enum TransferMode {
     /// Single-shot download/upload through the URL returned in `actions`.
+    /// 通过在 `actions` 中返回的 URL 进行一次性下载/上传。
     #[default]
     #[serde(rename = "basic")]
     BASIC,
     /// Object split into discrete pieces, each with its own URL — typically used for
     /// objects larger than the configured chunk threshold.
+    /// 对象分成离散的片段，每个片段都有自己的 URL — 通常用于大于配置的块阈值的对象。
     #[serde(rename = "multipart")]
     MULTIPART,
     /// Streaming uploads via TUS-like resumable PATCH semantics. Reserved by the spec
     /// but not yet implemented in Libra.
+    /// 通过类似 TUS 的可恢复 PATCH 语义进行流式上传。由规范保留但尚未在 Libra 中实现。
     STREAMING,
 }
 
 /// Direction of an LFS batch request.
+///
+/// LFS 批处理请求的方向。
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
 pub enum Operation {
     /// Server-to-client: fetch object content.
+    /// 服务器到客户端：获取对象内容。
     #[serde(rename = "download")]
     Download,
     /// Client-to-server: push object content.
+    /// 客户端到服务器：推送对象内容。
     #[serde(rename = "upload")]
     Upload,
 }
@@ -131,6 +153,18 @@ impl Link {
     /// - `href` is stored verbatim; callers are responsible for URL encoding.
     /// - The 24-hour expiry is not configurable here; servers that wish to issue
     ///   shorter-lived URLs should construct the struct manually.
+    ///
+    /// 使用合理的默认值为 LFS 操作 URL 构建 [`Link`]。
+    ///
+    /// 功能范围：
+    /// - 设置 `Accept: application/vnd.git-lfs` 标头，以便下游 HTTP 客户端协商 LFS 媒体类型，
+    ///   而无需记住它。
+    /// - 将 `expires_at` 标记为未来 24 小时（RFC 3339），这是 Git LFS 客户端期望的默认 LFS 操作
+    ///   生命周期。
+    ///
+    /// 边界条件：
+    /// - `href` 按原样存储；调用者负责 URL 编码。
+    /// - 24 小时过期在这里不可配置；希望发布寿命较短的 URL 的服务器应手动构建结构。
     pub fn new(href: &str) -> Self {
         let mut header = HashMap::new();
         header.insert("Accept".to_string(), "application/vnd.git-lfs".to_owned());
@@ -199,6 +233,22 @@ impl ResponseObject {
     ///   correlate the response with its own request even when reordering occurs.
     /// - `authenticated` is always `Some(true)` because Libra only returns response
     ///   objects after the surrounding handler has authenticated the caller.
+    ///
+    /// 为 LFS 批 API 定义的四个 `(file_exist, operation)` 组合构建 [`ResponseObject`]。
+    ///
+    /// 按 `res_condition` 的功能范围：
+    /// - `(file_exist=true, Upload)`：完全省略 `actions`，以便客户端知道服务器已经拥有对象
+    ///   并跳过上传 — 规范要求。
+    /// - `(file_exist=true, Download)`：发出指向 `download_url` 的单个 `Download` 操作。
+    /// - `(file_exist=false, Upload)`：发出指向 `upload_url` 的单个 `Upload` 操作。
+    ///   （TUS 验证已接线但当前已禁用 — 见源代码中的注释块。）
+    /// - `(file_exist=false, Download)`：无法服务对象；用 HTTP 风格代码 404 填充 `error`。
+    ///
+    /// 边界条件：
+    /// - `meta.oid` 和 `meta.size` 被逐字回显，以便 LFS 客户端即使在发生重新排序时也可以
+    ///   将响应与自己的请求相关联。
+    /// - `authenticated` 总是 `Some(true)`，因为 Libra 仅在周围处理器验证了调用者后才返回
+    ///   响应对象。
     pub fn new(
         meta: &MetaObject,
         res_condition: ResCondition,
@@ -267,6 +317,11 @@ impl ResponseObject {
     /// Used when the server cannot even compute a [`MetaObject`] (e.g. the OID is
     /// malformed or storage is unreachable), so the normal [`ResponseObject::new`]
     /// path cannot run.
+    ///
+    /// 为 `object` 构造仅失败的响应，携带 `err`。
+    ///
+    /// 当服务器甚至无法计算 [`MetaObject`] 时使用（例如，OID 格式错误或存储无法访问），
+    /// 因此正常的 [`ResponseObject::new`] 路径无法运行。
     pub fn failed_with_err(object: &RequestObject, err: ObjectError) -> ResponseObject {
         ResponseObject {
             oid: object.oid.to_owned(),
