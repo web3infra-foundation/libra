@@ -1,5 +1,7 @@
 //! Append-only event types for sub-agent runs.
 //!
+//! 子代理运行的仅追加事件类型。
+//!
 //! # Unknown-event-safe envelope (S2-INV-10 / R-A3)
 //!
 //! Two-layer pattern:

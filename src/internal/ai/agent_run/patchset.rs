@@ -1,6 +1,8 @@
 //! `AgentPatchSet[S]` snapshot — sub-agent output staged in the isolated
 //! workspace; never applied to the main worktree without a `MergeDecision`.
 //!
+//! `AgentPatchSet[S]` 快照 — 在隔离工作区中暂存的子代理输出；没有 `MergeDecision` 则永远不会应用于主工作树。
+//!
 //! Per S2-INV-03, sub-agent patches must NOT touch the main worktree until
 //! Layer 1 issues an `accept` decision. This wrapper carries the `PatchSet`
 //! id reference plus sub-agent provenance fields (the actual diff bytes stay

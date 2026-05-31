@@ -1,5 +1,7 @@
 //! `AgentTask[S]` snapshot: a Phase-2 dispatch unit derived from a confirmed
 //! `Task`. References — does not copy — the persistent `Task` business fields.
+//!
+//! `AgentTask[S]` 快照：从已确认 `Task` 派生的第 2 阶段调度单元。引用（不复制）持久化 `Task` 业务字段。
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

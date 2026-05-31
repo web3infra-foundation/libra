@@ -1,6 +1,8 @@
 //! `AgentContextPack[S]` snapshot — the read-only context bundle handed to a
 //! sub-agent at spawn time.
 //!
+//! `AgentContextPack[S]` 快照 — 在生成时传递给子代理的只读上下文包。
+//!
 //! Per CEX-S2-01 readiness matrix, the **schema** of this pack depends on
 //! Step 1.3 (`list_symbols` / `read_symbol`) and Step 1.9
 //! (`ContextFrame` / `MemoryAnchor`). Until those land, this scaffold only

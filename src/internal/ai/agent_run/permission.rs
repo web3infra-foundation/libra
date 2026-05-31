@@ -1,5 +1,7 @@
 //! `AgentPermissionProfile[S]` snapshot.
 //!
+//! `AgentPermissionProfile[S]` 快照。
+//!
 //! Per S2-INV-05 sub-agent tool policy is **default deny**; every Worker /
 //! Explorer / Reviewer agent must declare its allowed tools, sources, and
 //! approval mode explicitly. The exact `ApprovalKey` shape is owned by Step
