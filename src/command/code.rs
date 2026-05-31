@@ -1,99 +1,99 @@
 //! # Code Command — Interactive AI-Powered Coding Sessions
-//! 中文：标题：Code Command — Interactive AI-Powered Coding Sessions。
+//!   中文：标题：Code Command — Interactive AI-Powered Coding Sessions。
 //!
 //! This module implements the `libra code` subcommand, which is the primary entry point
-//! 中文：该注释与英文“This module implements the `libra code` subcommand, which is the primary entry point”含义一致。
+//!   中文：该注释与英文“This module implements the `libra code` subcommand, which is the primary entry point”含义一致。
 //! for AI-agent-driven and human-collaborative development within a Libra repository.
-//! 中文：该注释与英文“for AI-agent-driven and human-collaborative development within a Libra repository.”含义一致。
+//!   中文：该注释与英文“for AI-agent-driven and human-collaborative development within a Libra repository.”含义一致。
 //!
 //! ## Architecture Overview
-//! 中文：标题：Architecture Overview。
+//!   中文：标题：Architecture Overview。
 //!
 //! The command orchestrates several concurrent subsystems:
-//! 中文：该注释与英文“The command orchestrates several concurrent subsystems:”含义一致。
+//!   中文：该注释与英文“The command orchestrates several concurrent subsystems:”含义一致。
 //!
 //! - **TUI (Terminal UI)**: A `ratatui`/`crossterm`-based interactive terminal interface
-//! 中文：列表项说明与英文“**TUI (Terminal UI)**: A `ratatui`/`crossterm`-based interactive terminal interface”含义一致。
+//!   中文：列表项说明与英文“**TUI (Terminal UI)**: A `ratatui`/`crossterm`-based interactive terminal interface”含义一致。
 //!   that renders the chat conversation, tool outputs, and approval prompts.
-//! 中文：该注释与英文“that renders the chat conversation, tool outputs, and approval prompts.”含义一致。
+//!   中文：该注释与英文“that renders the chat conversation, tool outputs, and approval prompts.”含义一致。
 //! - **Web Server**: An embedded `axum` HTTP server that serves the Next.js static export
-//! 中文：列表项说明与英文“**Web Server**: An embedded `axum` HTTP server that serves the Next.js static export”含义一致。
+//!   中文：列表项说明与英文“**Web Server**: An embedded `axum` HTTP server that serves the Next.js static export”含义一致。
 //!   from `web/out/`, providing a browser-based UI alternative.
-//! 中文：该注释与英文“from `web/out/`, providing a browser-based UI alternative.”含义一致。
+//!   中文：该注释与英文“from `web/out/`, providing a browser-based UI alternative.”含义一致。
 //! - **MCP Server**: A Model Context Protocol server (using `rmcp`) that exposes Libra's
-//! 中文：列表项说明与英文“**MCP Server**: A Model Context Protocol server (using `rmcp`) that exposes Libra's”含义一致。
+//!   中文：列表项说明与英文“**MCP Server**: A Model Context Protocol server (using `rmcp`) that exposes Libra's”含义一致。
 //!   tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,
-//! 中文：该注释与英文“tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,”含义一致。
+//!   中文：该注释与英文“tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,”含义一致。
 //!   enabling integration with external AI clients such as Claude Desktop.
-//! 中文：该注释与英文“enabling integration with external AI clients such as Claude Desktop.”含义一致。
+//!   中文：该注释与英文“enabling integration with external AI clients such as Claude Desktop.”含义一致。
 //! - **AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,
-//! 中文：列表项说明与英文“**AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,”含义一致。
+//!   中文：列表项说明与英文“**AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,”含义一致。
 //!   OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama) or the managed Codex runtime.
-//! 中文：该注释与英文“OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama) or the managed Codex runtime.”含义一致。
+//!   中文：该注释与英文“OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama) or the managed Codex runtime.”含义一致。
 //!
 //! ## Supported Modes
-//! 中文：标题：Supported Modes。
+//!   中文：标题：Supported Modes。
 //!
 //! The command supports three mutually exclusive operating modes:
-//! 中文：该注释与英文“The command supports three mutually exclusive operating modes:”含义一致。
+//!   中文：该注释与英文“The command supports three mutually exclusive operating modes:”含义一致。
 //!
 //! | Mode | Flag | Description |
-//! 中文：该注释与英文“| Mode | Flag | Description |”含义一致。
+//!   中文：该注释与英文“| Mode | Flag | Description |”含义一致。
 //! |------|------|-------------|
 //! | **TUI** (default) | *(none)* | Full interactive terminal UI with background web + MCP servers |
-//! 中文：该注释与英文“| **TUI** (default) | *(none)* | Full interactive terminal UI with background web + MCP servers |”含义一致。
+//!   中文：该注释与英文“| **TUI** (default) | *(none)* | Full interactive terminal UI with background web + MCP servers |”含义一致。
 //! | **Web-only** | `--web` | Headless web server + MCP server; no terminal UI |
-//! 中文：该注释与英文“| **Web-only** | `--web` | Headless web server + MCP server; no terminal UI |”含义一致。
+//!   中文：该注释与英文“| **Web-only** | `--web` | Headless web server + MCP server; no terminal UI |”含义一致。
 //! | **Stdio** | `--stdio` | MCP server over stdin/stdout for AI client integration |
-//! 中文：该注释与英文“| **Stdio** | `--stdio` | MCP server over stdin/stdout for AI client integration |”含义一致。
+//!   中文：该注释与英文“| **Stdio** | `--stdio` | MCP server over stdin/stdout for AI client integration |”含义一致。
 //!
 //! ## Provider Dispatch
-//! 中文：标题：Provider Dispatch。
+//!   中文：标题：Provider Dispatch。
 //!
 //! The `--provider` flag selects the AI backend. Each provider follows the same pattern:
-//! 中文：该注释与英文“The `--provider` flag selects the AI backend. Each provider follows the same pattern:”含义一致。
+//!   中文：该注释与英文“The `--provider` flag selects the AI backend. Each provider follows the same pattern:”含义一致。
 //! 1. Create a client from environment variables (API keys).
-//! 中文：该注释与英文“1. Create a client from environment variables (API keys).”含义一致。
+//!   中文：该注释与英文“1. Create a client from environment variables (API keys).”含义一致。
 //! 2. Instantiate a completion model with the selected (or default) model name.
-//! 中文：该注释与英文“2. Instantiate a completion model with the selected (or default) model name.”含义一致。
+//!   中文：该注释与英文“2. Instantiate a completion model with the selected (or default) model name.”含义一致。
 //! 3. Pass the model into the shared `run_tui_with_model` function.
-//! 中文：该注释与英文“3. Pass the model into the shared `run_tui_with_model` function.”含义一致。
+//!   中文：该注释与英文“3. Pass the model into the shared `run_tui_with_model` function.”含义一致。
 //!
 //! The `codex` provider bypasses the generic completion model path and uses its
-//! 中文：该注释与英文“The `codex` provider bypasses the generic completion model path and uses its”含义一致。
+//!   中文：该注释与英文“The `codex` provider bypasses the generic completion model path and uses its”含义一致。
 //! managed app-server runtime with a dedicated execution flow.
-//! 中文：该注释与英文“managed app-server runtime with a dedicated execution flow.”含义一致。
+//!   中文：该注释与英文“managed app-server runtime with a dedicated execution flow.”含义一致。
 //!
 //! ## Sandbox & Approval
-//! 中文：标题：Sandbox & Approval。
+//!   中文：标题：Sandbox & Approval。
 //!
 //! Tool execution is governed by a layered sandbox and approval system:
-//! 中文：该注释与英文“Tool execution is governed by a layered sandbox and approval system:”含义一致。
+//!   中文：该注释与英文“Tool execution is governed by a layered sandbox and approval system:”含义一致。
 //! - **SandboxPolicy**: Controls filesystem and network access (read-only for review/research,
-//! 中文：列表项说明与英文“**SandboxPolicy**: Controls filesystem and network access (read-only for review/research,”含义一致。
+//!   中文：列表项说明与英文“**SandboxPolicy**: Controls filesystem and network access (read-only for review/research,”含义一致。
 //!   workspace-write for dev mode).
-//! 中文：该注释与英文“workspace-write for dev mode).”含义一致。
+//!   中文：该注释与英文“workspace-write for dev mode).”含义一致。
 //! - **AskForApproval**: Determines when to prompt the user for tool execution approval
-//! 中文：列表项说明与英文“**AskForApproval**: Determines when to prompt the user for tool execution approval”含义一致。
+//!   中文：列表项说明与英文“**AskForApproval**: Determines when to prompt the user for tool execution approval”含义一致。
 //!   (never, on-failure, on-request, unless-trusted).
-//! 中文：该注释与英文“(never, on-failure, on-request, unless-trusted).”含义一致。
+//!   中文：该注释与英文“(never, on-failure, on-request, unless-trusted).”含义一致。
 //!
 //! ## Session Persistence
-//! 中文：标题：Session Persistence。
+//!   中文：标题：Session Persistence。
 //!
 //! Conversation history is persisted via `SessionStore` under the `.libra/` storage
-//! 中文：该注释与英文“Conversation history is persisted via `SessionStore` under the `.libra/` storage”含义一致。
+//!   中文：该注释与英文“Conversation history is persisted via `SessionStore` under the `.libra/` storage”含义一致。
 //! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
-//! 中文：该注释与英文“directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.”含义一致。
+//!   中文：该注释与英文“directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.”含义一致。
 //!
 //! Cross-references for agents extending this command:
-//! 中文：该注释与英文“Cross-references for agents extending this command:”含义一致。
+//!   中文：该注释与英文“Cross-references for agents extending this command:”含义一致。
 //! - Agent workflow and object model: `docs/agent/agent-workflow.md`
-//! 中文：列表项说明与英文“Agent workflow and object model: `docs/agent/agent-workflow.md`”含义一致。
+//!   中文：列表项说明与英文“Agent workflow and object model: `docs/agent/agent-workflow.md`”含义一致。
 //! - MCP upgrade and transport notes: `docs/agent/mcp-upgrade-report.md`
-//! 中文：列表项说明与英文“MCP upgrade and transport notes: `docs/agent/mcp-upgrade-report.md`”含义一致。
+//!   中文：列表项说明与英文“MCP upgrade and transport notes: `docs/agent/mcp-upgrade-report.md`”含义一致。
 //! - IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`
-//! 中文：列表项说明与英文“IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`”含义一致。
+//!   中文：列表项说明与英文“IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`”含义一致。
 
 use std::{
     collections::BTreeMap,
@@ -220,27 +220,27 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Default port for the embedded web server serving the Next.js static export.
-/// 中文：该注释与英文“Default port for the embedded web server serving the Next.js static export.”含义一致。
+///   中文：该注释与英文“Default port for the embedded web server serving the Next.js static export.”含义一致。
 const DEFAULT_WEB_PORT: u16 = 3000;
 
 /// Default port for the MCP (Model Context Protocol) HTTP server.
-/// 中文：该注释与英文“Default port for the MCP (Model Context Protocol) HTTP server.”含义一致。
+///   中文：该注释与英文“Default port for the MCP (Model Context Protocol) HTTP server.”含义一致。
 const DEFAULT_MCP_PORT: u16 = 6789;
 
 /// Default network interface to bind servers to (localhost only).
-/// 中文：该注释与英文“Default network interface to bind servers to (localhost only).”含义一致。
+///   中文：该注释与英文“Default network interface to bind servers to (localhost only).”含义一致。
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
 
 /// Default executable name for the Codex CLI app-server.
-/// 中文：该注释与英文“Default executable name for the Codex CLI app-server.”含义一致。
+///   中文：该注释与英文“Default executable name for the Codex CLI app-server.”含义一致。
 const DEFAULT_CODEX_BIN: &str = "codex";
 
 /// Maximum time to wait for the Codex app-server WebSocket to become reachable.
-/// 中文：该注释与英文“Maximum time to wait for the Codex app-server WebSocket to become reachable.”含义一致。
+///   中文：该注释与英文“Maximum time to wait for the Codex app-server WebSocket to become reachable.”含义一致。
 const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Interval between WebSocket connectivity checks during Codex startup.
-/// 中文：该注释与英文“Interval between WebSocket connectivity checks during Codex startup.”含义一致。
+///   中文：该注释与英文“Interval between WebSocket connectivity checks during Codex startup.”含义一致。
 const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
@@ -249,14 +249,14 @@ const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 // ---------------------------------------------------------------------------
 
 /// Available AI provider backends for the `libra code` command.
-/// 中文：该注释与英文“Available AI provider backends for the `libra code` command.”含义一致。
+///   中文：该注释与英文“Available AI provider backends for the `libra code` command.”含义一致。
 ///
 /// Each variant maps to a specific LLM client implementation. The provider
-/// 中文：该注释与英文“Each variant maps to a specific LLM client implementation. The provider”含义一致。
+///   中文：该注释与英文“Each variant maps to a specific LLM client implementation. The provider”含义一致。
 /// determines which API key environment variable is required and which
-/// 中文：该注释与英文“determines which API key environment variable is required and which”含义一致。
+///   中文：该注释与英文“determines which API key environment variable is required and which”含义一致。
 /// default model is used when `--model` is omitted.
-/// 中文：该注释与英文“default model is used when `--model` is omitted.”含义一致。
+///   中文：该注释与英文“default model is used when `--model` is omitted.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
     Gemini,
@@ -273,14 +273,14 @@ pub enum CodeProvider {
 }
 
 /// Operating context that shapes the agent's system prompt and sandbox policy.
-/// 中文：该注释与英文“Operating context that shapes the agent's system prompt and sandbox policy.”含义一致。
+///   中文：该注释与英文“Operating context that shapes the agent's system prompt and sandbox policy.”含义一致。
 ///
 /// - `Dev`: Full read-write access to the workspace; the agent can modify files.
-/// 中文：列表项说明与英文“`Dev`: Full read-write access to the workspace; the agent can modify files.”含义一致。
+///   中文：列表项说明与英文“`Dev`: Full read-write access to the workspace; the agent can modify files.”含义一致。
 /// - `Review`: Read-only sandbox; the agent focuses on code review feedback.
-/// 中文：列表项说明与英文“`Review`: Read-only sandbox; the agent focuses on code review feedback.”含义一致。
+///   中文：列表项说明与英文“`Review`: Read-only sandbox; the agent focuses on code review feedback.”含义一致。
 /// - `Research`: Read-only sandbox; the agent focuses on codebase exploration.
-/// 中文：列表项说明与英文“`Research`: Read-only sandbox; the agent focuses on codebase exploration.”含义一致。
+///   中文：列表项说明与英文“`Research`: Read-only sandbox; the agent focuses on codebase exploration.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeContext {
     #[value(alias = "development")]
@@ -292,51 +292,51 @@ pub enum CodeContext {
 }
 
 /// Local TUI automation control mode.
-/// 中文：该注释与英文“Local TUI automation control mode.”含义一致。
+///   中文：该注释与英文“Local TUI automation control mode.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlMode {
     /// Keep the current loopback-only read behavior; no write token is created.
-    /// 中文：该注释与英文“Keep the current loopback-only read behavior; no write token is created.”含义一致。
+    ///   中文：该注释与英文“Keep the current loopback-only read behavior; no write token is created.”含义一致。
     Observe,
     /// Enable local automation write control with token and controller checks.
-    /// 中文：该注释与英文“Enable local automation write control with token and controller checks.”含义一致。
+    ///   中文：该注释与英文“Enable local automation write control with token and controller checks.”含义一致。
     Write,
 }
 
 /// Browser write-control posture for `libra code`.
-/// 中文：该注释与英文“Browser write-control posture for `libra code`.”含义一致。
+///   中文：该注释与英文“Browser write-control posture for `libra code`.”含义一致。
 ///
 /// Controls whether `/api/code/controller/attach` will issue a `Browser`
-/// 中文：该注释与英文“Controls whether `/api/code/controller/attach` will issue a `Browser`”含义一致。
+///   中文：该注释与英文“Controls whether `/api/code/controller/attach` will issue a `Browser`”含义一致。
 /// lease (allowing the embedded UI to drive `/messages`,
-/// 中文：该注释与英文“lease (allowing the embedded UI to drive `/messages`,”含义一致。
+///   中文：该注释与英文“lease (allowing the embedded UI to drive `/messages`,”含义一致。
 /// `/interactions/{id}`, and `/control/cancel`). The `--host` is still
-/// 中文：该注释与英文“`/interactions/{id}`, and `/control/cancel`). The `--host` is still”含义一致。
+///   中文：该注释与英文“`/interactions/{id}`, and `/control/cancel`). The `--host` is still”含义一致。
 /// forced to a loopback address whenever `loopback` is selected — see
-/// 中文：该注释与英文“forced to a loopback address whenever `loopback` is selected — see”含义一致。
+///   中文：该注释与英文“forced to a loopback address whenever `loopback` is selected — see”含义一致。
 /// [`ensure_loopback_browser_control_host`].
-/// 中文：该注释与英文“[`ensure_loopback_browser_control_host`].”含义一致。
+///   中文：该注释与英文“[`ensure_loopback_browser_control_host`].”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum BrowserControlMode {
     /// Browser controllers cannot attach. Default for normal TUI sessions and
-    /// 中文：该注释与英文“Browser controllers cannot attach. Default for normal TUI sessions and”含义一致。
+    ///   中文：该注释与英文“Browser controllers cannot attach. Default for normal TUI sessions and”含义一致。
     /// for `--web-only` against non-Codex providers.
-    /// 中文：该注释与英文“for `--web-only` against non-Codex providers.”含义一致。
+    ///   中文：该注释与英文“for `--web-only` against non-Codex providers.”含义一致。
     #[default]
     Off,
     /// Browser controllers may attach as long as the bound `--host` is
-    /// 中文：该注释与英文“Browser controllers may attach as long as the bound `--host` is”含义一致。
+    ///   中文：该注释与英文“Browser controllers may attach as long as the bound `--host` is”含义一致。
     /// loopback. Default for `--web-only --provider codex`.
-    /// 中文：该注释与英文“loopback. Default for `--web-only --provider codex`.”含义一致。
+    ///   中文：该注释与英文“loopback. Default for `--web-only --provider codex`.”含义一致。
     Loopback,
 }
 
 impl BrowserControlMode {
     /// Returns the canonical wire-format string used in banners, info files,
-    /// 中文：该注释与英文“Returns the canonical wire-format string used in banners, info files,”含义一致。
+    ///   中文：该注释与英文“Returns the canonical wire-format string used in banners, info files,”含义一致。
     /// and audit summaries — matches the clap value names exactly.
-    /// 中文：该注释与英文“and audit summaries — matches the clap value names exactly.”含义一致。
+    ///   中文：该注释与英文“and audit summaries — matches the clap value names exactly.”含义一致。
     pub fn as_str(self) -> &'static str {
         match self {
             BrowserControlMode::Off => "off",
@@ -346,26 +346,26 @@ impl BrowserControlMode {
 }
 
 /// Ollama-specific thinking/reasoning mode.
-/// 中文：该注释与英文“Ollama-specific thinking/reasoning mode.”含义一致。
+///   中文：该注释与英文“Ollama-specific thinking/reasoning mode.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OllamaThinkingArg {
     /// Let Ollama decide by omitting the `think` field.
-    /// 中文：该注释与英文“Let Ollama decide by omitting the `think` field.”含义一致。
+    ///   中文：该注释与英文“Let Ollama decide by omitting the `think` field.”含义一致。
     Auto,
     /// Disable thinking for faster local tool-calling responses.
-    /// 中文：该注释与英文“Disable thinking for faster local tool-calling responses.”含义一致。
+    ///   中文：该注释与英文“Disable thinking for faster local tool-calling responses.”含义一致。
     Off,
     /// Enable thinking without specifying a depth.
-    /// 中文：该注释与英文“Enable thinking without specifying a depth.”含义一致。
+    ///   中文：该注释与英文“Enable thinking without specifying a depth.”含义一致。
     On,
     /// Request low thinking depth.
-    /// 中文：该注释与英文“Request low thinking depth.”含义一致。
+    ///   中文：该注释与英文“Request low thinking depth.”含义一致。
     Low,
     /// Request medium thinking depth.
-    /// 中文：该注释与英文“Request medium thinking depth.”含义一致。
+    ///   中文：该注释与英文“Request medium thinking depth.”含义一致。
     Medium,
     /// Request high thinking depth.
-    /// 中文：该注释与英文“Request high thinking depth.”含义一致。
+    ///   中文：该注释与英文“Request high thinking depth.”含义一致。
     High,
 }
 
@@ -383,14 +383,14 @@ impl From<OllamaThinkingArg> for CompletionThinking {
 }
 
 /// DeepSeek-specific thinking mode.
-/// 中文：该注释与英文“DeepSeek-specific thinking mode.”含义一致。
+///   中文：该注释与英文“DeepSeek-specific thinking mode.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DeepSeekThinkingArg {
     /// Send `thinking: {"type": "enabled"}` to DeepSeek.
-    /// 中文：该注释与英文“Send `thinking: {"type": "enabled"}` to DeepSeek.”含义一致。
+    ///   中文：该注释与英文“Send `thinking: {"type": "enabled"}` to DeepSeek.”含义一致。
     Enabled,
     /// Send `thinking: {"type": "disabled"}` to DeepSeek.
-    /// 中文：该注释与英文“Send `thinking: {"type": "disabled"}` to DeepSeek.”含义一致。
+    ///   中文：该注释与英文“Send `thinking: {"type": "disabled"}` to DeepSeek.”含义一致。
     Disabled,
 }
 
@@ -404,14 +404,14 @@ impl From<DeepSeekThinkingArg> for CompletionThinking {
 }
 
 /// Kimi-specific thinking mode.
-/// 中文：该注释与英文“Kimi-specific thinking mode.”含义一致。
+///   中文：该注释与英文“Kimi-specific thinking mode.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum KimiThinkingArg {
     /// Send `thinking: {"type": "enabled"}` to Kimi.
-    /// 中文：该注释与英文“Send `thinking: {"type": "enabled"}` to Kimi.”含义一致。
+    ///   中文：该注释与英文“Send `thinking: {"type": "enabled"}` to Kimi.”含义一致。
     Enabled,
     /// Send `thinking: {"type": "disabled"}` to Kimi.
-    /// 中文：该注释与英文“Send `thinking: {"type": "disabled"}` to Kimi.”含义一致。
+    ///   中文：该注释与英文“Send `thinking: {"type": "disabled"}` to Kimi.”含义一致。
     Disabled,
 }
 
@@ -425,7 +425,7 @@ impl From<KimiThinkingArg> for CompletionThinking {
 }
 
 /// DeepSeek-specific reasoning effort.
-/// 中文：该注释与英文“DeepSeek-specific reasoning effort.”含义一致。
+///   中文：该注释与英文“DeepSeek-specific reasoning effort.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DeepSeekReasoningEffortArg {
     Low,
@@ -447,21 +447,21 @@ impl From<DeepSeekReasoningEffortArg> for CompletionReasoningEffort {
 }
 
 /// User-facing approval policy controlling when tool execution requires
-/// 中文：该注释与英文“User-facing approval policy controlling when tool execution requires”含义一致。
+///   中文：该注释与英文“User-facing approval policy controlling when tool execution requires”含义一致。
 /// explicit human confirmation in the TUI.
-/// 中文：该注释与英文“explicit human confirmation in the TUI.”含义一致。
+///   中文：该注释与英文“explicit human confirmation in the TUI.”含义一致。
 ///
 /// This enum is the CLI-facing representation; it converts into the internal
-/// 中文：该注释与英文“This enum is the CLI-facing representation; it converts into the internal”含义一致。
+///   中文：该注释与英文“This enum is the CLI-facing representation; it converts into the internal”含义一致。
 /// [`AskForApproval`] enum via the `From` impl below.
-/// 中文：该注释与英文“[`AskForApproval`] enum via the `From` impl below.”含义一致。
+///   中文：该注释与英文“[`AskForApproval`] enum via the `From` impl below.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeApprovalPolicy {
     /// Never prompt; dangerous commands are rejected.
-    /// 中文：该注释与英文“Never prompt; dangerous commands are rejected.”含义一致。
+    ///   中文：该注释与英文“Never prompt; dangerous commands are rejected.”含义一致。
     Never,
     /// Never prompt; allow every command for this interactive session.
-    /// 中文：该注释与英文“Never prompt; allow every command for this interactive session.”含义一致。
+    ///   中文：该注释与英文“Never prompt; allow every command for this interactive session.”含义一致。
     #[value(
         alias = "allow-all",
         alias = "allow_all",
@@ -470,28 +470,28 @@ pub enum CodeApprovalPolicy {
     )]
     AllowAll,
     /// Prompt only when retrying after sandbox denial.
-    /// 中文：该注释与英文“Prompt only when retrying after sandbox denial.”含义一致。
+    ///   中文：该注释与英文“Prompt only when retrying after sandbox denial.”含义一致。
     #[value(alias = "on-failure")]
     OnFailure,
     /// Run inside sandbox by default; prompt when escalation or policy requires it.
-    /// 中文：该注释与英文“Run inside sandbox by default; prompt when escalation or policy requires it.”含义一致。
+    ///   中文：该注释与英文“Run inside sandbox by default; prompt when escalation or policy requires it.”含义一致。
     #[value(alias = "on-request")]
     OnRequest,
     /// Prompt for non-trusted operations (safe read commands are auto-allowed).
-    /// 中文：该注释与英文“Prompt for non-trusted operations (safe read commands are auto-allowed).”含义一致。
+    ///   中文：该注释与英文“Prompt for non-trusted operations (safe read commands are auto-allowed).”含义一致。
     #[value(alias = "unless-trusted", alias = "untrusted")]
     Untrusted,
 }
 
 /// Developer-selected network access policy for TUI execution.
-/// 中文：该注释与英文“Developer-selected network access policy for TUI execution.”含义一致。
+///   中文：该注释与英文“Developer-selected network access policy for TUI execution.”含义一致。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeNetworkAccess {
     /// Allow shell and gate tasks to use network access.
-    /// 中文：该注释与英文“Allow shell and gate tasks to use network access.”含义一致。
+    ///   中文：该注释与英文“Allow shell and gate tasks to use network access.”含义一致。
     Allow,
     /// Deny network access for shell and gate tasks.
-    /// 中文：该注释与英文“Deny network access for shell and gate tasks.”含义一致。
+    ///   中文：该注释与英文“Deny network access for shell and gate tasks.”含义一致。
     Deny,
 }
 
@@ -508,9 +508,9 @@ impl CodeApprovalPolicy {
 }
 
 /// Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]
-/// 中文：该注释与英文“Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]”含义一致。
+///   中文：该注释与英文“Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]”含义一致。
 /// enum used by the sandbox/approval subsystem.
-/// 中文：该注释与英文“enum used by the sandbox/approval subsystem.”含义一致。
+///   中文：该注释与英文“enum used by the sandbox/approval subsystem.”含义一致。
 impl From<CodeApprovalPolicy> for AskForApproval {
     fn from(value: CodeApprovalPolicy) -> Self {
         match value {
@@ -529,26 +529,26 @@ impl From<CodeApprovalPolicy> for AskForApproval {
 // ---------------------------------------------------------------------------
 
 /// `--help` examples shown in `libra code --help` output.
-/// 中文：该注释与英文“`--help` examples shown in `libra code --help` output.”含义一致。
+///   中文：该注释与英文“`--help` examples shown in `libra code --help` output.”含义一致。
 ///
 /// `code` launches the interactive Libra Code session in one of three
-/// 中文：该注释与英文“`code` launches the interactive Libra Code session in one of three”含义一致。
+///   中文：该注释与英文“`code` launches the interactive Libra Code session in one of three”含义一致。
 /// modes: TUI (the default), web-only (`--web` / `--web-only`), or
-/// 中文：该注释与英文“modes: TUI (the default), web-only (`--web` / `--web-only`), or”含义一致。
+///   中文：该注释与英文“modes: TUI (the default), web-only (`--web` / `--web-only`), or”含义一致。
 /// stdio. The banner pins the most common invocations across modes
-/// 中文：该注释与英文“stdio. The banner pins the most common invocations across modes”含义一致。
+///   中文：该注释与英文“stdio. The banner pins the most common invocations across modes”含义一致。
 /// (TUI default, web-only with a specific provider, `--browser-control
-/// 中文：该注释与英文“(TUI default, web-only with a specific provider, `--browser-control”含义一致。
+///   中文：该注释与英文“(TUI default, web-only with a specific provider, `--browser-control”含义一致。
 /// loopback`, `--control write` for local automation write control,
-/// 中文：该注释与英文“loopback`, `--control write` for local automation write control,”含义一致。
+///   中文：该注释与英文“loopback`, `--control write` for local automation write control,”含义一致。
 /// resume by thread id, plan mode, and `--env-file` for vault-less
-/// 中文：该注释与英文“resume by thread id, plan mode, and `--env-file` for vault-less”含义一致。
+///   中文：该注释与英文“resume by thread id, plan mode, and `--env-file` for vault-less”含义一致。
 /// provider bootstrap) so users see the right entry point without
-/// 中文：该注释与英文“provider bootstrap) so users see the right entry point without”含义一致。
+///   中文：该注释与英文“provider bootstrap) so users see the right entry point without”含义一致。
 /// reading the design doc. Cross-cutting `--help` EXAMPLES rollout per
-/// 中文：该注释与英文“reading the design doc. Cross-cutting `--help` EXAMPLES rollout per”含义一致。
+///   中文：该注释与英文“reading the design doc. Cross-cutting `--help` EXAMPLES rollout per”含义一致。
 /// `docs/improvement/README.md` item B.
-/// 中文：该注释与英文“`docs/improvement/README.md` item B.”含义一致。
+///   中文：该注释与英文“`docs/improvement/README.md` item B.”含义一致。
 pub const CODE_EXAMPLES: &str = "\
 EXAMPLES:
     libra code                                       Launch the default TUI session
@@ -566,320 +566,320 @@ EXAMPLES:
     libra code --stdio                               Pipe-driven session for embedding";
 
 /// Command-line arguments for `libra code`.
-/// 中文：该注释与英文“Command-line arguments for `libra code`.”含义一致。
+///   中文：该注释与英文“Command-line arguments for `libra code`.”含义一致。
 ///
 /// This struct is parsed by `clap` and drives all three operating modes
-/// 中文：该注释与英文“This struct is parsed by `clap` and drives all three operating modes”含义一致。
+///   中文：该注释与英文“This struct is parsed by `clap` and drives all three operating modes”含义一致。
 /// (TUI, web-only, stdio). Many flags are mode-specific and validated
-/// 中文：该注释与英文“(TUI, web-only, stdio). Many flags are mode-specific and validated”含义一致。
+///   中文：该注释与英文“(TUI, web-only, stdio). Many flags are mode-specific and validated”含义一致。
 /// at runtime by [`validate_mode_args`].
-/// 中文：该注释与英文“at runtime by [`validate_mode_args`].”含义一致。
+///   中文：该注释与英文“at runtime by [`validate_mode_args`].”含义一致。
 #[derive(Parser, Debug)]
 #[command(after_help = CODE_EXAMPLES)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
-    /// 中文：该注释与英文“Run the web server only (no TUI). Alias: `--web`.”含义一致。
+    ///   中文：该注释与英文“Run the web server only (no TUI). Alias: `--web`.”含义一致。
     #[arg(long, alias = "web", conflicts_with = "stdio")]
     pub web_only: bool,
 
     /// Port to listen on (web server)
-    /// 中文：该注释与英文“Port to listen on (web server)”含义一致。
+    ///   中文：该注释与英文“Port to listen on (web server)”含义一致。
     #[arg(short, long, default_value_t = DEFAULT_WEB_PORT)]
     pub port: u16,
 
     /// Host address to bind to (web server)
-    /// 中文：该注释与英文“Host address to bind to (web server)”含义一致。
+    ///   中文：该注释与英文“Host address to bind to (web server)”含义一致。
     #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
     /// Working directory for the code session (default: current directory)
-    /// 中文：该注释与英文“Working directory for the code session (default: current directory)”含义一致。
+    ///   中文：该注释与英文“Working directory for the code session (default: current directory)”含义一致。
     #[arg(long, value_name = "PATH")]
     pub cwd: Option<PathBuf>,
 
     /// Path to a Libra repository (default: discover from current directory)
-    /// 中文：该注释与英文“Path to a Libra repository (default: discover from current directory)”含义一致。
+    ///   中文：该注释与英文“Path to a Libra repository (default: discover from current directory)”含义一致。
     #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 
     /// Load provider environment variables from a dotenv-style file.
-    /// 中文：该注释与英文“Load provider environment variables from a dotenv-style file.”含义一致。
+    ///   中文：该注释与英文“Load provider environment variables from a dotenv-style file.”含义一致。
     ///
     /// Values in this file take precedence over already exported process
-    /// 中文：该注释与英文“Values in this file take precedence over already exported process”含义一致。
+    ///   中文：该注释与英文“Values in this file take precedence over already exported process”含义一致。
     /// environment variables for provider bootstrap.
-    /// 中文：该注释与英文“environment variables for provider bootstrap.”含义一致。
+    ///   中文：该注释与英文“environment variables for provider bootstrap.”含义一致。
     #[arg(long = "env-file", value_name = "PATH")]
     pub env_file: Option<PathBuf>,
 
     /// Local TUI automation control mode.
-    /// 中文：该注释与英文“Local TUI automation control mode.”含义一致。
+    ///   中文：该注释与英文“Local TUI automation control mode.”含义一致。
     #[arg(long, value_enum, default_value_t = ControlMode::Observe)]
     pub control: ControlMode,
 
     /// Browser write-control posture (`off` | `loopback`).
-    /// 中文：该注释与英文“Browser write-control posture (`off` | `loopback`).”含义一致。
+    ///   中文：该注释与英文“Browser write-control posture (`off` | `loopback`).”含义一致。
     ///
     /// Defaults are mode-specific:
-    /// 中文：该注释与英文“Defaults are mode-specific:”含义一致。
+    ///   中文：该注释与英文“Defaults are mode-specific:”含义一致。
     /// - normal TUI session → `off`
-    /// 中文：列表项说明与英文“normal TUI session → `off`”含义一致。
+    ///   中文：列表项说明与英文“normal TUI session → `off`”含义一致。
     /// - `--web-only --provider codex` → `loopback`
-    /// 中文：列表项说明与英文“`--web-only --provider codex` → `loopback`”含义一致。
+    ///   中文：列表项说明与英文“`--web-only --provider codex` → `loopback`”含义一致。
     /// - `--web-only` with any other provider → `off`
-    /// 中文：列表项说明与英文“`--web-only` with any other provider → `off`”含义一致。
+    ///   中文：列表项说明与英文“`--web-only` with any other provider → `off`”含义一致。
     ///
     /// Selecting `loopback` is rejected when `--host` is not a loopback
-    /// 中文：该注释与英文“Selecting `loopback` is rejected when `--host` is not a loopback”含义一致。
+    ///   中文：该注释与英文“Selecting `loopback` is rejected when `--host` is not a loopback”含义一致。
     /// address, and the flag is incompatible with `--stdio`.
-    /// 中文：该注释与英文“address, and the flag is incompatible with `--stdio`.”含义一致。
+    ///   中文：该注释与英文“address, and the flag is incompatible with `--stdio`.”含义一致。
     #[arg(long = "browser-control", value_enum, conflicts_with = "stdio")]
     pub browser_control: Option<BrowserControlMode>,
 
     /// Path to the local automation control token file
-    /// 中文：该注释与英文“Path to the local automation control token file”含义一致。
+    ///   中文：该注释与英文“Path to the local automation control token file”含义一致。
     #[arg(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 
     /// Path to the local automation control discovery info file
-    /// 中文：该注释与英文“Path to the local automation control discovery info file”含义一致。
+    ///   中文：该注释与英文“Path to the local automation control discovery info file”含义一致。
     #[arg(long, value_name = "PATH")]
     pub control_info_file: Option<PathBuf>,
 
     /// AI provider backend
-    /// 中文：该注释与英文“AI provider backend”含义一致。
+    ///   中文：该注释与英文“AI provider backend”含义一致。
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
     pub provider: CodeProvider,
 
     /// Model id (provider-specific)
-    /// 中文：该注释与英文“Model id (provider-specific)”含义一致。
+    ///   中文：该注释与英文“Model id (provider-specific)”含义一致。
     #[arg(long)]
     pub model: Option<String>,
 
     /// Sampling temperature (provider-specific range, typically 0.0–2.0)
-    /// 中文：该注释与英文“Sampling temperature (provider-specific range, typically 0.0–2.0)”含义一致。
+    ///   中文：该注释与英文“Sampling temperature (provider-specific range, typically 0.0–2.0)”含义一致。
     #[arg(long, value_name = "FLOAT")]
     pub temperature: Option<f64>,
 
     /// Ollama thinking mode: auto, off, on, low, medium, or high.
-    /// 中文：该注释与英文“Ollama thinking mode: auto, off, on, low, medium, or high.”含义一致。
+    ///   中文：该注释与英文“Ollama thinking mode: auto, off, on, low, medium, or high.”含义一致。
     ///
     /// If omitted, Ollama uses OLLAMA_THINK and then defaults to `off`.
-    /// 中文：该注释与英文“If omitted, Ollama uses OLLAMA_THINK and then defaults to `off`.”含义一致。
+    ///   中文：该注释与英文“If omitted, Ollama uses OLLAMA_THINK and then defaults to `off`.”含义一致。
     #[arg(long = "ollama-thinking", alias = "thinking", value_enum)]
     pub ollama_thinking: Option<OllamaThinkingArg>,
 
     /// Send compact Ollama tool schemas for providers that reject complex JSON schemas.
-    /// 中文：该注释与英文“Send compact Ollama tool schemas for providers that reject complex JSON schemas.”含义一致。
+    ///   中文：该注释与英文“Send compact Ollama tool schemas for providers that reject complex JSON schemas.”含义一致。
     #[arg(long = "ollama-compact-tools")]
     pub ollama_compact_tools: bool,
 
     /// DeepSeek thinking mode: enabled or disabled.
-    /// 中文：该注释与英文“DeepSeek thinking mode: enabled or disabled.”含义一致。
+    ///   中文：该注释与英文“DeepSeek thinking mode: enabled or disabled.”含义一致。
     #[arg(long = "deepseek-thinking", value_enum)]
     pub deepseek_thinking: Option<DeepSeekThinkingArg>,
 
     /// DeepSeek reasoning effort: low, medium, high, or max.
-    /// 中文：该注释与英文“DeepSeek reasoning effort: low, medium, high, or max.”含义一致。
+    ///   中文：该注释与英文“DeepSeek reasoning effort: low, medium, high, or max.”含义一致。
     #[arg(long = "deepseek-reasoning-effort", value_enum)]
     pub deepseek_reasoning_effort: Option<DeepSeekReasoningEffortArg>,
 
     /// DeepSeek stream mode: true or false.
-    /// 中文：该注释与英文“DeepSeek stream mode: true or false.”含义一致。
+    ///   中文：该注释与英文“DeepSeek stream mode: true or false.”含义一致。
     #[arg(long = "deepseek-stream", alias = "stream", value_name = "BOOL")]
     pub deepseek_stream: Option<bool>,
 
     /// Kimi thinking mode: enabled or disabled.
-    /// 中文：该注释与英文“Kimi thinking mode: enabled or disabled.”含义一致。
+    ///   中文：该注释与英文“Kimi thinking mode: enabled or disabled.”含义一致。
     #[arg(long = "kimi-thinking", value_enum)]
     pub kimi_thinking: Option<KimiThinkingArg>,
 
     /// Kimi stream mode: true or false. Defaults to true for Kimi.
-    /// 中文：该注释与英文“Kimi stream mode: true or false. Defaults to true for Kimi.”含义一致。
+    ///   中文：该注释与英文“Kimi stream mode: true or false. Defaults to true for Kimi.”含义一致。
     #[arg(long = "kimi-stream", value_name = "BOOL")]
     pub kimi_stream: Option<bool>,
 
     /// Select an agent profile by name. When the profile carries a structured
-    /// 中文：该注释与英文“Select an agent profile by name. When the profile carries a structured”含义一致。
+    ///   中文：该注释与英文“Select an agent profile by name. When the profile carries a structured”含义一致。
     /// `model: provider/model[@variant]` binding, the agent's binding wins
-    /// 中文：该注释与英文“`model: provider/model[@variant]` binding, the agent's binding wins”含义一致。
+    ///   中文：该注释与英文“`model: provider/model[@variant]` binding, the agent's binding wins”含义一致。
     /// atomically — provider, model id, and variant all come from the
-    /// 中文：该注释与英文“atomically — provider, model id, and variant all come from the”含义一致。
+    ///   中文：该注释与英文“atomically — provider, model id, and variant all come from the”含义一致。
     /// agent's spec, and a separately-supplied `--model` is ignored to avoid
-    /// 中文：该注释与英文“agent's spec, and a separately-supplied `--model` is ignored to avoid”含义一致。
+    ///   中文：该注释与英文“agent's spec, and a separately-supplied `--model` is ignored to avoid”含义一致。
     /// hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles
-    /// 中文：该注释与英文“hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles”含义一致。
+    ///   中文：该注释与英文“hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles”含义一致。
     /// without a structured binding fall back to the CLI defaults verbatim.
-    /// 中文：该注释与英文“without a structured binding fall back to the CLI defaults verbatim.”含义一致。
+    ///   中文：该注释与英文“without a structured binding fall back to the CLI defaults verbatim.”含义一致。
     /// Profiles are looked up via the same three-tier hierarchy used elsewhere
-    /// 中文：该注释与英文“Profiles are looked up via the same three-tier hierarchy used elsewhere”含义一致。
+    ///   中文：该注释与英文“Profiles are looked up via the same three-tier hierarchy used elsewhere”含义一致。
     /// (project `.libra/agents/`, user `~/.config/libra/agents/`, embedded).
-    /// 中文：该注释与英文“(project `.libra/agents/`, user `~/.config/libra/agents/`, embedded).”含义一致。
+    ///   中文：该注释与英文“(project `.libra/agents/`, user `~/.config/libra/agents/`, embedded).”含义一致。
     #[arg(long = "agent", value_name = "NAME")]
     pub agent: Option<String>,
 
     /// Test-only fake provider fixture.
-    /// 中文：该注释与英文“Test-only fake provider fixture.”含义一致。
+    ///   中文：该注释与英文“Test-only fake provider fixture.”含义一致。
     #[cfg(feature = "test-provider")]
     #[arg(long = "fake-fixture", hide = true, value_name = "PATH")]
     pub fake_fixture: Option<PathBuf>,
 
     /// Operating context mode (dev, review, research)
-    /// 中文：该注释与英文“Operating context mode (dev, review, research)”含义一致。
+    ///   中文：该注释与英文“Operating context mode (dev, review, research)”含义一致。
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
 
     /// Resume a canonical Libra thread by UUID
-    /// 中文：该注释与英文“Resume a canonical Libra thread by UUID”含义一致。
+    ///   中文：该注释与英文“Resume a canonical Libra thread by UUID”含义一致。
     #[arg(long, value_name = "THREAD_UUID")]
     pub resume: Option<String>,
 
     /// Tool approval policy:
-    /// 中文：该注释与英文“Tool approval policy:”含义一致。
+    ///   中文：该注释与英文“Tool approval policy:”含义一致。
     /// - `never`: no prompts, dangerous commands are rejected
-    /// 中文：列表项说明与英文“`never`: no prompts, dangerous commands are rejected”含义一致。
+    ///   中文：列表项说明与英文“`never`: no prompts, dangerous commands are rejected”含义一致。
     /// - `allow-all`: no prompts, all commands are allowed for this session
-    /// 中文：列表项说明与英文“`allow-all`: no prompts, all commands are allowed for this session”含义一致。
+    ///   中文：列表项说明与英文“`allow-all`: no prompts, all commands are allowed for this session”含义一致。
     /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
-    /// 中文：列表项说明与英文“`on-failure`: prompt only for retry outside sandbox after sandbox denial”含义一致。
+    ///   中文：列表项说明与英文“`on-failure`: prompt only for retry outside sandbox after sandbox denial”含义一致。
     /// - `on-request`: run sandboxed by default; prompt for escalation/policy-required cases
-    /// 中文：列表项说明与英文“`on-request`: run sandboxed by default; prompt for escalation/policy-required cases”含义一致。
+    ///   中文：列表项说明与英文“`on-request`: run sandboxed by default; prompt for escalation/policy-required cases”含义一致。
     /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
-    /// 中文：列表项说明与英文“`untrusted`: prompt for non-trusted operations, auto-allow known-safe reads”含义一致。
+    ///   中文：列表项说明与英文“`untrusted`: prompt for non-trusted operations, auto-allow known-safe reads”含义一致。
     #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
     pub approval_policy: CodeApprovalPolicy,
 
     /// Seconds that a TTL approval remains reusable for matching commands.
-    /// 中文：该注释与英文“Seconds that a TTL approval remains reusable for matching commands.”含义一致。
+    ///   中文：该注释与英文“Seconds that a TTL approval remains reusable for matching commands.”含义一致。
     #[arg(long = "approval-ttl", value_name = "SECS")]
     pub approval_ttl: Option<u64>,
 
     /// Network access policy for TUI shell and gate execution.
-    /// 中文：该注释与英文“Network access policy for TUI shell and gate execution.”含义一致。
+    ///   中文：该注释与英文“Network access policy for TUI shell and gate execution.”含义一致。
     #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
     pub network_access: CodeNetworkAccess,
 
     /// Port for the embedded MCP server to listen on
-    /// 中文：该注释与英文“Port for the embedded MCP server to listen on”含义一致。
+    ///   中文：该注释与英文“Port for the embedded MCP server to listen on”含义一致。
     #[arg(long, value_name = "PORT", default_value_t = DEFAULT_MCP_PORT)]
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
-    /// 中文：该注释与英文“Run the MCP server over Stdio (for Claude Desktop integration)”含义一致。
+    ///   中文：该注释与英文“Run the MCP server over Stdio (for Claude Desktop integration)”含义一致。
     #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
 
     /// Provider API base URL.
-    /// 中文：该注释与英文“Provider API base URL.”含义一致。
+    ///   中文：该注释与英文“Provider API base URL.”含义一致。
     ///
     /// For Ollama, use a local/remote daemon URL such as
-    /// 中文：该注释与英文“For Ollama, use a local/remote daemon URL such as”含义一致。
+    ///   中文：该注释与英文“For Ollama, use a local/remote daemon URL such as”含义一致。
     /// `http://remote-host:11434/v1`, or `https://ollama.com` for direct
-    /// 中文：该注释与英文“`http://remote-host:11434/v1`, or `https://ollama.com` for direct”含义一致。
+    ///   中文：该注释与英文“`http://remote-host:11434/v1`, or `https://ollama.com` for direct”含义一致。
     /// Ollama Cloud API access with `OLLAMA_API_KEY`.
-    /// 中文：该注释与英文“Ollama Cloud API access with `OLLAMA_API_KEY`.”含义一致。
+    ///   中文：该注释与英文“Ollama Cloud API access with `OLLAMA_API_KEY`.”含义一致。
     #[arg(long, value_name = "URL")]
     pub api_base: Option<String>,
 
     /// Codex executable used to launch the managed app-server
-    /// 中文：该注释与英文“Codex executable used to launch the managed app-server”含义一致。
+    ///   中文：该注释与英文“Codex executable used to launch the managed app-server”含义一致。
     #[arg(long, value_name = "PATH", default_value = DEFAULT_CODEX_BIN)]
     pub codex_bin: String,
 
     /// Override the Codex app-server port (default: random local free port)
-    /// 中文：该注释与英文“Override the Codex app-server port (default: random local free port)”含义一致。
+    ///   中文：该注释与英文“Override the Codex app-server port (default: random local free port)”含义一致。
     #[arg(long, value_name = "PORT")]
     pub codex_port: Option<u16>,
 
     /// Codex plan-first mode: require an approved plan before execution.
-    /// 中文：该注释与英文“Codex plan-first mode: require an approved plan before execution.”含义一致。
+    ///   中文：该注释与英文“Codex plan-first mode: require an approved plan before execution.”含义一致。
     ///
     /// When `--provider=codex`, this defaults to ON so the session
-    /// 中文：该注释与英文“When `--provider=codex`, this defaults to ON so the session”含义一致。
+    ///   中文：该注释与英文“When `--provider=codex`, this defaults to ON so the session”含义一致。
     /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
-    /// 中文：该注释与英文“follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &”含义一致。
+    ///   中文：该注释与英文“follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &”含义一致。
     /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
-    /// 中文：该注释与英文“plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to”含义一致。
+    ///   中文：该注释与英文“plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to”含义一致。
     /// opt out for a single session. For non-Codex providers, omit the flag —
-    /// 中文：该注释与英文“opt out for a single session. For non-Codex providers, omit the flag —”含义一致。
+    ///   中文：该注释与英文“opt out for a single session. For non-Codex providers, omit the flag —”含义一致。
     /// Libra drives Phase 0/1 through its own tool loop.
-    /// 中文：该注释与英文“Libra drives Phase 0/1 through its own tool loop.”含义一致。
+    ///   中文：该注释与英文“Libra drives Phase 0/1 through its own tool loop.”含义一致。
     ///
     /// Accepted forms:
-    /// 中文：该注释与英文“Accepted forms:”含义一致。
+    ///   中文：该注释与英文“Accepted forms:”含义一致。
     /// `--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.
-    /// 中文：该注释与英文“`--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.”含义一致。
+    ///   中文：该注释与英文“`--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.”含义一致。
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub plan_mode: Option<bool>,
 
     /// Goal-mode objective. When set, the session boots with an
-    /// 中文：该注释与英文“Goal-mode objective. When set, the session boots with an”含义一致。
+    ///   中文：该注释与英文“Goal-mode objective. When set, the session boots with an”含义一致。
     /// active Goal whose objective is the supplied string; the
-    /// 中文：该注释与英文“active Goal whose objective is the supplied string; the”含义一致。
+    ///   中文：该注释与英文“active Goal whose objective is the supplied string; the”含义一致。
     /// supervisor (P6.3) drives the tool loop until completion is
-    /// 中文：该注释与英文“supervisor (P6.3) drives the tool loop until completion is”含义一致。
+    ///   中文：该注释与英文“supervisor (P6.3) drives the tool loop until completion is”含义一致。
     /// claimed and the verifier (P6.2) accepts. Equivalent to
-    /// 中文：该注释与英文“claimed and the verifier (P6.2) accepts. Equivalent to”含义一致。
+    ///   中文：该注释与英文“claimed and the verifier (P6.2) accepts. Equivalent to”含义一致。
     /// invoking `/goal start <objective>` immediately after the
-    /// 中文：该注释与英文“invoking `/goal start <objective>` immediately after the”含义一致。
+    ///   中文：该注释与英文“invoking `/goal start <objective>` immediately after the”含义一致。
     /// session opens.
-    /// 中文：该注释与英文“session opens.”含义一致。
+    ///   中文：该注释与英文“session opens.”含义一致。
     ///
     /// The objective is validated up-front against the same shape
-    /// 中文：该注释与英文“The objective is validated up-front against the same shape”含义一致。
+    ///   中文：该注释与英文“The objective is validated up-front against the same shape”含义一致。
     /// rules `GoalSpec::new` applies — non-empty after trim, ≤ 16
-    /// 中文：该注释与英文“rules `GoalSpec::new` applies — non-empty after trim, ≤ 16”含义一致。
+    ///   中文：该注释与英文“rules `GoalSpec::new` applies — non-empty after trim, ≤ 16”含义一致。
     /// KiB. A bad objective fails CLI parsing rather than crashing
-    /// 中文：该注释与英文“KiB. A bad objective fails CLI parsing rather than crashing”含义一致。
+    ///   中文：该注释与英文“KiB. A bad objective fails CLI parsing rather than crashing”含义一致。
     /// the supervisor at startup.
-    /// 中文：该注释与英文“the supervisor at startup.”含义一致。
+    ///   中文：该注释与英文“the supervisor at startup.”含义一致。
     #[arg(long = "goal", value_name = "OBJECTIVE")]
     pub goal: Option<String>,
 }
 
 /// Resolves the effective `plan_mode` flag for the current invocation.
-/// 中文：该注释与英文“Resolves the effective `plan_mode` flag for the current invocation.”含义一致。
+///   中文：该注释与英文“Resolves the effective `plan_mode` flag for the current invocation.”含义一致。
 ///
 /// Returns the user-supplied value when present; otherwise defaults to
-/// 中文：该注释与英文“Returns the user-supplied value when present; otherwise defaults to”含义一致。
+///   中文：该注释与英文“Returns the user-supplied value when present; otherwise defaults to”含义一致。
 /// `true` for the Codex provider and `false` for other providers.
-/// 中文：该注释与英文“`true` for the Codex provider and `false` for other providers.”含义一致。
+///   中文：该注释与英文“`true` for the Codex provider and `false` for other providers.”含义一致。
 ///
 /// **Scope of enforcement:** `plan_mode` is forwarded to Codex's
-/// 中文：列表项说明与英文“*Scope of enforcement:** `plan_mode` is forwarded to Codex's”含义一致。
+///   中文：列表项说明与英文“*Scope of enforcement:** `plan_mode` is forwarded to Codex's”含义一致。
 /// `developerInstructions` / `baseInstructions` and tells Codex's own agent
-/// 中文：该注释与英文“`developerInstructions` / `baseInstructions` and tells Codex's own agent”含义一致。
+///   中文：该注释与英文“`developerInstructions` / `baseInstructions` and tells Codex's own agent”含义一致。
 /// loop to produce a structured plan and wait for an approval before
-/// 中文：该注释与英文“loop to produce a structured plan and wait for an approval before”含义一致。
+///   中文：该注释与英文“loop to produce a structured plan and wait for an approval before”含义一致。
 /// executing. The approval gate is therefore **Codex's own approval channel**
-/// 中文：该注释与英文“executing. The approval gate is therefore **Codex's own approval channel**”含义一致。
+///   中文：该注释与英文“executing. The approval gate is therefore **Codex's own approval channel**”含义一致。
 /// (per-tool / per-command requests), not Libra's Phase 0 / Phase 1 review
-/// 中文：该注释与英文“(per-tool / per-command requests), not Libra's Phase 0 / Phase 1 review”含义一致。
+///   中文：该注释与英文“(per-tool / per-command requests), not Libra's Phase 0 / Phase 1 review”含义一致。
 /// loop. Libra's own intent / plan drafting tool loop (`phase0_plan_tool_loop_config` /
-/// 中文：该注释与英文“loop. Libra's own intent / plan drafting tool loop (`phase0_plan_tool_loop_config` /”含义一致。
+///   中文：该注释与英文“loop. Libra's own intent / plan drafting tool loop (`phase0_plan_tool_loop_config` /”含义一致。
 /// `phase1_plan_tool_loop_config` in `src/internal/tui/app.rs`) requires a
-/// 中文：该注释与英文“`phase1_plan_tool_loop_config` in `src/internal/tui/app.rs`) requires a”含义一致。
+///   中文：该注释与英文“`phase1_plan_tool_loop_config` in `src/internal/tui/app.rs`) requires a”含义一致。
 /// generic `CompletionModel` and is bypassed when `managed_code_ui_runtime`
-/// 中文：该注释与英文“generic `CompletionModel` and is bypassed when `managed_code_ui_runtime`”含义一致。
+///   中文：该注释与英文“generic `CompletionModel` and is bypassed when `managed_code_ui_runtime`”含义一致。
 /// is set (the Codex runtime is a managed backend, not a completion model —
-/// 中文：该注释与英文“is set (the Codex runtime is a managed backend, not a completion model —”含义一致。
+///   中文：该注释与英文“is set (the Codex runtime is a managed backend, not a completion model —”含义一致。
 /// see the bypass at `src/internal/tui/app.rs` near
-/// 中文：该注释与英文“see the bypass at `src/internal/tui/app.rs` near”含义一致。
+///   中文：该注释与英文“see the bypass at `src/internal/tui/app.rs` near”含义一致。
 /// `if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(...)`).
-/// 中文：该注释与英文“`if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(...)`).”含义一致。
+///   中文：该注释与英文“`if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(...)`).”含义一致。
 ///
 /// Combining `--plan-mode=true` with `--approval-policy=allow-all` /
-/// 中文：该注释与英文“Combining `--plan-mode=true` with `--approval-policy=allow-all` /”含义一致。
+///   中文：该注释与英文“Combining `--plan-mode=true` with `--approval-policy=allow-all` /”含义一致。
 /// `=never` means Codex still produces the plan, but its approval gate is
-/// 中文：该注释与英文“`=never` means Codex still produces the plan, but its approval gate is”含义一致。
+///   中文：该注释与英文“`=never` means Codex still produces the plan, but its approval gate is”含义一致。
 /// auto-approved — the operator sees the plan in the transcript / log but
-/// 中文：该注释与英文“auto-approved — the operator sees the plan in the transcript / log but”含义一致。
+///   中文：该注释与英文“auto-approved — the operator sees the plan in the transcript / log but”含义一致。
 /// is never asked to confirm. `start_codex_code_ui_runtime` emits a
-/// 中文：该注释与英文“is never asked to confirm. `start_codex_code_ui_runtime` emits a”含义一致。
+///   中文：该注释与英文“is never asked to confirm. `start_codex_code_ui_runtime` emits a”含义一致。
 /// `tracing::warn!` when this combination is detected so the operator can
-/// 中文：该注释与英文“`tracing::warn!` when this combination is detected so the operator can”含义一致。
+///   中文：该注释与英文“`tracing::warn!` when this combination is detected so the operator can”含义一致。
 /// notice that the review gate has been disabled.
-/// 中文：该注释与英文“notice that the review gate has been disabled.”含义一致。
+///   中文：该注释与英文“notice that the review gate has been disabled.”含义一致。
 pub(crate) fn effective_plan_mode(args: &CodeArgs) -> bool {
     args.plan_mode
         .unwrap_or(matches!(args.provider, CodeProvider::Codex))
@@ -891,38 +891,38 @@ pub(crate) fn effective_plan_mode(args: &CodeArgs) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Entry point for the `libra code` subcommand.
-/// 中文：该注释与英文“Entry point for the `libra code` subcommand.”含义一致。
+///   中文：该注释与英文“Entry point for the `libra code` subcommand.”含义一致。
 ///
 /// Validates CLI flag combinations, then dispatches to one of three mode-specific
-/// 中文：该注释与英文“Validates CLI flag combinations, then dispatches to one of three mode-specific”含义一致。
+///   中文：该注释与英文“Validates CLI flag combinations, then dispatches to one of three mode-specific”含义一致。
 /// execution paths: stdio (MCP over stdin/stdout), web-only (headless HTTP servers),
-/// 中文：该注释与英文“execution paths: stdio (MCP over stdin/stdout), web-only (headless HTTP servers),”含义一致。
+///   中文：该注释与英文“execution paths: stdio (MCP over stdin/stdout), web-only (headless HTTP servers),”含义一致。
 /// or TUI (full interactive terminal with background servers).
-/// 中文：该注释与英文“or TUI (full interactive terminal with background servers).”含义一致。
+///   中文：该注释与英文“or TUI (full interactive terminal with background servers).”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - May start local web, MCP, and Codex app-server processes depending on mode.
-/// 中文：列表项说明与英文“May start local web, MCP, and Codex app-server processes depending on mode.”含义一致。
+///   中文：列表项说明与英文“May start local web, MCP, and Codex app-server processes depending on mode.”含义一致。
 /// - May create `.libra/objects` and connect to `.libra/libra.db` for history.
-/// 中文：列表项说明与英文“May create `.libra/objects` and connect to `.libra/libra.db` for history.”含义一致。
+///   中文：列表项说明与英文“May create `.libra/objects` and connect to `.libra/libra.db` for history.”含义一致。
 /// - In TUI mode, may mutate the workspace through registered tools, subject to
-/// 中文：列表项说明与英文“In TUI mode, may mutate the workspace through registered tools, subject to”含义一致。
+///   中文：列表项说明与英文“In TUI mode, may mutate the workspace through registered tools, subject to”含义一致。
 ///   sandbox and approval policy.
-/// 中文：该注释与英文“sandbox and approval policy.”含义一致。
+///   中文：该注释与英文“sandbox and approval policy.”含义一致。
 /// - In stdio mode, owns stdin/stdout for the MCP session.
-/// 中文：列表项说明与英文“In stdio mode, owns stdin/stdout for the MCP session.”含义一致。
+///   中文：列表项说明与英文“In stdio mode, owns stdin/stdout for the MCP session.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// Returns [`CliError`] for invalid mode combinations, provider credential
-/// 中文：该注释与英文“Returns [`CliError`] for invalid mode combinations, provider credential”含义一致。
+///   中文：该注释与英文“Returns [`CliError`] for invalid mode combinations, provider credential”含义一致。
 /// failures, network bind failures, Codex app-server startup failures, or
-/// 中文：该注释与英文“failures, network bind failures, Codex app-server startup failures, or”含义一致。
+///   中文：该注释与英文“failures, network bind failures, Codex app-server startup failures, or”含义一致。
 /// terminal/session initialization failures. Error classification follows
-/// 中文：该注释与英文“terminal/session initialization failures. Error classification follows”含义一致。
+///   中文：该注释与英文“terminal/session initialization failures. Error classification follows”含义一致。
 /// `docs/development/cli-error-contract-design.md`.
-/// 中文：该注释与英文“`docs/development/cli-error-contract-design.md`.”含义一致。
+///   中文：该注释与英文“`docs/development/cli-error-contract-design.md`.”含义一致。
 pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
     validate_mode_args(&args, output).map_err(CliError::command_usage)?;
     if args.stdio {
@@ -940,20 +940,20 @@ pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Handle to a running MCP server.
-/// 中文：该注释与英文“Handle to a running MCP server.”含义一致。
+///   中文：该注释与英文“Handle to a running MCP server.”含义一致。
 ///
 /// In addition to the shared shutdown mechanism, this tracks individual
-/// 中文：该注释与英文“In addition to the shared shutdown mechanism, this tracks individual”含义一致。
+///   中文：该注释与英文“In addition to the shared shutdown mechanism, this tracks individual”含义一致。
 /// per-connection tasks so they can be aborted during shutdown — preventing
-/// 中文：该注释与英文“per-connection tasks so they can be aborted during shutdown — preventing”含义一致。
+///   中文：该注释与英文“per-connection tasks so they can be aborted during shutdown — preventing”含义一致。
 /// leaked tasks when the server is torn down.
-/// 中文：该注释与英文“leaked tasks when the server is torn down.”含义一致。
+///   中文：该注释与英文“leaked tasks when the server is torn down.”含义一致。
 struct McpServerHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
     /// Tracks spawned per-connection Hyper service tasks for cleanup.
-    /// 中文：该注释与英文“Tracks spawned per-connection Hyper service tasks for cleanup.”含义一致。
+    ///   中文：该注释与英文“Tracks spawned per-connection Hyper service tasks for cleanup.”含义一致。
     connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -978,34 +978,34 @@ impl McpServerHandle {
 // ---------------------------------------------------------------------------
 
 /// Runs the web server and MCP server without a terminal UI.
-/// 中文：该注释与英文“Runs the web server and MCP server without a terminal UI.”含义一致。
+///   中文：该注释与英文“Runs the web server and MCP server without a terminal UI.”含义一致。
 ///
 /// Blocks on `Ctrl-C`, then performs graceful shutdown of both servers.
-/// 中文：该注释与英文“Blocks on `Ctrl-C`, then performs graceful shutdown of both servers.”含义一致。
+///   中文：该注释与英文“Blocks on `Ctrl-C`, then performs graceful shutdown of both servers.”含义一致。
 /// This mode is useful for remote/headless environments where the user
-/// 中文：该注释与英文“This mode is useful for remote/headless environments where the user”含义一致。
+///   中文：该注释与英文“This mode is useful for remote/headless environments where the user”含义一致。
 /// interacts through a browser or external MCP client.
-/// 中文：该注释与英文“interacts through a browser or external MCP client.”含义一致。
+///   中文：该注释与英文“interacts through a browser or external MCP client.”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - Starts the embedded web server and Streamable HTTP MCP server.
-/// 中文：列表项说明与英文“Starts the embedded web server and Streamable HTTP MCP server.”含义一致。
+///   中文：列表项说明与英文“Starts the embedded web server and Streamable HTTP MCP server.”含义一致。
 /// - For the Codex provider, starts and later shuts down a managed Codex
-/// 中文：列表项说明与英文“For the Codex provider, starts and later shuts down a managed Codex”含义一致。
+///   中文：列表项说明与英文“For the Codex provider, starts and later shuts down a managed Codex”含义一致。
 ///   app-server child process.
-/// 中文：该注释与英文“app-server child process.”含义一致。
+///   中文：该注释与英文“app-server child process.”含义一致。
 /// - Prints connection details to stdout and listens for `Ctrl-C`.
-/// 中文：列表项说明与英文“Prints connection details to stdout and listens for `Ctrl-C`.”含义一致。
+///   中文：列表项说明与英文“Prints connection details to stdout and listens for `Ctrl-C`.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// Returns [`CliError`] when the working directory cannot be resolved, the web
-/// 中文：该注释与英文“Returns [`CliError`] when the working directory cannot be resolved, the web”含义一致。
+///   中文：该注释与英文“Returns [`CliError`] when the working directory cannot be resolved, the web”含义一致。
 /// or MCP listener cannot bind, the Codex app-server fails to start, or the
-/// 中文：该注释与英文“or MCP listener cannot bind, the Codex app-server fails to start, or the”含义一致。
+///   中文：该注释与英文“or MCP listener cannot bind, the Codex app-server fails to start, or the”含义一致。
 /// selected host would expose loopback-only browser control.
-/// 中文：该注释与英文“selected host would expose loopback-only browser control.”含义一致。
+///   中文：该注释与英文“selected host would expose loopback-only browser control.”含义一致。
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
     let browser_control = resolve_browser_control_mode(args)?;
@@ -1296,67 +1296,67 @@ fn provider_env_value_with_lookup(
 }
 
 /// Build an [`AnyCompletionModel`] for every non-Codex provider through the
-/// 中文：该注释与英文“Build an [`AnyCompletionModel`] for every non-Codex provider through the”含义一致。
+///   中文：该注释与英文“Build an [`AnyCompletionModel`] for every non-Codex provider through the”含义一致。
 /// shared [`ProviderFactory`].
-/// 中文：该注释与英文“shared [`ProviderFactory`].”含义一致。
+///   中文：该注释与英文“shared [`ProviderFactory`].”含义一致。
 ///
 /// This consolidates what used to be eight near-identical match arms
-/// 中文：该注释与英文“This consolidates what used to be eight near-identical match arms”含义一致。
+///   中文：该注释与英文“This consolidates what used to be eight near-identical match arms”含义一致。
 /// (`Gemini`, `Openai`, `Anthropic`, `Deepseek`, `Kimi`, `Zhipu`, `Ollama`,
-/// 中文：该注释与英文“(`Gemini`, `Openai`, `Anthropic`, `Deepseek`, `Kimi`, `Zhipu`, `Ollama`,”含义一致。
+///   中文：该注释与英文“(`Gemini`, `Openai`, `Anthropic`, `Deepseek`, `Kimi`, `Zhipu`, `Ollama`,”含义一致。
 /// `Fake`) into a single dispatch. The Codex provider stays on its own path
-/// 中文：该注释与英文“`Fake`) into a single dispatch. The Codex provider stays on its own path”含义一致。
+///   中文：该注释与英文“`Fake`) into a single dispatch. The Codex provider stays on its own path”含义一致。
 /// because it bypasses `AnyCompletionModel` entirely (managed app-server
-/// 中文：该注释与英文“because it bypasses `AnyCompletionModel` entirely (managed app-server”含义一致。
+///   中文：该注释与英文“because it bypasses `AnyCompletionModel` entirely (managed app-server”含义一致。
 /// runtime).
-/// 中文：该注释与英文“runtime).”含义一致。
+///   中文：该注释与英文“runtime).”含义一致。
 ///
 /// Env resolution flows through [`provider_env_value_with_lookup`] for
-/// 中文：该注释与英文“Env resolution flows through [`provider_env_value_with_lookup`] for”含义一致。
+///   中文：该注释与英文“Env resolution flows through [`provider_env_value_with_lookup`] for”含义一致。
 /// **every** provider, not just Deepseek / Kimi as before. The precedence is
-/// 中文：列表项说明与英文“*every** provider, not just Deepseek / Kimi as before. The precedence is”含义一致。
+///   中文：列表项说明与英文“*every** provider, not just Deepseek / Kimi as before. The precedence is”含义一致。
 /// `--env-file` first then process env (documented on `--env-file` itself),
-/// 中文：该注释与英文“`--env-file` first then process env (documented on `--env-file` itself),”含义一致。
+///   中文：该注释与英文“`--env-file` first then process env (documented on `--env-file` itself),”含义一致。
 /// and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`
-/// 中文：该注释与英文“and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`”含义一致。
+///   中文：该注释与英文“and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`”含义一致。
 /// flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process
-/// 中文：该注释与英文“flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process”含义一致。
+///   中文：该注释与英文“flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process”含义一致。
 /// env via `from_env()`; this widens them to consult `--env-file` first as
-/// 中文：该注释与英文“env via `from_env()`; this widens them to consult `--env-file` first as”含义一致。
+///   中文：该注释与英文“env via `from_env()`; this widens them to consult `--env-file` first as”含义一致。
 /// well, so a value defined in the env-file now wins over a stale process-env
-/// 中文：该注释与英文“well, so a value defined in the env-file now wins over a stale process-env”含义一致。
+///   中文：该注释与英文“well, so a value defined in the env-file now wins over a stale process-env”含义一致。
 /// value for those providers.
-/// 中文：该注释与英文“value for those providers.”含义一致。
+///   中文：该注释与英文“value for those providers.”含义一致。
 ///
 /// The function returns the resolved model name AND the effective provider
-/// 中文：该注释与英文“The function returns the resolved model name AND the effective provider”含义一致。
+///   中文：该注释与英文“The function returns the resolved model name AND the effective provider”含义一致。
 /// name string so the caller can tag usage / UI metadata against the agent's
-/// 中文：该注释与英文“name string so the caller can tag usage / UI metadata against the agent's”含义一致。
+///   中文：该注释与英文“name string so the caller can tag usage / UI metadata against the agent's”含义一致。
 /// chosen provider (which may differ from `--provider` after an `--agent`
-/// 中文：该注释与英文“chosen provider (which may differ from `--provider` after an `--agent`”含义一致。
+///   中文：该注释与英文“chosen provider (which may differ from `--provider` after an `--agent`”含义一致。
 /// override).
-/// 中文：该注释与英文“override).”含义一致。
+///   中文：该注释与英文“override).”含义一致。
 ///
 /// OC-Phase 2 P2.4 added the `--agent <name>` override path. When the flag
-/// 中文：该注释与英文“OC-Phase 2 P2.4 added the `--agent <name>` override path. When the flag”含义一致。
+///   中文：该注释与英文“OC-Phase 2 P2.4 added the `--agent <name>` override path. When the flag”含义一致。
 /// is set the helper loads the profile via the same three-tier hierarchy
-/// 中文：该注释与英文“is set the helper loads the profile via the same three-tier hierarchy”含义一致。
+///   中文：该注释与英文“is set the helper loads the profile via the same three-tier hierarchy”含义一致。
 /// the runtime uses, asserts the agent is primary-eligible, and — if the
-/// 中文：该注释与英文“the runtime uses, asserts the agent is primary-eligible, and — if the”含义一致。
+///   中文：该注释与英文“the runtime uses, asserts the agent is primary-eligible, and — if the”含义一致。
 /// profile carries a structured `model: provider/model[@variant]` binding —
-/// 中文：该注释与英文“profile carries a structured `model: provider/model[@variant]` binding —”含义一致。
+///   中文：该注释与英文“profile carries a structured `model: provider/model[@variant]` binding —”含义一致。
 /// uses that binding **atomically**: provider id, model id, and variant all
-/// 中文：该注释与英文“uses that binding **atomically**: provider id, model id, and variant all”含义一致。
+///   中文：该注释与英文“uses that binding **atomically**: provider id, model id, and variant all”含义一致。
 /// come from the agent's spec. A separately-supplied `--model` is **ignored**
-/// 中文：该注释与英文“come from the agent's spec. A separately-supplied `--model` is **ignored**”含义一致。
+///   中文：该注释与英文“come from the agent's spec. A separately-supplied `--model` is **ignored**”含义一致。
 /// when the binding wins, since mixing an explicit model id with the agent's
-/// 中文：该注释与英文“when the binding wins, since mixing an explicit model id with the agent's”含义一致。
+///   中文：该注释与英文“when the binding wins, since mixing an explicit model id with the agent's”含义一致。
 /// provider can produce nonsense pairs (e.g. anthropic provider with an
-/// 中文：该注释与英文“provider can produce nonsense pairs (e.g. anthropic provider with an”含义一致。
+///   中文：该注释与英文“provider can produce nonsense pairs (e.g. anthropic provider with an”含义一致。
 /// OpenAI-shaped model id). When the agent profile does NOT carry a binding,
-/// 中文：该注释与英文“OpenAI-shaped model id). When the agent profile does NOT carry a binding,”含义一致。
+///   中文：该注释与英文“OpenAI-shaped model id). When the agent profile does NOT carry a binding,”含义一致。
 /// the CLI defaults stand verbatim.
-/// 中文：该注释与英文“the CLI defaults stand verbatim.”含义一致。
+///   中文：该注释与英文“the CLI defaults stand verbatim.”含义一致。
 fn build_any_completion_model_for_args(
     args: &CodeArgs,
     env_file: &CodeEnvFile,
@@ -1612,35 +1612,35 @@ fn build_any_completion_model_for_args_with_lookup(
 }
 
 /// Resolve the **effective** [`CodeProvider`] enum that downstream
-/// 中文：该注释与英文“Resolve the **effective** [`CodeProvider`] enum that downstream”含义一致。
+///   中文：该注释与英文“Resolve the **effective** [`CodeProvider`] enum that downstream”含义一致。
 /// provider-specific helpers should dispatch on (OC-Phase 2 P2.4).
-/// 中文：该注释与英文“provider-specific helpers should dispatch on (OC-Phase 2 P2.4).”含义一致。
+///   中文：该注释与英文“provider-specific helpers should dispatch on (OC-Phase 2 P2.4).”含义一致。
 ///
 /// When `--agent <name>` is set and the agent's profile carries a structured
-/// 中文：该注释与英文“When `--agent <name>` is set and the agent's profile carries a structured”含义一致。
+///   中文：该注释与英文“When `--agent <name>` is set and the agent's profile carries a structured”含义一致。
 /// `model: provider/model` binding, the effective provider is the one named
-/// 中文：该注释与英文“`model: provider/model` binding, the effective provider is the one named”含义一致。
+///   中文：该注释与英文“`model: provider/model` binding, the effective provider is the one named”含义一致。
 /// by the binding's `provider_id`. Otherwise the effective provider is the
-/// 中文：该注释与英文“by the binding's `provider_id`. Otherwise the effective provider is the”含义一致。
+///   中文：该注释与英文“by the binding's `provider_id`. Otherwise the effective provider is the”含义一致。
 /// CLI `--provider` default.
-/// 中文：该注释与英文“CLI `--provider` default.”含义一致。
+///   中文：该注释与英文“CLI `--provider` default.”含义一致。
 ///
 /// An agent binding whose `provider_id` does NOT map to a known
-/// 中文：该注释与英文“An agent binding whose `provider_id` does NOT map to a known”含义一致。
+///   中文：该注释与英文“An agent binding whose `provider_id` does NOT map to a known”含义一致。
 /// [`CodeProvider`] variant is rejected with a `command_usage` error.
-/// 中文：该注释与英文“[`CodeProvider`] variant is rejected with a `command_usage` error.”含义一致。
+///   中文：该注释与英文“[`CodeProvider`] variant is rejected with a `command_usage` error.”含义一致。
 /// Silently falling back to `args.provider` would leave the system prompt /
-/// 中文：该注释与英文“Silently falling back to `args.provider` would leave the system prompt /”含义一致。
+///   中文：该注释与英文“Silently falling back to `args.provider` would leave the system prompt /”含义一致。
 /// context-budget / completion knobs computed against the CLI provider
-/// 中文：该注释与英文“context-budget / completion knobs computed against the CLI provider”含义一致。
+///   中文：该注释与英文“context-budget / completion knobs computed against the CLI provider”含义一致。
 /// while the model is ultimately built for a different (or non-existent)
-/// 中文：该注释与英文“while the model is ultimately built for a different (or non-existent)”含义一致。
+///   中文：该注释与英文“while the model is ultimately built for a different (or non-existent)”含义一致。
 /// provider — a partial-misconfiguration trap. The list of known provider
-/// 中文：该注释与英文“provider — a partial-misconfiguration trap. The list of known provider”含义一致。
+///   中文：该注释与英文“provider — a partial-misconfiguration trap. The list of known provider”含义一致。
 /// ids stays in lock-step with [`provider_id::ALL_PRODUCTION`] (plus
-/// 中文：该注释与英文“ids stays in lock-step with [`provider_id::ALL_PRODUCTION`] (plus”含义一致。
+///   中文：该注释与英文“ids stays in lock-step with [`provider_id::ALL_PRODUCTION`] (plus”含义一致。
 /// `FAKE` under the `test-provider` feature).
-/// 中文：该注释与英文“`FAKE` under the `test-provider` feature).”含义一致。
+///   中文：该注释与英文“`FAKE` under the `test-provider` feature).”含义一致。
 fn effective_code_provider_for_args(
     args: &CodeArgs,
     working_dir: &std::path::Path,
@@ -1674,27 +1674,27 @@ fn effective_code_provider_for_args(
 }
 
 /// Look up the agent profile selected by `--agent <name>` and return its
-/// 中文：该注释与英文“Look up the agent profile selected by `--agent <name>` and return its”含义一致。
+///   中文：该注释与英文“Look up the agent profile selected by `--agent <name>` and return its”含义一致。
 /// structured `ModelBinding` if the profile carries one (OC-Phase 2 P2.4).
-/// 中文：该注释与英文“structured `ModelBinding` if the profile carries one (OC-Phase 2 P2.4).”含义一致。
+///   中文：该注释与英文“structured `ModelBinding` if the profile carries one (OC-Phase 2 P2.4).”含义一致。
 ///
 /// Returns `Ok(None)` when:
-/// 中文：该注释与英文“Returns `Ok(None)` when:”含义一致。
+///   中文：该注释与英文“Returns `Ok(None)` when:”含义一致。
 /// - `--agent` was not supplied; the helper is a no-op.
-/// 中文：列表项说明与英文“`--agent` was not supplied; the helper is a no-op.”含义一致。
+///   中文：列表项说明与英文“`--agent` was not supplied; the helper is a no-op.”含义一致。
 /// - The agent exists but has no `model: provider/model` binding (legacy
-/// 中文：列表项说明与英文“The agent exists but has no `model: provider/model` binding (legacy”含义一致。
+///   中文：列表项说明与英文“The agent exists but has no `model: provider/model` binding (legacy”含义一致。
 ///   `model: default` / `fast` / etc.). The CLI defaults stand.
-/// 中文：该注释与英文“`model: default` / `fast` / etc.). The CLI defaults stand.”含义一致。
+///   中文：该注释与英文“`model: default` / `fast` / etc.). The CLI defaults stand.”含义一致。
 ///
 /// Returns `Err(_)` when:
-/// 中文：该注释与英文“Returns `Err(_)` when:”含义一致。
+///   中文：该注释与英文“Returns `Err(_)` when:”含义一致。
 /// - The agent name does not match any profile in the three-tier hierarchy.
-/// 中文：列表项说明与英文“The agent name does not match any profile in the three-tier hierarchy.”含义一致。
+///   中文：列表项说明与英文“The agent name does not match any profile in the three-tier hierarchy.”含义一致。
 /// - The agent's `mode` is not primary-eligible (sub-agents are dispatched
-/// 中文：列表项说明与英文“The agent's `mode` is not primary-eligible (sub-agents are dispatched”含义一致。
+///   中文：列表项说明与英文“The agent's `mode` is not primary-eligible (sub-agents are dispatched”含义一致。
 ///   via the `task` tool in OC-Phase 3, not as the session driver).
-/// 中文：该注释与英文“via the `task` tool in OC-Phase 3, not as the session driver).”含义一致。
+///   中文：该注释与英文“via the `task` tool in OC-Phase 3, not as the session driver).”含义一致。
 fn resolve_agent_binding_override(
     args: &CodeArgs,
     working_dir: &std::path::Path,
@@ -1728,38 +1728,38 @@ fn resolve_agent_binding_override(
 }
 
 /// Main TUI execution path: initializes the AI provider, builds the tool
-/// 中文：该注释与英文“Main TUI execution path: initializes the AI provider, builds the tool”含义一致。
+///   中文：该注释与英文“Main TUI execution path: initializes the AI provider, builds the tool”含义一致。
 /// registry, starts background web/MCP servers, and launches the interactive
-/// 中文：该注释与英文“registry, starts background web/MCP servers, and launches the interactive”含义一致。
+///   中文：该注释与英文“registry, starts background web/MCP servers, and launches the interactive”含义一致。
 /// terminal application.
-/// 中文：该注释与英文“terminal application.”含义一致。
+///   中文：该注释与英文“terminal application.”含义一致。
 ///
 /// This function handles provider-specific client creation (API key validation,
-/// 中文：该注释与英文“This function handles provider-specific client creation (API key validation,”含义一致。
+///   中文：该注释与英文“This function handles provider-specific client creation (API key validation,”含义一致。
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
-/// 中文：该注释与英文“model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].”含义一致。
+///   中文：该注释与英文“model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - Reads provider credentials from environment variables and optional dotenv
-/// 中文：列表项说明与英文“Reads provider credentials from environment variables and optional dotenv”含义一致。
+///   中文：列表项说明与英文“Reads provider credentials from environment variables and optional dotenv”含义一致。
 ///   files.
-/// 中文：该注释与英文“files.”含义一致。
+///   中文：该注释与英文“files.”含义一致。
 /// - Registers local file, shell, planning, and MCP bridge tools for the agent.
-/// 中文：列表项说明与英文“Registers local file, shell, planning, and MCP bridge tools for the agent.”含义一致。
+///   中文：列表项说明与英文“Registers local file, shell, planning, and MCP bridge tools for the agent.”含义一致。
 /// - May start web/MCP background services and a managed Codex app-server.
-/// 中文：列表项说明与英文“May start web/MCP background services and a managed Codex app-server.”含义一致。
+///   中文：列表项说明与英文“May start web/MCP background services and a managed Codex app-server.”含义一致。
 /// - May mutate the workspace through tools when the selected context permits it.
-/// 中文：列表项说明与英文“May mutate the workspace through tools when the selected context permits it.”含义一致。
+///   中文：列表项说明与英文“May mutate the workspace through tools when the selected context permits it.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// Returns [`CliError`] for missing credentials, invalid provider configuration,
-/// 中文：该注释与英文“Returns [`CliError`] for missing credentials, invalid provider configuration,”含义一致。
+///   中文：该注释与英文“Returns [`CliError`] for missing credentials, invalid provider configuration,”含义一致。
 /// unsafe mode/host combinations, provider bootstrap failures, or failures from
-/// 中文：该注释与英文“unsafe mode/host combinations, provider bootstrap failures, or failures from”含义一致。
+///   中文：该注释与英文“unsafe mode/host combinations, provider bootstrap failures, or failures from”含义一致。
 /// the shared TUI lifecycle.
-/// 中文：该注释与英文“the shared TUI lifecycle.”含义一致。
+///   中文：该注释与英文“the shared TUI lifecycle.”含义一致。
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
@@ -1994,9 +1994,9 @@ fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
 }
 
 /// Provider-explicit variant of [`completion_thinking_for_args`] used by the
-/// 中文：该注释与英文“Provider-explicit variant of [`completion_thinking_for_args`] used by the”含义一致。
+///   中文：该注释与英文“Provider-explicit variant of [`completion_thinking_for_args`] used by the”含义一致。
 /// `--agent` override path so the resolved provider drives the dispatch.
-/// 中文：该注释与英文“`--agent` override path so the resolved provider drives the dispatch.”含义一致。
+///   中文：该注释与英文“`--agent` override path so the resolved provider drives the dispatch.”含义一致。
 fn completion_thinking_for_provider(
     provider: CodeProvider,
     args: &CodeArgs,
@@ -2014,7 +2014,7 @@ fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionRea
 }
 
 /// Provider-explicit variant of [`completion_reasoning_effort_for_args`].
-/// 中文：该注释与英文“Provider-explicit variant of [`completion_reasoning_effort_for_args`].”含义一致。
+///   中文：该注释与英文“Provider-explicit variant of [`completion_reasoning_effort_for_args`].”含义一致。
 fn completion_reasoning_effort_for_provider(
     provider: CodeProvider,
     args: &CodeArgs,
@@ -2032,7 +2032,7 @@ fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
 }
 
 /// Provider-explicit variant of [`completion_stream_for_args`].
-/// 中文：该注释与英文“Provider-explicit variant of [`completion_stream_for_args`].”含义一致。
+///   中文：该注释与英文“Provider-explicit variant of [`completion_stream_for_args`].”含义一致。
 fn completion_stream_for_provider(provider: CodeProvider, args: &CodeArgs) -> Option<bool> {
     match provider {
         CodeProvider::Deepseek => args.deepseek_stream,
@@ -2051,12 +2051,12 @@ fn preserve_reasoning_content_for_provider(provider: CodeProvider) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Represents a managed Codex app-server child process and its WebSocket URL.
-/// 中文：该注释与英文“Represents a managed Codex app-server child process and its WebSocket URL.”含义一致。
+///   中文：该注释与英文“Represents a managed Codex app-server child process and its WebSocket URL.”含义一致。
 ///
 /// The server is spawned as a child process and communicated with over WebSocket.
-/// 中文：该注释与英文“The server is spawned as a child process and communicated with over WebSocket.”含义一致。
+///   中文：该注释与英文“The server is spawned as a child process and communicated with over WebSocket.”含义一致。
 /// [`ManagedCodexServer::shutdown`] sends SIGKILL and waits up to 5 seconds.
-/// 中文：该注释与英文“[`ManagedCodexServer::shutdown`] sends SIGKILL and waits up to 5 seconds.”含义一致。
+///   中文：该注释与英文“[`ManagedCodexServer::shutdown`] sends SIGKILL and waits up to 5 seconds.”含义一致。
 struct ManagedCodexServer {
     ws_url: String,
     child: Child,
@@ -2064,16 +2064,16 @@ struct ManagedCodexServer {
 
 impl ManagedCodexServer {
     /// Gracefully shuts down the managed Codex app-server process.
-    /// 中文：该注释与英文“Gracefully shuts down the managed Codex app-server process.”含义一致。
+    ///   中文：该注释与英文“Gracefully shuts down the managed Codex app-server process.”含义一致。
     ///
     /// If the child process has already exited (`id()` returns `None`), this is
-    /// 中文：该注释与英文“If the child process has already exited (`id()` returns `None`), this is”含义一致。
+    ///   中文：该注释与英文“If the child process has already exited (`id()` returns `None`), this is”含义一致。
     /// a no-op. Otherwise it sends a kill signal via `start_kill()` and waits up
-    /// 中文：该注释与英文“a no-op. Otherwise it sends a kill signal via `start_kill()` and waits up”含义一致。
+    ///   中文：该注释与英文“a no-op. Otherwise it sends a kill signal via `start_kill()` and waits up”含义一致。
     /// to 5 seconds for the process to terminate. If the timeout expires the
-    /// 中文：该注释与英文“to 5 seconds for the process to terminate. If the timeout expires the”含义一致。
+    ///   中文：该注释与英文“to 5 seconds for the process to terminate. If the timeout expires the”含义一致。
     /// process is abandoned (the OS will reap it when the handle is dropped).
-    /// 中文：该注释与英文“process is abandoned (the OS will reap it when the handle is dropped).”含义一致。
+    ///   中文：该注释与英文“process is abandoned (the OS will reap it when the handle is dropped).”含义一致。
     async fn shutdown(&mut self) {
         if self.child.id().is_none() {
             return;
@@ -2225,25 +2225,25 @@ fn ensure_loopback_browser_control_host(host: &str) -> CliResult<()> {
 }
 
 /// Resolve the effective [`BrowserControlMode`] for this invocation.
-/// 中文：该注释与英文“Resolve the effective [`BrowserControlMode`] for this invocation.”含义一致。
+///   中文：该注释与英文“Resolve the effective [`BrowserControlMode`] for this invocation.”含义一致。
 ///
 /// User-supplied `--browser-control` always wins. When the flag is omitted
-/// 中文：该注释与英文“User-supplied `--browser-control` always wins. When the flag is omitted”含义一致。
+///   中文：该注释与英文“User-supplied `--browser-control` always wins. When the flag is omitted”含义一致。
 /// the default is mode-aware:
-/// 中文：该注释与英文“the default is mode-aware:”含义一致。
+///   中文：该注释与英文“the default is mode-aware:”含义一致。
 ///   - `--web-only --provider codex` → `loopback` (matches the existing
-/// 中文：列表项说明与英文“`--web-only --provider codex` → `loopback` (matches the existing”含义一致。
+///   中文：列表项说明与英文“`--web-only --provider codex` → `loopback` (matches the existing”含义一致。
 ///     "browser write enabled" default for managed Codex sessions),
-/// 中文：该注释与英文“"browser write enabled" default for managed Codex sessions),”含义一致。
+///   中文：该注释与英文“"browser write enabled" default for managed Codex sessions),”含义一致。
 ///   - all other entry points → `off` (TUI sessions and non-Codex
-/// 中文：列表项说明与英文“all other entry points → `off` (TUI sessions and non-Codex”含义一致。
+///   中文：列表项说明与英文“all other entry points → `off` (TUI sessions and non-Codex”含义一致。
 ///     `--web-only` placeholders).
-/// 中文：该注释与英文“`--web-only` placeholders).”含义一致。
+///   中文：该注释与英文“`--web-only` placeholders).”含义一致。
 ///
 /// `loopback` further requires that `--host` is a loopback address; this is
-/// 中文：该注释与英文“`loopback` further requires that `--host` is a loopback address; this is”含义一致。
+///   中文：该注释与英文“`loopback` further requires that `--host` is a loopback address; this is”含义一致。
 /// validated up-front so we fail closed before any port is bound.
-/// 中文：该注释与英文“validated up-front so we fail closed before any port is bound.”含义一致。
+///   中文：该注释与英文“validated up-front so we fail closed before any port is bound.”含义一致。
 pub fn resolve_browser_control_mode(args: &CodeArgs) -> CliResult<BrowserControlMode> {
     let mode = match args.browser_control {
         Some(mode) => mode,
@@ -2264,13 +2264,13 @@ fn default_browser_control_mode(args: &CodeArgs) -> BrowserControlMode {
 }
 
 /// CLI-side wrapper around `code_ui::test_lease_duration_override` that maps
-/// 中文：该注释与英文“CLI-side wrapper around `code_ui::test_lease_duration_override` that maps”含义一致。
+///   中文：该注释与英文“CLI-side wrapper around `code_ui::test_lease_duration_override` that maps”含义一致。
 /// the helper's `String` error into `CliError::command_usage` so a bad
-/// 中文：该注释与英文“the helper's `String` error into `CliError::command_usage` so a bad”含义一致。
+///   中文：该注释与英文“the helper's `String` error into `CliError::command_usage` so a bad”含义一致。
 /// `LIBRA_CODE_LEASE_DURATION_MS` value fails the command at startup with
-/// 中文：该注释与英文“`LIBRA_CODE_LEASE_DURATION_MS` value fails the command at startup with”含义一致。
+///   中文：该注释与英文“`LIBRA_CODE_LEASE_DURATION_MS` value fails the command at startup with”含义一致。
 /// a stable, user-readable message.
-/// 中文：该注释与英文“a stable, user-readable message.”含义一致。
+///   中文：该注释与英文“a stable, user-readable message.”含义一致。
 fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>> {
     crate::internal::ai::web::code_ui::test_lease_duration_override()
         .map_err(CliError::command_usage)
@@ -2377,27 +2377,27 @@ fn build_headless_web_code_ui_snapshot(
 }
 
 /// Build a headless Code UI runtime for `--web-only` non-Codex providers.
-/// 中文：该注释与英文“Build a headless Code UI runtime for `--web-only` non-Codex providers.”含义一致。
+///   中文：该注释与英文“Build a headless Code UI runtime for `--web-only` non-Codex providers.”含义一致。
 ///
 /// Constructs a minimal local-read-only [`ToolRegistry`]
-/// 中文：该注释与英文“Constructs a minimal local-read-only [`ToolRegistry`]”含义一致。
+///   中文：该注释与英文“Constructs a minimal local-read-only [`ToolRegistry`]”含义一致。
 /// and wires it into a [`HeadlessCodeRuntime`] so the browser composer can
-/// 中文：该注释与英文“and wires it into a [`HeadlessCodeRuntime`] so the browser composer can”含义一致。
+///   中文：该注释与英文“and wires it into a [`HeadlessCodeRuntime`] so the browser composer can”含义一致。
 /// drive a real agent turn against the supplied `model`. The result is
-/// 中文：该注释与英文“drive a real agent turn against the supplied `model`. The result is”含义一致。
+///   中文：该注释与英文“drive a real agent turn against the supplied `model`. The result is”含义一致。
 /// exposed through [`CodeUiRuntimeHandle`] just like the TUI flow, so the
-/// 中文：该注释与英文“exposed through [`CodeUiRuntimeHandle`] just like the TUI flow, so the”含义一致。
+///   中文：该注释与英文“exposed through [`CodeUiRuntimeHandle`] just like the TUI flow, so the”含义一致。
 /// rest of `start_web_server` can use it without per-mode special cases.
-/// 中文：该注释与英文“rest of `start_web_server` can use it without per-mode special cases.”含义一致。
+///   中文：该注释与英文“rest of `start_web_server` can use it without per-mode special cases.”含义一致。
 ///
 /// `browser_write_enabled` should mirror the resolved
-/// 中文：该注释与英文“`browser_write_enabled` should mirror the resolved”含义一致。
+///   中文：该注释与英文“`browser_write_enabled` should mirror the resolved”含义一致。
 /// [`BrowserControlMode::Loopback`] so the runtime advertises browser writes
-/// 中文：该注释与英文“[`BrowserControlMode::Loopback`] so the runtime advertises browser writes”含义一致。
+///   中文：该注释与英文“[`BrowserControlMode::Loopback`] so the runtime advertises browser writes”含义一致。
 /// in the snapshot capabilities. The initial controller is `Unclaimed` —
-/// 中文：该注释与英文“in the snapshot capabilities. The initial controller is `Unclaimed` —”含义一致。
+///   中文：该注释与英文“in the snapshot capabilities. The initial controller is `Unclaimed` —”含义一致。
 /// the browser is the only writer in headless mode, no TUI to hand off from.
-/// 中文：该注释与英文“the browser is the only writer in headless mode, no TUI to hand off from.”含义一致。
+///   中文：该注释与英文“the browser is the only writer in headless mode, no TUI to hand off from.”含义一致。
 async fn build_headless_web_code_ui_runtime<M>(
     args: &CodeArgs,
     working_dir: &Path,
@@ -2539,25 +2539,25 @@ fn build_headless_tool_registry(
 }
 
 /// Construct the appropriate provider client and wrap it in
-/// 中文：该注释与英文“Construct the appropriate provider client and wrap it in”含义一致。
+///   中文：该注释与英文“Construct the appropriate provider client and wrap it in”含义一致。
 /// [`build_headless_web_code_ui_runtime`]. Returns `None` when the requested
-/// 中文：该注释与英文“[`build_headless_web_code_ui_runtime`]. Returns `None` when the requested”含义一致。
+///   中文：该注释与英文“[`build_headless_web_code_ui_runtime`]. Returns `None` when the requested”含义一致。
 /// provider is not yet wired into the headless path so the caller can fall
-/// 中文：该注释与英文“provider is not yet wired into the headless path so the caller can fall”含义一致。
+///   中文：该注释与英文“provider is not yet wired into the headless path so the caller can fall”含义一致。
 /// back to the read-only placeholder gracefully.
-/// 中文：该注释与英文“back to the read-only placeholder gracefully.”含义一致。
+///   中文：该注释与英文“back to the read-only placeholder gracefully.”含义一致。
 ///
 /// v0 now routes several non-Codex providers through the same provider-factory
-/// 中文：该注释与英文“v0 now routes several non-Codex providers through the same provider-factory”含义一致。
+///   中文：该注释与英文“v0 now routes several non-Codex providers through the same provider-factory”含义一致。
 /// bootstrap used by TUI. This keeps API-key/base-URL resolution centralized and
-/// 中文：该注释与英文“bootstrap used by TUI. This keeps API-key/base-URL resolution centralized and”含义一致。
+///   中文：该注释与英文“bootstrap used by TUI. This keeps API-key/base-URL resolution centralized and”含义一致。
 /// ensures `--web-only` behavior stays aligned with existing provider construction.
-/// 中文：该注释与英文“ensures `--web-only` behavior stays aligned with existing provider construction.”含义一致。
+///   中文：该注释与英文“ensures `--web-only` behavior stays aligned with existing provider construction.”含义一致。
 ///
 /// The placeholder path is still available for providers that are not in this
-/// 中文：该注释与英文“The placeholder path is still available for providers that are not in this”含义一致。
+///   中文：该注释与英文“The placeholder path is still available for providers that are not in this”含义一致。
 /// dispatch arm or fail during bootstrap for other reasons.
-/// 中文：该注释与英文“dispatch arm or fail during bootstrap for other reasons.”含义一致。
+///   中文：该注释与英文“dispatch arm or fail during bootstrap for other reasons.”含义一致。
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
@@ -2750,9 +2750,9 @@ async fn start_codex_code_ui_runtime(
 // ---------------------------------------------------------------------------
 
 /// Maps [`CodeApprovalPolicy`] to the Codex app-server's approval string.
-/// 中文：该注释与英文“Maps [`CodeApprovalPolicy`] to the Codex app-server's approval string.”含义一致。
+///   中文：该注释与英文“Maps [`CodeApprovalPolicy`] to the Codex app-server's approval string.”含义一致。
 /// Codex only distinguishes between "accept" (auto-approve) and "ask" (prompt).
-/// 中文：该注释与英文“Codex only distinguishes between "accept" (auto-approve) and "ask" (prompt).”含义一致。
+///   中文：该注释与英文“Codex only distinguishes between "accept" (auto-approve) and "ask" (prompt).”含义一致。
 fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
     match policy {
         CodeApprovalPolicy::Never | CodeApprovalPolicy::AllowAll => "accept",
@@ -2763,17 +2763,17 @@ fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
 }
 
 /// Starts the Codex app-server as a managed child process.
-/// 中文：该注释与英文“Starts the Codex app-server as a managed child process.”含义一致。
+///   中文：该注释与英文“Starts the Codex app-server as a managed child process.”含义一致。
 ///
 /// 1. Resolves the WebSocket URL (using the requested port or auto-selecting a free one).
-/// 中文：该注释与英文“1. Resolves the WebSocket URL (using the requested port or auto-selecting a free one).”含义一致。
+///   中文：该注释与英文“1. Resolves the WebSocket URL (using the requested port or auto-selecting a free one).”含义一致。
 /// 2. Spawns the Codex binary with `app-server --listen <ws_url>`.
-/// 中文：该注释与英文“2. Spawns the Codex binary with `app-server --listen <ws_url>`.”含义一致。
+///   中文：该注释与英文“2. Spawns the Codex binary with `app-server --listen <ws_url>`.”含义一致。
 /// 3. Polls the WebSocket endpoint until it becomes reachable (or times out).
-/// 中文：该注释与英文“3. Polls the WebSocket endpoint until it becomes reachable (or times out).”含义一致。
+///   中文：该注释与英文“3. Polls the WebSocket endpoint until it becomes reachable (or times out).”含义一致。
 ///
 /// On failure, the child process is killed before returning the error.
-/// 中文：该注释与英文“On failure, the child process is killed before returning the error.”含义一致。
+///   中文：该注释与英文“On failure, the child process is killed before returning the error.”含义一致。
 async fn start_managed_codex_server(
     codex_bin: &str,
     requested_port: Option<u16>,
@@ -2792,11 +2792,11 @@ async fn start_managed_codex_server(
 }
 
 /// Builds a `tokio::process::Command` for the Codex app-server.
-/// 中文：该注释与英文“Builds a `tokio::process::Command` for the Codex app-server.”含义一致。
+///   中文：该注释与英文“Builds a `tokio::process::Command` for the Codex app-server.”含义一致。
 /// Stdin/stdout/stderr are all set to null since the server communicates
-/// 中文：该注释与英文“Stdin/stdout/stderr are all set to null since the server communicates”含义一致。
+///   中文：该注释与英文“Stdin/stdout/stderr are all set to null since the server communicates”含义一致。
 /// exclusively over WebSocket.
-/// 中文：该注释与英文“exclusively over WebSocket.”含义一致。
+///   中文：该注释与英文“exclusively over WebSocket.”含义一致。
 fn build_codex_command(program: &str, ws_url: &str, working_dir: &Path) -> Command {
     let mut command = Command::new(program);
     command
@@ -2811,9 +2811,9 @@ fn build_codex_command(program: &str, ws_url: &str, working_dir: &Path) -> Comma
 }
 
 /// Windows fallback: wraps the Codex binary invocation in `cmd /C` to
-/// 中文：该注释与英文“Windows fallback: wraps the Codex binary invocation in `cmd /C` to”含义一致。
+///   中文：该注释与英文“Windows fallback: wraps the Codex binary invocation in `cmd /C` to”含义一致。
 /// handle `.cmd`/`.bat` shims that are common on Windows (e.g. from npm).
-/// 中文：该注释与英文“handle `.cmd`/`.bat` shims that are common on Windows (e.g. from npm).”含义一致。
+///   中文：该注释与英文“handle `.cmd`/`.bat` shims that are common on Windows (e.g. from npm).”含义一致。
 #[cfg(target_os = "windows")]
 fn build_windows_shell_codex_command(codex_bin: &str, ws_url: &str, working_dir: &Path) -> Command {
     let mut command = Command::new("cmd");
@@ -2831,9 +2831,9 @@ fn build_windows_shell_codex_command(codex_bin: &str, ws_url: &str, working_dir:
 }
 
 /// Attempts to spawn the Codex app-server process. On Windows, falls back
-/// 中文：该注释与英文“Attempts to spawn the Codex app-server process. On Windows, falls back”含义一致。
+///   中文：该注释与英文“Attempts to spawn the Codex app-server process. On Windows, falls back”含义一致。
 /// to `cmd /C` if the direct spawn fails with `NotFound` (handles `.cmd` shims).
-/// 中文：该注释与英文“to `cmd /C` if the direct spawn fails with `NotFound` (handles `.cmd` shims).”含义一致。
+///   中文：该注释与英文“to `cmd /C` if the direct spawn fails with `NotFound` (handles `.cmd` shims).”含义一致。
 fn spawn_codex_app_server(codex_bin: &str, ws_url: &str, working_dir: &Path) -> CliResult<Child> {
     match build_codex_command(codex_bin, ws_url, working_dir).spawn() {
         Ok(child) => Ok(child),
@@ -2856,9 +2856,9 @@ fn spawn_codex_app_server(codex_bin: &str, ws_url: &str, working_dir: &Path) -> 
 }
 
 /// Resolves the WebSocket URL for the Codex app-server.
-/// 中文：该注释与英文“Resolves the WebSocket URL for the Codex app-server.”含义一致。
+///   中文：该注释与英文“Resolves the WebSocket URL for the Codex app-server.”含义一致。
 /// If no port is specified, auto-selects a free local port via [`pick_free_local_port`].
-/// 中文：该注释与英文“If no port is specified, auto-selects a free local port via [`pick_free_local_port`].”含义一致。
+///   中文：该注释与英文“If no port is specified, auto-selects a free local port via [`pick_free_local_port`].”含义一致。
 fn resolve_codex_ws_url(requested_port: Option<u16>) -> CliResult<String> {
     let port = match requested_port {
         Some(0) => {
@@ -2873,11 +2873,11 @@ fn resolve_codex_ws_url(requested_port: Option<u16>) -> CliResult<String> {
 }
 
 /// Binds to port 0 on the given host to let the OS assign a free ephemeral
-/// 中文：该注释与英文“Binds to port 0 on the given host to let the OS assign a free ephemeral”含义一致。
+///   中文：该注释与英文“Binds to port 0 on the given host to let the OS assign a free ephemeral”含义一致。
 /// port, then returns that port number. The listener is dropped immediately,
-/// 中文：该注释与英文“port, then returns that port number. The listener is dropped immediately,”含义一致。
+///   中文：该注释与英文“port, then returns that port number. The listener is dropped immediately,”含义一致。
 /// releasing the port for the Codex server to bind to.
-/// 中文：该注释与英文“releasing the port for the Codex server to bind to.”含义一致。
+///   中文：该注释与英文“releasing the port for the Codex server to bind to.”含义一致。
 fn pick_free_local_port(host: &str) -> CliResult<u16> {
     let listener = std::net::TcpListener::bind((host, 0)).map_err(|e| {
         CliError::network(format!(
@@ -2894,11 +2894,11 @@ fn pick_free_local_port(host: &str) -> CliResult<u16> {
 }
 
 /// Polls the Codex app-server WebSocket endpoint until a connection succeeds
-/// 中文：该注释与英文“Polls the Codex app-server WebSocket endpoint until a connection succeeds”含义一致。
+///   中文：该注释与英文“Polls the Codex app-server WebSocket endpoint until a connection succeeds”含义一致。
 /// or [`CODEX_STARTUP_TIMEOUT`] is exceeded. The probe connection is immediately
-/// 中文：该注释与英文“or [`CODEX_STARTUP_TIMEOUT`] is exceeded. The probe connection is immediately”含义一致。
+///   中文：该注释与英文“or [`CODEX_STARTUP_TIMEOUT`] is exceeded. The probe connection is immediately”含义一致。
 /// dropped after a successful handshake.
-/// 中文：该注释与英文“dropped after a successful handshake.”含义一致。
+///   中文：该注释与英文“dropped after a successful handshake.”含义一致。
 async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
     let deadline = Instant::now() + CODEX_STARTUP_TIMEOUT;
 
@@ -2928,14 +2928,14 @@ async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Resolves the effective working directory for the code session.
-/// 中文：该注释与英文“Resolves the effective working directory for the code session.”含义一致。
+///   中文：该注释与英文“Resolves the effective working directory for the code session.”含义一致。
 ///
 /// Priority: `--cwd` > `--repo` > current working directory.
-/// 中文：该注释与英文“Priority: `--cwd` > `--repo` > current working directory.”含义一致。
+///   中文：该注释与英文“Priority: `--cwd` > `--repo` > current working directory.”含义一致。
 /// Validates that the resolved path exists and is a directory.
-/// 中文：该注释与英文“Validates that the resolved path exists and is a directory.”含义一致。
+///   中文：该注释与英文“Validates that the resolved path exists and is a directory.”含义一致。
 /// `--cwd` and `--repo` are mutually exclusive.
-/// 中文：该注释与英文“`--cwd` and `--repo` are mutually exclusive.”含义一致。
+///   中文：该注释与英文“`--cwd` and `--repo` are mutually exclusive.”含义一致。
 pub(crate) fn resolve_code_preflight_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
     resolve_code_working_dir(args)
 }
@@ -2982,14 +2982,14 @@ fn validate_code_working_dir(working_dir: PathBuf, flag: &str) -> CliResult<Path
 // ---------------------------------------------------------------------------
 
 /// Aggregates all parameters needed to launch the TUI application.
-/// 中文：该注释与英文“Aggregates all parameters needed to launch the TUI application.”含义一致。
+///   中文：该注释与英文“Aggregates all parameters needed to launch the TUI application.”含义一致。
 ///
 /// This struct is built once in [`execute_tui`] and consumed by
-/// 中文：该注释与英文“This struct is built once in [`execute_tui`] and consumed by”含义一致。
+///   中文：该注释与英文“This struct is built once in [`execute_tui`] and consumed by”含义一致。
 /// [`run_tui_with_model`]. It bundles network config, tool registry,
-/// 中文：该注释与英文“[`run_tui_with_model`]. It bundles network config, tool registry,”含义一致。
+///   中文：该注释与英文“[`run_tui_with_model`]. It bundles network config, tool registry,”含义一致。
 /// prompt/temperature settings, session state, and inter-component channels.
-/// 中文：该注释与英文“prompt/temperature settings, session state, and inter-component channels.”含义一致。
+///   中文：该注释与英文“prompt/temperature settings, session state, and inter-component channels.”含义一致。
 struct TuiLaunchConfig {
     host: String,
     port: u16,
@@ -3017,11 +3017,11 @@ struct TuiLaunchConfig {
     control_runtime: ControlRuntimeConfig,
     browser_control: BrowserControlMode,
     /// Goal objective passed via `libra code --goal`. The TUI app
-    /// 中文：该注释与英文“Goal objective passed via `libra code --goal`. The TUI app”含义一致。
+    ///   中文：该注释与英文“Goal objective passed via `libra code --goal`. The TUI app”含义一致。
     /// uses this to bootstrap a `GoalSpec` and seed
-    /// 中文：该注释与英文“uses this to bootstrap a `GoalSpec` and seed”含义一致。
+    ///   中文：该注释与英文“uses this to bootstrap a `GoalSpec` and seed”含义一致。
     /// [`AppConfig::initial_goal`] before the first turn.
-    /// 中文：该注释与英文“[`AppConfig::initial_goal`] before the first turn.”含义一致。
+    ///   中文：该注释与英文“[`AppConfig::initial_goal`] before the first turn.”含义一致。
     initial_goal: Option<String>,
 }
 
@@ -3247,53 +3247,53 @@ fn append_resume_audit_frame(
 }
 
 /// Core TUI lifecycle: wires up the terminal, background servers, agent
-/// 中文：该注释与英文“Core TUI lifecycle: wires up the terminal, background servers, agent”含义一致。
+///   中文：该注释与英文“Core TUI lifecycle: wires up the terminal, background servers, agent”含义一致。
 /// configuration, session persistence, and the interactive `App` event loop.
-/// 中文：该注释与英文“configuration, session persistence, and the interactive `App` event loop.”含义一致。
+///   中文：该注释与英文“configuration, session persistence, and the interactive `App` event loop.”含义一致。
 ///
 /// This function is generic over the completion model `M`, allowing all
-/// 中文：该注释与英文“This function is generic over the completion model `M`, allowing all”含义一致。
+///   中文：该注释与英文“This function is generic over the completion model `M`, allowing all”含义一致。
 /// providers to share the same TUI setup code. The flow is:
-/// 中文：该注释与英文“providers to share the same TUI setup code. The flow is:”含义一致。
+///   中文：该注释与英文“providers to share the same TUI setup code. The flow is:”含义一致。
 ///
 /// 1. Load git hooks from the working directory.
-/// 中文：该注释与英文“1. Load git hooks from the working directory.”含义一致。
+///   中文：该注释与英文“1. Load git hooks from the working directory.”含义一致。
 /// 2. Build the agent's `ToolLoopConfig` (preamble, temperature, sandbox policy).
-/// 中文：该注释与英文“2. Build the agent's `ToolLoopConfig` (preamble, temperature, sandbox policy).”含义一致。
+///   中文：该注释与英文“2. Build the agent's `ToolLoopConfig` (preamble, temperature, sandbox policy).”含义一致。
 /// 3. Initialize the terminal via `tui_init()` with a restore guard.
-/// 中文：该注释与英文“3. Initialize the terminal via `tui_init()` with a restore guard.”含义一致。
+///   中文：该注释与英文“3. Initialize the terminal via `tui_init()` with a restore guard.”含义一致。
 /// 4. Start the web server and MCP server as background tasks.
-/// 中文：该注释与英文“4. Start the web server and MCP server as background tasks.”含义一致。
+///   中文：该注释与英文“4. Start the web server and MCP server as background tasks.”含义一致。
 /// 5. Load slash commands and agent profiles from disk.
-/// 中文：该注释与英文“5. Load slash commands and agent profiles from disk.”含义一致。
+///   中文：该注释与英文“5. Load slash commands and agent profiles from disk.”含义一致。
 /// 6. Restore or create a new session.
-/// 中文：该注释与英文“6. Restore or create a new session.”含义一致。
+///   中文：该注释与英文“6. Restore or create a new session.”含义一致。
 /// 7. Run the `App` event loop until the user exits.
-/// 中文：该注释与英文“7. Run the `App` event loop until the user exits.”含义一致。
+///   中文：该注释与英文“7. Run the `App` event loop until the user exits.”含义一致。
 /// 8. Gracefully shut down all background servers.
-/// 中文：该注释与英文“8. Gracefully shut down all background servers.”含义一致。
+///   中文：该注释与英文“8. Gracefully shut down all background servers.”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - Switches the terminal into TUI mode and restores it on exit.
-/// 中文：列表项说明与英文“Switches the terminal into TUI mode and restores it on exit.”含义一致。
+///   中文：列表项说明与英文“Switches the terminal into TUI mode and restores it on exit.”含义一致。
 /// - Starts background web and MCP listeners when their ports are available.
-/// 中文：列表项说明与英文“Starts background web and MCP listeners when their ports are available.”含义一致。
+///   中文：列表项说明与英文“Starts background web and MCP listeners when their ports are available.”含义一致。
 /// - Reads hook, slash-command, profile, session, and projection state from the
-/// 中文：列表项说明与英文“Reads hook, slash-command, profile, session, and projection state from the”含义一致。
+///   中文：列表项说明与英文“Reads hook, slash-command, profile, session, and projection state from the”含义一致。
 ///   working directory.
-/// 中文：该注释与英文“working directory.”含义一致。
+///   中文：该注释与英文“working directory.”含义一致。
 /// - Persists session updates and may drive tool-mediated workspace writes.
-/// 中文：列表项说明与英文“Persists session updates and may drive tool-mediated workspace writes.”含义一致。
+///   中文：列表项说明与英文“Persists session updates and may drive tool-mediated workspace writes.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// Returns [`CliError`] for terminal initialization failures, invalid resume
-/// 中文：该注释与英文“Returns [`CliError`] for terminal initialization failures, invalid resume”含义一致。
+///   中文：该注释与英文“Returns [`CliError`] for terminal initialization failures, invalid resume”含义一致。
 /// thread IDs, missing sessions, session/projection load failures, or fatal app
-/// 中文：该注释与英文“thread IDs, missing sessions, session/projection load failures, or fatal app”含义一致。
+///   中文：该注释与英文“thread IDs, missing sessions, session/projection load failures, or fatal app”含义一致。
 /// exits reported by the TUI event loop.
-/// 中文：该注释与英文“exits reported by the TUI event loop.”含义一致。
+///   中文：该注释与英文“exits reported by the TUI event loop.”含义一致。
 async fn run_tui_with_model<M>(
     model: M,
     params: TuiLaunchConfig,
@@ -3900,17 +3900,17 @@ where
 // ---------------------------------------------------------------------------
 
 /// Starts the MCP server using `rmcp`'s Streamable HTTP transport.
-/// 中文：该注释与英文“Starts the MCP server using `rmcp`'s Streamable HTTP transport.”含义一致。
+///   中文：该注释与英文“Starts the MCP server using `rmcp`'s Streamable HTTP transport.”含义一致。
 ///
 /// Each incoming TCP connection is handled by a Hyper service that wraps the
-/// 中文：该注释与英文“Each incoming TCP connection is handled by a Hyper service that wraps the”含义一致。
+///   中文：该注释与英文“Each incoming TCP connection is handled by a Hyper service that wraps the”含义一致。
 /// `StreamableHttpService`. Per-connection tasks are tracked in `connection_tasks`
-/// 中文：该注释与英文“`StreamableHttpService`. Per-connection tasks are tracked in `connection_tasks`”含义一致。
+///   中文：该注释与英文“`StreamableHttpService`. Per-connection tasks are tracked in `connection_tasks`”含义一致。
 /// so they can be aborted during shutdown, preventing task leaks.
-/// 中文：该注释与英文“so they can be aborted during shutdown, preventing task leaks.”含义一致。
+///   中文：该注释与英文“so they can be aborted during shutdown, preventing task leaks.”含义一致。
 ///
 /// Uses `LocalSessionManager` for session management (single-node, in-memory).
-/// 中文：该注释与英文“Uses `LocalSessionManager` for session management (single-node, in-memory).”含义一致。
+///   中文：该注释与英文“Uses `LocalSessionManager` for session management (single-node, in-memory).”含义一致。
 async fn start_mcp_server(
     host: &str,
     port: u16,
@@ -3984,9 +3984,9 @@ async fn start_mcp_server(
 // ---------------------------------------------------------------------------
 
 /// Builds the system prompt (preamble) for the AI agent, incorporating the
-/// 中文：该注释与英文“Builds the system prompt (preamble) for the AI agent, incorporating the”含义一致。
+///   中文：该注释与英文“Builds the system prompt (preamble) for the AI agent, incorporating the”含义一致。
 /// working directory context and optional operating mode (dev/review/research).
-/// 中文：该注释与英文“working directory context and optional operating mode (dev/review/research).”含义一致。
+///   中文：该注释与英文“working directory context and optional operating mode (dev/review/research).”含义一致。
 fn system_preamble(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
@@ -4053,21 +4053,21 @@ fn task_intent_for_context(context: Option<CodeContext>) -> TaskIntent {
 }
 
 /// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
-/// 中文：该注释与英文“Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring”含义一致。
+///   中文：该注释与英文“Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring”含义一致。
 /// the sandbox policy based on the operating context:
-/// 中文：该注释与英文“the sandbox policy based on the operating context:”含义一致。
+///   中文：该注释与英文“the sandbox policy based on the operating context:”含义一致。
 ///
 /// - **Dev mode (or no context)**: Workspace-write sandbox allowing modifications
-/// 中文：列表项说明与英文“**Dev mode (or no context)**: Workspace-write sandbox allowing modifications”含义一致。
+///   中文：列表项说明与英文“**Dev mode (or no context)**: Workspace-write sandbox allowing modifications”含义一致。
 ///   within the working directory; network access follows the developer's
-/// 中文：该注释与英文“within the working directory; network access follows the developer's”含义一致。
+///   中文：该注释与英文“within the working directory; network access follows the developer's”含义一致。
 ///   selected policy.
-/// 中文：该注释与英文“selected policy.”含义一致。
+///   中文：该注释与英文“selected policy.”含义一致。
 /// - **Review / Research mode**: Read-only sandbox; no writes or network access.
-/// 中文：列表项说明与英文“**Review / Research mode**: Read-only sandbox; no writes or network access.”含义一致。
+///   中文：列表项说明与英文“**Review / Research mode**: Read-only sandbox; no writes or network access.”含义一致。
 ///
 /// The approval policy and its communication channel are also wired in here.
-/// 中文：该注释与英文“The approval policy and its communication channel are also wired in here.”含义一致。
+///   中文：该注释与英文“The approval policy and its communication channel are also wired in here.”含义一致。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DefaultTuiApprovalConfig {
     policy: AskForApproval,
@@ -4207,32 +4207,32 @@ fn approval_cache_policy_from_project_config(working_dir: &Path) -> ApprovalCach
 // ---------------------------------------------------------------------------
 
 /// Initializes the [`LibraMcpServer`] instance with optional history persistence.
-/// 中文：该注释与英文“Initializes the [`LibraMcpServer`] instance with optional history persistence.”含义一致。
+///   中文：该注释与英文“Initializes the [`LibraMcpServer`] instance with optional history persistence.”含义一致。
 ///
 /// Sets up the local object storage directory and SQLite database under the
-/// 中文：该注释与英文“Sets up the local object storage directory and SQLite database under the”含义一致。
+///   中文：该注释与英文“Sets up the local object storage directory and SQLite database under the”含义一致。
 /// `.libra/` storage root. If any step fails (directory creation, DB connection),
-/// 中文：该注释与英文“`.libra/` storage root. If any step fails (directory creation, DB connection),”含义一致。
+///   中文：该注释与英文“`.libra/` storage root. If any step fails (directory creation, DB connection),”含义一致。
 /// falls back to a read-only MCP server with history disabled, printing a warning.
-/// 中文：该注释与英文“falls back to a read-only MCP server with history disabled, printing a warning.”含义一致。
+///   中文：该注释与英文“falls back to a read-only MCP server with history disabled, printing a warning.”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - Creates the local object storage directory when possible.
-/// 中文：列表项说明与英文“Creates the local object storage directory when possible.”含义一致。
+///   中文：列表项说明与英文“Creates the local object storage directory when possible.”含义一致。
 /// - Opens a SQLite connection for intent/run history when the DB path is usable.
-/// 中文：列表项说明与英文“Opens a SQLite connection for intent/run history when the DB path is usable.”含义一致。
+///   中文：列表项说明与英文“Opens a SQLite connection for intent/run history when the DB path is usable.”含义一致。
 /// - Prints warnings to stderr before falling back to history-disabled mode.
-/// 中文：列表项说明与英文“Prints warnings to stderr before falling back to history-disabled mode.”含义一致。
+///   中文：列表项说明与英文“Prints warnings to stderr before falling back to history-disabled mode.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// This helper intentionally does not return errors. It converts storage/DB
-/// 中文：该注释与英文“This helper intentionally does not return errors. It converts storage/DB”含义一致。
+///   中文：该注释与英文“This helper intentionally does not return errors. It converts storage/DB”含义一致。
 /// setup failures into a read-only MCP server so AI clients can still inspect
-/// 中文：该注释与英文“setup failures into a read-only MCP server so AI clients can still inspect”含义一致。
+///   中文：该注释与英文“setup failures into a read-only MCP server so AI clients can still inspect”含义一致。
 /// files and continue a degraded session.
-/// 中文：该注释与英文“files and continue a degraded session.”含义一致。
+///   中文：该注释与英文“files and continue a degraded session.”含义一致。
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     let storage_dir = resolve_storage_root(working_dir);
     let objects_dir = storage_dir.join("objects");
@@ -4298,72 +4298,72 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 }
 
 /// Resolves the `.libra/` storage root for the given working directory.
-/// 中文：该注释与英文“Resolves the `.libra/` storage root for the given working directory.”含义一致。
+///   中文：该注释与英文“Resolves the `.libra/` storage root for the given working directory.”含义一致。
 ///
 /// Supports linked worktrees by delegating to `try_get_storage_path`, which
-/// 中文：该注释与英文“Supports linked worktrees by delegating to `try_get_storage_path`, which”含义一致。
+///   中文：该注释与英文“Supports linked worktrees by delegating to `try_get_storage_path`, which”含义一致。
 /// follows `.libra` symlinks to the main repository's storage. Falls back to
-/// 中文：该注释与英文“follows `.libra` symlinks to the main repository's storage. Falls back to”含义一致。
+///   中文：该注释与英文“follows `.libra` symlinks to the main repository's storage. Falls back to”含义一致。
 /// `<working_dir>/.libra` if resolution fails.
-/// 中文：该注释与英文“`<working_dir>/.libra` if resolution fails.”含义一致。
+///   中文：该注释与英文“`<working_dir>/.libra` if resolution fails.”含义一致。
 pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
     try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
 /// CEX-S2-12 "single sub-agent behind flag" concurrency cap.
-/// 中文：该注释与英文“CEX-S2-12 "single sub-agent behind flag" concurrency cap.”含义一致。
+///   中文：该注释与英文“CEX-S2-12 "single sub-agent behind flag" concurrency cap.”含义一致。
 ///
 /// While the `code.sub_agents.enabled` gate is the only path that
-/// 中文：该注释与英文“While the `code.sub_agents.enabled` gate is the only path that”含义一致。
+///   中文：该注释与英文“While the `code.sub_agents.enabled` gate is the only path that”含义一致。
 /// builds a [`SubAgentToolLoopRuntime`], CEX-S2-12 must run at most one
-/// 中文：该注释与英文“builds a [`SubAgentToolLoopRuntime`], CEX-S2-12 must run at most one”含义一致。
+///   中文：该注释与英文“builds a [`SubAgentToolLoopRuntime`], CEX-S2-12 must run at most one”含义一致。
 /// concurrent sub-agent regardless of the operator-configured
-/// 中文：该注释与英文“concurrent sub-agent regardless of the operator-configured”含义一致。
+///   中文：该注释与英文“concurrent sub-agent regardless of the operator-configured”含义一致。
 /// `code.multi_agent.max_concurrent_subagents` (and the
-/// 中文：该注释与英文“`code.multi_agent.max_concurrent_subagents` (and the”含义一致。
+///   中文：该注释与英文“`code.multi_agent.max_concurrent_subagents` (and the”含义一致。
 /// `code.sub_agents.max_parallel` schema default of `2`). Real
-/// 中文：该注释与英文“`code.sub_agents.max_parallel` schema default of `2`). Real”含义一致。
+///   中文：该注释与英文“`code.sub_agents.max_parallel` schema default of `2`). Real”含义一致。
 /// parallelism stays locked until CEX-S2-14 wires the scheduler-side
-/// 中文：该注释与英文“parallelism stays locked until CEX-S2-14 wires the scheduler-side”含义一致。
+///   中文：该注释与英文“parallelism stays locked until CEX-S2-14 wires the scheduler-side”含义一致。
 /// observer budget — at which point this returns `configured` instead
-/// 中文：该注释与英文“observer budget — at which point this returns `configured` instead”含义一致。
+///   中文：该注释与英文“observer budget — at which point this returns `configured` instead”含义一致。
 /// of the forced `1`.
-/// 中文：该注释与英文“of the forced `1`.”含义一致。
+///   中文：该注释与英文“of the forced `1`.”含义一致。
 ///
 /// Kept as a named pure function (rather than a literal `1` at the call
-/// 中文：该注释与英文“Kept as a named pure function (rather than a literal `1` at the call”含义一致。
+///   中文：该注释与英文“Kept as a named pure function (rather than a literal `1` at the call”含义一致。
 /// site) so the cap is documented, greppable, and pinned by a unit test
-/// 中文：该注释与英文“site) so the cap is documented, greppable, and pinned by a unit test”含义一致。
+///   中文：该注释与英文“site) so the cap is documented, greppable, and pinned by a unit test”含义一致。
 /// against a silent regression to passing the operator value through.
-/// 中文：该注释与英文“against a silent regression to passing the operator value through.”含义一致。
+///   中文：该注释与英文“against a silent regression to passing the operator value through.”含义一致。
 const fn cex_s2_12_subagent_concurrency_cap(_configured: u32) -> u32 {
     1
 }
 
 /// Construct a [`SubAgentToolLoopRuntime`] from the libra-code
-/// 中文：该注释与英文“Construct a [`SubAgentToolLoopRuntime`] from the libra-code”含义一致。
+///   中文：该注释与英文“Construct a [`SubAgentToolLoopRuntime`] from the libra-code”含义一致。
 /// session's resolved state. Called from the session bootstrap
-/// 中文：该注释与英文“session's resolved state. Called from the session bootstrap”含义一致。
+///   中文：该注释与英文“session's resolved state. Called from the session bootstrap”含义一致。
 /// when `agents_config.sub_agents.enabled = true`; failures
-/// 中文：该注释与英文“when `agents_config.sub_agents.enabled = true`; failures”含义一致。
+///   中文：该注释与英文“when `agents_config.sub_agents.enabled = true`; failures”含义一致。
 /// degrade to "task tool unavailable" rather than blocking
-/// 中文：该注释与英文“degrade to "task tool unavailable" rather than blocking”含义一致。
+///   中文：该注释与英文“degrade to "task tool unavailable" rather than blocking”含义一致。
 /// session startup.
-/// 中文：该注释与英文“session startup.”含义一致。
+///   中文：该注释与英文“session startup.”含义一致。
 ///
 /// The runtime is shared (cloned by `Option<...>::clone()` since
-/// 中文：该注释与英文“The runtime is shared (cloned by `Option<...>::clone()` since”含义一致。
+///   中文：该注释与英文“The runtime is shared (cloned by `Option<...>::clone()` since”含义一致。
 /// every field is `Arc`-wrapped or trivially copyable inside its
-/// 中文：该注释与英文“every field is `Arc`-wrapped or trivially copyable inside its”含义一致。
+///   中文：该注释与英文“every field is `Arc`-wrapped or trivially copyable inside its”含义一致。
 /// own owning newtype). Per-call `dispatch_context(call_id)`
-/// 中文：该注释与英文“own owning newtype). Per-call `dispatch_context(call_id)`”含义一致。
+///   中文：该注释与英文“own owning newtype). Per-call `dispatch_context(call_id)`”含义一致。
 /// captures a fresh `parent_message_id` for each `task` tool
-/// 中文：该注释与英文“captures a fresh `parent_message_id` for each `task` tool”含义一致。
+///   中文：该注释与英文“captures a fresh `parent_message_id` for each `task` tool”含义一致。
 /// invocation; the rest of the parent context is stable for the
-/// 中文：该注释与英文“invocation; the rest of the parent context is stable for the”含义一致。
+///   中文：该注释与英文“invocation; the rest of the parent context is stable for the”含义一致。
 /// session.
-/// 中文：该注释与英文“session.”含义一致。
+///   中文：该注释与英文“session.”含义一致。
 #[allow(clippy::too_many_arguments)]
 async fn build_subagent_runtime_for_session(
     agents_config: &AgentsConfig,
@@ -4699,28 +4699,28 @@ fn usage_price_table_from_project_config(storage_root: &Path) -> UsagePriceTable
 // ---------------------------------------------------------------------------
 
 /// Runs the MCP server over stdin/stdout using `rmcp`'s async read/write
-/// 中文：该注释与英文“Runs the MCP server over stdin/stdout using `rmcp`'s async read/write”含义一致。
+///   中文：该注释与英文“Runs the MCP server over stdin/stdout using `rmcp`'s async read/write”含义一致。
 /// transport. This mode is designed for integration with AI clients (e.g.
-/// 中文：该注释与英文“transport. This mode is designed for integration with AI clients (e.g.”含义一致。
+///   中文：该注释与英文“transport. This mode is designed for integration with AI clients (e.g.”含义一致。
 /// Claude Desktop) that communicate via the Model Context Protocol over pipes.
-/// 中文：该注释与英文“Claude Desktop) that communicate via the Model Context Protocol over pipes.”含义一致。
+///   中文：该注释与英文“Claude Desktop) that communicate via the Model Context Protocol over pipes.”含义一致。
 ///
 /// Blocks until the MCP session ends (client disconnects or EOF on stdin).
-/// 中文：该注释与英文“Blocks until the MCP session ends (client disconnects or EOF on stdin).”含义一致。
+///   中文：该注释与英文“Blocks until the MCP session ends (client disconnects or EOF on stdin).”含义一致。
 ///
 /// # Side Effects
-/// 中文：标题：Side Effects。
+///   中文：标题：Side Effects。
 /// - Takes ownership of process stdin/stdout for the MCP transport.
-/// 中文：列表项说明与英文“Takes ownership of process stdin/stdout for the MCP transport.”含义一致。
+///   中文：列表项说明与英文“Takes ownership of process stdin/stdout for the MCP transport.”含义一致。
 /// - Initializes the same history/object-backed MCP server used by other modes.
-/// 中文：列表项说明与英文“Initializes the same history/object-backed MCP server used by other modes.”含义一致。
+///   中文：列表项说明与英文“Initializes the same history/object-backed MCP server used by other modes.”含义一致。
 ///
 /// # Errors
-/// 中文：标题：Errors。
+///   中文：标题：Errors。
 /// Returns [`CliError`] when working-dir resolution fails, the MCP server cannot
-/// 中文：该注释与英文“Returns [`CliError`] when working-dir resolution fails, the MCP server cannot”含义一致。
+///   中文：该注释与英文“Returns [`CliError`] when working-dir resolution fails, the MCP server cannot”含义一致。
 /// start on stdio, or the running MCP session reports an unrecoverable error.
-/// 中文：该注释与英文“start on stdio, or the running MCP session reports an unrecoverable error.”含义一致。
+///   中文：该注释与英文“start on stdio, or the running MCP session reports an unrecoverable error.”含义一致。
 async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
 
@@ -4756,18 +4756,18 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Validates CLI flag combinations across all three operating modes.
-/// 中文：该注释与英文“Validates CLI flag combinations across all three operating modes.”含义一致。
+///   中文：该注释与英文“Validates CLI flag combinations across all three operating modes.”含义一致。
 ///
 /// Enforces constraints such as:
-/// 中文：该注释与英文“Enforces constraints such as:”含义一致。
+///   中文：该注释与英文“Enforces constraints such as:”含义一致。
 /// - Web and MCP ports must differ (except in stdio mode).
-/// 中文：列表项说明与英文“Web and MCP ports must differ (except in stdio mode).”含义一致。
+///   中文：列表项说明与英文“Web and MCP ports must differ (except in stdio mode).”含义一致。
 /// - TUI-specific flags (--model, --temperature, --resume, etc.) are rejected
-/// 中文：列表项说明与英文“TUI-specific flags (--model, --temperature, --resume, etc.) are rejected”含义一致。
+///   中文：列表项说明与英文“TUI-specific flags (--model, --temperature, --resume, etc.) are rejected”含义一致。
 ///   in web-only and stdio modes.
-/// 中文：该注释与英文“in web-only and stdio modes.”含义一致。
+///   中文：该注释与英文“in web-only and stdio modes.”含义一致。
 /// - Provider-specific flags are only accepted for their respective providers.
-/// 中文：列表项说明与英文“Provider-specific flags are only accepted for their respective providers.”含义一致。
+///   中文：列表项说明与英文“Provider-specific flags are only accepted for their respective providers.”含义一致。
 fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), String> {
     if !args.stdio && args.port == args.mcp_port && args.port != 0 {
         return Err(format!(
@@ -4912,9 +4912,9 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
 }
 
 /// Helper: rejects a flag if it was set (`is_invalid == true`) with a
-/// 中文：该注释与英文“Helper: rejects a flag if it was set (`is_invalid == true`) with a”含义一致。
+///   中文：该注释与英文“Helper: rejects a flag if it was set (`is_invalid == true`) with a”含义一致。
 /// standardized error message indicating the flag is not supported in the given mode.
-/// 中文：该注释与英文“standardized error message indicating the flag is not supported in the given mode.”含义一致。
+///   中文：该注释与英文“standardized error message indicating the flag is not supported in the given mode.”含义一致。
 fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), String> {
     if is_invalid {
         return Err(format!("{flag} is not supported in {mode} mode"));
@@ -4938,9 +4938,9 @@ fn ensure_loopback_control_host_for_validation(host: &str) -> Result<(), String>
 }
 
 /// Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).
-/// 中文：该注释与英文“Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).”含义一致。
+///   中文：该注释与英文“Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).”含义一致。
 /// This ensures users get clear errors instead of silently ignored flags.
-/// 中文：该注释与英文“This ensures users get clear errors instead of silently ignored flags.”含义一致。
+///   中文：该注释与英文“This ensures users get clear errors instead of silently ignored flags.”含义一致。
 fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
@@ -5000,17 +5000,17 @@ mod tests {
     use super::*;
 
     /// CEX-S2-12 "single sub-agent behind flag": the dispatcher
-    /// 中文：该注释与英文“CEX-S2-12 "single sub-agent behind flag": the dispatcher”含义一致。
+    ///   中文：该注释与英文“CEX-S2-12 "single sub-agent behind flag": the dispatcher”含义一致。
     /// concurrency cap is forced to 1 for every configured value —
-    /// 中文：该注释与英文“concurrency cap is forced to 1 for every configured value —”含义一致。
+    ///   中文：该注释与英文“concurrency cap is forced to 1 for every configured value —”含义一致。
     /// including the `sub_agents.max_parallel` schema default of 2 and
-    /// 中文：该注释与英文“including the `sub_agents.max_parallel` schema default of 2 and”含义一致。
+    ///   中文：该注释与英文“including the `sub_agents.max_parallel` schema default of 2 and”含义一致。
     /// larger operator settings — until CEX-S2-14 unlocks real
-    /// 中文：该注释与英文“larger operator settings — until CEX-S2-14 unlocks real”含义一致。
+    ///   中文：该注释与英文“larger operator settings — until CEX-S2-14 unlocks real”含义一致。
     /// parallelism. Pins the cap against a silent regression to passing
-    /// 中文：该注释与英文“parallelism. Pins the cap against a silent regression to passing”含义一致。
+    ///   中文：该注释与英文“parallelism. Pins the cap against a silent regression to passing”含义一致。
     /// the operator value through.
-    /// 中文：该注释与英文“the operator value through.”含义一致。
+    ///   中文：该注释与英文“the operator value through.”含义一致。
     // Test scenario: verifies `s2_12_concurrency_cap_forces_single_sub_agent` covers the s2 12 concurrency cap forces single sub agent behavior.
     // 测试场景：验证 `s2_12_concurrency_cap_forces_single_sub_agent` 覆盖 s2 12 concurrency cap forces single sub agent 对应的行为。
     #[test]
@@ -5129,11 +5129,11 @@ mod tests {
     }
 
     /// OC-Phase 6 P6.5: `--goal` runs the same shape rules
-    /// 中文：该注释与英文“OC-Phase 6 P6.5: `--goal` runs the same shape rules”含义一致。
+    ///   中文：该注释与英文“OC-Phase 6 P6.5: `--goal` runs the same shape rules”含义一致。
     /// `GoalSpec::new` does so a malformed objective fails CLI
-    /// 中文：该注释与英文“`GoalSpec::new` does so a malformed objective fails CLI”含义一致。
+    ///   中文：该注释与英文“`GoalSpec::new` does so a malformed objective fails CLI”含义一致。
     /// parsing instead of crashing the supervisor at session start.
-    /// 中文：该注释与英文“parsing instead of crashing the supervisor at session start.”含义一致。
+    ///   中文：该注释与英文“parsing instead of crashing the supervisor at session start.”含义一致。
     // Test scenario: verifies `accepts_well_formed_goal_objective` covers the accepts well formed goal objective behavior.
     // 测试场景：验证 `accepts_well_formed_goal_objective` 覆盖 accepts well formed goal objective 对应的行为。
     #[test]
@@ -6168,11 +6168,11 @@ no_cache_unknown_network = true
     // 中文：该注释与英文“─── OC-Phase 2 P2.4: --agent override ────────────────────────────────”含义一致。
 
     /// Build a working directory with a `.libra/agents/` profile that pins a
-    /// 中文：该注释与英文“Build a working directory with a `.libra/agents/` profile that pins a”含义一致。
+    ///   中文：该注释与英文“Build a working directory with a `.libra/agents/` profile that pins a”含义一致。
     /// structured `provider/model` binding so the override path has
-    /// 中文：该注释与英文“structured `provider/model` binding so the override path has”含义一致。
+    ///   中文：该注释与英文“structured `provider/model` binding so the override path has”含义一致。
     /// something to lift.
-    /// 中文：该注释与英文“something to lift.”含义一致。
+    ///   中文：该注释与英文“something to lift.”含义一致。
     fn write_agent_profile(working_dir: &Path, name: &str, body: &str) {
         let agents_dir = working_dir.join(".libra").join("agents");
         std::fs::create_dir_all(&agents_dir).expect("create agents dir");
@@ -6180,9 +6180,9 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: `--agent` is unset → helper is a no-op and returns `None`.
-    /// 中文：该注释与英文“Scenario: `--agent` is unset → helper is a no-op and returns `None`.”含义一致。
+    ///   中文：该注释与英文“Scenario: `--agent` is unset → helper is a no-op and returns `None`.”含义一致。
     /// This is the flag-off baseline OC-Phase 2 P2.4 must preserve.
-    /// 中文：该注释与英文“This is the flag-off baseline OC-Phase 2 P2.4 must preserve.”含义一致。
+    ///   中文：该注释与英文“This is the flag-off baseline OC-Phase 2 P2.4 must preserve.”含义一致。
     // Test scenario: verifies `resolve_agent_override_noop_when_flag_absent` covers the resolve agent override noop when flag absent behavior.
     // 测试场景：验证 `resolve_agent_override_noop_when_flag_absent` 覆盖 resolve agent override noop when flag absent 对应的行为。
     #[test]
@@ -6194,13 +6194,13 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: `--agent <name>` lifts a profile that carries
-    /// 中文：该注释与英文“Scenario: `--agent <name>` lifts a profile that carries”含义一致。
+    ///   中文：该注释与英文“Scenario: `--agent <name>` lifts a profile that carries”含义一致。
     /// `model: anthropic/claude-3-5-sonnet-latest` into a structured
-    /// 中文：该注释与英文“`model: anthropic/claude-3-5-sonnet-latest` into a structured”含义一致。
+    ///   中文：该注释与英文“`model: anthropic/claude-3-5-sonnet-latest` into a structured”含义一致。
     /// `ModelBinding`. The legacy `model_preference` form is irrelevant
-    /// 中文：该注释与英文“`ModelBinding`. The legacy `model_preference` form is irrelevant”含义一致。
+    ///   中文：该注释与英文“`ModelBinding`. The legacy `model_preference` form is irrelevant”含义一致。
     /// here; only the binding goes through.
-    /// 中文：该注释与英文“here; only the binding goes through.”含义一致。
+    ///   中文：该注释与英文“here; only the binding goes through.”含义一致。
     // Test scenario: verifies `resolve_agent_override_lifts_provider_slash_model_binding` covers the resolve agent override lifts provider slash model binding behavior.
     // 测试场景：验证 `resolve_agent_override_lifts_provider_slash_model_binding` 覆盖 resolve agent override lifts provider slash model binding 对应的行为。
     #[test]
@@ -6229,15 +6229,15 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: an `--agent` profile that carries only a legacy alias
-    /// 中文：该注释与英文“Scenario: an `--agent` profile that carries only a legacy alias”含义一致。
+    ///   中文：该注释与英文“Scenario: an `--agent` profile that carries only a legacy alias”含义一致。
     /// (`model: default`) yields `Ok(None)` — there is no structured
-    /// 中文：该注释与英文“(`model: default`) yields `Ok(None)` — there is no structured”含义一致。
+    ///   中文：该注释与英文“(`model: default`) yields `Ok(None)` — there is no structured”含义一致。
     /// binding to override the CLI defaults with, so the rest of
-    /// 中文：该注释与英文“binding to override the CLI defaults with, so the rest of”含义一致。
+    ///   中文：该注释与英文“binding to override the CLI defaults with, so the rest of”含义一致。
     /// `build_any_completion_model_for_args` falls through to the CLI
-    /// 中文：该注释与英文“`build_any_completion_model_for_args` falls through to the CLI”含义一致。
+    ///   中文：该注释与英文“`build_any_completion_model_for_args` falls through to the CLI”含义一致。
     /// provider/model defaults.
-    /// 中文：该注释与英文“provider/model defaults.”含义一致。
+    ///   中文：该注释与英文“provider/model defaults.”含义一致。
     // Test scenario: verifies `resolve_agent_override_returns_none_for_legacy_model_alias` covers the resolve agent override returns none for legacy model alias behavior.
     // 测试场景：验证 `resolve_agent_override_returns_none_for_legacy_model_alias` 覆盖 resolve agent override returns none for legacy model alias 对应的行为。
     #[test]
@@ -6256,11 +6256,11 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: an unknown agent name surfaces a `command_usage` error
-    /// 中文：该注释与英文“Scenario: an unknown agent name surfaces a `command_usage` error”含义一致。
+    ///   中文：该注释与英文“Scenario: an unknown agent name surfaces a `command_usage` error”含义一致。
     /// listing the known profiles. Embedded defaults always load, so the
-    /// 中文：该注释与英文“listing the known profiles. Embedded defaults always load, so the”含义一致。
+    ///   中文：该注释与英文“listing the known profiles. Embedded defaults always load, so the”含义一致。
     /// suggestion list is never empty.
-    /// 中文：该注释与英文“suggestion list is never empty.”含义一致。
+    ///   中文：该注释与英文“suggestion list is never empty.”含义一致。
     // Test scenario: verifies `resolve_agent_override_unknown_name_lists_known_profiles` covers the resolve agent override unknown name lists known profiles behavior.
     // 测试场景：验证 `resolve_agent_override_unknown_name_lists_known_profiles` 覆盖 resolve agent override unknown name lists known profiles 对应的行为。
     #[test]
@@ -6287,11 +6287,11 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: a profile whose `mode: subagent` is selected by `--agent`
-    /// 中文：该注释与英文“Scenario: a profile whose `mode: subagent` is selected by `--agent`”含义一致。
+    ///   中文：该注释与英文“Scenario: a profile whose `mode: subagent` is selected by `--agent`”含义一致。
     /// is rejected. Sub-agents are dispatched via the `task` tool in
-    /// 中文：该注释与英文“is rejected. Sub-agents are dispatched via the `task` tool in”含义一致。
+    ///   中文：该注释与英文“is rejected. Sub-agents are dispatched via the `task` tool in”含义一致。
     /// OC-Phase 3, not as the session driver.
-    /// 中文：该注释与英文“OC-Phase 3, not as the session driver.”含义一致。
+    ///   中文：该注释与英文“OC-Phase 3, not as the session driver.”含义一致。
     // Test scenario: verifies `resolve_agent_override_rejects_non_primary_eligible_mode` covers the resolve agent override rejects non primary eligible mode behavior.
     // 测试场景：验证 `resolve_agent_override_rejects_non_primary_eligible_mode` 覆盖 resolve agent override rejects non primary eligible mode 对应的行为。
     #[test]
@@ -6324,11 +6324,11 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: a `mode: all` profile IS primary-eligible, so the override
-    /// 中文：该注释与英文“Scenario: a `mode: all` profile IS primary-eligible, so the override”含义一致。
+    ///   中文：该注释与英文“Scenario: a `mode: all` profile IS primary-eligible, so the override”含义一致。
     /// surfaces the binding rather than erroring. This pins the doc rule
-    /// 中文：该注释与英文“surfaces the binding rather than erroring. This pins the doc rule”含义一致。
+    ///   中文：该注释与英文“surfaces the binding rather than erroring. This pins the doc rule”含义一致。
     /// "Primary | All" → primary-eligible.
-    /// 中文：该注释与英文“"Primary | All" → primary-eligible.”含义一致。
+    ///   中文：该注释与英文“"Primary | All" → primary-eligible.”含义一致。
     // Test scenario: verifies `resolve_agent_override_accepts_mode_all` covers the resolve agent override accepts mode all behavior.
     // 测试场景：验证 `resolve_agent_override_accepts_mode_all` 覆盖 resolve agent override accepts mode all 对应的行为。
     #[test]
@@ -6355,30 +6355,30 @@ no_cache_unknown_network = true
     }
 
     /// Scenario (OC-Phase 3 P3.1 flag-off invariant — production path):
-    /// 中文：该注释与英文“Scenario (OC-Phase 3 P3.1 flag-off invariant — production path):”含义一致。
+    ///   中文：该注释与英文“Scenario (OC-Phase 3 P3.1 flag-off invariant — production path):”含义一致。
     /// the headless tool registry built by [`build_headless_tool_registry`]
-    /// 中文：该注释与英文“the headless tool registry built by [`build_headless_tool_registry`]”含义一致。
+    ///   中文：该注释与英文“the headless tool registry built by [`build_headless_tool_registry`]”含义一致。
     /// MUST NOT register a `task` tool. P3.1 only ships the schema
-    /// 中文：该注释与英文“MUST NOT register a `task` tool. P3.1 only ships the schema”含义一致。
+    ///   中文：该注释与英文“MUST NOT register a `task` tool. P3.1 only ships the schema”含义一致。
     /// constructor; runtime wiring lives in P3.2+ behind
-    /// 中文：该注释与英文“constructor; runtime wiring lives in P3.2+ behind”含义一致。
+    ///   中文：该注释与英文“constructor; runtime wiring lives in P3.2+ behind”含义一致。
     /// `code.multi_agent.enabled` (OC-Phase 5). A regression that wires
-    /// 中文：该注释与英文“`code.multi_agent.enabled` (OC-Phase 5). A regression that wires”含义一致。
+    ///   中文：该注释与英文“`code.multi_agent.enabled` (OC-Phase 5). A regression that wires”含义一致。
     /// the dispatcher unconditionally would fail this test by surfacing
-    /// 中文：该注释与英文“the dispatcher unconditionally would fail this test by surfacing”含义一致。
+    ///   中文：该注释与英文“the dispatcher unconditionally would fail this test by surfacing”含义一致。
     /// `task` in the registry's `tool_names()`.
-    /// 中文：该注释与英文“`task` in the registry's `tool_names()`.”含义一致。
+    ///   中文：该注释与英文“`task` in the registry's `tool_names()`.”含义一致。
     ///
     /// The TUI path inlines its registry construction inside
-    /// 中文：该注释与英文“The TUI path inlines its registry construction inside”含义一致。
+    ///   中文：该注释与英文“The TUI path inlines its registry construction inside”含义一致。
     /// `execute_tui` and is not testable in isolation; the unit-level
-    /// 中文：该注释与英文“`execute_tui` and is not testable in isolation; the unit-level”含义一致。
+    ///   中文：该注释与英文“`execute_tui` and is not testable in isolation; the unit-level”含义一致。
     /// guard at
-    /// 中文：该注释与英文“guard at”含义一致。
+    ///   中文：该注释与英文“guard at”含义一致。
     /// `internal::ai::tools::registry::tests::registry_does_not_expose_task_tool_in_flag_off_default`
-    /// 中文：该注释与英文“`internal::ai::tools::registry::tests::registry_does_not_expose_task_tool_in_flag_off_default`”含义一致。
+    ///   中文：该注释与英文“`internal::ai::tools::registry::tests::registry_does_not_expose_task_tool_in_flag_off_default`”含义一致。
     /// covers the fixture-level invariant for that path.
-    /// 中文：该注释与英文“covers the fixture-level invariant for that path.”含义一致。
+    ///   中文：该注释与英文“covers the fixture-level invariant for that path.”含义一致。
     // Test scenario: verifies `build_headless_tool_registry_omits_task_tool_in_flag_off_default` covers the build headless tool registry omits task tool in flag off default behavior.
     // 测试场景：验证 `build_headless_tool_registry_omits_task_tool_in_flag_off_default` 覆盖 build headless tool registry omits task tool in flag off default 对应的行为。
     #[test]
@@ -6396,15 +6396,15 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: headless web mode now has a browser approval channel, a
-    /// 中文：该注释与英文“Scenario: headless web mode now has a browser approval channel, a”含义一致。
+    ///   中文：该注释与英文“Scenario: headless web mode now has a browser approval channel, a”含义一致。
     /// ToolRuntimeContext, and snapshot projection for direct plan updates, so
-    /// 中文：该注释与英文“ToolRuntimeContext, and snapshot projection for direct plan updates, so”含义一致。
+    ///   中文：该注释与英文“ToolRuntimeContext, and snapshot projection for direct plan updates, so”含义一致。
     /// the registry may expose the same guarded network/mutating/basic plan
-    /// 中文：该注释与英文“the registry may expose the same guarded network/mutating/basic plan”含义一致。
+    ///   中文：该注释与英文“the registry may expose the same guarded network/mutating/basic plan”含义一致。
     /// tools as TUI without bypassing sandbox, approval, or `--network-access
-    /// 中文：该注释与英文“tools as TUI without bypassing sandbox, approval, or `--network-access”含义一致。
+    ///   中文：该注释与英文“tools as TUI without bypassing sandbox, approval, or `--network-access”含义一致。
     /// deny`.
-    /// 中文：该注释与英文“deny`.”含义一致。
+    ///   中文：该注释与英文“deny`.”含义一致。
     // Test scenario: verifies `build_headless_tool_registry_exposes_runtime_guarded_tools` covers the build headless tool registry exposes runtime guarded tools behavior.
     // 测试场景：验证 `build_headless_tool_registry_exposes_runtime_guarded_tools` 覆盖 build headless tool registry exposes runtime guarded tools 对应的行为。
     #[test]
@@ -6429,21 +6429,21 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: an agent binding whose `provider_id` does NOT match any
-    /// 中文：该注释与英文“Scenario: an agent binding whose `provider_id` does NOT match any”含义一致。
+    ///   中文：该注释与英文“Scenario: an agent binding whose `provider_id` does NOT match any”含义一致。
     /// `CodeProvider` variant must be rejected at
-    /// 中文：该注释与英文“`CodeProvider` variant must be rejected at”含义一致。
+    ///   中文：该注释与英文“`CodeProvider` variant must be rejected at”含义一致。
     /// `effective_code_provider_for_args` with a clear, actionable error.
-    /// 中文：该注释与英文“`effective_code_provider_for_args` with a clear, actionable error.”含义一致。
+    ///   中文：该注释与英文“`effective_code_provider_for_args` with a clear, actionable error.”含义一致。
     /// Silent fallback to `args.provider` would leave system prompt and
-    /// 中文：该注释与英文“Silent fallback to `args.provider` would leave system prompt and”含义一致。
+    ///   中文：该注释与英文“Silent fallback to `args.provider` would leave system prompt and”含义一致。
     /// context-budget computations pointed at the CLI provider while the
-    /// 中文：该注释与英文“context-budget computations pointed at the CLI provider while the”含义一致。
+    ///   中文：该注释与英文“context-budget computations pointed at the CLI provider while the”含义一致。
     /// model itself was built (or refused) for a different provider —
-    /// 中文：该注释与英文“model itself was built (or refused) for a different provider —”含义一致。
+    ///   中文：该注释与英文“model itself was built (or refused) for a different provider —”含义一致。
     /// a partial-misconfiguration trap. Pinning this gate prevents the
-    /// 中文：该注释与英文“a partial-misconfiguration trap. Pinning this gate prevents the”含义一致。
+    ///   中文：该注释与英文“a partial-misconfiguration trap. Pinning this gate prevents the”含义一致。
     /// regression Codex flagged on the OC-Phase 2 P2.4 review.
-    /// 中文：该注释与英文“regression Codex flagged on the OC-Phase 2 P2.4 review.”含义一致。
+    ///   中文：该注释与英文“regression Codex flagged on the OC-Phase 2 P2.4 review.”含义一致。
     // Test scenario: verifies `effective_provider_rejects_unknown_binding_provider_id` covers the effective provider rejects unknown binding provider id behavior.
     // 测试场景：验证 `effective_provider_rejects_unknown_binding_provider_id` 覆盖 effective provider rejects unknown binding provider id 对应的行为。
     #[test]
@@ -6627,19 +6627,19 @@ no_cache_unknown_network = true
     }
 
     /// Scenario: `--provider gemini --model gpt-foo --agent planner`
-    /// 中文：该注释与英文“Scenario: `--provider gemini --model gpt-foo --agent planner`”含义一致。
+    ///   中文：该注释与英文“Scenario: `--provider gemini --model gpt-foo --agent planner`”含义一致。
     /// (where `planner` carries `model: anthropic/claude-3-5-sonnet-latest`)
-    /// 中文：该注释与英文“(where `planner` carries `model: anthropic/claude-3-5-sonnet-latest`)”含义一致。
+    ///   中文：该注释与英文“(where `planner` carries `model: anthropic/claude-3-5-sonnet-latest`)”含义一致。
     /// — the agent's binding wins **atomically**. The CLI `--model gpt-foo`
-    /// 中文：该注释与英文“— the agent's binding wins **atomically**. The CLI `--model gpt-foo`”含义一致。
+    ///   中文：该注释与英文“— the agent's binding wins **atomically**. The CLI `--model gpt-foo`”含义一致。
     /// is dropped because it would otherwise pair an OpenAI-style model id
-    /// 中文：该注释与英文“is dropped because it would otherwise pair an OpenAI-style model id”含义一致。
+    ///   中文：该注释与英文“is dropped because it would otherwise pair an OpenAI-style model id”含义一致。
     /// with the agent's anthropic provider. Smoke tests the integration of
-    /// 中文：该注释与英文“with the agent's anthropic provider. Smoke tests the integration of”含义一致。
+    ///   中文：该注释与英文“with the agent's anthropic provider. Smoke tests the integration of”含义一致。
     /// `resolve_agent_binding_override` with the rest of
-    /// 中文：该注释与英文“`resolve_agent_binding_override` with the rest of”含义一致。
+    ///   中文：该注释与英文“`resolve_agent_binding_override` with the rest of”含义一致。
     /// `build_any_completion_model_for_args`.
-    /// 中文：该注释与英文“`build_any_completion_model_for_args`.”含义一致。
+    ///   中文：该注释与英文“`build_any_completion_model_for_args`.”含义一致。
     #[cfg(feature = "test-provider")]
     // Test scenario: verifies `build_helper_treats_agent_binding_atomically` covers the build helper treats agent binding atomically behavior.
     // 测试场景：验证 `build_helper_treats_agent_binding_atomically` 覆盖 build helper treats agent binding atomically 对应的行为。

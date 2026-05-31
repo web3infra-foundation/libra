@@ -1,5 +1,7 @@
 //! Goal supervisor — Goal-bound tool-loop orchestrator.
 //!
+//! 目标监督器 — 目标绑定的工具循环编排器。
+//!
 //! Per `docs/improvement/opencode.md` lines 632-668, the supervisor is
 //! the entity that turns a freshly returned `ToolLoopTurn` into the
 //! next loop decision. It does **not** drive `run_tool_loop` itself

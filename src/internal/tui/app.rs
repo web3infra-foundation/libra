@@ -1,12 +1,12 @@
 //! Main application structure and event loop.
 //!
 //! 主应用程序结构和事件循环。
-//! 中文：该注释与英文“Main application structure and event loop.”含义一致。
+//!   中文：该注释与英文“Main application structure and event loop.”含义一致。
 //!
 //! The `App` struct manages the TUI state and coordinates between
-//! 中文：该注释与英文“The `App` struct manages the TUI state and coordinates between”含义一致。
+//!   中文：该注释与英文“The `App` struct manages the TUI state and coordinates between”含义一致。
 //! user input, agent execution, and UI rendering.
-//! 中文：该注释与英文“user input, agent execution, and UI rendering.”含义一致。
+//!   中文：该注释与英文“user input, agent execution, and UI rendering.”含义一致。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -272,54 +272,54 @@ fn render_mcp_error(context: &str, content: Vec<rmcp::model::Content>) {
 }
 
 /// The reason for exiting the application.
-/// 中文：该注释与英文“The reason for exiting the application.”含义一致。
+///   中文：该注释与英文“The reason for exiting the application.”含义一致。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
     /// User requested exit.
-    /// 中文：该注释与英文“User requested exit.”含义一致。
+    ///   中文：该注释与英文“User requested exit.”含义一致。
     UserRequested,
     /// Fatal error occurred.
-    /// 中文：该注释与英文“Fatal error occurred.”含义一致。
+    ///   中文：该注释与英文“Fatal error occurred.”含义一致。
     Fatal(String),
 }
 
 /// Information about the app exit state.
-/// 中文：该注释与英文“Information about the app exit state.”含义一致。
+///   中文：该注释与英文“Information about the app exit state.”含义一致。
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
     /// The reason for exiting.
-    /// 中文：该注释与英文“The reason for exiting.”含义一致。
+    ///   中文：该注释与英文“The reason for exiting.”含义一致。
     pub reason: ExitReason,
     /// Canonical thread id that can be inspected with `libra graph`, when known.
-    /// 中文：该注释与英文“Canonical thread id that can be inspected with `libra graph`, when known.”含义一致。
+    ///   中文：该注释与英文“Canonical thread id that can be inspected with `libra graph`, when known.”含义一致。
     pub thread_id: Option<String>,
 }
 
 /// Pending user-input state while the TUI waits for the user to answer.
-/// 中文：该注释与英文“Pending user-input state while the TUI waits for the user to answer.”含义一致。
+///   中文：该注释与英文“Pending user-input state while the TUI waits for the user to answer.”含义一致。
 struct PendingUserInput {
     /// The original request (questions, etc.).
-    /// 中文：该注释与英文“The original request (questions, etc.).”含义一致。
+    ///   中文：该注释与英文“The original request (questions, etc.).”含义一致。
     request: UserInputRequest,
     /// Index of the question currently being answered.
-    /// 中文：该注释与英文“Index of the question currently being answered.”含义一致。
+    ///   中文：该注释与英文“Index of the question currently being answered.”含义一致。
     current_question: usize,
     /// Answers collected so far, keyed by question id.
-    /// 中文：该注释与英文“Answers collected so far, keyed by question id.”含义一致。
+    ///   中文：该注释与英文“Answers collected so far, keyed by question id.”含义一致。
     answers: HashMap<String, UserInputAnswer>,
     /// Currently selected option index (0-based) for the active question.
-    /// 中文：该注释与英文“Currently selected option index (0-based) for the active question.”含义一致。
+    ///   中文：该注释与英文“Currently selected option index (0-based) for the active question.”含义一致。
     selected_option: usize,
     /// Whether the notes input is currently focused (Tab toggles).
-    /// 中文：该注释与英文“Whether the notes input is currently focused (Tab toggles).”含义一致。
+    ///   中文：该注释与英文“Whether the notes input is currently focused (Tab toggles).”含义一致。
     notes_focused: bool,
     /// Notes text being composed for the current question.
-    /// 中文：该注释与英文“Notes text being composed for the current question.”含义一致。
+    ///   中文：该注释与英文“Notes text being composed for the current question.”含义一致。
     notes_text: String,
 }
 
 /// Post-plan dialog state: stores the spec and user selection.
-/// 中文：该注释与英文“Post-plan dialog state: stores the spec and user selection.”含义一致。
+///   中文：该注释与英文“Post-plan dialog state: stores the spec and user selection.”含义一致。
 struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
@@ -335,14 +335,14 @@ struct PendingPostPlan {
 }
 
 /// Network policy dialog state after the user approves the execution plan.
-/// 中文：该注释与英文“Network policy dialog state after the user approves the execution plan.”含义一致。
+///   中文：该注释与英文“Network policy dialog state after the user approves the execution plan.”含义一致。
 struct PendingNetworkPolicyChoice {
     post_plan: PendingPostPlan,
     selected: usize, // 0=Deny, 1=Allow, 2=Back
 }
 
 /// Execution-plan revision state after the user chooses Modify on the plan review.
-/// 中文：该注释与英文“Execution-plan revision state after the user chooses Modify on the plan review.”含义一致。
+///   中文：该注释与英文“Execution-plan revision state after the user chooses Modify on the plan review.”含义一致。
 struct PendingExecutionPlanRevision {
     spec_json: String,
     intent_id: Option<String>,
@@ -382,7 +382,7 @@ struct ExecuteWorkflowRequest {
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
-/// 中文：该注释与英文“IntentSpec review dialog state: stores the spec and user selection.”含义一致。
+///   中文：该注释与英文“IntentSpec review dialog state: stores the spec and user selection.”含义一致。
 struct PendingIntentReview {
     spec_json: String,
     intent_id: Option<String>,
@@ -418,7 +418,7 @@ fn review_scroll_action(key: crossterm::event::KeyEvent) -> Option<ReviewScrollA
 }
 
 /// Pending sandbox approval state.
-/// 中文：该注释与英文“Pending sandbox approval state.”含义一致。
+///   中文：该注释与英文“Pending sandbox approval state.”含义一致。
 struct PendingExecApproval {
     request: ExecApprovalRequest,
     selected: usize,
@@ -426,14 +426,14 @@ struct PendingExecApproval {
 }
 
 /// Pending managed-provider interaction mirrored into the approval dialog.
-/// 中文：该注释与英文“Pending managed-provider interaction mirrored into the approval dialog.”含义一致。
+///   中文：该注释与英文“Pending managed-provider interaction mirrored into the approval dialog.”含义一致。
 struct PendingManagedInteraction {
     interaction: CodeUiInteractionRequest,
     selected: usize,
 }
 
 /// Pending orchestrator Phase 3 / Phase 4 confirmation.
-/// 中文：该注释与英文“Pending orchestrator Phase 3 / Phase 4 confirmation.”含义一致。
+///   中文：该注释与英文“Pending orchestrator Phase 3 / Phase 4 confirmation.”含义一致。
 struct PendingPhaseConfirmation {
     prompt: PhaseConfirmationPrompt,
     response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
@@ -442,7 +442,7 @@ struct PendingPhaseConfirmation {
 }
 
 /// Configuration for creating an App.
-/// 中文：该注释与英文“Configuration for creating an App.”含义一致。
+///   中文：该注释与英文“Configuration for creating an App.”含义一致。
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
@@ -454,232 +454,232 @@ pub struct AppConfig {
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
     pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
-    /// 中文：该注释与英文“Display name of the active model (e.g. "gemini-2.5-flash").”含义一致。
+    ///   中文：该注释与英文“Display name of the active model (e.g. "gemini-2.5-flash").”含义一致。
     pub model_name: String,
     /// Provider identifier (e.g. "gemini", "anthropic").
-    /// 中文：该注释与英文“Provider identifier (e.g. "gemini", "anthropic").”含义一致。
+    ///   中文：该注释与英文“Provider identifier (e.g. "gemini", "anthropic").”含义一致。
     pub provider_name: String,
     /// MCP server instance for workflow tracking.
-    /// 中文：该注释与英文“MCP server instance for workflow tracking.”含义一致。
+    ///   中文：该注释与英文“MCP server instance for workflow tracking.”含义一致。
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional Code UI session mirror for the browser UI.
-    /// 中文：该注释与英文“Optional Code UI session mirror for the browser UI.”含义一致。
+    ///   中文：该注释与英文“Optional Code UI session mirror for the browser UI.”含义一致。
     pub code_ui_session: Option<Arc<CodeUiSession>>,
     /// Optional Code UI runtime handle for local controller operations.
-    /// 中文：该注释与英文“Optional Code UI runtime handle for local controller operations.”含义一致。
+    ///   中文：该注释与英文“Optional Code UI runtime handle for local controller operations.”含义一致。
     pub code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Optional local automation command receiver.
-    /// 中文：该注释与英文“Optional local automation command receiver.”含义一致。
+    ///   中文：该注释与英文“Optional local automation command receiver.”含义一致。
     pub code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Optional managed provider runtime controlled through the same TUI.
-    /// 中文：该注释与英文“Optional managed provider runtime controlled through the same TUI.”含义一致。
+    ///   中文：该注释与英文“Optional managed provider runtime controlled through the same TUI.”含义一致。
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
-    /// 中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
+    ///   中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
     pub default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
-    /// 中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
+    ///   中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
     pub auto_classify_first_user_message: bool,
     /// Goal objective supplied via `libra code --goal`, if any.
-    /// 中文：该注释与英文“Goal objective supplied via `libra code --goal`, if any.”含义一致。
+    ///   中文：该注释与英文“Goal objective supplied via `libra code --goal`, if any.”含义一致。
     pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
-    /// 中文：该注释与英文“Source Pool control surface backing `/source` commands.”含义一致。
+    ///   中文：该注释与英文“Source Pool control surface backing `/source` commands.”含义一致。
     pub source_pool: SourcePool,
 }
 
 /// The main application struct.
-/// 中文：该注释与英文“The main application struct.”含义一致。
+///   中文：该注释与英文“The main application struct.”含义一致。
 pub struct App<M: CompletionModel> {
     /// The TUI instance.
-    /// 中文：该注释与英文“The TUI instance.”含义一致。
+    ///   中文：该注释与英文“The TUI instance.”含义一致。
     tui: Tui,
     /// The chat widget.
-    /// 中文：该注释与英文“The chat widget.”含义一致。
+    ///   中文：该注释与英文“The chat widget.”含义一致。
     widget: ChatWidget,
     /// The completion model used by the agent loop.
-    /// 中文：该注释与英文“The completion model used by the agent loop.”含义一致。
+    ///   中文：该注释与英文“The completion model used by the agent loop.”含义一致。
     model: RetryingCompletionModel<M>,
     /// The tool registry.
-    /// 中文：该注释与英文“The tool registry.”含义一致。
+    ///   中文：该注释与英文“The tool registry.”含义一致。
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
-    /// 中文：该注释与英文“Tool loop runtime config.”含义一致。
+    ///   中文：该注释与英文“Tool loop runtime config.”含义一致。
     config: ToolLoopConfig,
     /// Default tool allow-list for regular chat turns.
-    /// 中文：该注释与英文“Default tool allow-list for regular chat turns.”含义一致。
+    ///   中文：该注释与英文“Default tool allow-list for regular chat turns.”含义一致。
     default_allowed_tools: Vec<String>,
     /// Conversation history (model-facing).
-    /// 中文：该注释与英文“Conversation history (model-facing).”含义一致。
+    ///   中文：该注释与英文“Conversation history (model-facing).”含义一致。
     history: Vec<Message>,
     /// Receiver for app events.
-    /// 中文：该注释与英文“Receiver for app events.”含义一致。
+    ///   中文：该注释与英文“Receiver for app events.”含义一致。
     app_event_rx: UnboundedReceiver<AppEvent>,
     /// Sender for app events.
-    /// 中文：该注释与英文“Sender for app events.”含义一致。
+    ///   中文：该注释与英文“Sender for app events.”含义一致。
     app_event_tx: UnboundedSender<AppEvent>,
     /// The exit info, if any.
-    /// 中文：该注释与英文“The exit info, if any.”含义一致。
+    ///   中文：该注释与英文“The exit info, if any.”含义一致。
     exit_info: Option<AppExitInfo>,
     /// Last draw time for frame rate control.
-    /// 中文：该注释与英文“Last draw time for frame rate control.”含义一致。
+    ///   中文：该注释与英文“Last draw time for frame rate control.”含义一致。
     last_draw_time: Instant,
     /// Background agent task handle (used for interrupt).
-    /// 中文：该注释与英文“Background agent task handle (used for interrupt).”含义一致。
+    ///   中文：该注释与英文“Background agent task handle (used for interrupt).”含义一致。
     agent_task: Option<JoinHandle<()>>,
     /// Per-turn `AbortToken` shared with `config.subagent_runtime`'s
-    /// 中文：该注释与英文“Per-turn `AbortToken` shared with `config.subagent_runtime`'s”含义一致。
+    ///   中文：该注释与英文“Per-turn `AbortToken` shared with `config.subagent_runtime`'s”含义一致。
     /// (v0.17.786). `cancel_current_turn` cancels this so any
-    /// 中文：该注释与英文“(v0.17.786). `cancel_current_turn` cancels this so any”含义一致。
+    ///   中文：该注释与英文“(v0.17.786). `cancel_current_turn` cancels this so any”含义一致。
     /// in-flight sub-agent dispatch short-circuits via the
-    /// 中文：该注释与英文“in-flight sub-agent dispatch short-circuits via the”含义一致。
+    ///   中文：该注释与英文“in-flight sub-agent dispatch short-circuits via the”含义一致。
     /// runner's `tokio::select!` (v0.17.767). Reset at every
-    /// 中文：该注释与英文“runner's `tokio::select!` (v0.17.767). Reset at every”含义一致。
+    ///   中文：该注释与英文“runner's `tokio::select!` (v0.17.767). Reset at every”含义一致。
     /// turn start; cleared when the turn ends.
-    /// 中文：该注释与英文“turn start; cleared when the turn ends.”含义一致。
+    ///   中文：该注释与英文“turn start; cleared when the turn ends.”含义一致。
     current_turn_abort_token: Option<crate::internal::ai::agent::runtime::AbortToken>,
     /// Delayed draw task for frame coalescing inside frame interval.
-    /// 中文：该注释与英文“Delayed draw task for frame coalescing inside frame interval.”含义一致。
+    ///   中文：该注释与英文“Delayed draw task for frame coalescing inside frame interval.”含义一致。
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
-    /// 中文：该注释与英文“Initial welcome message.”含义一致。
+    ///   中文：该注释与英文“Initial welcome message.”含义一致。
     welcome_message: String,
     /// Whether the animated welcome screen is shown.
-    /// 中文：该注释与英文“Whether the animated welcome screen is shown.”含义一致。
+    ///   中文：该注释与英文“Whether the animated welcome screen is shown.”含义一致。
     welcome_active: bool,
     /// Slash command dispatcher.
-    /// 中文：该注释与英文“Slash command dispatcher.”含义一致。
+    ///   中文：该注释与英文“Slash command dispatcher.”含义一致。
     command_dispatcher: CommandDispatcher,
     /// Markdown skill dispatcher.
-    /// 中文：该注释与英文“Markdown skill dispatcher.”含义一致。
+    ///   中文：该注释与英文“Markdown skill dispatcher.”含义一致。
     skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
-    /// 中文：该注释与英文“Agent router for auto-selection.”含义一致。
+    ///   中文：该注释与英文“Agent router for auto-selection.”含义一致。
     agent_router: AgentProfileRouter,
     /// Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.
-    /// 中文：该注释与英文“Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.”含义一致。
+    ///   中文：该注释与英文“Parsed declarative multi-agent config for `/agents`, `/budget`, and runtime gates.”含义一致。
     agents_config: AgentsConfig,
     /// In-memory budget totals for this TUI session.
-    /// 中文：该注释与英文“In-memory budget totals for this TUI session.”含义一致。
+    ///   中文：该注释与英文“In-memory budget totals for this TUI session.”含义一致。
     budget_tracker: BudgetTracker,
     /// Session state for persistence.
-    /// 中文：该注释与英文“Session state for persistence.”含义一致。
+    ///   中文：该注释与英文“Session state for persistence.”含义一致。
     session: SessionState,
     /// Session store for saving/loading.
-    /// 中文：该注释与英文“Session store for saving/loading.”含义一致。
+    ///   中文：该注释与英文“Session store for saving/loading.”含义一致。
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
-    /// 中文：该注释与英文“Receiver for user-input requests from the `request_user_input` tool handler.”含义一致。
+    ///   中文：该注释与英文“Receiver for user-input requests from the `request_user_input` tool handler.”含义一致。
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Receiver for exec-approval requests from sandbox-governed handlers.
-    /// 中文：该注释与英文“Receiver for exec-approval requests from sandbox-governed handlers.”含义一致。
+    ///   中文：该注释与英文“Receiver for exec-approval requests from sandbox-governed handlers.”含义一致。
     exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
-    /// 中文：该注释与英文“Currently pending user-input interaction, if any.”含义一致。
+    ///   中文：该注释与英文“Currently pending user-input interaction, if any.”含义一致。
     pending_user_input: Option<PendingUserInput>,
     /// Currently pending exec approval interaction, if any.
-    /// 中文：该注释与英文“Currently pending exec approval interaction, if any.”含义一致。
+    ///   中文：该注释与英文“Currently pending exec approval interaction, if any.”含义一致。
     pending_exec_approval: Option<PendingExecApproval>,
     /// Currently pending managed-provider approval interaction, if any.
-    /// 中文：该注释与英文“Currently pending managed-provider approval interaction, if any.”含义一致。
+    ///   中文：该注释与英文“Currently pending managed-provider approval interaction, if any.”含义一致。
     pending_managed_interaction: Option<PendingManagedInteraction>,
     /// Currently pending Phase 3 / Phase 4 confirmation, if any.
-    /// 中文：该注释与英文“Currently pending Phase 3 / Phase 4 confirmation, if any.”含义一致。
+    ///   中文：该注释与英文“Currently pending Phase 3 / Phase 4 confirmation, if any.”含义一致。
     pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
-    /// 中文：该注释与英文“Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).”含义一致。
+    ///   中文：该注释与英文“Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).”含义一致。
     pending_post_plan: Option<PendingPostPlan>,
     /// Network policy dialog state after the user has chosen to execute the plan.
-    /// 中文：该注释与英文“Network policy dialog state after the user has chosen to execute the plan.”含义一致。
+    ///   中文：该注释与英文“Network policy dialog state after the user has chosen to execute the plan.”含义一致。
     pending_network_policy: Option<PendingNetworkPolicyChoice>,
     /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
-    /// 中文：该注释与英文“IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).”含义一致。
+    ///   中文：该注释与英文“IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).”含义一致。
     pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
-    /// 中文：该注释与英文“Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.”含义一致。
+    ///   中文：该注释与英文“Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.”含义一致。
     pending_plan_revision: Option<String>,
     /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
-    /// 中文：该注释与英文“Base execution plan for the next plan-revision request, if the user chose Modify Plan.”含义一致。
+    ///   中文：该注释与英文“Base execution plan for the next plan-revision request, if the user chose Modify Plan.”含义一致。
     pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
     /// Auto-execute the next generated plan as an execution-failure repair attempt.
-    /// 中文：该注释与英文“Auto-execute the next generated plan as an execution-failure repair attempt.”含义一致。
+    ///   中文：该注释与英文“Auto-execute the next generated plan as an execution-failure repair attempt.”含义一致。
     pending_auto_plan_repair_execution: Option<PendingAutoPlanRepairExecution>,
     /// Display name of the active model.
-    /// 中文：该注释与英文“Display name of the active model.”含义一致。
+    ///   中文：该注释与英文“Display name of the active model.”含义一致。
     model_name: String,
     /// Provider identifier.
-    /// 中文：该注释与英文“Provider identifier.”含义一致。
+    ///   中文：该注释与英文“Provider identifier.”含义一致。
     provider_name: String,
     /// Session-level model usage rendered in the compact bottom-pane line.
-    /// 中文：该注释与英文“Session-level model usage rendered in the compact bottom-pane line.”含义一致。
+    ///   中文：该注释与英文“Session-level model usage rendered in the compact bottom-pane line.”含义一致。
     usage_snapshot: UsageDisplaySnapshot,
     /// Estimated output tokens already added from streaming text deltas for
-    /// 中文：该注释与英文“Estimated output tokens already added from streaming text deltas for”含义一致。
+    ///   中文：该注释与英文“Estimated output tokens already added from streaming text deltas for”含义一致。
     /// the active turn. Final provider usage replaces this estimate.
-    /// 中文：该注释与英文“the active turn. Final provider usage replaces this estimate.”含义一致。
+    ///   中文：该注释与英文“the active turn. Final provider usage replaces this estimate.”含义一致。
     pending_stream_output_tokens: u64,
     /// Arguments used to render the currently open usage detail panel.
-    /// 中文：该注释与英文“Arguments used to render the currently open usage detail panel.”含义一致。
+    ///   中文：该注释与英文“Arguments used to render the currently open usage detail panel.”含义一致。
     usage_detail_args: Option<String>,
     /// MCP server instance for writing data.
-    /// 中文：该注释与英文“MCP server instance for writing data.”含义一致。
+    ///   中文：该注释与英文“MCP server instance for writing data.”含义一致。
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// Latest execution plan ID for attaching new turn runs.
-    /// 中文：该注释与英文“Latest execution plan ID for attaching new turn runs.”含义一致。
+    ///   中文：该注释与英文“Latest execution plan ID for attaching new turn runs.”含义一致。
     mcp_plan_id: Option<String>,
     /// Active turn run ID for appending decisions and tool invocations.
-    /// 中文：该注释与英文“Active turn run ID for appending decisions and tool invocations.”含义一致。
+    ///   中文：该注释与英文“Active turn run ID for appending decisions and tool invocations.”含义一致。
     mcp_run_id: Option<String>,
     /// Pending detached MCP write operations that must finish before shutdown.
-    /// 中文：该注释与英文“Pending detached MCP write operations that must finish before shutdown.”含义一致。
+    ///   中文：该注释与英文“Pending detached MCP write operations that must finish before shutdown.”含义一致。
     mcp_write_tracker: McpWriteTracker,
     /// Current active async turn. Events from stale turns are ignored.
-    /// 中文：该注释与英文“Current active async turn. Events from stale turns are ignored.”含义一致。
+    ///   中文：该注释与英文“Current active async turn. Events from stale turns are ignored.”含义一致。
     active_turn_id: Option<TurnId>,
     /// Monotonic turn counter.
-    /// 中文：该注释与英文“Monotonic turn counter.”含义一致。
+    ///   中文：该注释与英文“Monotonic turn counter.”含义一致。
     next_turn_id: TurnId,
     /// Shared view of active turn for global retry observer callbacks.
-    /// 中文：该注释与英文“Shared view of active turn for global retry observer callbacks.”含义一致。
+    ///   中文：该注释与英文“Shared view of active turn for global retry observer callbacks.”含义一致。
     active_turn_signal: Arc<AtomicU64>,
     /// Number of tool calls currently running in UI.
-    /// 中文：该注释与英文“Number of tool calls currently running in UI.”含义一致。
+    ///   中文：该注释与英文“Number of tool calls currently running in UI.”含义一致。
     running_tool_calls: usize,
     /// Shared run-id slot for the active turn, backfilled by MCP tracking.
-    /// 中文：该注释与英文“Shared run-id slot for the active turn, backfilled by MCP tracking.”含义一致。
+    ///   中文：该注释与英文“Shared run-id slot for the active turn, backfilled by MCP tracking.”含义一致。
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
     /// Provider-agnostic web snapshot state shared with the browser UI.
-    /// 中文：该注释与英文“Provider-agnostic web snapshot state shared with the browser UI.”含义一致。
+    ///   中文：该注释与英文“Provider-agnostic web snapshot state shared with the browser UI.”含义一致。
     code_ui_session: Option<Arc<CodeUiSession>>,
     /// Provider-agnostic web runtime state shared with the browser UI.
-    /// 中文：该注释与英文“Provider-agnostic web runtime state shared with the browser UI.”含义一致。
+    ///   中文：该注释与英文“Provider-agnostic web runtime state shared with the browser UI.”含义一致。
     code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Receiver for local automation commands from the Code UI adapter.
-    /// 中文：该注释与英文“Receiver for local automation commands from the Code UI adapter.”含义一致。
+    ///   中文：该注释与英文“Receiver for local automation commands from the Code UI adapter.”含义一致。
     code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Managed provider runtime for providers that own their own tool loop.
-    /// 中文：该注释与英文“Managed provider runtime for providers that own their own tool loop.”含义一致。
+    ///   中文：该注释与英文“Managed provider runtime for providers that own their own tool loop.”含义一致。
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
-    /// 中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
+    ///   中文：该注释与英文“Default network access policy selected at TUI launch.”含义一致。
     default_network_access: bool,
     /// Whether the first unprofiled user message should be model-classified.
-    /// 中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
+    ///   中文：该注释与英文“Whether the first unprofiled user message should be model-classified.”含义一致。
     auto_classify_first_user_message: bool,
     /// Monotonic id source for browser transcript artifacts.
-    /// 中文：该注释与英文“Monotonic id source for browser transcript artifacts.”含义一致。
+    ///   中文：该注释与英文“Monotonic id source for browser transcript artifacts.”含义一致。
     next_code_ui_item_id: u64,
     /// Active Goal session for this `libra code` invocation, if any
-    /// 中文：该注释与英文“Active Goal session for this `libra code` invocation, if any”含义一致。
+    ///   中文：该注释与英文“Active Goal session for this `libra code` invocation, if any”含义一致。
     /// (`/goal start <objective>` or `--goal "<objective>"`).
-    /// 中文：该注释与英文“(`/goal start <objective>` or `--goal "<objective>"`).”含义一致。
+    ///   中文：该注释与英文“(`/goal start <objective>` or `--goal "<objective>"`).”含义一致。
     /// Shared by both the TUI slash-command surface and the Code
-    /// 中文：该注释与英文“Shared by both the TUI slash-command surface and the Code”含义一致。
+    ///   中文：该注释与英文“Shared by both the TUI slash-command surface and the Code”含义一致。
     /// Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).
-    /// 中文：该注释与英文“Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).”含义一致。
+    ///   中文：该注释与英文“Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).”含义一致。
     goal_session: Option<super::goal_session::GoalSession>,
     /// Source Pool control state for this TUI session.
-    /// 中文：该注释与英文“Source Pool control state for this TUI session.”含义一致。
+    ///   中文：该注释与英文“Source Pool control state for this TUI session.”含义一致。
     source_pool: SourcePool,
 }
 
@@ -688,7 +688,7 @@ where
     M::Response: CompletionUsage,
 {
     /// Create a new App instance.
-    /// 中文：该注释与英文“Create a new App instance.”含义一致。
+    ///   中文：该注释与英文“Create a new App instance.”含义一致。
     pub fn new(
         tui: Tui,
         model: M,
@@ -876,7 +876,7 @@ where
     }
 
     /// Run the main event loop.
-    /// 中文：该注释与英文“Run the main event loop.”含义一致。
+    ///   中文：该注释与英文“Run the main event loop.”含义一致。
     pub async fn run(&mut self) -> anyhow::Result<AppExitInfo> {
         // Enter alternate screen
         // 中文：该注释与英文“Enter alternate screen”含义一致。
@@ -1124,7 +1124,7 @@ where
     }
 
     /// Handle a terminal event.
-    /// 中文：该注释与英文“Handle a terminal event.”含义一致。
+    ///   中文：该注释与英文“Handle a terminal event.”含义一致。
     async fn handle_tui_event(&mut self, event: TuiEvent) -> anyhow::Result<()> {
         match event {
             TuiEvent::Key(key) => {
@@ -1238,15 +1238,15 @@ where
     }
 
     /// `goal.start { objective }` — create an active Goal mirroring
-    /// 中文：该注释与英文“`goal.start { objective }` — create an active Goal mirroring”含义一致。
+    ///   中文：该注释与英文“`goal.start { objective }` — create an active Goal mirroring”含义一致。
     /// `/goal start <objective>`. Refuses if a Goal is already
-    /// 中文：该注释与英文“`/goal start <objective>`. Refuses if a Goal is already”含义一致。
+    ///   中文：该注释与英文“`/goal start <objective>`. Refuses if a Goal is already”含义一致。
     /// active in this session. The Code Control client receives
-    /// 中文：该注释与英文“active in this session. The Code Control client receives”含义一致。
+    ///   中文：该注释与英文“active in this session. The Code Control client receives”含义一致。
     /// the rendered status so it can display the goal id without a
-    /// 中文：该注释与英文“the rendered status so it can display the goal id without a”含义一致。
+    ///   中文：该注释与英文“the rendered status so it can display the goal id without a”含义一致。
     /// follow-up `goal.status` call.
-    /// 中文：该注释与英文“follow-up `goal.status` call.”含义一致。
+    ///   中文：该注释与英文“follow-up `goal.status` call.”含义一致。
     fn goal_session_start_from_control(
         &mut self,
         objective: String,
@@ -1285,9 +1285,9 @@ where
     }
 
     /// `goal.status` — render the active Goal's snapshot, or
-    /// 中文：该注释与英文“`goal.status` — render the active Goal's snapshot, or”含义一致。
+    ///   中文：该注释与英文“`goal.status` — render the active Goal's snapshot, or”含义一致。
     /// `GoalNotActive` if none.
-    /// 中文：该注释与英文“`GoalNotActive` if none.”含义一致。
+    ///   中文：该注释与英文“`GoalNotActive` if none.”含义一致。
     fn goal_session_status_from_control(&self) -> Result<String, TuiControlError> {
         use super::goal_session::render_goal_status;
         match self.goal_session.as_ref() {
@@ -1297,11 +1297,11 @@ where
     }
 
     /// `goal.cancel { reason }` — append `GoalEvent::Cancelled` to
-    /// 中文：该注释与英文“`goal.cancel { reason }` — append `GoalEvent::Cancelled` to”含义一致。
+    ///   中文：该注释与英文“`goal.cancel { reason }` — append `GoalEvent::Cancelled` to”含义一致。
     /// the active session and clear the slot. Refuses if no Goal is
-    /// 中文：该注释与英文“the active session and clear the slot. Refuses if no Goal is”含义一致。
+    ///   中文：该注释与英文“the active session and clear the slot. Refuses if no Goal is”含义一致。
     /// active or if the active Goal is already terminal.
-    /// 中文：该注释与英文“active or if the active Goal is already terminal.”含义一致。
+    ///   中文：该注释与英文“active or if the active Goal is already terminal.”含义一致。
     fn goal_session_cancel_from_control(
         &mut self,
         reason: String,
@@ -1344,19 +1344,19 @@ where
     }
 
     /// `/goal criteria add <text>` — append a single user-authored
-    /// 中文：该注释与英文“`/goal criteria add <text>` — append a single user-authored”含义一致。
+    ///   中文：该注释与英文“`/goal criteria add <text>` — append a single user-authored”含义一致。
     /// acceptance criterion to the active Goal via a
-    /// 中文：该注释与英文“acceptance criterion to the active Goal via a”含义一致。
+    ///   中文：该注释与英文“acceptance criterion to the active Goal via a”含义一致。
     /// `CriteriaRevised` envelope. The dispatcher delegates id
-    /// 中文：该注释与英文“`CriteriaRevised` envelope. The dispatcher delegates id”含义一致。
+    ///   中文：该注释与英文“`CriteriaRevised` envelope. The dispatcher delegates id”含义一致。
     /// minting to `GoalSession::revise_criteria_add`; the user only
-    /// 中文：该注释与英文“minting to `GoalSession::revise_criteria_add`; the user only”含义一致。
+    ///   中文：该注释与英文“minting to `GoalSession::revise_criteria_add`; the user only”含义一致。
     /// supplies the natural-language description. Refuses with
-    /// 中文：该注释与英文“supplies the natural-language description. Refuses with”含义一致。
+    ///   中文：该注释与英文“supplies the natural-language description. Refuses with”含义一致。
     /// `GoalNotActive` when no Goal is in flight (mirrors the
-    /// 中文：该注释与英文“`GoalNotActive` when no Goal is in flight (mirrors the”含义一致。
+    ///   中文：该注释与英文“`GoalNotActive` when no Goal is in flight (mirrors the”含义一致。
     /// `/goal status` and `/goal cancel` shape).
-    /// 中文：该注释与英文“`/goal status` and `/goal cancel` shape).”含义一致。
+    ///   中文：该注释与英文“`/goal status` and `/goal cancel` shape).”含义一致。
     fn goal_session_criteria_add_from_control(
         &mut self,
         description: String,
@@ -1396,19 +1396,19 @@ where
     }
 
     /// Refresh the bottom-pane Goal indicator from the current
-    /// 中文：该注释与英文“Refresh the bottom-pane Goal indicator from the current”含义一致。
+    ///   中文：该注释与英文“Refresh the bottom-pane Goal indicator from the current”含义一致。
     /// `goal_session` slot. Call after every mutation
-    /// 中文：该注释与英文“`goal_session` slot. Call after every mutation”含义一致。
+    ///   中文：该注释与英文“`goal_session` slot. Call after every mutation”含义一致。
     /// (`start` / `cancel` / `criteria add` / supervisor envelope
-    /// 中文：该注释与英文“(`start` / `cancel` / `criteria add` / supervisor envelope”含义一致。
+    ///   中文：该注释与英文“(`start` / `cancel` / `criteria add` / supervisor envelope”含义一致。
     /// fold) so the user sees the live state without invoking
-    /// 中文：该注释与英文“fold) so the user sees the live state without invoking”含义一致。
+    ///   中文：该注释与英文“fold) so the user sees the live state without invoking”含义一致。
     /// `/goal status`. Setting the line to `None` when there is no
-    /// 中文：该注释与英文“`/goal status`. Setting the line to `None` when there is no”含义一致。
+    ///   中文：该注释与英文“`/goal status`. Setting the line to `None` when there is no”含义一致。
     /// active Goal hides the row entirely so the layout shrinks
-    /// 中文：该注释与英文“active Goal hides the row entirely so the layout shrinks”含义一致。
+    ///   中文：该注释与英文“active Goal hides the row entirely so the layout shrinks”含义一致。
     /// back to its non-Goal height.
-    /// 中文：该注释与英文“back to its non-Goal height.”含义一致。
+    ///   中文：该注释与英文“back to its non-Goal height.”含义一致。
     fn refresh_bottom_pane_goal_status(&mut self) {
         use super::goal_session::render_goal_status_line;
         let line = self
@@ -1782,7 +1782,7 @@ where
     }
 
     /// Handle a key press event.
-    /// 中文：该注释与英文“Handle a key press event.”含义一致。
+    ///   中文：该注释与英文“Handle a key press event.”含义一致。
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
         // 中文：该注释与英文“Check for Ctrl+C first (always handled)”含义一致。
@@ -2151,7 +2151,7 @@ where
     }
 
     /// Handle keyboard input while in the AwaitingUserInput state.
-    /// 中文：该注释与英文“Handle keyboard input while in the AwaitingUserInput state.”含义一致。
+    ///   中文：该注释与英文“Handle keyboard input while in the AwaitingUserInput state.”含义一致。
     fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
         let is_freeform = self.pending_user_input.as_ref().is_some_and(|p| {
             let q = &p.request.questions[p.current_question];
@@ -2255,7 +2255,7 @@ where
     }
 
     /// Submit the currently selected answer for the active question.
-    /// 中文：该注释与英文“Submit the currently selected answer for the active question.”含义一致。
+    ///   中文：该注释与英文“Submit the currently selected answer for the active question.”含义一致。
     fn submit_user_input_answer(&mut self) {
         let interaction_id = self
             .pending_user_input
@@ -2360,7 +2360,7 @@ where
     }
 
     /// Cancel the pending user-input interaction (drops the oneshot sender).
-    /// 中文：该注释与英文“Cancel the pending user-input interaction (drops the oneshot sender).”含义一致。
+    ///   中文：该注释与英文“Cancel the pending user-input interaction (drops the oneshot sender).”含义一致。
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
             let interaction_id = pending.request.call_id.clone();
@@ -2384,7 +2384,7 @@ where
     }
 
     /// Sync the pending user-input state to the bottom pane for rendering.
-    /// 中文：该注释与英文“Sync the pending user-input state to the bottom pane for rendering.”含义一致。
+    ///   中文：该注释与英文“Sync the pending user-input state to the bottom pane for rendering.”含义一致。
     fn sync_user_input_to_pane(&mut self) {
         if let Some(ref pending) = self.pending_user_input {
             self.widget.bottom_pane.user_input_current_question = pending.current_question;
@@ -2395,7 +2395,7 @@ where
     }
 
     /// Handle a user-input request from the tool handler.
-    /// 中文：该注释与英文“Handle a user-input request from the tool handler.”含义一致。
+    ///   中文：该注释与英文“Handle a user-input request from the tool handler.”含义一致。
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
         let first_question = request.questions.first();
         tracing::debug!(
@@ -2991,7 +2991,7 @@ where
     }
 
     /// Handle an app event.
-    /// 中文：该注释与英文“Handle an app event.”含义一致。
+    ///   中文：该注释与英文“Handle an app event.”含义一致。
     async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         if !self.is_active_turn(event.turn_id()) {
             return Ok(());
@@ -5079,7 +5079,7 @@ where
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
-    /// 中文：该注释与英文“Submit a user message, expanding slash commands and applying agent context.”含义一致。
+    ///   中文：该注释与英文“Submit a user message, expanding slash commands and applying agent context.”含义一致。
     async fn submit_message(&mut self, text: String) {
         self.submit_message_from_source(text, TurnInputSource::Local)
             .await;
@@ -5182,7 +5182,7 @@ where
     }
 
     /// Handle a built-in TUI command (does not send to model).
-    /// 中文：该注释与英文“Handle a built-in TUI command (does not send to model).”含义一致。
+    ///   中文：该注释与英文“Handle a built-in TUI command (does not send to model).”含义一致。
     async fn handle_builtin_command(
         &mut self,
         cmd: super::slash_command::BuiltinCommand,
@@ -5496,23 +5496,23 @@ where
     }
 
     /// Render the response cell for a `/goal …` invocation. The
-    /// 中文：该注释与英文“Render the response cell for a `/goal …` invocation. The”含义一致。
+    ///   中文：该注释与英文“Render the response cell for a `/goal …` invocation. The”含义一致。
     /// parser lives in [`super::goal_command::parse_goal_subcommand`];
-    /// 中文：该注释与英文“parser lives in [`super::goal_command::parse_goal_subcommand`];”含义一致。
+    ///   中文：该注释与英文“parser lives in [`super::goal_command::parse_goal_subcommand`];”含义一致。
     /// this helper dispatches the typed result into the App's
-    /// 中文：该注释与英文“this helper dispatches the typed result into the App's”含义一致。
+    ///   中文：该注释与英文“this helper dispatches the typed result into the App's”含义一致。
     /// goal-session methods (the same methods the Code Control
-    /// 中文：该注释与英文“goal-session methods (the same methods the Code Control”含义一致。
+    ///   中文：该注释与英文“goal-session methods (the same methods the Code Control”含义一致。
     /// NDJSON `goal.*` handlers call), so both surfaces share one
-    /// 中文：该注释与英文“NDJSON `goal.*` handlers call), so both surfaces share one”含义一致。
+    ///   中文：该注释与英文“NDJSON `goal.*` handlers call), so both surfaces share one”含义一致。
     /// authority for state mutation (OC-Phase 6 P6.5 / P6.6). The
-    /// 中文：该注释与英文“authority for state mutation (OC-Phase 6 P6.5 / P6.6). The”含义一致。
+    ///   中文：该注释与英文“authority for state mutation (OC-Phase 6 P6.5 / P6.6). The”含义一致。
     /// `criteria add` arm stays parse-only because `CriteriaRevised`
-    /// 中文：该注释与英文“`criteria add` arm stays parse-only because `CriteriaRevised`”含义一致。
+    ///   中文：该注释与英文“`criteria add` arm stays parse-only because `CriteriaRevised`”含义一致。
     /// envelopes flow through the supervisor's apply path —
-    /// 中文：该注释与英文“envelopes flow through the supervisor's apply path —”含义一致。
+    ///   中文：该注释与英文“envelopes flow through the supervisor's apply path —”含义一致。
     /// integration ships once `run_tool_loop` integrates.
-    /// 中文：该注释与英文“integration ships once `run_tool_loop` integrates.”含义一致。
+    ///   中文：该注释与英文“integration ships once `run_tool_loop` integrates.”含义一致。
     fn format_goal_command_response(&mut self, args: &str) -> String {
         use super::goal_command::{GoalSubcommand, parse_goal_subcommand};
         match parse_goal_subcommand(args) {
@@ -5543,18 +5543,18 @@ where
     }
 
     /// Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.
-    /// 中文：该注释与英文“Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.”含义一致。
+    ///   中文：该注释与英文“Dispatch a user-initiated sub-agent from `/task <agent> <prompt>`.”含义一致。
     ///
     /// This is the OC-Phase 3 P3.6 user entry point: it skips the
-    /// 中文：该注释与英文“This is the OC-Phase 3 P3.6 user entry point: it skips the”含义一致。
+    ///   中文：该注释与英文“This is the OC-Phase 3 P3.6 user entry point: it skips the”含义一致。
     /// LLM-initiated permission dialog because the human explicitly
-    /// 中文：该注释与英文“LLM-initiated permission dialog because the human explicitly”含义一致。
+    ///   中文：该注释与英文“LLM-initiated permission dialog because the human explicitly”含义一致。
     /// requested the sub-agent, while keeping all other dispatcher
-    /// 中文：该注释与英文“requested the sub-agent, while keeping all other dispatcher”含义一致。
+    ///   中文：该注释与英文“requested the sub-agent, while keeping all other dispatcher”含义一致。
     /// gates (feature flag, depth, concurrency, safety, permission
-    /// 中文：该注释与英文“gates (feature flag, depth, concurrency, safety, permission”含义一致。
+    ///   中文：该注释与英文“gates (feature flag, depth, concurrency, safety, permission”含义一致。
     /// escalation, model build, child loop) intact.
-    /// 中文：该注释与英文“escalation, model build, child loop) intact.”含义一致。
+    ///   中文：该注释与英文“escalation, model build, child loop) intact.”含义一致。
     async fn task_command_message(&self, args: &str) -> String {
         let invocation = match parse_task_command_args(args) {
             Ok(invocation) => invocation,
@@ -8004,9 +8004,9 @@ where
     }
 
     /// Extract diff metadata from a successful `apply_patch` result and insert
-    /// 中文：该注释与英文“Extract diff metadata from a successful `apply_patch` result and insert”含义一致。
+    ///   中文：该注释与英文“Extract diff metadata from a successful `apply_patch` result and insert”含义一致。
     /// a [`DiffHistoryCell`] for visual diff rendering.
-    /// 中文：该注释与英文“a [`DiffHistoryCell`] for visual diff rendering.”含义一致。
+    ///   中文：该注释与英文“a [`DiffHistoryCell`] for visual diff rendering.”含义一致。
     fn try_insert_diff_cell(&mut self, result: &ToolOutput) {
         let ToolOutput::Function {
             metadata: Some(meta),
@@ -8245,7 +8245,7 @@ where
     }
 
     /// Schedule a frame draw with frame rate limiting.
-    /// 中文：该注释与英文“Schedule a frame draw with frame rate limiting.”含义一致。
+    ///   中文：该注释与英文“Schedule a frame draw with frame rate limiting.”含义一致。
     fn schedule_draw(&mut self) {
         if self
             .scheduled_draw_task
@@ -8278,7 +8278,7 @@ where
     }
 
     /// Draw the current frame.
-    /// 中文：该注释与英文“Draw the current frame.”含义一致。
+    ///   中文：该注释与英文“Draw the current frame.”含义一致。
     fn draw(&mut self) -> anyhow::Result<()> {
         self.tui.draw(|frame| {
             let area = frame.area();
@@ -12322,33 +12322,33 @@ fn persist_goal_events_to_session_root(
 }
 
 /// Replay the resumed session's Goal envelope stream into a fresh
-/// 中文：该注释与英文“Replay the resumed session's Goal envelope stream into a fresh”含义一致。
+///   中文：该注释与英文“Replay the resumed session's Goal envelope stream into a fresh”含义一致。
 /// [`super::goal_session::GoalSession`].
-/// 中文：该注释与英文“[`super::goal_session::GoalSession`].”含义一致。
+///   中文：该注释与英文“[`super::goal_session::GoalSession`].”含义一致。
 ///
 /// Returns `None` when:
-/// 中文：该注释与英文“Returns `None` when:”含义一致。
+///   中文：该注释与英文“Returns `None` when:”含义一致。
 /// * The session JSONL is missing or has no [`SessionEvent::Goal`]
-/// 中文：列表项说明与英文“The session JSONL is missing or has no [`SessionEvent::Goal`]”含义一致。
+///   中文：列表项说明与英文“The session JSONL is missing or has no [`SessionEvent::Goal`]”含义一致。
 ///   envelopes (the resumed thread never started a Goal).
-/// 中文：该注释与英文“envelopes (the resumed thread never started a Goal).”含义一致。
+///   中文：该注释与英文“envelopes (the resumed thread never started a Goal).”含义一致。
 /// * The envelope stream fails `goal::state::replay`'s shape checks
-/// 中文：列表项说明与英文“The envelope stream fails `goal::state::replay`'s shape checks”含义一致。
+///   中文：列表项说明与英文“The envelope stream fails `goal::state::replay`'s shape checks”含义一致。
 ///   (no leading `Created`, mismatched `goal_id`, invalid spec).
-/// 中文：该注释与英文“(no leading `Created`, mismatched `goal_id`, invalid spec).”含义一致。
+///   中文：该注释与英文“(no leading `Created`, mismatched `goal_id`, invalid spec).”含义一致。
 ///
 /// On success the projected state is logged together with the
-/// 中文：该注释与英文“On success the projected state is logged together with the”含义一致。
+///   中文：该注释与英文“On success the projected state is logged together with the”含义一致。
 /// rejection count so a forged or corrupted JSONL slice surfaces
-/// 中文：该注释与英文“rejection count so a forged or corrupted JSONL slice surfaces”含义一致。
+///   中文：该注释与英文“rejection count so a forged or corrupted JSONL slice surfaces”含义一致。
 /// in `tracing` instead of silently producing a nonsense state.
-/// 中文：该注释与英文“in `tracing` instead of silently producing a nonsense state.”含义一致。
+///   中文：该注释与英文“in `tracing` instead of silently producing a nonsense state.”含义一致。
 /// I/O failures are downgraded to a warn-level trace and an
-/// 中文：该注释与英文“I/O failures are downgraded to a warn-level trace and an”含义一致。
+///   中文：该注释与英文“I/O failures are downgraded to a warn-level trace and an”含义一致。
 /// empty-replay return because the resume path must not abort on
-/// 中文：该注释与英文“empty-replay return because the resume path must not abort on”含义一致。
+///   中文：该注释与英文“empty-replay return because the resume path must not abort on”含义一致。
 /// a broken events.jsonl.
-/// 中文：该注释与英文“a broken events.jsonl.”含义一致。
+///   中文：该注释与英文“a broken events.jsonl.”含义一致。
 fn replay_goal_session_from_session_root(
     session_root: &Path,
 ) -> Option<super::goal_session::GoalSession> {
@@ -12591,15 +12591,15 @@ fn should_route_plain_message_to_plan(text: &str) -> bool {
 }
 
 /// Build the [`GoalActor`] attribution for actions taken inside the
-/// 中文：该注释与英文“Build the [`GoalActor`] attribution for actions taken inside the”含义一致。
+///   中文：该注释与英文“Build the [`GoalActor`] attribution for actions taken inside the”含义一致。
 /// active session. Today we always attribute to the local user;
-/// 中文：该注释与英文“active session. Today we always attribute to the local user;”含义一致。
+///   中文：该注释与英文“active session. Today we always attribute to the local user;”含义一致。
 /// once the controller-lease layer threads automation actor metadata
-/// 中文：该注释与英文“once the controller-lease layer threads automation actor metadata”含义一致。
+///   中文：该注释与英文“once the controller-lease layer threads automation actor metadata”含义一致。
 /// through (P6.6 follow-up for the `Automation` actor variant), this
-/// 中文：该注释与英文“through (P6.6 follow-up for the `Automation` actor variant), this”含义一致。
+///   中文：该注释与英文“through (P6.6 follow-up for the `Automation` actor variant), this”含义一致。
 /// function will branch on the active controller.
-/// 中文：该注释与英文“function will branch on the active controller.”含义一致。
+///   中文：该注释与英文“function will branch on the active controller.”含义一致。
 fn goal_actor_for_session<M: CompletionModel>(
     _app: &App<M>,
 ) -> crate::internal::ai::goal::GoalActor {
