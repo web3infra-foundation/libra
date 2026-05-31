@@ -59,6 +59,7 @@ pub mod sandbox;
 pub mod shortlog;
 pub mod show;
 pub mod show_ref;
+pub mod stats;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;
