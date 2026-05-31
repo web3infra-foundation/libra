@@ -710,24 +710,10 @@ async fn write_session_end_checkpoint(
             serde_json::Value::String(checkpoint_id.clone()),
         );
     }
+    let transcript_redacted =
+        build_checkpoint_transcript_redacted(envelope, agent_kind, redacted_prompt, &mut metadata);
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("serialize checkpoint metadata")?;
-
-    // Transcript bytes for this minimal checkpoint = the redacted prompt the
-    // session ended on, or an empty stream when no prompt was carried. The
-    // bytes are already redacted because the upsert path scrubs them in
-    // place; we capture the same view here so the persisted blob never
-    // contains a leaked secret. Extending to the full session transcript is
-    // adapter-specific work (Phase 2 follow-up — `read_transcript` on
-    // ObservedAgent).
-    // Wrap in `RedactedBytes` so the agent-traces write path enforces the
-    // entire.md §8.1 / §13 P0 contract at the type level: the bytes were
-    // already scrubbed by the upsert path (see above), so this uses the
-    // sanctioned in-crate `new_unchecked` "already-redacted input"
-    // constructor rather than passing raw `&[u8]`.
-    let transcript_redacted = crate::internal::ai::observed_agents::RedactedBytes::new_unchecked(
-        redacted_prompt.unwrap_or("").as_bytes().to_vec(),
-    );
 
     let provider_name = envelope_provider_slug(agent_kind);
 
@@ -813,6 +799,75 @@ async fn write_session_end_checkpoint(
     // Phase 3 enhancement that adds per-rule counters to metadata.
     let _ = redaction_matches;
     Ok(())
+}
+
+fn build_checkpoint_transcript_redacted(
+    envelope: &SessionHookEnvelope,
+    agent_kind: &str,
+    redacted_prompt: Option<&str>,
+    metadata: &mut serde_json::Value,
+) -> crate::internal::ai::observed_agents::RedactedBytes {
+    use crate::internal::ai::observed_agents::{
+        AgentKind, AgentSessionCtx, RedactedBytes, Redactor, agent_for,
+    };
+
+    let Some(kind) = AgentKind::from_db_str(agent_kind) else {
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "transcript_source".to_string(),
+                serde_json::Value::String("fallback_prompt_unknown_agent_kind".to_string()),
+            );
+        }
+        return RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec());
+    };
+    let ctx = AgentSessionCtx {
+        session_id: build_ai_session_id(
+            envelope_provider_name_for_kind(kind),
+            &envelope.session_id,
+        ),
+        provider_session_id: envelope.session_id.clone(),
+        working_dir: std::path::PathBuf::from(&envelope.cwd),
+        transcript_path: envelope
+            .transcript_path
+            .as_ref()
+            .map(std::path::PathBuf::from),
+    };
+    let agent = agent_for(kind);
+    match agent.read_transcript(&ctx) {
+        Ok(Some(raw)) => {
+            let (redacted, report) = Redactor::new_default().redact(&raw);
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "transcript_source".to_string(),
+                    serde_json::Value::String("adapter".to_string()),
+                );
+                obj.insert(
+                    "transcript_redaction_report".to_string(),
+                    serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+                );
+            }
+            redacted
+        }
+        Ok(None) | Err(_) => {
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "transcript_source".to_string(),
+                    serde_json::Value::String("fallback_prompt".to_string()),
+                );
+            }
+            RedactedBytes::new_unchecked(redacted_prompt.unwrap_or("").as_bytes().to_vec())
+        }
+    }
+}
+
+fn envelope_provider_name_for_kind(
+    kind: crate::internal::ai::observed_agents::AgentKind,
+) -> &'static str {
+    match kind {
+        crate::internal::ai::observed_agents::AgentKind::ClaudeCode => "claude",
+        crate::internal::ai::observed_agents::AgentKind::Gemini => "gemini",
+        _ => kind.as_db_str(),
+    }
 }
 
 /// Map `agent_session.agent_kind` (the closed enum stored in the database)
@@ -1843,6 +1898,108 @@ mod tests {
             body.contains("deploy with") && body.contains("please"),
             "the redacted transcript must retain the non-secret text, got: {body}",
         );
+    }
+
+    /// entire.md §7.1 / §13: checkpoint transcripts should be snapshots of
+    /// the external agent's native transcript file, not just the final hook
+    /// prompt. The adapter returns raw bytes and the runtime redacts them
+    /// before writing `transcript/<provider>`.
+    #[tokio::test]
+    async fn session_end_checkpoint_transcript_blob_uses_adapter_transcript_snapshot() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+        let transcript_path = dir.path().join("claude-transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            b"full transcript body with AKIAIOSFODNN7EXAMPLE\n",
+        )
+        .expect("write transcript fixture");
+
+        let start = ingest_envelope(
+            "SessionStart",
+            "S-cp-full-transcript",
+            json!({ "transcript_path": transcript_path }),
+        );
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        let end = ingest_envelope(
+            "SessionEnd",
+            "S-cp-full-transcript",
+            json!({
+                "transcript_path": transcript_path,
+                "prompt": "fallback prompt must not be the transcript snapshot",
+            }),
+        );
+        ingest_agent_traces_payload(
+            &end,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("end ok");
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+
+        let body = read_single_agent_transcript_blob_body(&conn, &repo_path).await;
+        assert!(
+            body.contains("full transcript body"),
+            "checkpoint transcript must come from adapter transcript file, got: {body}",
+        );
+        assert!(
+            !body.contains("fallback prompt must not"),
+            "fallback prompt leaked into transcript snapshot instead of native transcript: {body}",
+        );
+        assert!(
+            !body.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked into adapter transcript snapshot: {body}",
+        );
+        assert!(
+            body.contains("<REDACTED:aws-access-key-id>"),
+            "adapter transcript secret should be redacted, got: {body}",
+        );
+    }
+
+    async fn read_single_agent_transcript_blob_body(
+        conn: &DatabaseConnection,
+        repo_path: &std::path::Path,
+    ) -> String {
+        let backend = conn.get_database_backend();
+        let blob_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_id FROM object_index WHERE o_type = 'agent_transcript' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query transcript blob")
+            .expect("a transcript blob must be indexed");
+        let blob_oid: String = blob_row.try_get_by("o_id").unwrap();
+
+        let object_path = repo_path
+            .join("objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        let raw = std::fs::read(&object_path).expect("read transcript blob object");
+        let mut decoder = flate2::read::ZlibDecoder::new(&raw[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        let header_end = decoded
+            .iter()
+            .position(|&b| b == 0)
+            .expect("blob object has a header terminator");
+        String::from_utf8_lossy(&decoded[header_end + 1..]).to_string()
     }
 
     /// Walk every object reachable from the checkpoint commit (commit →
