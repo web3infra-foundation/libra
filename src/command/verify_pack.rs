@@ -30,11 +30,14 @@ use crate::utils::{
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: usize = 256 * 4;
 
+/// RAII guard that restores the process-wide hash kind after index inspection.
 struct HashKindRestoreGuard {
+    /// Hash kind active before `verify-pack` temporarily switched formats.
     previous: HashKind,
 }
 
 impl HashKindRestoreGuard {
+    /// Switch to `next` and remember the previous hash kind for restoration.
     fn switch_to(next: HashKind) -> Self {
         let previous = get_hash_kind();
         set_hash_kind(next);
@@ -43,6 +46,7 @@ impl HashKindRestoreGuard {
 }
 
 impl Drop for HashKindRestoreGuard {
+    /// Restore the hash kind that was active before this guard was created.
     fn drop(&mut self) {
         set_hash_kind(self.previous);
     }

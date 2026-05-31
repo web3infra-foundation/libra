@@ -222,12 +222,16 @@ struct PackGroup {
 
 /// Held while a `gc` process owns `.libra/gc.lock`.
 struct GcLockGuard {
+    /// Path to the lock file that should be removed on drop.
     path: PathBuf,
+    /// Open handle keeping the create-new lock file alive for this process.
     _file: fs::File,
+    /// Whether `--force` removed an existing lock before acquisition.
     forced: bool,
 }
 
 impl Drop for GcLockGuard {
+    /// Remove the repository-local lock file when the guard leaves scope.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
@@ -827,10 +831,14 @@ fn insert_json_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -
     Ok(())
 }
 
+/// Minimal merge-state fields that can reference protected commits.
 #[derive(serde::Deserialize)]
 struct MergeStateRoots {
+    /// Commit checked out before the merge started.
     orig_head: String,
+    /// Commit being merged into the current branch.
     target: String,
+    /// Merge base recorded for conflict recovery.
     base: String,
 }
 
