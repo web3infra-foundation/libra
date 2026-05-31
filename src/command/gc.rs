@@ -685,13 +685,11 @@ fn clean_pack_directory(
                 stats.objects_in_packs += inspection.object_count;
             }
             (Some(pack), None) => {
-                stats.stale_files.push(handle_pack_file(
-                    pack,
-                    policy,
-                    dry_run,
-                    has_keep,
-                    "pack file has no matching .idx",
-                )?);
+                stats.stale_files.push(PackFileAction {
+                    path: display_path(pack),
+                    action: PackAction::Retained,
+                    reason: "pack file has no matching .idx; pack index can be rebuilt".to_string(),
+                });
             }
             (None, Some(idx)) => {
                 stats.stale_files.push(handle_pack_file(
@@ -1256,8 +1254,8 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    /// Covers pruning orphan pack files and temporary sidecars.
-    async fn clean_pack_directory_prunes_orphan_pack_and_sidecar() {
+    /// Covers retaining orphan pack files while pruning temporary sidecars.
+    async fn clean_pack_directory_retains_orphan_pack_and_prunes_sidecar() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
@@ -1277,13 +1275,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(stats.stale_files.len(), 2);
-        assert!(
-            stats
-                .stale_files
-                .iter()
-                .all(|file| file.action == PackAction::Pruned)
-        );
-        assert!(!pack.exists());
+        let pack_action = stats
+            .stale_files
+            .iter()
+            .find(|file| file.path.ends_with("pack-deadbeef.pack"))
+            .unwrap();
+        let sidecar_action = stats
+            .stale_files
+            .iter()
+            .find(|file| file.path.ends_with("pack-feedface.tmp"))
+            .unwrap();
+        assert_eq!(pack_action.action, PackAction::Retained);
+        assert!(pack_action.reason.contains("index can be rebuilt"));
+        assert_eq!(sidecar_action.action, PackAction::Pruned);
+        assert!(pack.exists());
         assert!(!sidecar.exists());
     }
 
