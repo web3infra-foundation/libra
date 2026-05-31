@@ -531,3 +531,48 @@ fn corrupt_object(hash: &ObjectHash, error: git_internal::errors::GitError) -> C
     CliError::fatal(format!("failed to load reachable object {hash}: {error}"))
         .with_stable_code(StableErrorCode::RepoCorrupt)
 }
+
+fn prune_unreachable_loose_objects(
+    storage: &ClientStorage,
+    reachability: &Reachability,
+    policy: PrunePolicy,
+    dry_run: bool,
+) -> CliResult<Vec<GcObjectAction>> {
+    let mut actions = Vec::new();
+    let reachable = &reachability.reachable;
+    for loose in &reachability.loose {
+        if reachable.contains(&loose.hash) {
+            continue;
+        }
+
+        let object_type = storage
+            .get_object_type(&loose.hash)
+            .map(|kind| kind.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        if should_prune(&loose.path, policy)? {
+            let action = if dry_run {
+                GcAction::WouldPrune
+            } else {
+                remove_file(&loose.path)?;
+                remove_empty_parent_dir(&loose.path)?;
+                GcAction::Pruned
+            };
+            actions.push(GcObjectAction {
+                oid: loose.hash.to_string(),
+                object_type,
+                action,
+                reason: "unreachable loose object matched prune policy".to_string(),
+            });
+        } else {
+            actions.push(GcObjectAction {
+                oid: loose.hash.to_string(),
+                object_type,
+                action: GcAction::Retained,
+                reason: "unreachable object is newer than prune cutoff or pruning is disabled"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(actions)
+}
