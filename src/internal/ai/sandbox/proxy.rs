@@ -1,6 +1,8 @@
 //! Network allowlist decision layer for sandbox Phase 7
 //! (`docs/improvement/sandbox.md` §7.4).
 //!
+//! 沙箱阶段 7 的网络允许列表决策层（`docs/improvement/sandbox.md` §7.4）。
+//!
 //! AI shell tools that need allowlisted outbound network access route through
 //! a short-lived local HTTP/CONNECT proxy in [`super::proxy_runtime`]. This
 //! module keeps the policy decision surface pure and testable:

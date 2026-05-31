@@ -1,12 +1,12 @@
 //! Code UI projection server helpers for exposing AI thread state to the local web UI.
-//!   中文：该注释与英文“Code UI projection server helpers for exposing AI thread state to the local web UI.”含义一致。
+//!     中文：该注释与英文“Code UI projection server helpers for exposing AI thread state to the local web UI.”含义一致。
 //!
 //! Boundary: this file translates internal projection records into HTTP/websocket
-//!   中文：该注释与英文“Boundary: this file translates internal projection records into HTTP/websocket”含义一致。
+//!     中文：该注释与英文“Boundary: this file translates internal projection records into HTTP/websocket”含义一致。
 //! views; it does not execute tools or mutate repository state. Projection resolver
-//!   中文：该注释与英文“views; it does not execute tools or mutate repository state. Projection resolver”含义一致。
+//!     中文：该注释与英文“views; it does not execute tools or mutate repository state. Projection resolver”含义一致。
 //! tests cover missing threads, event ordering, and replayed snapshots.
-//!   中文：该注释与英文“tests cover missing threads, event ordering, and replayed snapshots.”含义一致。
+//!     中文：该注释与英文“tests cover missing threads, event ordering, and replayed snapshots.”含义一致。
 
 use std::{
     collections::HashMap,
@@ -87,13 +87,13 @@ pub enum CodeUiControllerKind {
     None,
     Browser,
     /// Local automation writer. Automation requires both the process-level
-    ///   中文：该注释与英文“Local automation writer. Automation requires both the process-level”含义一致。
+    ///     中文：该注释与英文“Local automation writer. Automation requires both the process-level”含义一致。
     /// `X-Libra-Control-Token` and the lease-level `X-Code-Controller-Token`;
-    ///   中文：该注释与英文“`X-Libra-Control-Token` and the lease-level `X-Code-Controller-Token`;”含义一致。
+    ///     中文：该注释与英文“`X-Libra-Control-Token` and the lease-level `X-Code-Controller-Token`;”含义一致。
     /// existing browser controllers keep using only the lease token for
-    ///   中文：该注释与英文“existing browser controllers keep using only the lease token for”含义一致。
+    ///     中文：该注释与英文“existing browser controllers keep using only the lease token for”含义一致。
     /// backward compatibility.
-    ///   中文：该注释与英文“backward compatibility.”含义一致。
+    ///     中文：该注释与英文“backward compatibility.”含义一致。
     Automation,
     Tui,
     Cli,
@@ -417,11 +417,11 @@ pub struct CodeUiAckResponse {
 }
 
 /// `POST /api/code/task/dispatch` body. This is the Code Control
-///   中文：该注释与英文“`POST /api/code/task/dispatch` body. This is the Code Control”含义一致。
+///     中文：该注释与英文“`POST /api/code/task/dispatch` body. This is the Code Control”含义一致。
 /// equivalent of `/task <agent> <prompt>` and enters the dispatcher as
-///   中文：该注释与英文“equivalent of `/task <agent> <prompt>` and enters the dispatcher as”含义一致。
+///     中文：该注释与英文“equivalent of `/task <agent> <prompt>` and enters the dispatcher as”含义一致。
 /// `UserInitiated { bypass_permission_ask: true }`.
-///   中文：该注释与英文“`UserInitiated { bypass_permission_ask: true }`.”含义一致。
+///     中文：该注释与英文“`UserInitiated { bypass_permission_ask: true }`.”含义一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiTaskDispatchRequest {
@@ -430,15 +430,15 @@ pub struct CodeUiTaskDispatchRequest {
 }
 
 /// `POST /api/code/goal/start` body. The objective is validated
-///   中文：该注释与英文“`POST /api/code/goal/start` body. The objective is validated”含义一致。
+///     中文：该注释与英文“`POST /api/code/goal/start` body. The objective is validated”含义一致。
 /// at the App layer against the same `GoalSpec::new` shape rules
-///   中文：该注释与英文“at the App layer against the same `GoalSpec::new` shape rules”含义一致。
+///     中文：该注释与英文“at the App layer against the same `GoalSpec::new` shape rules”含义一致。
 /// (non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire
-///   中文：该注释与英文“(non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire”含义一致。
+///     中文：该注释与英文“(non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire”含义一致。
 /// shape itself is permissive so the validator's error messages
-///   中文：该注释与英文“shape itself is permissive so the validator's error messages”含义一致。
+///     中文：该注释与英文“shape itself is permissive so the validator's error messages”含义一致。
 /// surface verbatim through the response.
-///   中文：该注释与英文“surface verbatim through the response.”含义一致。
+///     中文：该注释与英文“surface verbatim through the response.”含义一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiGoalStartRequest {
@@ -446,9 +446,9 @@ pub struct CodeUiGoalStartRequest {
 }
 
 /// `POST /api/code/goal/cancel` body. The reason flows into the
-///   中文：该注释与英文“`POST /api/code/goal/cancel` body. The reason flows into the”含义一致。
+///     中文：该注释与英文“`POST /api/code/goal/cancel` body. The reason flows into the”含义一致。
 /// `GoalEvent::Cancelled` envelope's audit-log payload.
-///   中文：该注释与英文“`GoalEvent::Cancelled` envelope's audit-log payload.”含义一致。
+///     中文：该注释与英文“`GoalEvent::Cancelled` envelope's audit-log payload.”含义一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiGoalCancelRequest {
@@ -487,13 +487,13 @@ pub struct CodeUiDiagnostics {
 
 impl CodeUiDiagnostics {
     /// Wave 7 / PR 7 — exposed `pub(crate)` so the
-    ///   中文：该注释与英文“Wave 7 / PR 7 — exposed `pub(crate)` so the”含义一致。
+    ///     中文：该注释与英文“Wave 7 / PR 7 — exposed `pub(crate)` so the”含义一致。
     /// `code_diagnostics_handler` in `mod.rs` can apply it before
-    ///   中文：该注释与英文“`code_diagnostics_handler` in `mod.rs` can apply it before”含义一致。
+    ///     中文：该注释与英文“`code_diagnostics_handler` in `mod.rs` can apply it before”含义一致。
     /// serialising the response. Internal-only — automation
-    ///   中文：该注释与英文“serialising the response. Internal-only — automation”含义一致。
+    ///     中文：该注释与英文“serialising the response. Internal-only — automation”含义一致。
     /// clients never construct this themselves.
-    ///   中文：该注释与英文“clients never construct this themselves.”含义一致。
+    ///     中文：该注释与英文“clients never construct this themselves.”含义一致。
     pub(crate) fn redact(mut self, redactor: &SecretRedactor) -> Self {
         redact_string(&mut self.provider, redactor);
         redact_option_string(&mut self.model, redactor);
@@ -801,11 +801,11 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     }
 
     /// `task.dispatch` — explicitly run a sub-agent from automation.
-    ///   中文：该注释与英文“`task.dispatch` — explicitly run a sub-agent from automation.”含义一致。
+    ///     中文：该注释与英文“`task.dispatch` — explicitly run a sub-agent from automation.”含义一致。
     /// Default implementation returns "not supported" for adapters
-    ///   中文：该注释与英文“Default implementation returns "not supported" for adapters”含义一致。
+    ///     中文：该注释与英文“Default implementation returns "not supported" for adapters”含义一致。
     /// that do not expose the local TUI sub-agent runtime.
-    ///   中文：该注释与英文“that do not expose the local TUI sub-agent runtime.”含义一致。
+    ///     中文：该注释与英文“that do not expose the local TUI sub-agent runtime.”含义一致。
     async fn task_dispatch(&self, _agent: String, _prompt: String) -> anyhow::Result<String> {
         Err(anyhow!(
             "This libra code session does not support task.dispatch"
@@ -813,17 +813,17 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     }
 
     /// `goal.start` — create an active Goal in this session
-    ///   中文：该注释与英文“`goal.start` — create an active Goal in this session”含义一致。
+    ///     中文：该注释与英文“`goal.start` — create an active Goal in this session”含义一致。
     /// (OC-Phase 6 P6.6). Returns the rendered status of the new
-    ///   中文：该注释与英文“(OC-Phase 6 P6.6). Returns the rendered status of the new”含义一致。
+    ///     中文：该注释与英文“(OC-Phase 6 P6.6). Returns the rendered status of the new”含义一致。
     /// Goal so callers can echo it without a follow-up
-    ///   中文：该注释与英文“Goal so callers can echo it without a follow-up”含义一致。
+    ///     中文：该注释与英文“Goal so callers can echo it without a follow-up”含义一致。
     /// `goal.status`. Default implementation returns "not
-    ///   中文：该注释与英文“`goal.status`. Default implementation returns "not”含义一致。
+    ///     中文：该注释与英文“`goal.status`. Default implementation returns "not”含义一致。
     /// supported" so non-TUI adapters (headless, web-only Codex)
-    ///   中文：该注释与英文“supported" so non-TUI adapters (headless, web-only Codex)”含义一致。
+    ///     中文：该注释与英文“supported" so non-TUI adapters (headless, web-only Codex)”含义一致。
     /// don't have to opt in until they grow Goal mode support.
-    ///   中文：该注释与英文“don't have to opt in until they grow Goal mode support.”含义一致。
+    ///     中文：该注释与英文“don't have to opt in until they grow Goal mode support.”含义一致。
     async fn goal_start(&self, _objective: String) -> anyhow::Result<String> {
         Err(anyhow!(
             "This libra code session does not support Goal mode"
@@ -831,11 +831,11 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     }
 
     /// `goal.status` — render the active Goal's snapshot, or an
-    ///   中文：该注释与英文“`goal.status` — render the active Goal's snapshot, or an”含义一致。
+    ///     中文：该注释与英文“`goal.status` — render the active Goal's snapshot, or an”含义一致。
     /// error if none. Default implementation returns "not
-    ///   中文：该注释与英文“error if none. Default implementation returns "not”含义一致。
+    ///     中文：该注释与英文“error if none. Default implementation returns "not”含义一致。
     /// supported".
-    ///   中文：该注释与英文“supported".”含义一致。
+    ///     中文：该注释与英文“supported".”含义一致。
     async fn goal_status(&self) -> anyhow::Result<String> {
         Err(anyhow!(
             "This libra code session does not support Goal mode"
@@ -843,11 +843,11 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     }
 
     /// `goal.cancel` — explicit user-driven cancellation of the
-    ///   中文：该注释与英文“`goal.cancel` — explicit user-driven cancellation of the”含义一致。
+    ///     中文：该注释与英文“`goal.cancel` — explicit user-driven cancellation of the”含义一致。
     /// active Goal. Returns the rendered status post-cancel.
-    ///   中文：该注释与英文“active Goal. Returns the rendered status post-cancel.”含义一致。
+    ///     中文：该注释与英文“active Goal. Returns the rendered status post-cancel.”含义一致。
     /// Default implementation returns "not supported".
-    ///   中文：该注释与英文“Default implementation returns "not supported".”含义一致。
+    ///     中文：该注释与英文“Default implementation returns "not supported".”含义一致。
     async fn goal_cancel(&self, _reason: String) -> anyhow::Result<String> {
         Err(anyhow!(
             "This libra code session does not support Goal mode"
@@ -909,27 +909,27 @@ pub struct CodeUiRuntimeHandle {
 }
 
 /// Bag of constructor options for [`CodeUiRuntimeHandle::build_with_options`].
-///   中文：该注释与英文“Bag of constructor options for [`CodeUiRuntimeHandle::build_with_options`].”含义一致。
+///     中文：该注释与英文“Bag of constructor options for [`CodeUiRuntimeHandle::build_with_options`].”含义一致。
 ///
 /// Existing call sites continue to use [`CodeUiRuntimeHandle::build`] /
-///   中文：该注释与英文“Existing call sites continue to use [`CodeUiRuntimeHandle::build`] /”含义一致。
+///     中文：该注释与英文“Existing call sites continue to use [`CodeUiRuntimeHandle::build`] /”含义一致。
 /// [`CodeUiRuntimeHandle::build_with_control`] with the default 120 s lease
-///   中文：该注释与英文“[`CodeUiRuntimeHandle::build_with_control`] with the default 120 s lease”含义一致。
+///     中文：该注释与英文“[`CodeUiRuntimeHandle::build_with_control`] with the default 120 s lease”含义一致。
 /// TTL. Tests that need to exercise lease expiry without sleeping for two
-///   中文：该注释与英文“TTL. Tests that need to exercise lease expiry without sleeping for two”含义一致。
+///     中文：该注释与英文“TTL. Tests that need to exercise lease expiry without sleeping for two”含义一致。
 /// minutes pass a custom `lease_duration` through this struct.
-///   中文：该注释与英文“minutes pass a custom `lease_duration` through this struct.”含义一致。
+///     中文：该注释与英文“minutes pass a custom `lease_duration` through this struct.”含义一致。
 #[derive(Debug, Clone)]
 pub struct CodeUiRuntimeOptions {
     pub browser_write_enabled: bool,
     pub automation_write_enabled: bool,
     pub initial_controller: CodeUiInitialController,
     /// Override for the controller-lease TTL. `None` keeps the production
-    ///   中文：该注释与英文“Override for the controller-lease TTL. `None` keeps the production”含义一致。
+    ///     中文：该注释与英文“Override for the controller-lease TTL. `None` keeps the production”含义一致。
     /// default (`DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` = 120 s). Only set
-    ///   中文：该注释与英文“default (`DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` = 120 s). Only set”含义一致。
+    ///     中文：该注释与英文“default (`DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` = 120 s). Only set”含义一致。
     /// from `cfg(feature = "test-provider")` paths.
-    ///   中文：该注释与英文“from `cfg(feature = "test-provider")` paths.”含义一致。
+    ///     中文：该注释与英文“from `cfg(feature = "test-provider")` paths.”含义一致。
     pub lease_duration: Option<Duration>,
 }
 
@@ -949,27 +949,27 @@ impl CodeUiRuntimeOptions {
 }
 
 /// Test-only override for the controller-lease TTL.
-///   中文：该注释与英文“Test-only override for the controller-lease TTL.”含义一致。
+///     中文：该注释与英文“Test-only override for the controller-lease TTL.”含义一致。
 ///
 /// Production builds always return `Ok(None)` so the runtime keeps the
-///   中文：该注释与英文“Production builds always return `Ok(None)` so the runtime keeps the”含义一致。
+///     中文：该注释与英文“Production builds always return `Ok(None)` so the runtime keeps the”含义一致。
 /// default 120 s lease. Under `cfg(feature = "test-provider")`, the helper
-///   中文：该注释与英文“default 120 s lease. Under `cfg(feature = "test-provider")`, the helper”含义一致。
+///     中文：该注释与英文“default 120 s lease. Under `cfg(feature = "test-provider")`, the helper”含义一致。
 /// reads `LIBRA_CODE_LEASE_DURATION_MS` from the environment and rejects
-///   中文：该注释与英文“reads `LIBRA_CODE_LEASE_DURATION_MS` from the environment and rejects”含义一致。
+///     中文：该注释与英文“reads `LIBRA_CODE_LEASE_DURATION_MS` from the environment and rejects”含义一致。
 /// bogus inputs (zero, negative, non-integer) so a typo'd test fixture
-///   中文：该注释与英文“bogus inputs (zero, negative, non-integer) so a typo'd test fixture”含义一致。
+///     中文：该注释与英文“bogus inputs (zero, negative, non-integer) so a typo'd test fixture”含义一致。
 /// fails loudly at session spawn instead of silently keeping the
-///   中文：该注释与英文“fails loudly at session spawn instead of silently keeping the”含义一致。
+///     中文：该注释与英文“fails loudly at session spawn instead of silently keeping the”含义一致。
 /// production default.
-///   中文：该注释与英文“production default.”含义一致。
+///     中文：该注释与英文“production default.”含义一致。
 ///
 /// The error type is `String` so callers in both `CliResult` and
-///   中文：该注释与英文“The error type is `String` so callers in both `CliResult` and”含义一致。
+///     中文：该注释与英文“The error type is `String` so callers in both `CliResult` and”含义一致。
 /// `anyhow::Result` flows can wrap it — neither dependency is brought in
-///   中文：该注释与英文“`anyhow::Result` flows can wrap it — neither dependency is brought in”含义一致。
+///     中文：该注释与英文“`anyhow::Result` flows can wrap it — neither dependency is brought in”含义一致。
 /// by `code_ui.rs`.
-///   中文：该注释与英文“by `code_ui.rs`.”含义一致。
+///     中文：该注释与英文“by `code_ui.rs`.”含义一致。
 pub fn test_lease_duration_override() -> Result<Option<Duration>, String> {
     #[cfg(feature = "test-provider")]
     {
@@ -1119,26 +1119,26 @@ impl CodeUiRuntimeHandle {
     }
 
     /// Request a controller lease.
-    ///   中文：该注释与英文“Request a controller lease.”含义一致。
+    ///     中文：该注释与英文“Request a controller lease.”含义一致。
     ///
     /// `kind` may be `Browser` or `Automation`. `Automation` requires
-    ///   中文：该注释与英文“`kind` may be `Browser` or `Automation`. `Automation` requires”含义一致。
+    ///     中文：该注释与英文“`kind` may be `Browser` or `Automation`. `Automation` requires”含义一致。
     /// `automation_write_enabled` to be true (i.e. `--control write`).
-    ///   中文：该注释与英文“`automation_write_enabled` to be true (i.e. `--control write`).”含义一致。
+    ///     中文：该注释与英文“`automation_write_enabled` to be true (i.e. `--control write`).”含义一致。
     ///
     /// Errors:
-    ///   中文：该注释与英文“Errors:”含义一致。
+    ///     中文：该注释与英文“Errors:”含义一致。
     /// - `BROWSER_CONTROL_DISABLED` / `CONTROL_DISABLED` when the kind is not enabled.
-    ///   中文：列表项说明与英文“`BROWSER_CONTROL_DISABLED` / `CONTROL_DISABLED` when the kind is not enabled.”含义一致。
+    ///     中文：列表项说明与英文“`BROWSER_CONTROL_DISABLED` / `CONTROL_DISABLED` when the kind is not enabled.”含义一致。
     /// - `CONTROLLER_CONFLICT` when another client already holds an active lease.
-    ///   中文：列表项说明与英文“`CONTROLLER_CONFLICT` when another client already holds an active lease.”含义一致。
+    ///     中文：列表项说明与英文“`CONTROLLER_CONFLICT` when another client already holds an active lease.”含义一致。
     /// - `INVALID_CONTROLLER_KIND` for `None`, `Tui`, or `Cli`.
-    ///   中文：列表项说明与英文“`INVALID_CONTROLLER_KIND` for `None`, `Tui`, or `Cli`.”含义一致。
+    ///     中文：列表项说明与英文“`INVALID_CONTROLLER_KIND` for `None`, `Tui`, or `Cli`.”含义一致。
     ///
     /// The lease TTL defaults to `DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` (120s).
-    ///   中文：该注释与英文“The lease TTL defaults to `DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` (120s).”含义一致。
+    ///     中文：该注释与英文“The lease TTL defaults to `DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` (120s).”含义一致。
     /// Renew by calling again with the same `client_id`.
-    ///   中文：该注释与英文“Renew by calling again with the same `client_id`.”含义一致。
+    ///     中文：该注释与英文“Renew by calling again with the same `client_id`.”含义一致。
     pub async fn attach_controller(
         &self,
         kind: CodeUiControllerKind,
@@ -1230,19 +1230,19 @@ impl CodeUiRuntimeHandle {
     }
 
     /// Release an active controller lease.
-    ///   中文：该注释与英文“Release an active controller lease.”含义一致。
+    ///     中文：该注释与英文“Release an active controller lease.”含义一致。
     ///
     /// `force` is reserved for local TUI reclaim (e.g. `/control reclaim`).
-    ///   中文：该注释与英文“`force` is reserved for local TUI reclaim (e.g. `/control reclaim`).”含义一致。
+    ///     中文：该注释与英文“`force` is reserved for local TUI reclaim (e.g. `/control reclaim`).”含义一致。
     /// When `force` is `false`, both `client_id` and `token` must match the
-    ///   中文：该注释与英文“When `force` is `false`, both `client_id` and `token` must match the”含义一致。
+    ///     中文：该注释与英文“When `force` is `false`, both `client_id` and `token` must match the”含义一致。
     /// active lease. HTTP handlers should not expose `force` to remote clients.
-    ///   中文：该注释与英文“active lease. HTTP handlers should not expose `force` to remote clients.”含义一致。
+    ///     中文：该注释与英文“active lease. HTTP handlers should not expose `force` to remote clients.”含义一致。
     ///
     /// Thin wrappers (`detach_browser_controller`) hard-code `kind` and `force`
-    ///   中文：该注释与英文“Thin wrappers (`detach_browser_controller`) hard-code `kind` and `force`”含义一致。
+    ///     中文：该注释与英文“Thin wrappers (`detach_browser_controller`) hard-code `kind` and `force`”含义一致。
     /// to preserve backward compatibility for existing browser callers.
-    ///   中文：该注释与英文“to preserve backward compatibility for existing browser callers.”含义一致。
+    ///     中文：该注释与英文“to preserve backward compatibility for existing browser callers.”含义一致。
     pub async fn detach_controller(
         &self,
         kind: CodeUiControllerKind,
@@ -1303,11 +1303,11 @@ impl CodeUiRuntimeHandle {
     }
 
     /// `task.dispatch { agent, prompt }` — user-initiated sub-agent
-    ///   中文：该注释与英文“`task.dispatch { agent, prompt }` — user-initiated sub-agent”含义一致。
+    ///     中文：该注释与英文“`task.dispatch { agent, prompt }` — user-initiated sub-agent”含义一致。
     /// dispatch. Requires controller write-access because it mutates
-    ///   中文：该注释与英文“dispatch. Requires controller write-access because it mutates”含义一致。
+    ///     中文：该注释与英文“dispatch. Requires controller write-access because it mutates”含义一致。
     /// the session transcript and may run tools.
-    ///   中文：该注释与英文“the session transcript and may run tools.”含义一致。
+    ///     中文：该注释与英文“the session transcript and may run tools.”含义一致。
     pub async fn task_dispatch(
         &self,
         token: Option<&str>,
@@ -1322,17 +1322,17 @@ impl CodeUiRuntimeHandle {
     }
 
     /// `goal.start { objective }` — open an active Goal in this
-    ///   中文：该注释与英文“`goal.start { objective }` — open an active Goal in this”含义一致。
+    ///     中文：该注释与英文“`goal.start { objective }` — open an active Goal in this”含义一致。
     /// session. Requires controller write-access (a controller
-    ///   中文：该注释与英文“session. Requires controller write-access (a controller”含义一致。
+    ///     中文：该注释与英文“session. Requires controller write-access (a controller”含义一致。
     /// token validated against the active lease) because creating
-    ///   中文：该注释与英文“token validated against the active lease) because creating”含义一致。
+    ///     中文：该注释与英文“token validated against the active lease) because creating”含义一致。
     /// a Goal is a session-mutating operation. Returns the freshly
-    ///   中文：该注释与英文“a Goal is a session-mutating operation. Returns the freshly”含义一致。
+    ///     中文：该注释与英文“a Goal is a session-mutating operation. Returns the freshly”含义一致。
     /// rendered status string so callers don't need a follow-up
-    ///   中文：该注释与英文“rendered status string so callers don't need a follow-up”含义一致。
+    ///     中文：该注释与英文“rendered status string so callers don't need a follow-up”含义一致。
     /// `goal.status` (OC-Phase 6 P6.6).
-    ///   中文：该注释与英文“`goal.status` (OC-Phase 6 P6.6).”含义一致。
+    ///     中文：该注释与英文“`goal.status` (OC-Phase 6 P6.6).”含义一致。
     pub async fn goal_start(
         &self,
         token: Option<&str>,
@@ -1346,11 +1346,11 @@ impl CodeUiRuntimeHandle {
     }
 
     /// `goal.status` — return the active Goal's rendered snapshot.
-    ///   中文：该注释与英文“`goal.status` — return the active Goal's rendered snapshot.”含义一致。
+    ///     中文：该注释与英文“`goal.status` — return the active Goal's rendered snapshot.”含义一致。
     /// **Read-only**, so no controller token is required at this
-    ///   中文：列表项说明与英文“*Read-only**, so no controller token is required at this”含义一致。
+    ///     中文：列表项说明与英文“*Read-only**, so no controller token is required at this”含义一致。
     /// layer; the HTTP handler still loopback-gates the request.
-    ///   中文：该注释与英文“layer; the HTTP handler still loopback-gates the request.”含义一致。
+    ///     中文：该注释与英文“layer; the HTTP handler still loopback-gates the request.”含义一致。
     pub async fn goal_status(&self) -> Result<String, CodeUiApiError> {
         self.adapter
             .goal_status()
@@ -1359,11 +1359,11 @@ impl CodeUiRuntimeHandle {
     }
 
     /// `goal.cancel { reason }` — explicit cancellation of the
-    ///   中文：该注释与英文“`goal.cancel { reason }` — explicit cancellation of the”含义一致。
+    ///     中文：该注释与英文“`goal.cancel { reason }` — explicit cancellation of the”含义一致。
     /// active Goal. Requires controller write-access; mirrors
-    ///   中文：该注释与英文“active Goal. Requires controller write-access; mirrors”含义一致。
+    ///     中文：该注释与英文“active Goal. Requires controller write-access; mirrors”含义一致。
     /// `cancel_turn` in shape and audit policy.
-    ///   中文：该注释与英文“`cancel_turn` in shape and audit policy.”含义一致。
+    ///     中文：该注释与英文“`cancel_turn` in shape and audit policy.”含义一致。
     pub async fn goal_cancel(
         &self,
         token: Option<&str>,
@@ -1381,26 +1381,26 @@ impl CodeUiRuntimeHandle {
     }
 
     /// Validate a controller token and return the active lease.
-    ///   中文：该注释与英文“Validate a controller token and return the active lease.”含义一致。
+    ///     中文：该注释与英文“Validate a controller token and return the active lease.”含义一致。
     ///
     /// Checks that the token is present, non-empty, matches the active lease,
-    ///   中文：该注释与英文“Checks that the token is present, non-empty, matches the active lease,”含义一致。
+    ///     中文：该注释与英文“Checks that the token is present, non-empty, matches the active lease,”含义一致。
     /// and that the lease has not expired. Expired leases are cleared on check.
-    ///   中文：该注释与英文“and that the lease has not expired. Expired leases are cleared on check.”含义一致。
+    ///     中文：该注释与英文“and that the lease has not expired. Expired leases are cleared on check.”含义一致。
     ///
     /// Errors:
-    ///   中文：该注释与英文“Errors:”含义一致。
+    ///     中文：该注释与英文“Errors:”含义一致。
     /// - `MISSING_CONTROLLER_TOKEN` when `token` is missing or empty.
-    ///   中文：列表项说明与英文“`MISSING_CONTROLLER_TOKEN` when `token` is missing or empty.”含义一致。
+    ///     中文：列表项说明与英文“`MISSING_CONTROLLER_TOKEN` when `token` is missing or empty.”含义一致。
     /// - `CONTROLLER_CONFLICT` when no lease is active.
-    ///   中文：列表项说明与英文“`CONTROLLER_CONFLICT` when no lease is active.”含义一致。
+    ///     中文：列表项说明与英文“`CONTROLLER_CONFLICT` when no lease is active.”含义一致。
     /// - `INVALID_CONTROLLER_TOKEN` when the token does not match the active lease.
-    ///   中文：列表项说明与英文“`INVALID_CONTROLLER_TOKEN` when the token does not match the active lease.”含义一致。
+    ///     中文：列表项说明与英文“`INVALID_CONTROLLER_TOKEN` when the token does not match the active lease.”含义一致。
     ///
     /// Thin wrappers (`ensure_browser_write_access`) hard-code the kind check
-    ///   中文：该注释与英文“Thin wrappers (`ensure_browser_write_access`) hard-code the kind check”含义一致。
+    ///     中文：该注释与英文“Thin wrappers (`ensure_browser_write_access`) hard-code the kind check”含义一致。
     /// for backward compatibility.
-    ///   中文：该注释与英文“for backward compatibility.”含义一致。
+    ///     中文：该注释与英文“for backward compatibility.”含义一致。
     pub async fn ensure_controller_write_access(
         &self,
         token: Option<&str>,
@@ -1596,36 +1596,36 @@ impl CodeUiApiError {
 }
 
 /// Wave 2 / PR 2 — single source-of-truth catalogue of every
-///   中文：该注释与英文“Wave 2 / PR 2 — single source-of-truth catalogue of every”含义一致。
+///     中文：该注释与英文“Wave 2 / PR 2 — single source-of-truth catalogue of every”含义一致。
 /// Code UI error code the API exposes, paired with the HTTP status
-///   中文：该注释与英文“Code UI error code the API exposes, paired with the HTTP status”含义一致。
+///     中文：该注释与英文“Code UI error code the API exposes, paired with the HTTP status”含义一致。
 /// it MUST resolve to. Per `docs/improvement/test.md` §5.20, this
-///   中文：该注释与英文“it MUST resolve to. Per `docs/improvement/test.md` §5.20, this”含义一致。
+///     中文：该注释与英文“it MUST resolve to. Per `docs/improvement/test.md` §5.20, this”含义一致。
 /// list is enforced by `code_ui_error_code_contract*` in `tests`
-///   中文：该注释与英文“list is enforced by `code_ui_error_code_contract*` in `tests`”含义一致。
+///     中文：该注释与英文“list is enforced by `code_ui_error_code_contract*` in `tests`”含义一致。
 /// below: any new error code added by a constructor OR emitted by
-///   中文：该注释与英文“below: any new error code added by a constructor OR emitted by”含义一致。
+///     中文：该注释与英文“below: any new error code added by a constructor OR emitted by”含义一致。
 /// a route handler as an inline `WebApiError {…}` literal must be
-///   中文：该注释与英文“a route handler as an inline `WebApiError {…}` literal must be”含义一致。
+///     中文：该注释与英文“a route handler as an inline `WebApiError {…}` literal must be”含义一致。
 /// appended here, otherwise the test fails. The list is also the
-///   中文：该注释与英文“appended here, otherwise the test fails. The list is also the”含义一致。
+///     中文：该注释与英文“appended here, otherwise the test fails. The list is also the”含义一致。
 /// reference for `docs/automation/local-tui-control.md` and the
-///   中文：该注释与英文“reference for `docs/automation/local-tui-control.md` and the”含义一致。
+///     中文：该注释与英文“reference for `docs/automation/local-tui-control.md` and the”含义一致。
 /// Worker frontend error rendering.
-///   中文：该注释与英文“Worker frontend error rendering.”含义一致。
+///     中文：该注释与英文“Worker frontend error rendering.”含义一致。
 ///
 /// Codex pass-1 P3: the list is grouped by gate-rejection layer
-///   中文：该注释与英文“Codex pass-1 P3: the list is grouped by gate-rejection layer”含义一致。
+///     中文：该注释与英文“Codex pass-1 P3: the list is grouped by gate-rejection layer”含义一致。
 /// (loopback first, then body limit, then control-token, then
-///   中文：该注释与英文“(loopback first, then body limit, then control-token, then”含义一致。
+///     中文：该注释与英文“(loopback first, then body limit, then control-token, then”含义一致。
 /// controller lease, then read/runtime) so a reviewer can see at
-///   中文：该注释与英文“controller lease, then read/runtime) so a reviewer can see at”含义一致。
+///     中文：该注释与英文“controller lease, then read/runtime) so a reviewer can see at”含义一致。
 /// a glance which check produced a given code. Do NOT re-sort
-///   中文：该注释与英文“a glance which check produced a given code. Do NOT re-sort”含义一致。
+///     中文：该注释与英文“a glance which check produced a given code. Do NOT re-sort”含义一致。
 /// alphabetically — the gate ordering is part of the contract
-///   中文：该注释与英文“alphabetically — the gate ordering is part of the contract”含义一致。
+///     中文：该注释与英文“alphabetically — the gate ordering is part of the contract”含义一致。
 /// and matches the §5.3 / §5.4 specification.
-///   中文：该注释与英文“and matches the §5.3 / §5.4 specification.”含义一致。
+///     中文：该注释与英文“and matches the §5.3 / §5.4 specification.”含义一致。
 pub fn code_ui_error_codes() -> &'static [(&'static str, u16)] {
     &[
         // Layer ordering: route handlers reject non-loopback first.
@@ -1776,24 +1776,24 @@ pub fn apply_thread_bundle_to_snapshot(
 }
 
 /// Build the [`CodeUiPlanSnapshot`] list for a snapshot from the
-///   中文：该注释与英文“Build the [`CodeUiPlanSnapshot`] list for a snapshot from the”含义一致。
+///     中文：该注释与英文“Build the [`CodeUiPlanSnapshot`] list for a snapshot from the”含义一致。
 /// scheduler's selected-plan heads.
-///   中文：该注释与英文“scheduler's selected-plan heads.”含义一致。
+///     中文：该注释与英文“scheduler's selected-plan heads.”含义一致。
 ///
 /// `scheduler_updated_at` is the upstream `SchedulerState::updated_at`
-///   中文：该注释与英文“`scheduler_updated_at` is the upstream `SchedulerState::updated_at`”含义一致。
+///     中文：该注释与英文“`scheduler_updated_at` is the upstream `SchedulerState::updated_at`”含义一致。
 /// — *not* `Utc::now()` — so every plan entry surfaces the same
-///   中文：该注释与英文“— *not* `Utc::now()` — so every plan entry surfaces the same”含义一致。
+///     中文：该注释与英文“— *not* `Utc::now()` — so every plan entry surfaces the same”含义一致。
 /// projection revision timestamp as the rest of the snapshot. Using
-///   中文：该注释与英文“projection revision timestamp as the rest of the snapshot. Using”含义一致。
+///     中文：该注释与英文“projection revision timestamp as the rest of the snapshot. Using”含义一致。
 /// `Utc::now()` here would make every render emit a different
-///   中文：该注释与英文“`Utc::now()` here would make every render emit a different”含义一致。
+///     中文：该注释与英文“`Utc::now()` here would make every render emit a different”含义一致。
 /// `updatedAt` even when the underlying projection is unchanged, which
-///   中文：该注释与英文“`updatedAt` even when the underlying projection is unchanged, which”含义一致。
+///     中文：该注释与英文“`updatedAt` even when the underlying projection is unchanged, which”含义一致。
 /// breaks browser change-detection heuristics and makes contract
-///   中文：该注释与英文“breaks browser change-detection heuristics and makes contract”含义一致。
+///     中文：该注释与英文“breaks browser change-detection heuristics and makes contract”含义一致。
 /// snapshot tests non-deterministic.
-///   中文：该注释与英文“snapshot tests non-deterministic.”含义一致。
+///     中文：该注释与英文“snapshot tests non-deterministic.”含义一致。
 fn code_ui_plan_snapshots(
     plan_heads: &[PlanHeadRef],
     scheduler_updated_at: DateTime<Utc>,
@@ -1867,19 +1867,19 @@ mod tests {
     }
 
     /// Wave 12 / PR 12 — Codex pass-1 fix: pin the
-    ///   中文：该注释与英文“Wave 12 / PR 12 — Codex pass-1 fix: pin the”含义一致。
+    ///     中文：该注释与英文“Wave 12 / PR 12 — Codex pass-1 fix: pin the”含义一致。
     /// `docs/automation/local-tui-control.md` "Error code reference"
-    ///   中文：该注释与英文“`docs/automation/local-tui-control.md` "Error code reference"”含义一致。
+    ///     中文：该注释与英文“`docs/automation/local-tui-control.md` "Error code reference"”含义一致。
     /// table against `code_ui_error_codes()` so a code-only
-    ///   中文：该注释与英文“table against `code_ui_error_codes()` so a code-only”含义一致。
+    ///     中文：该注释与英文“table against `code_ui_error_codes()` so a code-only”含义一致。
     /// addition can't silently desync the publicly-documented
-    ///   中文：该注释与英文“addition can't silently desync the publicly-documented”含义一致。
+    ///     中文：该注释与英文“addition can't silently desync the publicly-documented”含义一致。
     /// contract. Parses every Markdown row whose first cell is
-    ///   中文：该注释与英文“contract. Parses every Markdown row whose first cell is”含义一致。
+    ///     中文：该注释与英文“contract. Parses every Markdown row whose first cell is”含义一致。
     /// a backtick-wrapped identifier and compares the
-    ///   中文：该注释与英文“a backtick-wrapped identifier and compares the”含义一致。
+    ///     中文：该注释与英文“a backtick-wrapped identifier and compares the”含义一致。
     /// `(code, status)` set against the source-of-truth table.
-    ///   中文：该注释与英文“`(code, status)` set against the source-of-truth table.”含义一致。
+    ///     中文：该注释与英文“`(code, status)` set against the source-of-truth table.”含义一致。
     // Test scenario: verifies `code_ui_error_code_listing_matches_authoritative_doc` covers the code ui error code listing matches authoritative doc behavior.
     // 测试场景：验证 `code_ui_error_code_listing_matches_authoritative_doc` 覆盖 code ui error code listing matches authoritative doc 对应的行为。
     #[test]
@@ -2001,29 +2001,29 @@ mod tests {
     }
 
     /// Wave 2 / PR 2 — error code source-of-truth contract.
-    ///   中文：该注释与英文“Wave 2 / PR 2 — error code source-of-truth contract.”含义一致。
+    ///     中文：该注释与英文“Wave 2 / PR 2 — error code source-of-truth contract.”含义一致。
     ///
     /// `code_ui_error_codes()` lists every Code UI error code the
-    ///   中文：该注释与英文“`code_ui_error_codes()` lists every Code UI error code the”含义一致。
+    ///     中文：该注释与英文“`code_ui_error_codes()` lists every Code UI error code the”含义一致。
     /// API may return. Per `docs/improvement/test.md` §5.20 we
-    ///   中文：该注释与英文“API may return. Per `docs/improvement/test.md` §5.20 we”含义一致。
+    ///     中文：该注释与英文“API may return. Per `docs/improvement/test.md` §5.20 we”含义一致。
     /// pin both:
-    ///   中文：该注释与英文“pin both:”含义一致。
+    ///     中文：该注释与英文“pin both:”含义一致。
     ///
     /// 1. the (code, status) tuples themselves are stable — any
-    ///   中文：该注释与英文“1. the (code, status) tuples themselves are stable — any”含义一致。
+    ///     中文：该注释与英文“1. the (code, status) tuples themselves are stable — any”含义一致。
     ///    drift breaks the documented HTTP contract; and
-    ///   中文：该注释与英文“drift breaks the documented HTTP contract; and”含义一致。
+    ///     中文：该注释与英文“drift breaks the documented HTTP contract; and”含义一致。
     /// 2. each documented constructor (`CodeUiApiError::*`) and
-    ///   中文：该注释与英文“2. each documented constructor (`CodeUiApiError::*`) and”含义一致。
+    ///     中文：该注释与英文“2. each documented constructor (`CodeUiApiError::*`) and”含义一致。
     ///    runtime path that produces a code in the list still
-    ///   中文：该注释与英文“runtime path that produces a code in the list still”含义一致。
+    ///     中文：该注释与英文“runtime path that produces a code in the list still”含义一致。
     ///    resolves to the listed status. Adding a new constructor
-    ///   中文：该注释与英文“resolves to the listed status. Adding a new constructor”含义一致。
+    ///     中文：该注释与英文“resolves to the listed status. Adding a new constructor”含义一致。
     ///    that produces an unlisted code makes the
-    ///   中文：该注释与英文“that produces an unlisted code makes the”含义一致。
+    ///     中文：该注释与英文“that produces an unlisted code makes the”含义一致。
     ///    `produced_codes_are_listed` assertion fail.
-    ///   中文：该注释与英文“`produced_codes_are_listed` assertion fail.”含义一致。
+    ///     中文：该注释与英文“`produced_codes_are_listed` assertion fail.”含义一致。
     // Test scenario: verifies `code_ui_error_code_contract_pins_status_per_code` covers the code ui error code contract pins status per code behavior.
     // 测试场景：验证 `code_ui_error_code_contract_pins_status_per_code` 覆盖 code ui error code contract pins status per code 对应的行为。
     #[test]
@@ -2126,30 +2126,30 @@ mod tests {
     }
 
     /// Codex pass-1 P2 — inline-producer coverage for the
-    ///   中文：该注释与英文“Codex pass-1 P2 — inline-producer coverage for the”含义一致。
+    ///     中文：该注释与英文“Codex pass-1 P2 — inline-producer coverage for the”含义一致。
     /// catalogue. The codes listed below are emitted as inline
-    ///   中文：该注释与英文“catalogue. The codes listed below are emitted as inline”含义一致。
+    ///     中文：该注释与英文“catalogue. The codes listed below are emitted as inline”含义一致。
     /// `WebApiError { … }` literals from `web::mod` rather than
-    ///   中文：该注释与英文“`WebApiError { … }` literals from `web::mod` rather than”含义一致。
+    ///     中文：该注释与英文“`WebApiError { … }` literals from `web::mod` rather than”含义一致。
     /// via the `CodeUiApiError` constructors above. Pinning their
-    ///   中文：该注释与英文“via the `CodeUiApiError` constructors above. Pinning their”含义一致。
+    ///     中文：该注释与英文“via the `CodeUiApiError` constructors above. Pinning their”含义一致。
     /// (code, status) shape here makes the catalogue's
-    ///   中文：该注释与英文“(code, status) shape here makes the catalogue's”含义一致。
+    ///     中文：该注释与英文“(code, status) shape here makes the catalogue's”含义一致。
     /// "single-source-of-truth" claim true for the WHOLE error
-    ///   中文：该注释与英文“"single-source-of-truth" claim true for the WHOLE error”含义一致。
+    ///     中文：该注释与英文“"single-source-of-truth" claim true for the WHOLE error”含义一致。
     /// surface, not just the constructor surface.
-    ///   中文：该注释与英文“surface, not just the constructor surface.”含义一致。
+    ///     中文：该注释与英文“surface, not just the constructor surface.”含义一致。
     ///
     /// The literal shapes mirror the inline producers in
-    ///   中文：该注释与英文“The literal shapes mirror the inline producers in”含义一致。
+    ///     中文：该注释与英文“The literal shapes mirror the inline producers in”含义一致。
     /// `src/internal/ai/web/mod.rs` (search for the code string
-    ///   中文：该注释与英文“`src/internal/ai/web/mod.rs` (search for the code string”含义一致。
+    ///     中文：该注释与英文“`src/internal/ai/web/mod.rs` (search for the code string”含义一致。
     /// to find the producer). When refactoring an inline literal
-    ///   中文：该注释与英文“to find the producer). When refactoring an inline literal”含义一致。
+    ///     中文：该注释与英文“to find the producer). When refactoring an inline literal”含义一致。
     /// into a named helper, move the corresponding case into
-    ///   中文：该注释与英文“into a named helper, move the corresponding case into”含义一致。
+    ///     中文：该注释与英文“into a named helper, move the corresponding case into”含义一致。
     /// `code_ui_error_code_contract_pins_status_per_code` above.
-    ///   中文：该注释与英文“`code_ui_error_code_contract_pins_status_per_code` above.”含义一致。
+    ///     中文：该注释与英文“`code_ui_error_code_contract_pins_status_per_code` above.”含义一致。
     // Test scenario: verifies `code_ui_error_code_contract_pins_status_for_inline_producers` covers the code ui error code contract pins status for inline producers behavior.
     // 测试场景：验证 `code_ui_error_code_contract_pins_status_for_inline_producers` 覆盖 code ui error code contract pins status for inline producers 对应的行为。
     #[test]
