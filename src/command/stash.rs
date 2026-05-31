@@ -1,4 +1,6 @@
 //! Implements stash push/pop/show/drop/apply by saving worktree/index states as commits and restoring them on demand.
+//!
+//! 实现 stash push/pop/show/drop/apply，通过将工作树/索引状态保存为提交并按需还原。
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
