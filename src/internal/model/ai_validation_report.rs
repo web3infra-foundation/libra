@@ -1,4 +1,6 @@
 //! SeaORM entity for runtime-owned validation reports.
+//!
+//! 运行时所有验证报告的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

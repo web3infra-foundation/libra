@@ -1,4 +1,6 @@
 //! SeaORM entity for Libra thread projections.
+//!
+//! Libra 线程投影的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 
