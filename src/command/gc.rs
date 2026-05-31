@@ -566,6 +566,7 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
 
 /// Collect loose objects and root object IDs before graph traversal.
 async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability> {
+    ensure_real_object_directory(storage.base_path())?;
     let loose = list_loose_objects(storage.base_path())?;
     let (roots, protected) = collect_roots_from_database().await?;
     Ok(Reachability {
@@ -575,6 +576,30 @@ async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability
         reachable: HashSet::new(),
         warnings: Vec::new(),
     })
+}
+
+/// Ensure the object database root is a real directory before traversal.
+fn ensure_real_object_directory(objects_dir: &Path) -> CliResult<()> {
+    match fs::symlink_metadata(objects_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::fatal(format!(
+            "refusing to traverse symlink object directory '{}'",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(CliError::fatal(format!(
+            "object directory '{}' is not a directory",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to inspect object directory '{}': {}",
+            objects_dir.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
 }
 
 /// List object files stored in Git-compatible loose-object directories.
@@ -1274,6 +1299,34 @@ fn clean_pack_directory(
     policy: PrunePolicy,
     dry_run: bool,
 ) -> CliResult<PackStats> {
+    let object_metadata = match fs::symlink_metadata(storage.base_path()) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect object directory '{}': {}",
+                storage.base_path().display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
+    };
+    if object_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.file_type().is_dir())
+    {
+        return Ok(PackStats {
+            directory_exists: true,
+            stale_files: vec![PackFileAction {
+                path: display_path(storage.base_path()),
+                action: PackAction::Retained,
+                reason: "object directory is not a real directory; retained without traversal"
+                    .to_string(),
+            }],
+            ..Default::default()
+        });
+    }
+
     let pack_dir = storage.base_path().join("pack");
     let pack_metadata = match fs::symlink_metadata(&pack_dir) {
         Ok(metadata) => Some(metadata),
@@ -1736,6 +1789,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let objects = list_loose_objects(&dir.path().join("missing")).unwrap();
         assert!(objects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// Covers rejecting a symlinked object directory before traversal.
+    fn ensure_real_object_directory_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        let objects = repo.path().join("objects");
+        symlink(external.path(), &objects).unwrap();
+
+        let err = ensure_real_object_directory(&objects).unwrap_err();
+
+        assert!(err.render().contains("symlink object directory"));
     }
 
     #[test]
@@ -2343,6 +2412,37 @@ mod tests {
         let _ = fs::remove_dir_all(&pack_dir);
         fs::create_dir_all(pack_dir.parent().unwrap()).unwrap();
         symlink(external.path(), &pack_dir).unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files[0].action, PackAction::Retained);
+        assert!(external_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers pack cleanup refusing a symlink object directory.
+    async fn clean_pack_directory_retains_symlink_object_directory() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let external = tempdir().unwrap();
+        let external_pack = external.path().join("pack");
+        fs::create_dir_all(&external_pack).unwrap();
+        let external_file = external_pack.join("pack-deadbeef.idx");
+        fs::write(&external_file, b"idx").unwrap();
+        let objects = path::objects();
+        fs::remove_dir_all(&objects).unwrap();
+        symlink(external.path(), &objects).unwrap();
+        let storage = ClientStorage::init(path::objects());
 
         let stats = clean_pack_directory(
             &storage,

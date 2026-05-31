@@ -155,6 +155,26 @@ impl LocalStorage {
     // --- Pack related methods ---
 
     fn list_all_packs(&self) -> Vec<PathBuf> {
+        match fs::symlink_metadata(&self.base_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                tracing::warn!(
+                    object_dir = %self.base_path.display(),
+                    "skipping symlink object directory"
+                );
+                return Vec::new();
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => return Vec::new(),
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    object_dir = %self.base_path.display(),
+                    error = %err,
+                    "failed to inspect object directory, skipping packs"
+                );
+                return Vec::new();
+            }
+        }
         let pack_dir = self.base_path.join("pack");
         let metadata = match fs::symlink_metadata(&pack_dir) {
             Ok(metadata) if metadata.file_type().is_dir() => metadata,
