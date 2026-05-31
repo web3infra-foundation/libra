@@ -351,3 +351,183 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
         }
     }
 }
+
+async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability> {
+    let loose = list_loose_objects(storage.base_path())?;
+    let roots = collect_roots_from_database().await?;
+    Ok(Reachability {
+        loose,
+        roots,
+        reachable: HashSet::new(),
+    })
+}
+
+fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
+    if !objects_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut objects = Vec::new();
+    for entry in fs::read_dir(objects_dir).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read object directory '{}': {}",
+            objects_dir.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        let entry = entry.map_err(|error| {
+            CliError::fatal(format!("failed to read object directory entry: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        let prefix_path = entry.path();
+        if !prefix_path.is_dir() {
+            continue;
+        }
+        let Some(prefix) = prefix_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_hex_prefix(prefix) {
+            continue;
+        }
+        for object_entry in fs::read_dir(&prefix_path).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read loose object directory '{}': {}",
+                prefix_path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })? {
+            let object_entry = object_entry.map_err(|error| {
+                CliError::fatal(format!("failed to read loose object entry: {error}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+            let path = object_entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(suffix) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let candidate = format!("{prefix}{suffix}");
+            let Ok(hash) = ObjectHash::from_str(&candidate) else {
+                continue;
+            };
+            objects.push(LooseObject { hash, path });
+        }
+    }
+    objects.sort_by_key(|object| object.hash.to_string());
+    Ok(objects)
+}
+
+fn is_hex_prefix(prefix: &str) -> bool {
+    prefix.len() == 2 && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn collect_roots_from_database() -> CliResult<HashSet<ObjectHash>> {
+    let db = get_db_conn_instance().await;
+    let mut roots = HashSet::new();
+
+    let refs = reference::Entity::find().all(&db).await.map_err(|error| {
+        CliError::fatal(format!("failed to load references: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for entry in refs {
+        if let Some(raw) = entry.commit.as_deref() {
+            roots.insert(parse_stored_hash(raw, "reference")?);
+        }
+    }
+
+    let reflogs = reflog::Entity::find().all(&db).await.map_err(|error| {
+        CliError::fatal(format!("failed to load reflogs: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for entry in reflogs {
+        for raw in [entry.old_oid.as_str(), entry.new_oid.as_str()] {
+            if !is_null_oid(raw) {
+                roots.insert(parse_stored_hash(raw, "reflog")?);
+            }
+        }
+    }
+
+    roots.extend(index_roots()?);
+    Ok(roots)
+}
+
+fn parse_stored_hash(raw: &str, source: &str) -> CliResult<ObjectHash> {
+    ObjectHash::from_str(raw).map_err(|error| {
+        CliError::fatal(format!("invalid {source} object id '{raw}': {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
+}
+
+fn is_null_oid(raw: &str) -> bool {
+    !raw.is_empty() && raw.bytes().all(|byte| byte == b'0')
+}
+
+fn index_roots() -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    let index_path = path::index();
+    if !index_path.exists() {
+        return Ok(roots);
+    }
+    let index = git_internal::internal::index::Index::load(&index_path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read index '{}': {error}",
+            index_path.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    for entry in index.tracked_entries(0) {
+        roots.insert(entry.hash);
+    }
+    Ok(roots)
+}
+
+fn trace_reachable(storage: &ClientStorage, reachability: &mut Reachability) -> CliResult<()> {
+    let mut queue = VecDeque::from_iter(reachability.roots.iter().copied());
+    while let Some(hash) = queue.pop_front() {
+        if !reachability.reachable.insert(hash) {
+            continue;
+        }
+        for child in object_children(storage, &hash)? {
+            if !reachability.reachable.contains(&child) {
+                queue.push_back(child);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn object_children(storage: &ClientStorage, hash: &ObjectHash) -> CliResult<Vec<ObjectHash>> {
+    let object_type = storage.get_object_type(hash).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to inspect reachable object {hash}: {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    match object_type {
+        ObjectType::Commit => {
+            let commit: Commit = load_object(hash).map_err(|error| corrupt_object(hash, error))?;
+            let mut children = Vec::with_capacity(commit.parent_commit_ids.len() + 1);
+            children.push(commit.tree_id);
+            children.extend(commit.parent_commit_ids);
+            Ok(children)
+        }
+        ObjectType::Tree => {
+            let tree: Tree = load_object(hash).map_err(|error| corrupt_object(hash, error))?;
+            Ok(tree.tree_items.iter().map(|item| item.id).collect())
+        }
+        ObjectType::Tag => {
+            let tag: GitTag = load_object(hash).map_err(|error| corrupt_object(hash, error))?;
+            Ok(vec![tag.object_hash])
+        }
+        ObjectType::Blob => Ok(Vec::new()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn corrupt_object(hash: &ObjectHash, error: git_internal::errors::GitError) -> CliError {
+    CliError::fatal(format!("failed to load reachable object {hash}: {error}"))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+}
