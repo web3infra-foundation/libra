@@ -1,4 +1,6 @@
 //! Test support utilities including change-dir guards, repository setup/cleanup helpers, fixture copying, and isolated command execution helpers.
+//!
+//! 测试支持实用程序，包括更改目录的保护、存储库设置/清理助手、固定装置复制和隔离命令执行助手。
 
 use std::{
     cell::Cell,
