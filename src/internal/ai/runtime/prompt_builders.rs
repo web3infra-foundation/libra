@@ -1,5 +1,7 @@
 //! Prompt package builders for the formal AI runtime phases.
 //!
+//! 正式 AI 运行时阶段的提示包构建器。
+//!
 //! Boundary: builders assemble provider-ready text from already-validated contracts;
 //! they do not decide workflow state transitions. Runtime contract tests check phase
 //! prompts for required context, acceptance gates, and missing-field handling.

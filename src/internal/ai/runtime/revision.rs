@@ -1,5 +1,7 @@
 //! Cross-phase revision-chain helper (schema-only landing).
 //!
+//! 跨阶段修订链助手（仅模式落地）。
+//!
 //! Phase 0 (Intent), Phase 1 (Plan) and Phase 2 (Execution) all participate
 //! in **revision chains**: every modification produces a new immutable
 //! revision rather than overwriting the previous one, so the formal history
