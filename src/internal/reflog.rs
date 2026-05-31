@@ -1,4 +1,6 @@
 //! Reflog persistence layer that writes formatted entries, queries by ref name, and enforces transaction-safe patterns for updates.
+//!
+//! Reflog 持久化层，写入格式化条目、按引用名称查询并强制事务安全的更新模式。
 
 use std::{
     fmt::{Debug, Display, Formatter},

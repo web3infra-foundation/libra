@@ -1,5 +1,7 @@
 //! Internal layer for the Libra runtime.
 //!
+//! Libra 运行时的内部层。
+//!
 //! This module is the seam between the user-facing CLI commands (in `src/command`)
 //! and the persistent state held inside `.libra/`:
 //!

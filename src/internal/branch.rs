@@ -1,5 +1,7 @@
 //! Branch storage layer.
 //!
+//! 分支存储层。
+//!
 //! All branch state for a Libra repository lives in the SQLite `reference` table
 //! (kind = `Branch`). This module is the only place that should mutate that table
 //! for branch-shaped rows; callers go through [`Branch::find_branch`],
