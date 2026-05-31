@@ -1,5 +1,7 @@
 //! Access-control checks for orchestrator workspace mutations.
 //!
+//! 编排器工作区变更的访问控制检查。
+//!
 //! Boundary: ACL decisions are path- and intent-scope based and must reject traversal,
 //! hidden out-of-scope writes, and unrelated lockfile changes. Workspace tests cover
 //! allowed edits, cargo-lock companions, and violation diagnostics.

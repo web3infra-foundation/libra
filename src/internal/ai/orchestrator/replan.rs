@@ -1,6 +1,8 @@
 //! Replanning helpers for turning failed or incomplete validation into follow-up
 //! tasks.
 //!
+//! 将失败或不完整验证转换为后续任务的重新规划助手。
+//!
 //! Boundary: replanning produces revised task specs; it does not directly apply
 //! patches or mark decisions final. Validation-decision and scheduler tests cover
 //! needs-revision, missing evidence, and repeated-failure cases.

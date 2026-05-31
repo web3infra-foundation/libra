@@ -1,5 +1,7 @@
 //! Decision logic for accepting, rejecting, or requesting revisions during an AI run.
 //!
+//! AI 运行期间接受、拒绝或请求修订的决策逻辑。
+//!
 //! Boundary: decider consumes evidence and validation reports; it must not execute
 //! tools or mutate workspaces. Validation decision-flow tests cover accepted, rejected,
 //! and needs-revision branches.
