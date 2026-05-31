@@ -1,4 +1,6 @@
 //! LFS protocol client that negotiates batch/lock/verify endpoints, uploads or downloads objects in chunks with hashing, and caches auth endpoints.
+//!
+//! LFS 协议客户端，协商批处理/锁定/验证端点、以分块方式上传或下载对象并进行哈希处理，并缓存身份验证端点。
 
 use std::{collections::HashSet, path::Path};
 
