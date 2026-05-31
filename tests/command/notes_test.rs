@@ -454,14 +454,11 @@ fn basic_default_subcommand_empty() {
 fn boundary_add_empty_message() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["notes", "add", "-m", ""], repo.path());
-    assert_cli_success(&output, "notes add with empty message");
-    // Verify the note exists (empty content)
-    let show = run_libra_command(&["notes", "show"], repo.path());
-    assert_cli_success(&show, "show empty note");
-    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(!output.status.success(), "empty message should be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.is_empty() || stdout == "\n" || stdout == "\r\n",
-        "expected empty or near-empty note content, got: '{stdout}'"
+        stderr.contains("empty note content"),
+        "expected empty content error, got: {stderr}"
     );
 }
 

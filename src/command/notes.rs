@@ -134,11 +134,11 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
     match subcommand {
         NotesSubcommand::Add {
             object,
-            message,
-            file,
+            message: _,
+            file: _,
             force,
         } => {
-            let content = build_note_content(&message, &file)?;
+            let content = build_note_content()?;
             let result = notes::add(
                 notes_ref,
                 object.as_deref().unwrap_or("HEAD"),
@@ -208,31 +208,88 @@ pub async fn execute_safe(args: NotesArgs, output: &OutputConfig) -> CliResult<(
     Ok(())
 }
 
-fn build_note_content(messages: &[String], files: &[String]) -> CliResult<String> {
+/// A content source with the type and value as it appeared on the command line.
+#[derive(Debug)]
+enum ContentPart {
+    Message(String),
+    File(String),
+}
+
+/// Walk the raw process arguments to rebuild the original `-m`/`-F` occurrence
+/// order.  Clap splits them into separate `Vec`s, but `git notes` semantics
+/// require that the paragraph order matches the command-line order (e.g.
+/// `-F header -m trailer` must produce `header\n\ntrailer`, not the reverse).
+fn ordered_content_parts() -> Vec<ContentPart> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-m" || arg == "--message" {
+            i += 1;
+            if i < args.len() {
+                parts.push(ContentPart::Message(args[i].clone()));
+            }
+        } else if arg == "-F" || arg == "--file" {
+            i += 1;
+            if i < args.len() {
+                parts.push(ContentPart::File(args[i].clone()));
+            }
+        } else if let Some(val) = arg.strip_prefix("-m") {
+            if !val.is_empty() {
+                parts.push(ContentPart::Message(val.to_string()));
+            }
+        } else if let Some(val) = arg.strip_prefix("-F") {
+            if !val.is_empty() {
+                parts.push(ContentPart::File(val.to_string()));
+            }
+        } else if let Some(val) = arg.strip_prefix("--message=") {
+            parts.push(ContentPart::Message(val.to_string()));
+        } else if let Some(val) = arg.strip_prefix("--file=") {
+            parts.push(ContentPart::File(val.to_string()));
+        }
+        i += 1;
+    }
+    parts
+}
+
+fn build_note_content() -> CliResult<String> {
+    let ordered = ordered_content_parts();
+
     let mut parts: Vec<String> = Vec::new();
 
-    for msg in messages {
-        parts.push(msg.clone());
-    }
-    for file_path in files {
-        let data = if file_path == "-" {
-            std::io::read_to_string(std::io::stdin())
-                .map_err(|e| CliError::io(format!("failed to read stdin: {e}")))?
-        } else {
-            std::fs::read_to_string(file_path)
-                .map_err(|e| CliError::io(format!("failed to read '{file_path}': {e}")))?
-        };
-        parts.push(data);
+    for part in &ordered {
+        match part {
+            ContentPart::Message(msg) => parts.push(msg.clone()),
+            ContentPart::File(file_path) => {
+                let data = if file_path == "-" {
+                    std::io::read_to_string(std::io::stdin())
+                        .map_err(|e| CliError::io(format!("failed to read stdin: {e}")))?
+                } else {
+                    std::fs::read_to_string(file_path)
+                        .map_err(|e| CliError::io(format!("failed to read '{file_path}': {e}")))?
+                };
+                parts.push(data);
+            }
+        }
     }
 
-    if parts.is_empty() {
+    if ordered.is_empty() {
         return Err(
             CliError::command_usage("provide a message with '-m <msg>' or '-F <file>'.")
                 .with_stable_code(StableErrorCode::CliInvalidArguments),
         );
     }
 
-    Ok(parts.join("\n\n"))
+    let content = parts.join("\n\n");
+    if content.trim().is_empty() {
+        return Err(CliError::command_usage(
+            "empty note content is not allowed. Provide non-empty text with '-m' or a non-empty file with '-F'.",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
+    Ok(content)
 }
 
 fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
