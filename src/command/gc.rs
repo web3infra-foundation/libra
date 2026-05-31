@@ -1467,3 +1467,162 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
     }
+
+    #[test]
+    fn collect_pack_groups_groups_other_sidecars() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("pack-abcd.tmp"), b"tmp").unwrap();
+        let groups = collect_pack_groups(dir.path()).unwrap();
+        assert_eq!(groups["pack-abcd"].others.len(), 1);
+    }
+
+    #[test]
+    fn handle_pack_file_reports_would_prune_in_dry_run() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pack-abcd.idx");
+        fs::write(&path, b"idx").unwrap();
+        let action = handle_pack_file(
+            &path,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            true,
+            false,
+            "orphan",
+        )
+        .unwrap();
+        assert_eq!(action.action, PackAction::WouldPrune);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn handle_pack_file_retains_when_prune_disabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pack-abcd.idx");
+        fs::write(&path, b"idx").unwrap();
+        let action = handle_pack_file(&path, PrunePolicy::Never, false, false, "orphan").unwrap();
+        assert_eq!(action.action, PackAction::Retained);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn remove_empty_parent_dir_ignores_non_empty_directory() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("aa").join("object");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file.parent().unwrap().join("other"), b"x").unwrap();
+        remove_empty_parent_dir(&file).unwrap();
+        assert!(file.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn gc_action_serialization_names_are_stable() {
+        assert_eq!(
+            serde_json::to_value(GcAction::WouldPrune).unwrap(),
+            serde_json::json!("would_prune")
+        );
+    }
+
+    #[test]
+    fn pack_action_serialization_names_are_stable() {
+        assert_eq!(
+            serde_json::to_value(PackAction::WouldPrune).unwrap(),
+            serde_json::json!("would_prune")
+        );
+    }
+
+    #[test]
+    fn default_prune_constant_matches_help_contract() {
+        assert_eq!(DEFAULT_PRUNE, "2.weeks.ago");
+    }
+
+    #[test]
+    fn seconds_per_week_matches_days() {
+        assert_eq!(SECONDS_PER_WEEK, 7 * SECONDS_PER_DAY);
+    }
+
+    #[test]
+    fn gc_examples_mentions_dry_run_and_json() {
+        assert!(GC_EXAMPLES.contains("--dry-run"));
+        assert!(GC_EXAMPLES.contains("--json"));
+    }
+
+    #[test]
+    fn pack_file_action_can_report_retention_reason() {
+        let action = PackFileAction {
+            path: "pack-x.idx".into(),
+            action: PackAction::Retained,
+            reason: "kept".into(),
+        };
+        assert_eq!(action.reason, "kept");
+    }
+
+    #[test]
+    fn gc_object_action_can_report_prune_reason() {
+        let action = GcObjectAction {
+            oid: "abc".into(),
+            object_type: "blob".into(),
+            action: GcAction::Retained,
+            reason: "young".into(),
+        };
+        assert_eq!(action.object_type, "blob");
+    }
+
+    #[test]
+    fn reachability_default_has_no_roots() {
+        let reachability = Reachability::default();
+        assert!(reachability.roots.is_empty());
+        assert!(reachability.reachable.is_empty());
+    }
+
+    #[test]
+    fn pack_group_default_is_empty() {
+        let group = PackGroup::default();
+        assert!(group.pack.is_none());
+        assert!(group.idx.is_none());
+        assert!(group.keep.is_none());
+    }
+
+    #[test]
+    fn should_prune_returns_false_for_never() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"x").unwrap();
+        assert!(!should_prune(&path, PrunePolicy::Never).unwrap());
+    }
+
+    #[test]
+    fn should_prune_accepts_future_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"x").unwrap();
+        assert!(
+            should_prune(
+                &path,
+                PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1))
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn should_prune_reports_missing_file_metadata_error() {
+        let dir = tempdir().unwrap();
+        let error = should_prune(
+            &dir.path().join("missing"),
+            PrunePolicy::OlderThan(SystemTime::now()),
+        )
+        .unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn object_children_blob_has_no_children() {
+        let repo = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let blob = Blob::from_content("blob");
+        save_object(&blob, &blob.id).unwrap();
+        assert!(object_children(&storage, &blob.id).unwrap().is_empty());
+    }
+}
