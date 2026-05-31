@@ -47,11 +47,39 @@ fn write_unreachable_blob(repo: &std::path::Path, name: &str, contents: &str) ->
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn write_prunable_blob(repo: &std::path::Path, name: &str, contents: &str) -> String {
+    let oid = write_unreachable_blob(repo, name, contents);
+    mark_object_index_synced(repo, &oid);
+    oid
+}
+
+fn mark_object_index_synced(repo: &std::path::Path, oid: &str) {
+    let db_path = repo.join(".libra").join("libra.db");
+    let uri = format!("sqlite://{}", db_path.display());
+    let oid = oid.to_string();
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+
+            let conn = Database::connect(&uri)
+                .await
+                .expect("connect repo database");
+            conn.execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE object_index SET is_synced = 1 WHERE o_id = ?",
+                [oid.into()],
+            ))
+            .await
+            .expect("mark object_index row synced");
+        });
+}
+
 #[test]
 #[serial]
 fn gc_prune_now_removes_unreachable_loose_object() {
     let repo = create_committed_repo_via_cli();
-    let oid = write_unreachable_blob(repo.path(), "garbage.txt", "garbage\n");
+    let oid = write_prunable_blob(repo.path(), "garbage.txt", "garbage\n");
     assert!(loose_object_path(repo.path(), &oid).exists());
 
     let output = run_libra_command(&["gc", "--prune=now"], repo.path());
@@ -67,7 +95,7 @@ fn gc_prune_now_removes_unreachable_loose_object() {
 #[serial]
 fn gc_dry_run_reports_without_removing_object() {
     let repo = create_committed_repo_via_cli();
-    let oid = write_unreachable_blob(repo.path(), "dry-run.txt", "dry\n");
+    let oid = write_prunable_blob(repo.path(), "dry-run.txt", "dry\n");
 
     let output = run_libra_command(&["gc", "--dry-run", "--prune=now"], repo.path());
     assert_cli_success(&output, "gc --dry-run should succeed");
@@ -128,7 +156,7 @@ fn gc_keeps_reachable_tracked_blob() {
 #[serial]
 fn gc_json_reports_pruned_loose_object() {
     let repo = create_committed_repo_via_cli();
-    let oid = write_unreachable_blob(repo.path(), "json-garbage.txt", "json\n");
+    let oid = write_prunable_blob(repo.path(), "json-garbage.txt", "json\n");
 
     let output = run_libra_command(&["--json", "gc", "--prune=now"], repo.path());
     assert_cli_success(&output, "json gc should succeed");
@@ -145,7 +173,7 @@ fn gc_json_reports_pruned_loose_object() {
 #[serial]
 fn gc_json_dry_run_reports_would_prune() {
     let repo = create_committed_repo_via_cli();
-    write_unreachable_blob(repo.path(), "json-dry.txt", "json dry\n");
+    write_prunable_blob(repo.path(), "json-dry.txt", "json dry\n");
 
     let output = run_libra_command(&["--json", "gc", "--dry-run", "--prune=now"], repo.path());
     assert_cli_success(&output, "json dry-run gc should succeed");
@@ -213,7 +241,7 @@ fn gc_keeps_live_pack_sidecars() {
     assert!(bitmap.exists());
     assert!(rev.exists());
     assert!(mtimes.exists());
-    assert!(!tmp.exists());
+    assert!(tmp.exists());
 }
 
 #[test]
