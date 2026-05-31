@@ -1,5 +1,7 @@
 //! Status indicator widget shown above the composer while the agent is busy.
 //!
+//! 当代理繁忙时显示在编写器上方的状态指示器小部件。
+//!
 //! Renders a single dim line of the form
 //! `<spinner> <status>  <elapsed>  [Esc: Interrupt]` whenever the agent is in a
 //! non-idle, non-modal state. The spinner advances via the elapsed wall clock
