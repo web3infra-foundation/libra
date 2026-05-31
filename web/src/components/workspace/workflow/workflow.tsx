@@ -201,7 +201,11 @@ export function Workflow({ width }: Props) {
         </div>
       </footer>
 
-      <DetailPanel detail={detail} onClose={() => setDetail(null)} />
+      <DetailPanel
+        detail={detail}
+        snapshot={snapshot}
+        onClose={() => setDetail(null)}
+      />
     </section>
   );
 }

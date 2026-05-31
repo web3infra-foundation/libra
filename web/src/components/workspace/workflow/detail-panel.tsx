@@ -2,11 +2,12 @@
 
 import type { ReactNode } from "react";
 
-import { IconArrow, IconX } from "@/components/icons";
+import { IconX } from "@/components/icons";
 import { cn } from "@/lib/utils";
 
 import { Markdown } from "./markdown";
 import { statusMeta } from "./status-meta";
+import type { CodeUiSessionSnapshot } from "@/lib/code-ui/types";
 import type {
   DetailState,
   ExecutionRun,
@@ -19,9 +20,10 @@ import type {
 type Props = {
   detail: DetailState | null;
   onClose: () => void;
+  snapshot: CodeUiSessionSnapshot | null;
 };
 
-export function DetailPanel({ detail, onClose }: Props) {
+export function DetailPanel({ detail, onClose, snapshot }: Props) {
   const open = !!detail;
 
   return (
@@ -44,13 +46,23 @@ export function DetailPanel({ detail, onClose }: Props) {
           transitionTimingFunction: "cubic-bezier(0.22, 0.61, 0.36, 1)",
         }}
       >
-        {detail && <DetailContent detail={detail} onClose={onClose} />}
+        {detail && (
+          <DetailContent detail={detail} snapshot={snapshot} onClose={onClose} />
+        )}
       </div>
     </>
   );
 }
 
-function DetailContent({ detail, onClose }: { detail: DetailState; onClose: () => void }) {
+function DetailContent({
+  detail,
+  snapshot,
+  onClose,
+}: {
+  detail: DetailState;
+  snapshot: CodeUiSessionSnapshot | null;
+  onClose: () => void;
+}) {
   const meta = detailMeta(detail);
   return (
     <>
@@ -78,8 +90,8 @@ function DetailContent({ detail, onClose }: { detail: DetailState; onClose: () =
         {detail.kind === "plan-step" && <PlanStepDetail data={detail.data} />}
         {detail.kind === "task" && <TaskDetail task={detail.data} />}
         {detail.kind === "run" && <RunDetail run={detail.data} />}
-        {detail.kind === "validation" && <ValidationDetail />}
-        {detail.kind === "release" && <ReleaseDetail />}
+        {detail.kind === "validation" && <ValidationDetail snapshot={snapshot} />}
+        {detail.kind === "release" && <ReleaseDetail snapshot={snapshot} />}
       </div>
     </>
   );
@@ -284,95 +296,63 @@ function RunDetail({ run }: { run: ExecutionRun }) {
   );
 }
 
-function ValidationDetail() {
+function ValidationDetail({ snapshot }: { snapshot: CodeUiSessionSnapshot | null }) {
+  const pendingInteractions =
+    snapshot?.interactions.filter((interaction) => interaction.status === "pending").length ?? 0;
+  const count = (value: number) => (snapshot ? String(value) : "—");
   return (
     <>
       <div className="mb-2.5 text-[15px] font-semibold">Validation gate</div>
-      <div className="mb-[18px] text-[12.5px] leading-[1.6] text-ink-2">
-        Phase 3 runs after the execution DAG settles. It audits the resulting PatchSet against policy and collects the evidence needed for release.
-      </div>
 
-      <Section label="Checks">
-        <CheckRow name="SAST · static analysis" status="queued" />
-        <CheckRow name="SCA · dependency advisories" status="queued" />
-        <CheckRow name="Type-check" status="queued" />
-        <CheckRow name="Test plan · full run" status="queued" />
-        <CheckRow name="Compatibility · API surface" status="queued" />
+      <Section label="Snapshot">
+        <KV k="Session status" v={snapshot?.status ?? "—"} />
+        <KV k="Plans" v={count(snapshot?.plans.length ?? 0)} />
+        <KV k="Tasks" v={count(snapshot?.tasks.length ?? 0)} />
+        <KV k="Tool calls" v={count(snapshot?.toolCalls.length ?? 0)} />
+        <KV k="PatchSets" v={count(snapshot?.patchsets.length ?? 0)} />
+        <KV k="Pending interactions" v={count(pendingInteractions)} />
       </Section>
 
-      <Section label="Output">
-        <div className="text-[12px] leading-[1.6] text-ink-3">
-          Each check appends an Evidence record (kind ={" "}
-          <span className="mono">audit</span>) to the thread&apos;s append-only log. The aggregate verdict determines whether Release auto-merges or escalates to human review.
-        </div>
+      <Section label="Controller">
+        <KV k="Kind" v={snapshot?.controller.kind ?? "—"} />
+        <KV k="Can write" v={snapshot ? (snapshot.controller.canWrite ? "yes" : "no") : "—"} />
+        <KV k="Loopback only" v={snapshot ? (snapshot.controller.loopbackOnly ? "yes" : "no") : "—"} />
+        <KV k="Owner" v={snapshot?.controller.ownerLabel ?? "—"} />
       </Section>
     </>
   );
 }
 
-function ReleaseDetail() {
+function ReleaseDetail({ snapshot }: { snapshot: CodeUiSessionSnapshot | null }) {
+  const count = (value: number) => (snapshot ? String(value) : "—");
   return (
     <>
       <div className="mb-2.5 text-[15px] font-semibold">Release decision</div>
-      <div className="mb-[18px] text-[12.5px] leading-[1.6] text-ink-2">
-        Phase 4 is the final decision. Libra classifies the PatchSet by risk, then either auto-merges or requests human review — producing a signed IntentEvent either way.
-      </div>
 
-      <Section label="Risk classification">
-        <KV k="Policy" v="web3infra/default" />
-        <KV k="Surface" v="internal hook · 2 callers" />
-        <KV k="Blast radius" v="low" />
-        <KV k="Reversibility" v="clean revert" />
+      <Section label="Session">
+        <KV k="Thread" v={snapshot?.threadId ?? "—"} />
+        <KV k="Provider" v={snapshot?.provider.provider ?? "—"} />
+        <KV k="Model" v={snapshot?.provider.model ?? "—"} />
+        <KV k="Working dir" v={snapshot?.workingDir ?? "—"} />
       </Section>
 
-      <Section label="Path">
-        <div className="mb-2 flex items-center gap-1.5 text-[12.5px]">
-          <span
-            className="mono rounded-sm px-2 py-px text-[10.5px]"
-            style={{ background: "var(--good-soft)", color: "var(--good)" }}
-          >
-            LOW
-          </span>
-          <IconArrow size={11} className="text-ink-3" />
-          <span>
-            Auto-merge to <span className="mono">main</span>
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
-          <span
-            className="mono rounded-sm px-2 py-px text-[10.5px]"
-            style={{ background: "var(--warn-soft)", color: "var(--warn)" }}
-          >
-            HIGH
-          </span>
-          <IconArrow size={11} />
-          <span>Open review for erin@web3infra</span>
-        </div>
+      <Section label="Artifacts">
+        <KV k="PatchSets" v={count(snapshot?.patchsets.length ?? 0)} />
+        <KV k="Tool calls" v={count(snapshot?.toolCalls.length ?? 0)} />
+        <KV k="Tasks" v={count(snapshot?.tasks.length ?? 0)} />
+      </Section>
+
+      <Section label="State">
+        <KV k="Status" v={snapshot?.status ?? "—"} />
+        <KV k="Controller can write" v={snapshot ? (snapshot.controller.canWrite ? "yes" : "no") : "—"} />
+        <KV k="Loopback only" v={snapshot ? (snapshot.controller.loopbackOnly ? "yes" : "no") : "—"} />
       </Section>
 
       <Section label="Output">
         <div className="text-[12px] leading-[1.6] text-ink-3">
-          Decision is sealed as an <span className="mono">IntentEvent</span> on the thread and mirrored to the git provider. No phase can run past Release without a decision record.
+          Release details are derived from the live session snapshot.
         </div>
       </Section>
     </>
-  );
-}
-
-function CheckRow({ name, status }: { name: string; status: StepStatus }) {
-  const m = statusMeta(status);
-  return (
-    <div className="flex items-center gap-2 border-b border-rule py-2">
-      <div
-        className="grid h-4 w-4 place-items-center rounded-full border"
-        style={{ background: m.bg, color: m.color, borderColor: m.color }}
-      >
-        {m.icon}
-      </div>
-      <span className="flex-1 text-[12.5px]">{name}</span>
-      <span className="mono text-[10px]" style={{ color: m.color }}>
-        {m.label}
-      </span>
-    </div>
   );
 }
