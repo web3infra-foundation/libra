@@ -767,3 +767,233 @@ fn format_io_error(error: &io::Error) -> String {
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{Duration, SystemTime},
+    };
+
+    use git_internal::{
+        hash::{ObjectHash, get_hash_kind},
+        internal::object::{
+            blob::Blob,
+            commit::Commit,
+            signature::{Signature, SignatureType},
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    };
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        command::save_object,
+        utils::{output::JsonFormat, test, util},
+    };
+
+    fn test_hash(byte: u8) -> ObjectHash {
+        ObjectHash::from_bytes(&vec![byte; get_hash_kind().size()])
+            .expect("hash bytes should match active hash kind")
+    }
+
+    fn signature() -> Signature {
+        Signature {
+            signature_type: SignatureType::Author,
+            name: "tester".to_string(),
+            email: "tester@example.com".to_string(),
+            timestamp: 1,
+            timezone: "+0000".to_string(),
+        }
+    }
+
+    fn commit_with_tree(tree_id: ObjectHash, parents: Vec<ObjectHash>) -> Commit {
+        Commit {
+            id: test_hash(9),
+            tree_id,
+            parent_commit_ids: parents,
+            author: signature(),
+            committer: Signature {
+                signature_type: SignatureType::Committer,
+                ..signature()
+            },
+            message: "commit".to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_prune_date_accepts_never_and_now() {
+        assert_eq!(parse_prune_date("never").unwrap(), PrunePolicy::Never);
+        assert!(matches!(
+            parse_prune_date("now").unwrap(),
+            PrunePolicy::OlderThan(_)
+        ));
+    }
+
+    #[test]
+    fn parse_prune_date_accepts_relative_weeks() {
+        let PrunePolicy::OlderThan(cutoff) = parse_prune_date("2.weeks.ago").unwrap() else {
+            panic!("expected cutoff");
+        };
+        assert!(cutoff < SystemTime::now());
+    }
+
+    #[test]
+    fn parse_prune_date_accepts_supported_relative_units() {
+        for value in [
+            "1.second.ago",
+            "2.seconds.ago",
+            "1.minute.ago",
+            "2.minutes.ago",
+            "1.hour.ago",
+            "2.hours.ago",
+            "1.day.ago",
+            "2.days.ago",
+            "1.week.ago",
+            "2.weeks.ago",
+            "all",
+        ] {
+            assert!(
+                matches!(parse_prune_date(value).unwrap(), PrunePolicy::OlderThan(_)),
+                "{value} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_prune_date_rejects_unknown_values() {
+        let error = parse_prune_date("yesterday").unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
+    }
+
+    #[test]
+    fn parse_prune_date_rejects_bad_amount_and_unit() {
+        for value in ["x.days.ago", "2.months.ago"] {
+            let error = parse_prune_date(value).unwrap_err();
+            assert_eq!(error.stable_code(), StableErrorCode::CliInvalidArguments);
+        }
+    }
+
+    #[test]
+    fn is_hex_prefix_requires_two_hex_digits() {
+        assert!(is_hex_prefix("ab"));
+        assert!(is_hex_prefix("09"));
+        assert!(!is_hex_prefix("abc"));
+        assert!(!is_hex_prefix("zz"));
+    }
+
+    #[test]
+    fn pack_stem_groups_standard_pack_files() {
+        assert_eq!(
+            pack_stem(Path::new("pack-abc.pack")).as_deref(),
+            Some("pack-abc")
+        );
+        assert_eq!(
+            pack_stem(Path::new("pack-abc.idx")).as_deref(),
+            Some("pack-abc")
+        );
+        assert_eq!(
+            pack_stem(Path::new("pack-abc.keep")).as_deref(),
+            Some("pack-abc")
+        );
+    }
+
+    #[test]
+    fn pack_stem_ignores_non_pack_prefixes() {
+        assert!(pack_stem(Path::new("tmp.pack")).is_none());
+        assert!(pack_stem(Path::new("README")).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn list_loose_objects_skips_pack_directory() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let blob = Blob::from_content("hello");
+        save_object(&blob, &blob.id).unwrap();
+        fs::create_dir_all(path::objects().join("pack")).unwrap();
+        fs::write(path::objects().join("pack").join("pack-x.pack"), b"bad").unwrap();
+
+        let objects = list_loose_objects(&path::objects()).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].hash, blob.id);
+    }
+
+    #[test]
+    fn list_loose_objects_returns_empty_for_missing_directory() {
+        let dir = tempdir().unwrap();
+        let objects = list_loose_objects(&dir.path().join("missing")).unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn list_loose_objects_skips_non_files_and_invalid_names() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("loose-file"), b"x").unwrap();
+        fs::create_dir(dir.path().join("zz")).unwrap();
+        fs::create_dir(dir.path().join("ab")).unwrap();
+        fs::create_dir(dir.path().join("ab").join("nested")).unwrap();
+        fs::write(dir.path().join("ab").join("not-a-hash"), b"x").unwrap();
+
+        let objects = list_loose_objects(dir.path()).unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn trace_reachable_walks_commit_tree_and_blob() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("content");
+        save_object(&blob, &blob.id).unwrap();
+        let tree = Tree {
+            id: test_hash(2),
+            tree_items: vec![TreeItem {
+                mode: TreeItemMode::Blob,
+                id: blob.id,
+                name: "file.txt".to_string(),
+            }],
+        };
+        save_object(&tree, &tree.id).unwrap();
+        let commit = commit_with_tree(tree.id, Vec::new());
+        save_object(&commit, &commit.id).unwrap();
+
+        let mut reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::from([commit.id]),
+            reachable: HashSet::new(),
+        };
+        trace_reachable(&storage, &mut reachability).unwrap();
+
+        assert!(reachability.reachable.contains(&commit.id));
+        assert!(reachability.reachable.contains(&tree.id));
+        assert!(reachability.reachable.contains(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn trace_reachable_skips_already_seen_roots() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("content");
+        save_object(&blob, &blob.id).unwrap();
+        let mut reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::from([blob.id]),
+            reachable: HashSet::from([blob.id]),
+        };
+        trace_reachable(&storage, &mut reachability).unwrap();
+
+        assert_eq!(reachability.reachable.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
