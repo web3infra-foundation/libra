@@ -1,6 +1,8 @@
 //! IntentSpec subsystem: draft extraction, canonicalization, validation, repair,
 //! persistence, and summary rendering for AI-driven work.
 //!
+//! IntentSpec 子系统：用于 AI 驱动工作的草稿提取、规范化、验证、修复、持久化和摘要呈现。
+//!
 //! Boundary: this module owns the "what should be done" contract. Execution planning,
 //! workspace mutation, and final gate decisions live under `orchestrator`. End-to-end
 //! coverage is in `tests/intent_flow_test.rs` and the AI validation decision tests.

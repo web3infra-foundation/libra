@@ -1,3 +1,7 @@
+//! Provider pricing tables for computing token cost estimates.
+//!
+//! 用于计算令牌成本估算的提供商定价表。
+
 use std::{collections::HashMap, fmt};
 
 use serde::Deserialize;

@@ -1,4 +1,6 @@
 //! SeaORM entity for the live context window projection.
+//!
+//! 实时上下文窗口投影的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

@@ -1,5 +1,7 @@
 //! Sandbox subsystem for AI tool calls.
 //!
+//! AI 工具调用的沙箱子系统。
+//!
 //! Boundary: exposes policy parsing, command-safety checks, and runtime enforcement;
 //! it does not decide workflow phase state. AI hardening contract tests exercise the
 //! public guarantees of this module.

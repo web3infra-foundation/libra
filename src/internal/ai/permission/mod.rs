@@ -1,5 +1,7 @@
 //! Permission ruleset machinery (OC-Phase 2 P2.3).
 //!
+//! 权限规则机制（OC-Phase 2 P2.3）。
+//!
 //! This module is the in-memory half of the [Permission Ruleset & Approval
 //! Feedback Protocol] from `docs/improvement/opencode.md`. It defines the
 //! data shapes and the two pure algorithms (`evaluate`, `disabled`) that

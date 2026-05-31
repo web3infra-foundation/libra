@@ -1,5 +1,7 @@
 //! Markdown skill loading and dispatch.
 //!
+//! Markdown 技能加载和调度。
+//!
 //! Skills are reusable workflow fragments stored as markdown files with TOML
 //! frontmatter. They are distinct from slash commands: commands are one-shot
 //! prompt expansions, while skills may constrain tool policy and carry audit

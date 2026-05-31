@@ -1,5 +1,7 @@
 //! Versioned schema migration runner — CEX-12.5 deliverable.
 //!
+//! 版本化模式迁移运行程序 — CEX-12.5 可交付物。
+//!
 //! Provides a single, reusable abstraction every future persistence-touching
 //! CEX (CEX-13b ContextFrame, CEX-15 automation_log, CEX-16
 //! `agent_usage_stats`, plus Step 2 `schema_versions` extensions) plugs into,

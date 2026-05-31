@@ -1,5 +1,7 @@
 //! Publish wire-format contract types.
 //!
+//! 发布线格式契约类型。
+//!
 //! Per `docs/improvement/publish.md` Phase 0, every JSON object the
 //! CLI produces and the Worker consumes round-trips through the
 //! types declared here. The shape of the JSON is fixed to:

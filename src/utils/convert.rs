@@ -1,5 +1,7 @@
 //! Utilities for converting existing Git repositories into Libra repositories by reusing fetch and clone logic.
 //!
+//! 通过重用 fetch 和 clone 逻辑将现有 Git 存储库转换为 Libra 存储库的实用程序。
+//!
 //! `libra init --from-git-repository <path>` calls into this module after the empty
 //! Libra database has been bootstrapped. The conversion path treats the source Git
 //! repository as a remote named `origin`, runs a normal `fetch` and `setup_repository`

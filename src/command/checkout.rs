@@ -1,4 +1,6 @@
 //! Handles checkout-style flows to show the current branch, switch to existing branches, or create and switch to a new one using restore utilities.
+//!
+//! 处理检出风格的流程，以显示当前分支、切换到现有分支或使用还原实用程序创建并切换到新分支。
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
@@ -205,6 +207,8 @@ impl From<CheckoutError> for CliError {
     }
 }
 
+/// Fire-and-forget entry point for the checkout command.
+/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: CheckoutArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -224,6 +228,21 @@ pub async fn execute(args: CheckoutArgs) {
 /// Returns [`CliError`] when the target branch is invalid or missing, local
 /// changes would be overwritten, branch creation fails, or checkout/restore
 /// writes fail.
+///
+/// 检出命令的快速执行入口。
+/// 委托给 execute_safe 并将任何错误打印到 stderr。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+///
+/// # 副作用
+/// - 验证目标分支名称并阻止内部 `intent` 分支。
+/// - 提供 `-b` 时可能创建分支。
+/// - 切换 HEAD/当前分支并将工作树还原到目标。
+/// - 通过 [`OutputConfig`] 发出状态消息。
+///
+/// # 错误
+/// 当目标分支无效或缺失、本地更改会被覆盖、分支创建失败或
+/// 检出/还原写入失败时返回 [`CliError`]。
 pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_checkout(args, output).await.map_err(CliError::from)?;
     render_checkout_output(&result, output)

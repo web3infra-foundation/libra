@@ -1,4 +1,6 @@
 //! Provider-neutral usage recording and display helpers (CEX-16).
+//!
+//! 提供商中立的使用记录和显示助手（CEX-16）。
 
 pub mod format;
 pub mod pricing;

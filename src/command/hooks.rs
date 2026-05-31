@@ -1,6 +1,9 @@
 //! `libra hooks <provider> <subcommand>` — compatibility entry point invoked
 //! by hook configurations the existing `HookProvider`s install (Claude Code's
 //! `.claude/settings.json`, Gemini's hooks). Adds the `Commands::Hooks(...)`
+//!
+//! `libra hooks <provider> <subcommand>` — 兼容性入口点，由现有 `HookProvider` 安装的
+//! 钩子配置调用（Claude Code 的 `.claude/settings.json`、Gemini 的钩子）。
 //! variant promised in `docs/improvement/entire.md` (sections 1.2 and 6.1).
 //!
 //! Phase 1.1: this entry point currently delegates to the canonical

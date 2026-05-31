@@ -1,5 +1,7 @@
 //! Diff rendering for TUI display.
 //!
+//! TUI 显示的差异渲染。
+//!
 //! This module is a self-contained renderer that converts a map of file
 //! changes (each carrying a unified-diff string produced by
 //! `diffy::create_patch`) into styled `ratatui::text::Line` rows ready for

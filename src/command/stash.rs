@@ -1,4 +1,6 @@
 //! Implements stash push/pop/show/drop/apply by saving worktree/index states as commits and restoring them on demand.
+//!
+//! 实现 stash push/pop/show/drop/apply，通过将工作树/索引状态保存为提交并按需还原。
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -34,6 +36,8 @@ use crate::{
             rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
             restore_working_directory_from_tree,
         },
+        status::{self, StatusArgs},
+        switch,
     },
     internal::{
         branch::{Branch as InternalBranch, BranchStoreError},
@@ -84,6 +88,18 @@ enum StashError {
     #[error("clearing all stash entries requires --force in interactive mode")]
     ClearRequiresForce,
 
+    #[error("unstaged changes, can't create branch from stash")]
+    DirtyUnstaged,
+
+    #[error("untracked files, can't create branch from stash")]
+    DirtyUntracked,
+
+    #[error("uncommitted changes, can't create branch from stash")]
+    DirtyUncommitted,
+
+    #[error("failed to determine working tree status before stash branch: {0}")]
+    StatusCheck(String),
+
     #[error("failed to read object: {0}")]
     ReadObject(String),
 
@@ -112,6 +128,10 @@ impl StashError {
             Self::BranchExists(_) => StableErrorCode::ConflictOperationBlocked,
             Self::BranchLookupFailed { .. } => StableErrorCode::IoReadFailed,
             Self::ClearRequiresForce => StableErrorCode::CliInvalidArguments,
+            Self::DirtyUnstaged | Self::DirtyUntracked | Self::DirtyUncommitted => {
+                StableErrorCode::RepoStateInvalid
+            }
+            Self::StatusCheck(_) => StableErrorCode::IoReadFailed,
             Self::ReadObject(_) => StableErrorCode::IoReadFailed,
             Self::WriteObject(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
@@ -151,6 +171,14 @@ impl From<StashError> for CliError {
             StashError::ClearRequiresForce => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("re-run with --force, or use --json / --machine for scripted use"),
+            StashError::DirtyUnstaged
+            | StashError::DirtyUntracked
+            | StashError::DirtyUncommitted => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("commit or stash your current changes before running 'libra stash branch'."),
+            StashError::StatusCheck(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("inspect the repository status, repair any corrupt state, and retry 'libra stash branch'."),
             StashError::Other(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
@@ -274,7 +302,7 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             name_only,
             name_status,
         } => run_show(stash, name_only, name_status).await,
-        Stash::Branch { branch, stash } => run_branch(branch, stash).await,
+        Stash::Branch { branch, stash } => run_branch(branch, stash, output).await,
         Stash::Clear { force } => run_clear(force, output).await,
     }
 }
@@ -525,7 +553,11 @@ async fn run_show(
     })
 }
 
-async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashOutput, StashError> {
+async fn run_branch(
+    branch_name: String,
+    stash: Option<String>,
+    output: &OutputConfig,
+) -> Result<StashOutput, StashError> {
     if InternalBranch::exists_result(&branch_name, None)
         .await
         .map_err(|error| stash_branch_store_error(&branch_name, error))?
@@ -547,6 +579,8 @@ async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashO
         .parent_commit_ids
         .first()
         .ok_or_else(|| StashError::ReadObject("stash commit is malformed".into()))?;
+
+    ensure_clean_for_stash_branch(output).await?;
 
     InternalBranch::update_branch(&branch_name, &base_hash.to_string(), None)
         .await
@@ -576,6 +610,34 @@ fn stash_branch_store_error(branch: &str, error: BranchStoreError) -> StashError
     StashError::BranchLookupFailed {
         branch: branch.to_string(),
         detail: error.to_string(),
+    }
+}
+
+async fn ensure_clean_for_stash_branch(output: &OutputConfig) -> Result<(), StashError> {
+    switch::ensure_clean_status(output)
+        .await
+        .map_err(stash_branch_clean_error)?;
+
+    let unstaged = status::changes_to_be_staged()
+        .map_err(|error| StashError::StatusCheck(error.to_string()))?;
+    if !unstaged.new.is_empty() {
+        if !output.quiet && !output.is_json() {
+            status::execute(StatusArgs::default()).await;
+        }
+        return Err(StashError::DirtyUntracked);
+    }
+
+    Ok(())
+}
+
+fn stash_branch_clean_error(error: switch::SwitchError) -> StashError {
+    match error {
+        switch::SwitchError::DirtyUnstaged => StashError::DirtyUnstaged,
+        switch::SwitchError::DirtyUncommitted => StashError::DirtyUncommitted,
+        switch::SwitchError::StatusCheck(detail) => StashError::StatusCheck(detail),
+        other => StashError::Other(format!(
+            "failed to verify clean working tree before stash branch: {other}"
+        )),
     }
 }
 
@@ -1454,6 +1516,22 @@ mod tests {
             "clearing all stash entries requires --force in interactive mode",
         );
         assert_eq!(
+            StashError::DirtyUnstaged.to_string(),
+            "unstaged changes, can't create branch from stash",
+        );
+        assert_eq!(
+            StashError::DirtyUntracked.to_string(),
+            "untracked files, can't create branch from stash",
+        );
+        assert_eq!(
+            StashError::DirtyUncommitted.to_string(),
+            "uncommitted changes, can't create branch from stash",
+        );
+        assert_eq!(
+            StashError::StatusCheck("index read failed".to_string()).to_string(),
+            "failed to determine working tree status before stash branch: index read failed",
+        );
+        assert_eq!(
             StashError::ReadObject("permission denied".to_string()).to_string(),
             "failed to read object: permission denied",
         );
@@ -1479,10 +1557,11 @@ mod tests {
     /// Pin the `stable_code()` mapping for every variant of
     /// [`StashError`]. JSON consumers branch on the
     /// [`StableErrorCode`] in the error envelope; three variants
-    /// share `IoWriteFailed` (WriteObject / IndexSave / ResetFailed)
-    /// and two share both `IoReadFailed` (BranchLookupFailed /
-    /// ReadObject) and `CliInvalidArguments` (InvalidStashRef /
-    /// ClearRequiresForce). A future refactor that reroutes any
+    /// share `IoWriteFailed` (WriteObject / IndexSave / ResetFailed),
+    /// three share `IoReadFailed` (BranchLookupFailed / StatusCheck /
+    /// ReadObject), three share `RepoStateInvalid` (DirtyUnstaged /
+    /// DirtyUntracked / DirtyUncommitted), and two share `CliInvalidArguments`
+    /// (InvalidStashRef / ClearRequiresForce). A future refactor that reroutes any
     /// variant — for example flipping `BranchExists` from
     /// `ConflictOperationBlocked` to `CliInvalidTarget` — silently
     /// changes the wire surface unless every variant has its own
@@ -1530,6 +1609,22 @@ mod tests {
         assert_eq!(
             StashError::ClearRequiresForce.stable_code(),
             StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            StashError::DirtyUnstaged.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            StashError::DirtyUntracked.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            StashError::DirtyUncommitted.stable_code(),
+            StableErrorCode::RepoStateInvalid,
+        );
+        assert_eq!(
+            StashError::StatusCheck("ignored".to_string()).stable_code(),
+            StableErrorCode::IoReadFailed,
         );
         assert_eq!(
             StashError::ReadObject("ignored".to_string()).stable_code(),

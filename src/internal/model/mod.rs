@@ -1,4 +1,6 @@
 //! Exposes SeaORM entity modules for config, reference, reflog, and object_index tables used across the internal database layer.
+//!
+//! 公开用于整个内部数据库层的 config、reference、reflog 和 object_index 表的 SeaORM 实体模块。
 
 pub mod ai_decision_proposal;
 pub mod ai_final_decision;

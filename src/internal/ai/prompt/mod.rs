@@ -1,5 +1,7 @@
 //! Composable system prompt builder for the AI agent.
 //!
+//! AI 代理的可组合系统提示构建器。
+//!
 //! This module provides a rules-based prompt system where the system prompt is
 //! composed from modular rule files. Rules are loaded from a three-tier hierarchy:
 //!

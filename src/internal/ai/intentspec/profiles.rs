@@ -1,6 +1,8 @@
 //! IntentSpec profile templates that convert common request classes into default
 //! checks, artifacts, and risk metadata.
 //!
+//! 将常见请求类转换为默认检查、工件和风险元数据的 IntentSpec 配置文件模板。
+//!
 //! Boundary: profiles provide defaults only; user-supplied constraints and acceptance
 //! criteria remain authoritative. Intent draft tests cover profile selection and ensure
 //! generated defaults do not remove explicit user fields.

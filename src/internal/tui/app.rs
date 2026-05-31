@@ -1,4 +1,6 @@
 //! Main application structure and event loop.
+//!
+//! 主应用程序结构和事件循环。
 //! 中文：该注释与英文“Main application structure and event loop.”含义一致。
 //!
 //! The `App` struct manages the TUI state and coordinates between
@@ -1769,6 +1771,7 @@ where
             ));
         }
         self.pending_plan_revision = None;
+        self.sync_pending_plan_revision_snapshot().await;
         self.pending_execution_plan_revision = None;
 
         if let Some(code_ui_session) = self.code_ui_session.clone() {
@@ -4853,6 +4856,7 @@ where
                         }
                         Some(ExecutionFailureRevision::IntentSpecRevision) => {
                             self.pending_plan_revision = Some(spec_json);
+                            self.sync_pending_plan_revision_snapshot().await;
                         }
                         Some(ExecutionFailureRevision::ManualAction) | None => {}
                     }
@@ -5018,6 +5022,14 @@ where
         }
     }
 
+    async fn sync_pending_plan_revision_snapshot(&self) {
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            code_ui_session
+                .set_pending_plan_revision(self.pending_plan_revision.clone())
+                .await;
+        }
+    }
+
     fn begin_managed_interaction(&mut self, mut interaction: CodeUiInteractionRequest) {
         if interaction.options.is_empty() {
             interaction.options = default_managed_interaction_options();
@@ -5106,6 +5118,7 @@ where
         if let Some(spec_json) = self.pending_plan_revision.take() {
             if text.trim_start().starts_with('/') {
                 self.pending_plan_revision = Some(spec_json);
+                self.sync_pending_plan_revision_snapshot().await;
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                     pending_plan_revision_help_message(),
                 )));
@@ -5199,6 +5212,7 @@ where
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
+                self.sync_pending_plan_revision_snapshot().await;
                 self.pending_execution_plan_revision = None;
                 self.pending_auto_plan_repair_execution = None;
                 self.sync_mux_input_context();
@@ -5321,6 +5335,7 @@ where
                     match parse_pending_plan_revision_command(args) {
                         PendingPlanRevisionCommand::ContinueAutoRepair { .. } => {
                             self.pending_plan_revision = Some(spec_json);
+                            self.sync_pending_plan_revision_snapshot().await;
                             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                                 pending_plan_revision_help_message(),
                             )));
@@ -5335,11 +5350,14 @@ where
                                 "Spec revision canceled.".to_string(),
                             )));
                             self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                            self.pending_plan_revision = None;
+                            self.sync_pending_plan_revision_snapshot().await;
                             self.sync_mux_input_context();
                             self.schedule_draw();
                         }
                         PendingPlanRevisionCommand::Invalid => {
                             self.pending_plan_revision = Some(spec_json);
+                            self.sync_pending_plan_revision_snapshot().await;
                             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                                 pending_plan_revision_help_message(),
                             )));
@@ -5939,6 +5957,11 @@ where
         }
         self.pending_execution_plan_revision = None;
         self.pending_plan_revision = None;
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.set_pending_plan_revision(None).await;
+            });
+        }
         self.interrupt_agent_task();
         self.clear_mcp_run_id();
         self.widget.bottom_pane.clear();
@@ -6226,6 +6249,7 @@ where
             _ => {
                 if selected == 1 {
                     self.pending_plan_revision = Some(pending.spec_json);
+                    self.sync_pending_plan_revision_snapshot().await;
                     let msg = format!(
                         "{} Your next plain-text message will revise the current IntentSpec.",
                         pending_plan_revision_help_message()
@@ -7360,6 +7384,7 @@ where
                 pending_plan_revision_help_message(),
             )));
             self.pending_plan_revision = Some(spec_json);
+            self.sync_pending_plan_revision_snapshot().await;
             self.sync_mux_input_context();
             self.schedule_draw();
             return;
@@ -7377,6 +7402,7 @@ where
 
     async fn begin_plan_workflow(&mut self, user_text: String, prompt: String) {
         self.pending_plan_revision = None;
+        self.sync_pending_plan_revision_snapshot().await;
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);

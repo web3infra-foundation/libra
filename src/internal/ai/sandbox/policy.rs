@@ -1,5 +1,7 @@
 //! Policy model for constraining AI tool execution inside a workspace sandbox.
 //!
+//! 在工作区沙箱内约束 AI 工具执行的策略模型。
+//!
 //! Boundary: policy parsing is conservative and treats missing or ambiguous allowlists
 //! as denied operations. Hardening contract tests cover path traversal, shell command,
 //! and workspace-scope boundaries.

@@ -1,4 +1,6 @@
 //! LFS subcommands for authentication, batch negotiation, lock management, and integrating media storage with standard workflows.
+//!
+//! LFS 子命令，用于身份验证、批量协商、锁管理和与标准工作流集成媒体存储。
 
 use std::{
     fs::{File, OpenOptions},

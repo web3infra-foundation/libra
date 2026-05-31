@@ -1,5 +1,7 @@
 //! AI agent domain.
 //!
+//! AI 代理域。
+//!
 //! - `runtime`: execution runtime for AI agents (Agent, tool loop, chat state).
 //! - `profile`: declarative agent profiles and auto-selection/lookup utilities.
 //! - `budget`: per-session and per-agent budget enforcement (OC-Phase 5 P5.3).

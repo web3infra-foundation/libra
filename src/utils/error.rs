@@ -1,5 +1,7 @@
 //! User-facing CLI error rendering utilities.
 //!
+//! 面向用户的 CLI 错误渲染实用程序。
+//!
 //! The CLI uses [`CliError`] as the single user-visible error type at the
 //! process boundary. Domain errors inside commands should be mapped into
 //! [`CliError`] with an explicit stable code, exit code, and hint set instead

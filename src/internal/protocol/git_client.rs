@@ -1,4 +1,6 @@
 //! Git protocol (git://) client that connects over TCP, advertises refs, and streams pack data.
+//!
+//! Git 协议 (git://) 客户端，通过 TCP 连接、广告引用和流式传输包数据。
 
 use std::io::Error as IoError;
 

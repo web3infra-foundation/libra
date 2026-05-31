@@ -1,5 +1,7 @@
 //! # Embedded Web Server for `libra code`
 //!
+//! # `libra code` 的嵌入式网络服务器
+//!
 //! This module serves the static Next.js bundle and the provider-agnostic
 //! `/api/code/*` protocol used by the browser UI.
 

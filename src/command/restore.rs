@@ -1,4 +1,6 @@
 //! Implements restore flows to reset files or entire trees from commits or the index, respecting pathspecs and staged vs worktree targets.
+//!
+//! 实现还原流程，从提交或索引重置文件或整个树，尊重路径规范和暂存与工作树目标。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -163,6 +165,7 @@ pub struct RestoreArgs {
     pub staged: bool,
 }
 
+/// Fire-and-forget entry point for the restore command.
 pub async fn execute(args: RestoreArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -182,6 +185,20 @@ pub async fn execute(args: RestoreArgs) {
 /// Returns [`CliError`] when the repository is missing, the source revision or
 /// pathspecs cannot be resolved, object reads fail, or index/worktree writes
 /// fail.
+///
+/// 还原命令的快速执行入口。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+///
+/// # 副作用
+/// - 从索引或提交树还原选定的路径。
+/// - 设置 `--staged` 时可能重写索引条目。
+/// - 工作树目标活跃时可能覆盖工作树文件。
+/// - 为还原的路径呈现人类可读或 JSON 输出。
+///
+/// # 错误
+/// 当存储库缺失、无法解析源修订或路径规范、对象读取失败或
+/// 索引/工作树写入失败时返回 [`CliError`]。
 pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let result = run_restore(args).await.map_err(CliError::from)?;

@@ -1,5 +1,7 @@
 //! Task workspace preparation and synchronization for orchestrated AI execution.
 //!
+//! 编排 AI 执行的任务工作区准备和同步。
+//!
 //! Boundary: each task receives an isolated copy or FUSE overlay of the main workspace,
 //! then allowed changes are synced back after scope checks. Tests in this module cover
 //! file copy, symlink handling, deletion, contract violations, and cleanup behavior.

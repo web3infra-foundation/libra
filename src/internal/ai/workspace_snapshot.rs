@@ -1,5 +1,7 @@
 //! Workspace snapshot utilities used to compare task worktrees against a baseline.
 //!
+//! 工作区快照实用程序，用于将任务工作树与基线进行比较。
+//!
 //! Boundary: snapshots record relative paths, file content hashes, metadata kind, and
 //! deletion state without following symlinks outside the workspace. Orchestrator
 //! workspace tests cover symlink, deletion, and changed-file edge cases.

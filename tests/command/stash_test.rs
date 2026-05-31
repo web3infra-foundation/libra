@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use libra::{
     command::{
@@ -768,6 +768,225 @@ fn test_stash_branch_refuses_existing_branch() {
         stderr.contains("LBR-CONFLICT-002"),
         "branch conflict should surface ConflictOperationBlocked, stderr: {stderr}"
     );
+}
+
+/// `stash branch` must not create the new branch or overwrite the current
+/// dirty worktree when unrelated local edits exist after the stash was made.
+#[tokio::test]
+#[serial]
+async fn test_stash_branch_refuses_dirty_worktree_without_creating_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "stashed change\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before dirty branch refusal",
+    );
+    fs::write(repo.path().join("tracked.txt"), "local dirty change\n").unwrap();
+
+    let output = run_libra_command(&["stash", "branch", "stash-dirty"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch must refuse dirty worktree"
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("unstaged changes, can't create branch from stash"),
+        "unexpected stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "local dirty change\n",
+        "stash branch refusal must preserve the user's dirty worktree"
+    );
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let branch = Branch::find_branch_result("stash-dirty", None)
+            .await
+            .expect("branch lookup should succeed");
+        assert!(
+            branch.is_none(),
+            "stash branch must not create a branch after dirty-worktree refusal"
+        );
+    }
+
+    let list = run_libra_command(&["stash", "list", "--json"], repo.path());
+    assert_cli_success(&list, "stash list after dirty branch refusal");
+    let json = parse_json_stdout(&list);
+    assert_eq!(
+        json["data"]["entries"]
+            .as_array()
+            .expect("entries array")
+            .len(),
+        1,
+        "stash entry should remain available after dirty-worktree refusal"
+    );
+}
+
+/// Untracked files are also dirty for `stash branch`, because applying the
+/// stashed tree can overwrite an untracked path with the same name.
+#[tokio::test]
+#[serial]
+async fn test_stash_branch_refuses_untracked_worktree_without_side_effects() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "stashed tracked change\n").unwrap();
+    fs::write(repo.path().join("scratch.txt"), "stashed scratch\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before untracked branch refusal",
+    );
+    fs::write(repo.path().join("scratch.txt"), "local untracked scratch\n").unwrap();
+
+    let output = run_libra_command(&["stash", "branch", "stash-untracked"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch must refuse untracked files"
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("untracked files, can't create branch from stash"),
+        "unexpected stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("scratch.txt")).unwrap(),
+        "local untracked scratch\n",
+        "stash branch refusal must not overwrite a conflicting untracked file"
+    );
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let branch = Branch::find_branch_result("stash-untracked", None)
+            .await
+            .expect("branch lookup should succeed");
+        assert!(
+            branch.is_none(),
+            "stash branch must not create a branch after untracked-worktree refusal"
+        );
+    }
+
+    let list = run_libra_command(&["stash", "list", "--json"], repo.path());
+    assert_cli_success(&list, "stash list after untracked branch refusal");
+    let json = parse_json_stdout(&list);
+    assert_eq!(
+        json["data"]["entries"]
+            .as_array()
+            .expect("entries array")
+            .len(),
+        1,
+        "stash entry should remain available after untracked-worktree refusal"
+    );
+}
+
+/// `stash branch` also refuses staged changes before creating a branch, applying
+/// the stash, or dropping the stash entry.
+#[tokio::test]
+#[serial]
+async fn test_stash_branch_refuses_staged_worktree_without_side_effects() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "stashed change\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before staged branch refusal",
+    );
+    fs::write(repo.path().join("tracked.txt"), "local staged change\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage local change before stash branch",
+    );
+
+    let output = run_libra_command(&["stash", "branch", "stash-staged"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch must refuse staged changes"
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("uncommitted changes, can't create branch from stash"),
+        "unexpected stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "local staged change\n",
+        "stash branch refusal must preserve the user's staged worktree"
+    );
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let branch = Branch::find_branch_result("stash-staged", None)
+            .await
+            .expect("branch lookup should succeed");
+        assert!(
+            branch.is_none(),
+            "stash branch must not create a branch after staged-worktree refusal"
+        );
+
+        let staged = libra::command::status::changes_to_be_committed().await;
+        assert!(
+            staged.modified.contains(&PathBuf::from("tracked.txt")),
+            "staged tracked.txt modification must remain in the index"
+        );
+        let unstaged = libra::command::status::changes_to_be_staged()
+            .expect("unstaged status should be readable");
+        assert!(
+            unstaged.is_empty(),
+            "stash branch refusal must not introduce unstaged changes: {unstaged:?}"
+        );
+    }
+
+    let list = run_libra_command(&["stash", "list", "--json"], repo.path());
+    assert_cli_success(&list, "stash list after staged branch refusal");
+    let json = parse_json_stdout(&list);
+    assert_eq!(
+        json["data"]["entries"]
+            .as_array()
+            .expect("entries array")
+            .len(),
+        1,
+        "stash entry should remain available after staged-worktree refusal"
+    );
+}
+
+/// A dirty worktree must not mask the existing "no stash found" failure mode.
+#[tokio::test]
+#[serial]
+async fn test_stash_branch_reports_no_stash_before_dirty_worktree() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "local dirty change\n").unwrap();
+
+    let output = run_libra_command(&["stash", "branch", "missing-stash"], repo.path());
+    assert!(
+        !output.status.success(),
+        "stash branch with no stash must fail"
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("no stash found"),
+        "no-stash priority should be preserved, stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "local dirty change\n",
+        "no-stash failure must preserve the user's dirty worktree"
+    );
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let branch = Branch::find_branch_result("missing-stash", None)
+            .await
+            .expect("branch lookup should succeed");
+        assert!(
+            branch.is_none(),
+            "stash branch must not create a branch when no stash exists"
+        );
+    }
 }
 
 /// `stash branch <name>` must treat a corrupt existing branch row as

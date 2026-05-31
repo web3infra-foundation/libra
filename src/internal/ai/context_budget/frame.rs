@@ -1,4 +1,6 @@
 //! Prompt context-frame records and attachment handling.
+//!
+//! 提示上下文框架记录和附件处理。
 
 use std::{
     collections::HashSet,

@@ -1,5 +1,7 @@
 //! Formatting helpers for `libra log` output modes.
 //!
+//! `libra log` 输出模式的格式化助手。
+//!
 //! Boundary: formatting consumes already-selected commits and decorations; revision
 //! walking and filtering live elsewhere. Command log tests cover empty history,
 //! decorate modes, date formats, and machine-readable output.

@@ -1,4 +1,6 @@
 //! Phase 4 risk aggregation, decision proposals, and derived-record persistence.
+//!
+//! 阶段 4 风险聚合、决策提案和派生记录持久化。
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};

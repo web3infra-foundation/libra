@@ -1,4 +1,6 @@
 //! Utilities module aggregator exposing storage, path, object, LFS, D1 client, and testing helpers.
+//!
+//! 实用程序模块聚合器，公开存储、路径、对象、LFS、D1 客户端和测试助手。
 
 pub mod error;
 #[cfg(unix)]

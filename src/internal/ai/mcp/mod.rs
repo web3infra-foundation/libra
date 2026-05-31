@@ -1,5 +1,7 @@
 //! MCP tools and resources implementation.
 //!
+//! MCP 工具和资源实现。
+//!
 //! # Tools Interface
 //!
 //! | Tool Name | Description |

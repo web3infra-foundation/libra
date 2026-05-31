@@ -1,4 +1,6 @@
 //! Provides grep command logic for searching text patterns in working tree, index, or commit trees
+//!
+//! 提供 grep 命令逻辑，用于在工作树、索引或提交树中搜索文本模式。
 //! with regex support, pathspec filtering, and various output formatting options.
 
 use std::{

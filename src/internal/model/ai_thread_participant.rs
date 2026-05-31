@@ -1,4 +1,6 @@
 //! SeaORM entity for thread participants.
+//!
+//! 线程参与者的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

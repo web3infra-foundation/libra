@@ -1,5 +1,7 @@
 //! Client-side object storage gateway.
 //!
+//! 客户端对象存储网关。
+//!
 //! This module is the synchronous facade that the rest of the codebase uses to read,
 //! write, and search Git objects. It hides three orthogonal concerns:
 //!

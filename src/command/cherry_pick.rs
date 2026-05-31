@@ -1,4 +1,6 @@
 //! Applies commits onto the current branch by replaying their changes into the index/worktree and emitting new commits or conflict notices.
+//!
+//! 通过将其更改重放到索引/工作树中并发出新提交或冲突通知，将提交应用到当前分支。
 
 use std::{
     collections::{HashMap, HashSet},

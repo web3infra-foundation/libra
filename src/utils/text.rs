@@ -1,4 +1,6 @@
 //! Shared text helpers for safe abbreviated display and fuzzy matching.
+//!
+//! 用于安全缩写显示和模糊匹配的共享文本助手。
 
 /// Default short hash width used in human-readable confirmations.
 pub const SHORT_HASH_LEN: usize = 7;

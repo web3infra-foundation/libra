@@ -1,5 +1,7 @@
 //! CLI entry for Libra.
 //!
+//! Libra 的 CLI 入口。
+//!
 //! Defines the clap subcommand grammar, performs cross-cutting preflight (locating the
 //! repository database and pinning the global hash algorithm to whatever is recorded
 //! in `core.objectformat`), and dispatches every parsed command to its `command::*`
@@ -8,6 +10,14 @@
 //! Because every subcommand reads or writes objects whose hash kind must match the
 //! repository's recorded `core.objectformat`, this module is the single point where
 //! that global is configured before any handler runs.
+//!
+//! Libra 的 CLI 入口。
+//!
+//! 定义 clap 子命令语法，执行横切预检（定位存储库数据库并将全局哈希算法锁定到 `core.objectformat`
+//! 中记录的内容），并将每个解析的命令分发到其 `command::*` 处理器。
+//!
+//! 因为每个子命令读取或写入的对象的哈希类型必须与存储库记录的 `core.objectformat` 匹配，此模块
+//! 是在任何处理器运行之前配置该全局变量的单一位置。
 
 use std::{env, io::Write, path::Path};
 
@@ -70,6 +80,19 @@ const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
 ///   panic.
 /// - Currently accepts only `"sha1"` and `"sha256"`; anything else is rejected with a
 ///   fatal error.
+///
+/// 读取存储库的 `core.objectformat` 并锁定全局哈希算法。
+///
+/// 功能范围：
+/// - 打开 `<storage>/<DATABASE>` 处的 SQLite 数据库并读取 `core.objectformat`，当该行不存在时
+///   默认为 `"sha1"`。
+/// - 调用 `git_internal::hash::set_hash_kind` 以使进程其余部分哈希的每个对象都与存储库的存储格式匹配。
+///
+/// 边界条件：
+/// - 当数据库文件缺失时返回致命错误 — 每个非 `init`、非 `clone` 命令都需要一个存储库，默默继续
+///   会用错误的算法哈希对象。
+/// - 当数据库无法打开时返回致命错误（权限、磁盘损坏），以便用户看到底层消息而不是下游恐慌。
+/// - 目前仅接受 `"sha1"` 和 `"sha256"`；任何其他内容都被拒绝并返回致命错误。
 async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
     let db_path = storage.join(utils::util::DATABASE);
     if !db_path.exists() {
@@ -544,6 +567,17 @@ pub enum Bisect {
 ///   [`crate::exec`].
 /// - Returns `CliError::fatal` if the runtime itself cannot be constructed (extremely
 ///   unlikely outside of OOM scenarios).
+///
+/// 同步 CLI 入口 — 由 `libra` 二进制文件和无法（或不愿）拥有自己 Tokio 运行时的嵌入者使用。
+///
+/// 功能范围：
+/// - 构建多线程 Tokio 运行时，然后驱动 [`parse_async`] 完成。
+/// - 当 `args` 为 `None` 时，底层解析器回退到 `std::env::args`。
+///
+/// 边界条件：
+/// - 从现有 Tokio 运行时内调用此函数会崩溃；已经异步的嵌入者必须直接调用 [`parse_async`]。
+///   见 [`crate::exec`] 中的嵌入合约。
+/// - 如果运行时本身无法构造（OOM 场景外极不可能发生），返回 `CliError::fatal`。
 pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -570,6 +604,19 @@ pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
 /// See: [`tests::clap_alias_br_resolves_to_branch`] and friends for related parser
 /// behaviour. The exact rewrite is exercised end-to-end by the integration tests in
 /// `tests/command/log_test.rs`.
+///
+/// 将 Git 风格的 `-<n>` 快捷方式重写为长格式 `-n <n>` 标志，但仅在活动子命令为 `log` 时。
+///
+/// Git 接受 `git log -3` 作为 `git log -n 3` 的速记，但 clap 无法表达纯数字标志而不与位置修订冲突。
+/// 此助手在 clap 看到之前修补 argv，以便用户保留熟悉的快捷方式。
+///
+/// 边界条件：
+/// - 重写仅对 `log` 子命令中任何 `--` 分隔符之前的参数触发，因此恰好看起来像 `-3` 的路径或修订在
+///   用户显式关闭选项列表后会逐字保留。
+/// - 当 `log` 不是活动子命令时，原始 argv 被原样返回，保留每个其他命令的 `-<n>` 语义不变。
+///
+/// 见：[`tests::clap_alias_br_resolves_to_branch`] 和相关项的相关解析器行为。精确重写由
+/// `tests/command/log_test.rs` 中的集成测试端到端运行。
 fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     // Detect the real subcommand position to avoid rewriting positional args for other commands.
     let subcommand = find_subcommand_index(&args);
@@ -1050,6 +1097,28 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
 /// - When `--exit-code-on-warning` is set and at least one warning was recorded, the
 ///   function returns a `CliError::failure` with stable code `WarningEmitted` even
 ///   though the underlying command succeeded.
+///
+/// 异步 CLI 分发器 — 每次 Libra 调用背后的实际协调器。
+///
+/// 功能范围：
+/// 1. 规范化 argv（重写 `log -<n>` 快捷方式，删除前导 `--`）。
+/// 2. 重置每进程警告跟踪器，以便在长期存活的进程（TUI、测试）中 `--exit-code-on-warning` 不会被
+///    先前的调用污染。
+/// 3. 在 clap 解析之前短路 `help error-codes` 主题，因为否则它会被视为未知子命令。
+/// 4. 使用 clap 解析并将每个解析失败转换为结构化 [`CliError`]（见 [`classify_parse_error`]）。
+/// 5. 验证 clap 无法表达的命令特定 arg 约束（例如 [`command::tag::validate_cli_args`]）。
+/// 6. 对于在存储库上运行的命令，运行 [`command_preflight_storage`] 并通过
+///    [`set_local_hash_kind_for_storage`] 初始化全局哈希种类。
+/// 7. 将全局输出标志解析为单个 [`OutputConfig`] 并分发到匹配的 `command::*::execute_safe` 处理器。
+/// 8. 命令返回后，等待任何后台存储任务（对象索引、缓存刷新），以便它们不会被进程退出杀死。
+///
+/// 边界条件：
+/// - `--help` / `--version` 仍通过 clap 渲染，以便输出完全符合用户预期；函数然后返回 `Ok(())`
+///   而不分发。
+/// - `Init` 分支在之后显式恢复原始 CWD，因为处理器可能会 `cd` 进新创建的存储库，下游调用者
+///   （特别是集成测试套件和 `--from-git-repository`）依赖 CWD 在调用中保持稳定。
+/// - 当设置 `--exit-code-on-warning` 且至少记录了一个警告时，函数返回具有稳定代码 `WarningEmitted`
+///   的 `CliError::failure`，即使底层命令成功。
 pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let argv = match args {
         Some(args) => args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -1233,6 +1302,11 @@ mod tests {
     /// The underlying `arg_required_else_help = true` flag triggers clap's
     /// `DisplayHelpOnMissingArgumentOrSubcommand` path, which we treat the same as
     /// `DisplayHelp` — i.e. print and return `Ok(())`.
+    ///
+    /// 场景：运行不带参数的 `libra` 应显示使用信息，不带 `error:` 前缀，匹配 `git` 和其他
+    /// 标准工具的行为。底层 `arg_required_else_help = true` 标志触发 clap 的
+    /// `DisplayHelpOnMissingArgumentOrSubcommand` 路径，我们将其视为与 `DisplayHelp` 相同 —
+    /// 即打印并返回 `Ok(())`。
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn no_subcommand_shows_help_without_error_prefix() {
@@ -1245,6 +1319,10 @@ mod tests {
     /// parsers). This test is the cheapest way to keep the giant `Commands` enum
     /// honest as new subcommands are added.
     /// See: <https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html>
+    ///
+    /// 场景：clap 的 `debug_assert` 遍历整个命令树，并在任何结构错误（重复标志、冲突别名、
+    /// 格式错误的值解析器）上崩溃。此测试是在添加新子命令时保持巨大 `Commands` 枚举诚实的最便宜方式。
+    /// 见：<https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html>
     #[test]
     fn verify_cli() {
         use clap::CommandFactory;
@@ -1256,6 +1334,10 @@ mod tests {
     /// is exposed via `libra config --import`. This test guards the redirect hint
     /// emitted by [`parse_error_hints`] / [`REDIRECTED_COMMANDS`] so users typing the
     /// natural-but-wrong word are pointed at the real flag.
+    ///
+    /// 场景：`libra import` 有意不是子命令，因为导入通过 `libra config --import` 公开。此测试
+    /// 保护由 [`parse_error_hints`] / [`REDIRECTED_COMMANDS`] 发出的重定向提示，以便键入
+    /// 自然但错误的单词的用户被指向真实标志。
     #[tokio::test]
     async fn parse_error_shows_import_hint() {
         let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();

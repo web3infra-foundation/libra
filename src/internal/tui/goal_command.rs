@@ -1,5 +1,7 @@
 //! Parser for the `/goal` family of TUI slash commands.
 //!
+//! `/goal` 系列 TUI 斜杠命令的解析器。
+//!
 //! Per `docs/improvement/opencode.md` lines 686-693, Goal mode exposes
 //! three primary user-facing slash commands plus one criteria-tweak:
 //!

@@ -1,4 +1,6 @@
 //! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
+//!
+//! 通过解析目标提交、创建轻量级或带注释的标记对象、存储参考和列出现有标记来管理标记。
 
 use std::io;
 
@@ -85,6 +87,8 @@ pub struct TagListEntry {
     pub display_message: Option<String>,
 }
 
+/// Fire-and-forget entry point for the tag command.
+/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: TagArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -94,6 +98,12 @@ pub async fn execute(args: TagArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists, creates, or deletes tags depending on the
 /// provided arguments.
+///
+/// 标记命令的快速执行入口。
+/// 委托给 execute_safe 并将任何错误打印到 stderr。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+/// 根据提供的参数列出、创建或删除标记。
 pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_tag(&args).await.map_err(CliError::from)?;
     render_tag_output(&result, output)

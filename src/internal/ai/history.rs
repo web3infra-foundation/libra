@@ -1,5 +1,7 @@
 //! AI workflow history persistence backed by an orphan Git branch.
 //!
+//! 由孤立 Git 分支支持的 AI 工作流历史持久化。
+//!
 //! Libra records every AI process artefact (Intent, Task, Run, Plan,
 //! PatchSet, Evidence, ToolInvocation, Provenance, Decision, ContextFrame,
 //! ...) on a parallel branch named [`AI_REF`] (`libra/intent`). The branch

@@ -1,5 +1,7 @@
 //! Goal state — replayable projection of the event stream.
 //!
+//! 目标状态 — 事件流的可重播投影。
+//!
 //! Per `docs/improvement/opencode.md` lines 567-576, [`GoalState`] is the
 //! supervisor's view of an active Goal: spec, status, plan, completed
 //! criteria, evidence refs, blockers, and the most recent assistant

@@ -1,5 +1,7 @@
 //! Step 2 sub-agent contracts (CEX-S2-10 schema-first runtime contracts).
 //!
+//! 第 2 步子代理契约（CEX-S2-10 模式优先运行时契约）。
+//!
 //! # Status
 //!
 //! This module is **schema-only**: it defines the data types Step 2 will use,
@@ -62,6 +64,7 @@ pub mod event;
 pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
+pub mod parallel;
 pub mod patchset;
 pub mod permission;
 pub mod run;
@@ -253,6 +256,11 @@ pub use event::{
 pub use evidence::{AgentEvidence, AgentType};
 pub use evidence_query::{
     EvidenceFilter, evidence_query_by_scope, evidence_stream, merge_decision_distillable_evidence,
+};
+pub use parallel::{
+    ParallelAdmissionConfig, ParallelAdmissionDecision, ParallelPromotions, ParallelQueueReason,
+    ParallelRunSnapshot, ParallelRunState, ParallelSchedulerSnapshot, ParallelSchedulerState,
+    ParallelTaskRequest,
 };
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;

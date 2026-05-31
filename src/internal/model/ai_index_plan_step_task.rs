@@ -1,4 +1,6 @@
 //! SeaORM entity for the plan step -> task reverse index.
+//!
+//! 计划步骤 -> 任务反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 
