@@ -19,14 +19,14 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
     command::{load_object, verify_pack},
     internal::{
         db::get_db_conn_instance,
-        model::{reference, reflog},
+        model::{object_index, reference, reflog},
     },
     utils::{
         client_storage::ClientStorage,
@@ -249,7 +249,8 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let mut reachability = collect_reachability(&storage).await?;
     trace_reachable(&storage, &mut reachability)?;
 
-    let loose = prune_unreachable_loose_objects(&storage, &reachability, policy, args.dry_run)?;
+    let loose =
+        prune_unreachable_loose_objects(&storage, &reachability, policy, args.dry_run).await?;
     let pack_files = clean_pack_directory(&storage, policy, args.dry_run)?;
 
     let loose_stats = LooseObjectStats {
@@ -664,7 +665,7 @@ fn corrupt_object(hash: &ObjectHash, error: git_internal::errors::GitError) -> C
 }
 
 /// Remove or report unreachable loose objects according to the prune policy.
-fn prune_unreachable_loose_objects(
+async fn prune_unreachable_loose_objects(
     storage: &ClientStorage,
     reachability: &Reachability,
     policy: PrunePolicy,
@@ -688,6 +689,9 @@ fn prune_unreachable_loose_objects(
             } else {
                 remove_file(&loose.path)?;
                 remove_empty_parent_dir(&loose.path)?;
+                if !storage.exist(&loose.hash) {
+                    remove_object_index_rows(&loose.hash).await?;
+                }
                 GcAction::Pruned
             };
             actions.push(GcObjectAction {
@@ -707,6 +711,22 @@ fn prune_unreachable_loose_objects(
         }
     }
     Ok(actions)
+}
+
+/// Remove local cloud-backup index rows for an object no longer present locally.
+async fn remove_object_index_rows(hash: &ObjectHash) -> CliResult<()> {
+    let db = get_db_conn_instance().await;
+    object_index::Entity::delete_many()
+        .filter(object_index::Column::OId.eq(hash.to_string()))
+        .exec(&db)
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!(
+                "failed to remove object_index row for pruned object {hash}: {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    Ok(())
 }
 
 /// Verify valid pack groups and clean stale pack sidecar files.
@@ -927,6 +947,7 @@ mod tests {
     use git_internal::{
         hash::{ObjectHash, get_hash_kind},
         internal::object::{
+            ObjectTrait,
             blob::Blob,
             commit::Commit,
             signature::{Signature, SignatureType},
@@ -1236,6 +1257,7 @@ mod tests {
             PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
             true,
         )
+        .await
         .unwrap();
         assert_eq!(actions[0].action, GcAction::WouldPrune);
         assert!(storage.exist(&blob.id));
@@ -1264,9 +1286,53 @@ mod tests {
             PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
             false,
         )
+        .await
         .unwrap();
         assert_eq!(actions[0].action, GcAction::Pruned);
         assert!(!storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers pruning an object also removing its local cloud index row.
+    async fn prune_unreachable_loose_objects_removes_object_index_row() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("indexed garbage");
+        storage.put(&blob.id, &blob.data, blob.get_type()).unwrap();
+        ClientStorage::wait_for_background_tasks();
+        let db = get_db_conn_instance().await;
+        let before = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .one(&db)
+            .await
+            .unwrap();
+        assert!(before.is_some());
+
+        let reachability = Reachability {
+            loose: list_loose_objects(&path::objects()).unwrap(),
+            roots: HashSet::new(),
+            reachable: HashSet::new(),
+        };
+        let actions = prune_unreachable_loose_objects(
+            &storage,
+            &reachability,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actions[0].action, GcAction::Pruned);
+        let after = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .one(&db)
+            .await
+            .unwrap();
+        assert!(after.is_none());
     }
 
     #[tokio::test]
@@ -1292,6 +1358,7 @@ mod tests {
             PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
             false,
         )
+        .await
         .unwrap();
         assert!(actions.is_empty());
         assert!(storage.exist(&blob.id));
