@@ -30,6 +30,24 @@ use crate::utils::{
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: usize = 256 * 4;
 
+struct HashKindRestoreGuard {
+    previous: HashKind,
+}
+
+impl HashKindRestoreGuard {
+    fn switch_to(next: HashKind) -> Self {
+        let previous = get_hash_kind();
+        set_hash_kind(next);
+        Self { previous }
+    }
+}
+
+impl Drop for HashKindRestoreGuard {
+    fn drop(&mut self) {
+        set_hash_kind(self.previous);
+    }
+}
+
 const VERIFY_PACK_EXAMPLES: &str = "\
 EXAMPLES:
     libra verify-pack objects/pack/pack-abc123.idx                   Verify an index against its sibling .pack
@@ -175,11 +193,9 @@ pub(crate) struct PackInspection {
 /// Verify an explicit `.idx` / `.pack` pair and return reusable pack metadata.
 pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult<PackInspection> {
     let idx_bytes = read_file(idx_file, "pack index")?;
-    if let Some(hash_kind) =
-        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?
-    {
-        set_hash_kind(hash_kind);
-    }
+    let _hash_guard = infer_idx_v2_hash_kind(&idx_bytes)
+        .map_err(|detail| invalid_index(idx_file, detail))?
+        .map(HashKindRestoreGuard::switch_to);
     let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
     let decoded = decode_pack(pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
@@ -200,11 +216,9 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
         .unwrap_or_else(|| idx_file.with_extension("pack"));
 
     let idx_bytes = read_file(&idx_file, "pack index")?;
-    if let Some(hash_kind) =
-        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?
-    {
-        set_hash_kind(hash_kind);
-    }
+    let _hash_guard = infer_idx_v2_hash_kind(&idx_bytes)
+        .map_err(|detail| invalid_index(&idx_file, detail))?
+        .map(HashKindRestoreGuard::switch_to);
     let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?;
     let decoded = decode_pack(&pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
@@ -906,5 +920,16 @@ mod tests {
             .expect_err("duplicate hash should fail");
 
         assert!(err.contains("duplicate object ID"));
+    }
+
+    #[test]
+    /// Covers temporary hash-kind switches being restored on drop.
+    fn hash_kind_restore_guard_restores_previous_kind() {
+        let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+        {
+            let _restore = HashKindRestoreGuard::switch_to(HashKind::Sha256);
+            assert_eq!(get_hash_kind(), HashKind::Sha256);
+        }
+        assert_eq!(get_hash_kind(), HashKind::Sha1);
     }
 }

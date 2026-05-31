@@ -46,7 +46,6 @@ EXAMPLES:
 
 const DEFAULT_PRUNE: &str = "2.weeks.ago";
 const GITLINK_INDEX_MODE: u32 = 0o160000;
-const LIVE_PACK_SIDECARS: &[&str] = &["bitmap", "rev", "mtimes"];
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 const SECONDS_PER_MONTH: u64 = 30 * SECONDS_PER_DAY;
@@ -411,16 +410,25 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
     match policy {
         PrunePolicy::Never => Ok(false),
         PrunePolicy::OlderThan(cutoff) => {
-            let modified = fs::metadata(path)
-                .and_then(|metadata| metadata.modified())
-                .map_err(|error| {
-                    CliError::fatal(format!(
-                        "failed to read metadata for '{}': {}",
-                        path.display(),
-                        format_io_error(&error)
-                    ))
-                    .with_stable_code(StableErrorCode::IoReadFailed)
-                })?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to read metadata for '{}': {}",
+                    path.display(),
+                    format_io_error(&error)
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Ok(false);
+            }
+            let modified = metadata.modified().map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to read metadata for '{}': {}",
+                    path.display(),
+                    format_io_error(&error)
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
             Ok(modified <= cutoff)
         }
     }
@@ -440,8 +448,18 @@ async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability
 
 /// List object files stored in Git-compatible loose-object directories.
 fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
-    if !objects_dir.exists() {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(objects_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect object directory '{}': {}",
+                objects_dir.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
     }
 
     let mut objects = Vec::new();
@@ -458,7 +476,15 @@ fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
         let prefix_path = entry.path();
-        if !prefix_path.is_dir() {
+        let prefix_metadata = fs::symlink_metadata(&prefix_path).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to inspect loose object directory '{}': {}",
+                prefix_path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        if !prefix_metadata.file_type().is_dir() {
             continue;
         }
         let Some(prefix) = prefix_path.file_name().and_then(|name| name.to_str()) else {
@@ -480,7 +506,15 @@ fn list_loose_objects(objects_dir: &Path) -> CliResult<Vec<LooseObject>> {
                     .with_stable_code(StableErrorCode::IoReadFailed)
             })?;
             let path = object_entry.path();
-            if !path.is_file() {
+            let object_metadata = fs::symlink_metadata(&path).map_err(|error| {
+                CliError::fatal(format!(
+                    "failed to inspect loose object entry '{}': {}",
+                    path.display(),
+                    format_io_error(&error)
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+            if !object_metadata.file_type().is_file() {
                 continue;
             }
             let Some(suffix) = path.file_name().and_then(|name| name.to_str()) else {
@@ -818,6 +852,26 @@ fn stash_roots() -> CliResult<HashSet<ObjectHash>> {
 
 /// Read an optional repository metadata file, treating absence as empty data.
 fn read_optional_metadata_file(path: &Path, label: &str) -> CliResult<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CliError::fatal(format!(
+                "refusing to read symlink {label} '{}'",
+                path.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect {label} '{}': {}",
+                path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
+    }
     match fs::read_to_string(path) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -833,8 +887,11 @@ fn read_optional_metadata_file(path: &Path, label: &str) -> CliResult<Option<Str
 /// Parse an object ID read from repository metadata.
 fn parse_stored_hash(raw: &str, source: &str) -> CliResult<ObjectHash> {
     ObjectHash::from_str(raw).map_err(|error| {
-        CliError::fatal(format!("invalid {source} object id '{raw}': {error}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
+        CliError::fatal(format!(
+            "invalid {source} object id ({} bytes): {error}",
+            raw.len()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
     })
 }
 
@@ -1007,31 +1064,56 @@ fn clean_pack_directory(
     dry_run: bool,
 ) -> CliResult<PackStats> {
     let pack_dir = storage.base_path().join("pack");
+    let pack_metadata = match fs::symlink_metadata(&pack_dir) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect pack directory '{}': {}",
+                pack_dir.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
+    };
     let mut stats = PackStats {
-        directory_exists: pack_dir.exists(),
+        directory_exists: pack_metadata.is_some(),
         ..Default::default()
     };
-    if !pack_dir.exists() {
+    let Some(metadata) = pack_metadata else {
+        return Ok(stats);
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        stats.stale_files.push(PackFileAction {
+            path: display_path(&pack_dir),
+            action: PackAction::Retained,
+            reason: "pack directory is not a real directory; retained without traversal"
+                .to_string(),
+        });
         return Ok(stats);
     }
 
     let groups = collect_pack_groups(&pack_dir)?;
-    for (stem, group) in groups {
+    for (_stem, group) in groups {
         let has_keep = group.keep.is_some();
         let has_pack_index_pair = group.pack.is_some() && group.idx.is_some();
         match (&group.pack, &group.idx) {
-            (Some(pack), Some(idx)) => {
-                let inspection = verify_pack::inspect_pack_files(idx, pack).map_err(|error| {
-                    CliError::fatal(format!(
-                        "failed to verify pack group '{}': {}",
-                        stem,
-                        error.render()
-                    ))
-                    .with_stable_code(StableErrorCode::RepoCorrupt)
-                })?;
-                stats.packs_verified += 1;
-                stats.objects_in_packs += inspection.object_count;
-            }
+            (Some(pack), Some(idx)) => match verify_pack::inspect_pack_files(idx, pack) {
+                Ok(inspection) => {
+                    stats.packs_verified += 1;
+                    stats.objects_in_packs += inspection.object_count;
+                }
+                Err(error) => {
+                    stats.stale_files.push(PackFileAction {
+                        path: display_path(pack),
+                        action: PackAction::Retained,
+                        reason: format!(
+                            "pack/index pair failed verification and was retained: {}",
+                            error.render()
+                        ),
+                    });
+                }
+            },
             (Some(pack), None) => {
                 stats.stale_files.push(PackFileAction {
                     path: display_path(pack),
@@ -1052,7 +1134,13 @@ fn clean_pack_directory(
         }
 
         for other in group.others {
-            if has_pack_index_pair && is_live_pack_sidecar(&other) {
+            if group.pack.is_some() || has_pack_index_pair || is_pack_transient_file(&other) {
+                stats.stale_files.push(PackFileAction {
+                    path: display_path(&other),
+                    action: PackAction::Retained,
+                    reason: "pack sidecar retained for an active or potentially active pack stem"
+                        .to_string(),
+                });
                 continue;
             }
             stats.stale_files.push(handle_pack_file(
@@ -1068,11 +1156,11 @@ fn clean_pack_directory(
     Ok(stats)
 }
 
-/// Return whether a pack sidecar is part of a live pack/index group.
-fn is_live_pack_sidecar(path: &Path) -> bool {
+/// Return whether a pack sidecar may belong to an in-progress pack writer.
+fn is_pack_transient_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| LIVE_PACK_SIDECARS.contains(&extension))
+        .is_some_and(|extension| matches!(extension, "lock" | "tmp"))
 }
 
 /// Group pack-directory files by their `pack-*` stem.
@@ -1091,12 +1179,24 @@ fn collect_pack_groups(pack_dir: &Path) -> CliResult<BTreeMap<String, PackGroup>
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to inspect pack directory entry '{}': {}",
+                path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         let Some(stem) = pack_stem(&path) else {
             continue;
         };
+        if metadata.file_type().is_symlink() {
+            groups.entry(stem).or_default().others.push(path);
+            continue;
+        }
+        if !metadata.file_type().is_file() {
+            continue;
+        }
         let group = groups.entry(stem).or_default();
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("pack") => group.pack = Some(path),
@@ -1137,6 +1237,16 @@ fn handle_pack_file(
     has_keep: bool,
     reason: &str,
 ) -> CliResult<PackFileAction> {
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Ok(PackFileAction {
+            path: display_path(path),
+            action: PackAction::Retained,
+            reason: format!("{reason}; symbolic links are never pruned"),
+        });
+    }
     if has_keep {
         return Ok(PackFileAction {
             path: display_path(path),
@@ -1417,6 +1527,29 @@ mod tests {
         fs::write(dir.path().join("ab").join("not-a-hash"), b"x").unwrap();
 
         let objects = list_loose_objects(dir.path()).unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// Covers loose-object scanning refusing symlink directories and files.
+    fn list_loose_objects_skips_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        fs::create_dir(external.path().join("aa")).unwrap();
+        fs::write(external.path().join("aa").join("bbbb"), b"x").unwrap();
+        symlink(external.path().join("aa"), dir.path().join("aa")).unwrap();
+        fs::create_dir(dir.path().join("bb")).unwrap();
+        symlink(
+            external.path().join("aa").join("bbbb"),
+            dir.path().join("bb").join("bbbb"),
+        )
+        .unwrap();
+
+        let objects = list_loose_objects(dir.path()).unwrap();
+
         assert!(objects.is_empty());
     }
 
@@ -1770,8 +1903,8 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    /// Covers retaining orphan pack files while pruning temporary sidecars.
-    async fn clean_pack_directory_retains_orphan_pack_and_prunes_sidecar() {
+    /// Covers retaining orphan pack files and temporary sidecars conservatively.
+    async fn clean_pack_directory_retains_orphan_pack_and_tmp_sidecar() {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
@@ -1803,18 +1936,147 @@ mod tests {
             .unwrap();
         assert_eq!(pack_action.action, PackAction::Retained);
         assert!(pack_action.reason.contains("index can be rebuilt"));
-        assert_eq!(sidecar_action.action, PackAction::Pruned);
+        assert_eq!(sidecar_action.action, PackAction::Retained);
         assert!(pack.exists());
-        assert!(!sidecar.exists());
+        assert!(sidecar.exists());
     }
 
     #[test]
-    /// Covers identifying live pack sidecar extensions.
-    fn is_live_pack_sidecar_accepts_known_extensions() {
-        assert!(is_live_pack_sidecar(Path::new("pack-abcd.bitmap")));
-        assert!(is_live_pack_sidecar(Path::new("pack-abcd.rev")));
-        assert!(is_live_pack_sidecar(Path::new("pack-abcd.mtimes")));
-        assert!(!is_live_pack_sidecar(Path::new("pack-abcd.tmp")));
+    /// Covers identifying pack files that may belong to active writers.
+    fn is_pack_transient_file_accepts_lock_and_tmp() {
+        assert!(is_pack_transient_file(Path::new("pack-abcd.idx.lock")));
+        assert!(is_pack_transient_file(Path::new("pack-abcd.pack.tmp")));
+        assert!(!is_pack_transient_file(Path::new("pack-abcd.bitmap")));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers retaining all sidecars that share an orphan pack stem.
+    async fn clean_pack_directory_retains_orphan_pack_sidecars() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let pack = pack_dir.join("pack-deadbeef.pack");
+        let sidecar = pack_dir.join("pack-deadbeef.promisor");
+        fs::write(&pack, b"orphan").unwrap();
+        fs::write(&sidecar, b"metadata").unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        let sidecar_action = stats
+            .stale_files
+            .iter()
+            .find(|file| file.path.ends_with("pack-deadbeef.promisor"))
+            .unwrap();
+        assert_eq!(sidecar_action.action, PackAction::Retained);
+        assert!(sidecar.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers pack verification failures not aborting unrelated cleanup.
+    async fn clean_pack_directory_retains_bad_pack_and_continues() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let bad_pack = pack_dir.join("pack-bad.pack");
+        let bad_idx = pack_dir.join("pack-bad.idx");
+        let orphan_idx = pack_dir.join("pack-orphan.idx");
+        fs::write(&bad_pack, b"bad pack").unwrap();
+        fs::write(&bad_idx, b"bad idx").unwrap();
+        fs::write(&orphan_idx, b"orphan").unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        let bad_action = stats
+            .stale_files
+            .iter()
+            .find(|file| file.path.ends_with("pack-bad.pack"))
+            .unwrap();
+        let orphan_action = stats
+            .stale_files
+            .iter()
+            .find(|file| file.path.ends_with("pack-orphan.idx"))
+            .unwrap();
+        assert_eq!(bad_action.action, PackAction::Retained);
+        assert_eq!(orphan_action.action, PackAction::Pruned);
+        assert!(bad_pack.exists());
+        assert!(!orphan_idx.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers pack cleanup refusing a symlink pack directory.
+    async fn clean_pack_directory_retains_symlink_pack_directory() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let external = tempdir().unwrap();
+        let external_file = external.path().join("pack-deadbeef.idx");
+        fs::write(&external_file, b"idx").unwrap();
+        let pack_dir = path::objects().join("pack");
+        let _ = fs::remove_dir_all(&pack_dir);
+        fs::create_dir_all(pack_dir.parent().unwrap()).unwrap();
+        symlink(external.path(), &pack_dir).unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files[0].action, PackAction::Retained);
+        assert!(external_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers pack cleanup retaining symlink entries inside pack directories.
+    async fn clean_pack_directory_retains_symlink_pack_entry() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let storage = ClientStorage::init(path::objects());
+        let pack_dir = path::objects().join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let external = tempdir().unwrap();
+        let external_file = external.path().join("outside.idx");
+        fs::write(&external_file, b"idx").unwrap();
+        symlink(&external_file, pack_dir.join("pack-deadbeef.idx")).unwrap();
+
+        let stats = clean_pack_directory(
+            &storage,
+            PrunePolicy::OlderThan(SystemTime::now() + Duration::from_secs(1)),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(stats.stale_files[0].action, PackAction::Retained);
+        assert!(external_file.exists());
     }
 
     #[tokio::test]
@@ -2083,6 +2345,25 @@ mod tests {
     fn parse_stored_hash_rejects_invalid_hash() {
         let error = parse_stored_hash("not-a-hash", "reference").unwrap_err();
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(!error.render().contains("not-a-hash"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// Covers metadata file reads refusing symlinks before reading content.
+    fn read_optional_metadata_file_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let sensitive = dir.path().join("secret");
+        let link = dir.path().join("stash");
+        fs::write(&sensitive, "not-a-hash-secret").unwrap();
+        symlink(&sensitive, &link).unwrap();
+
+        let error = read_optional_metadata_file(&link, "stash reference").unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(!error.render().contains("not-a-hash-secret"));
     }
 
     #[tokio::test]

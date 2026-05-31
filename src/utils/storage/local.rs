@@ -156,7 +156,30 @@ impl LocalStorage {
 
     fn list_all_packs(&self) -> Vec<PathBuf> {
         let pack_dir = self.base_path.join("pack");
-        if !pack_dir.exists() {
+        let metadata = match fs::symlink_metadata(&pack_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => metadata,
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    tracing::warn!(
+                        pack_dir = %pack_dir.display(),
+                        "skipping symlink pack directory"
+                    );
+                }
+                return Vec::new();
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Vec::new();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    pack_dir = %pack_dir.display(),
+                    error = %err,
+                    "failed to inspect pack directory, skipping"
+                );
+                return Vec::new();
+            }
+        };
+        if !metadata.file_type().is_dir() {
             return Vec::new();
         }
         let mut packs = Vec::new();
@@ -183,7 +206,18 @@ impl LocalStorage {
                     continue;
                 }
             };
-            if path.is_file() && path.extension().is_some_and(|ext| ext == "pack") {
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "skipping pack entry with unreadable metadata"
+                    );
+                    continue;
+                }
+            };
+            if metadata.file_type().is_file() && path.extension().is_some_and(|ext| ext == "pack") {
                 packs.push(path);
             }
         }
@@ -196,12 +230,30 @@ impl LocalStorage {
         for pack in packs {
             let idx = pack.with_extension("idx");
             let want_v2 = get_hash_kind() == HashKind::Sha256;
-            let needs_rebuild = if idx.exists() {
-                if want_v2 {
-                    !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
-                } else {
-                    false
+            let idx_metadata = match fs::symlink_metadata(&idx) {
+                Ok(metadata) => Some(metadata),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                Err(err) => {
+                    tracing::warn!(
+                        idx = %idx.display(),
+                        error = %err,
+                        "skipping pack index with unreadable metadata"
+                    );
+                    continue;
                 }
+            };
+            if idx_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.file_type().is_symlink())
+            {
+                tracing::warn!(
+                    idx = %idx.display(),
+                    "skipping symlink pack index to avoid writing outside the object database"
+                );
+                continue;
+            }
+            let needs_rebuild = if idx_metadata.is_some() {
+                want_v2 && !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
             } else {
                 true
             };
