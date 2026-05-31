@@ -467,7 +467,7 @@ async fn ingest_agent_traces(
 ///
 /// `repo_path` is the `.libra` directory used to resolve the Git object
 /// store for checkpoint commit creation (Phase 2.1). Passing `None` skips
-/// the checkpoint commit step on `SessionEnd` and only persists the
+/// the checkpoint commit step on checkpoint-worthy lifecycle events and only persists the
 /// `agent_session` summary; tests use that path so they don't need a live
 /// `libra init` workspace.
 pub(crate) async fn ingest_agent_traces_payload(
@@ -565,7 +565,7 @@ pub(crate) async fn ingest_agent_traces_payload(
 
     let new_state = match event.kind {
         LifecycleEventKind::SessionStart => "active",
-        LifecycleEventKind::SessionEnd => "stopped",
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd => "stopped",
         LifecycleEventKind::Compaction => "condensed",
         LifecycleEventKind::CompactionCompleted => "active",
         _ => "active",
@@ -598,8 +598,11 @@ pub(crate) async fn ingest_agent_traces_payload(
                 ELSE agent_session.metadata_json
             END
     ";
-    let stopped_at: Option<i64> =
-        matches!(event.kind, LifecycleEventKind::SessionEnd).then_some(now);
+    let stopped_at: Option<i64> = matches!(
+        event.kind,
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
+    )
+    .then_some(now);
     conn.execute(Statement::from_sql_and_values(
         backend,
         upsert_sql,
@@ -619,16 +622,14 @@ pub(crate) async fn ingest_agent_traces_payload(
     .await
     .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
 
-    // Phase 2.1: on SessionEnd, materialise a `committed` checkpoint commit
-    // on `refs/libra/agent-traces` and index it in `agent_checkpoint`. The
-    // checkpoint's tree carries metadata.json + transcript blob; events
-    // blob inclusion lands in a follow-up alongside SessionStore JSONL
-    // wiring. Earlier-in-session events (TurnEnd) get checkpoints in a
-    // future change.
-    if matches!(event.kind, LifecycleEventKind::SessionEnd)
-        && let Some(repo) = repo_path
+    // Materialise committed checkpoints at durable agent boundaries. SessionEnd
+    // captures the final snapshot; TurnEnd captures recoverable per-turn state.
+    if matches!(
+        event.kind,
+        LifecycleEventKind::SessionEnd | LifecycleEventKind::TurnEnd
+    ) && let Some(repo) = repo_path
     {
-        write_session_end_checkpoint(
+        write_committed_checkpoint(
             conn,
             repo,
             &session_id,
@@ -666,13 +667,13 @@ fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Write a SessionEnd checkpoint: materialise transcript + metadata blobs,
+/// Write a committed checkpoint: materialise transcript + metadata blobs,
 /// append a commit on `refs/libra/agent-traces`, and insert the
 /// corresponding `agent_checkpoint` row. Errors are surfaced verbatim — a
-/// failure here means the SessionEnd ingest cannot acknowledge a clean
-/// shutdown to the caller.
+/// failure here means the hook ingest cannot acknowledge a clean checkpoint
+/// boundary to the caller.
 #[allow(clippy::too_many_arguments)]
-async fn write_session_end_checkpoint(
+async fn write_committed_checkpoint(
     conn: &sea_orm::DatabaseConnection,
     repo_path: &std::path::Path,
     libra_session_id: &str,
@@ -1817,6 +1818,82 @@ mod tests {
         let _ = tree_oid; // silence unused warning — assertions above
         // already verified the root tree is indexed
         // via the reachability walker
+    }
+
+    /// entire.md §6.3 / §7.1: Stop/TurnEnd must create an intermediate
+    /// committed checkpoint, not wait until SessionEnd, so long-running agent
+    /// sessions can rewind to turn boundaries.
+    #[tokio::test]
+    async fn ingest_turn_end_writes_checkpoint_when_repo_path_provided() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        let repo_path = dir.path().to_path_buf();
+
+        let start = ingest_envelope("SessionStart", "S-turn-cp", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        let stop = ingest_envelope("Stop", "S-turn-cp", json!({}));
+        ingest_agent_traces_payload(
+            &stop,
+            super::super::provider::ProviderHookCommand::Stop,
+            LifecycleEventKind::TurnEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("turn end ok");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT s.state, s.stopped_at, cp.scope, cp.traces_commit, cp.tree_oid, cp.metadata_blob_oid \
+                 FROM agent_session s \
+                 JOIN agent_checkpoint cp ON cp.session_id = s.session_id \
+                 WHERE s.provider_session_id = 'S-turn-cp' LIMIT 1",
+                [],
+            ))
+            .await
+            .expect("query")
+            .expect("turn-end checkpoint row exists");
+
+        assert_eq!(row.try_get_by::<String, _>("state").unwrap(), "stopped");
+        assert!(
+            row.try_get_by::<Option<i64>, _>("stopped_at")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(row.try_get_by::<String, _>("scope").unwrap(), "committed");
+        let traces_commit: String = row.try_get_by("traces_commit").unwrap();
+        let tree_oid: String = row.try_get_by("tree_oid").unwrap();
+        let metadata_blob_oid: String = row.try_get_by("metadata_blob_oid").unwrap();
+        assert!(!traces_commit.is_empty());
+        assert!(!tree_oid.is_empty());
+        assert!(!metadata_blob_oid.is_empty());
+
+        let ref_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT `commit` FROM reference WHERE name = ? AND kind = 'Branch' LIMIT 1",
+                [crate::internal::branch::AGENT_TRACES_BRANCH.into()],
+            ))
+            .await
+            .expect("query agent-traces ref")
+            .expect("agent-traces ref row exists");
+        let head: String = ref_row.try_get_by("commit").unwrap();
+        assert_eq!(head, traces_commit);
+
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+        verify_full_reachability_indexed(&conn, &repo_path, &traces_commit).await;
     }
 
     /// entire.md §8.1 / §13 (P0) end-to-end: a SessionEnd prompt carrying
