@@ -1,5 +1,7 @@
 //! Data structures for the Git LFS HTTP API.
 //!
+//! Git LFS HTTP API 的数据结构。
+//!
 //! These types encode/decode the JSON payloads exchanged with an LFS server: batch
 //! requests, transfer adapter selection, signed action URLs (download/upload/verify),
 //! file locks, and chunked transfer metadata.

@@ -1,6 +1,8 @@
 //! Common helpers for formatting commit messages, parsing embedded GPG signatures, and
 //! validating Conventional Commit styles.
 //!
+//! 用于格式化提交消息、解析嵌入式 GPG 签名和验证 Conventional Commit 样式的通用助手。
+//!
 //! This module is intentionally dependency-light so that it can be shared by both the CLI
 //! command layer and lower-level repository code without introducing dependency cycles.
 //! All functions here are pure (no I/O, no global state) and operate on string slices.

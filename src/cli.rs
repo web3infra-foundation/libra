@@ -1,5 +1,7 @@
 //! CLI entry for Libra.
 //!
+//! Libra 的 CLI 入口。
+//!
 //! Defines the clap subcommand grammar, performs cross-cutting preflight (locating the
 //! repository database and pinning the global hash algorithm to whatever is recorded
 //! in `core.objectformat`), and dispatches every parsed command to its `command::*`

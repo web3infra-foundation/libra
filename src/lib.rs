@@ -1,5 +1,7 @@
 //! Library entry for the Libra CLI.
 //!
+//! Libra CLI 的库入口。
+//!
 //! This crate has two faces:
 //! 1. The `libra` binary (see `main.rs`) parses the process argv and dispatches to
 //!    [`cli::parse`].

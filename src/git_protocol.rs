@@ -1,6 +1,8 @@
 //! Packet-line helpers and service type parsing for the Git smart protocol, covering both
 //! `upload-pack` (fetch/clone) and `receive-pack` (push) flows.
 //!
+//! Git 智能协议的数据包行助手和服务类型解析，涵盖 `upload-pack`（fetch/clone）和 `receive-pack`（push）流。
+//!
 //! The Git smart protocol frames every payload as a sequence of `pkt-line` records: a
 //! 4-byte ASCII hex length header followed by `length - 4` bytes of payload. A length of
 //! `0000` is a flush marker. This module exposes the minimum primitives required to read

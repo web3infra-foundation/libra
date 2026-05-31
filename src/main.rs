@@ -1,5 +1,7 @@
 //! Binary entry point for the `libra` CLI.
 //!
+//! `libra` CLI 的二进制入口点。
+//!
 //! Responsibilities, in order:
 //! 1. Initialise the tracing subscriber (controlled by `LIBRA_LOG` / `RUST_LOG` and the
 //!    optional `LIBRA_LOG_FILE` env var).
