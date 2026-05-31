@@ -220,6 +220,22 @@ pub struct CodeUiInteractionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CodeUiPendingPostPlanSnapshot {
+    pub spec_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub selected: usize,
+    pub network_access: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub automatic_repair_attempts: u8,
+    pub automatic_repair_max_attempts: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CodeUiPlanStep {
     pub step: String,
     pub status: String,
@@ -299,6 +315,8 @@ pub struct CodeUiSessionSnapshot {
     pub usage: Option<CodeUiUsageSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_plan_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_post_plan: Option<CodeUiPendingPostPlanSnapshot>,
     pub plans: Vec<CodeUiPlanSnapshot>,
     pub tasks: Vec<CodeUiTaskSnapshot>,
     pub tool_calls: Vec<CodeUiToolCallSnapshot>,
@@ -320,6 +338,7 @@ impl Default for CodeUiSessionSnapshot {
             transcript: Vec::new(),
             usage: None,
             pending_plan_revision: None,
+            pending_post_plan: None,
             plans: Vec::new(),
             tasks: Vec::new(),
             tool_calls: Vec::new(),
@@ -1702,6 +1721,7 @@ pub fn initial_snapshot(
         transcript: Vec::new(),
         usage: None,
         pending_plan_revision: None,
+        pending_post_plan: None,
         plans: Vec::new(),
         tasks: Vec::new(),
         tool_calls: Vec::new(),
