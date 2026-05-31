@@ -616,25 +616,26 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026052301_source_call_log_down.sql"
             )),
         },
-        // v0.17.906 notes: adds the `notes` table mapping (notes_ref, object)
-        // pairs to blob hashes. Existing repositories initialised before this
-        // migration need the table; for new repositories the bootstrap SQL also
-        // contains the same DDL, so the `IF NOT EXISTS` guard makes this a no-op
-        // there.
-        Migration {
-            version: 2026053001,
-            name: "notes",
-            up: include_str!("../../../sql/migrations/2026053001_notes.sql"),
-            down: Some(include_str!(
-                "../../../sql/migrations/2026053001_notes_down.sql"
-            )),
-        },
         Migration {
             version: 2026053101,
             name: "ai_final_decision",
             up: include_str!("../../../sql/migrations/2026053101_ai_final_decision.sql"),
             down: Some(include_str!(
                 "../../../sql/migrations/2026053101_ai_final_decision_down.sql"
+            )),
+        },
+        // v0.17.906 notes: adds the `notes` table mapping (notes_ref, object)
+        // pairs to blob hashes. Must be registered above the existing schema
+        // head so that repositories already at 2026053101 still apply it.
+        // The DDL is idempotent (CREATE TABLE IF NOT EXISTS) so new
+        // repositories that already have the table via bootstrap SQL see a
+        // no-op.
+        Migration {
+            version: 2026053102,
+            name: "notes",
+            up: include_str!("../../../sql/migrations/2026053102_notes.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026053102_notes_down.sql"
             )),
         },
     ]
@@ -753,7 +754,7 @@ mod tests {
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
         assert_eq!(runner.len(), 9);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026053101));
+        assert_eq!(runner.max_registered_version(), Some(2026053102));
     }
 
     #[test]

@@ -141,30 +141,23 @@ pub async fn add(
         ))
         .await?;
     } else {
-        // INSERT … ON CONFLICT DO NOTHING: if the row already exists the
-        // statement is a no-op and `changes()` returns 0, so we detect the
-        // conflict without a separate SELECT.
-        db.execute(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "INSERT INTO notes (notes_ref, object, blob) VALUES (?, ?, ?) \
-             ON CONFLICT(notes_ref, object) DO NOTHING",
-            [
-                notes_ref.into(),
-                object_str.clone().into(),
-                note_hash.clone().into(),
-            ],
-        ))
-        .await?;
-
-        let changes: Option<i64> = db
-            .query_one(Statement::from_string(
+        // INSERT OR IGNORE: if the row already exists the statement is a
+        // no-op and rows_affected() returns 0, so we detect the conflict
+        // without a separate query that could land on a different pooled
+        // connection.
+        let result = db
+            .execute(Statement::from_sql_and_values(
                 sea_orm::DatabaseBackend::Sqlite,
-                "SELECT changes()",
+                "INSERT OR IGNORE INTO notes (notes_ref, object, blob) VALUES (?, ?, ?)",
+                [
+                    notes_ref.into(),
+                    object_str.clone().into(),
+                    note_hash.clone().into(),
+                ],
             ))
-            .await?
-            .map(|row| row.try_get_by_index(0).unwrap_or(0));
+            .await?;
 
-        if changes == Some(0) {
+        if result.rows_affected() == 0 {
             return Err(NotesError::AlreadyExists {
                 notes_ref: notes_ref.to_string(),
                 object: object_str,

@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053001, 2026053101,
+            2026053101, 2026053102,
         ]
     );
     assert_eq!(
@@ -61,15 +61,15 @@ fn builtin_migrations_register_current_schema_migrations() {
             "approved_permission",
             "agent_usage_stats_agent_name",
             "source_call_log",
-            "notes",
             "ai_final_decision",
+            "notes",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
     assert_eq!(runner.len(), 9);
-    assert_eq!(runner.max_registered_version(), Some(2026053101));
+    assert_eq!(runner.max_registered_version(), Some(2026053102));
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1042,7 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053001, 2026053101,
+            2026053101, 2026053102,
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
@@ -1084,7 +1084,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .expect("rollback past approved_permission");
     assert_eq!(
         rolled,
-        vec![2026053101, 2026053001, 2026052301, 2026050801, 2026050601]
+        vec![2026053102, 2026053101, 2026052301, 2026050801, 2026050601]
     );
     assert!(
         !table_exists(&conn, "approved_permission").await,
@@ -1106,7 +1106,7 @@ async fn approved_permission_up_down_up_round_trip() {
         .expect("second up reapplies cleanly");
     assert_eq!(
         reapplied,
-        vec![2026050601, 2026050801, 2026052301, 2026053001, 2026053101]
+        vec![2026050601, 2026050801, 2026052301, 2026053101, 2026053102]
     );
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);
