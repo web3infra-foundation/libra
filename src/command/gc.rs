@@ -727,6 +727,7 @@ fn clean_pack_directory(
     let groups = collect_pack_groups(&pack_dir)?;
     for (stem, group) in groups {
         let has_keep = group.keep.is_some();
+        let has_pack_index_pair = group.pack.is_some() && group.idx.is_some();
         match (&group.pack, &group.idx) {
             (Some(pack), Some(idx)) => {
                 let inspection = verify_pack::inspect_pack_files(idx, pack).map_err(|error| {
@@ -760,6 +761,9 @@ fn clean_pack_directory(
         }
 
         for other in group.others {
+            if has_pack_index_pair && is_live_pack_sidecar(&other) {
+                continue;
+            }
             stats.stale_files.push(handle_pack_file(
                 &other,
                 policy,
@@ -771,6 +775,13 @@ fn clean_pack_directory(
     }
 
     Ok(stats)
+}
+
+/// Return whether a pack sidecar is part of a live pack/index group.
+fn is_live_pack_sidecar(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| LIVE_PACK_SIDECARS.contains(&extension))
 }
 
 /// Group pack-directory files by their `pack-*` stem.
@@ -1388,6 +1399,15 @@ mod tests {
         assert_eq!(sidecar_action.action, PackAction::Pruned);
         assert!(pack.exists());
         assert!(!sidecar.exists());
+    }
+
+    #[test]
+    /// Covers identifying live pack sidecar extensions.
+    fn is_live_pack_sidecar_accepts_known_extensions() {
+        assert!(is_live_pack_sidecar(Path::new("pack-abcd.bitmap")));
+        assert!(is_live_pack_sidecar(Path::new("pack-abcd.rev")));
+        assert!(is_live_pack_sidecar(Path::new("pack-abcd.mtimes")));
+        assert!(!is_live_pack_sidecar(Path::new("pack-abcd.tmp")));
     }
 
     #[tokio::test]

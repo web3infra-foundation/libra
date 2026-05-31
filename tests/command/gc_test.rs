@@ -1,12 +1,44 @@
 //! Integration tests for `gc`, covering reachability pruning, stale pack cleanup,
 //! structured output, and CLI error handling.
 
-use std::fs;
+use std::{fs, process::Command};
 
 use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
+
+fn packs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs")
+}
+
+fn copy_pack_fixture_to_pack_dir(repo: &std::path::Path, prefix: &str) -> std::path::PathBuf {
+    let pack_dir = repo.join(".libra").join("objects").join("pack");
+    fs::create_dir_all(&pack_dir).expect("failed to create pack dir");
+    let pack_src = fs::read_dir(packs_dir())
+        .expect("read packs dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".pack"))
+        })
+        .unwrap_or_else(|| panic!("pack fixture with prefix {prefix:?} not found"));
+    let pack_dst = pack_dir.join(format!("pack-{prefix}.pack"));
+    fs::copy(pack_src, &pack_dst).expect("copy pack fixture");
+    pack_dst
+}
+
+fn make_file_old(path: &std::path::Path) {
+    let status = Command::new("touch")
+        .arg("-t")
+        .arg("202001010000.00")
+        .arg(path)
+        .status()
+        .expect("touch should run");
+    assert!(status.success(), "touch should update mtime for {path:?}");
+}
 
 fn write_unreachable_blob(repo: &std::path::Path, name: &str, contents: &str) -> String {
     fs::write(repo.join(name), contents).expect("failed to write blob source");
@@ -156,6 +188,32 @@ fn gc_keeps_orphan_pack_index_when_keep_file_exists() {
     assert_cli_success(&output, "gc should respect pack keep file");
 
     assert!(orphan_idx.exists());
+}
+
+#[test]
+#[serial]
+fn gc_keeps_live_pack_sidecars() {
+    let repo = create_committed_repo_via_cli();
+    let pack_path = copy_pack_fixture_to_pack_dir(repo.path(), "small-sha1");
+    let output = run_libra_command(&["index-pack", pack_path.to_str().unwrap()], repo.path());
+    assert_cli_success(&output, "index-pack should build fixture index");
+
+    let bitmap = pack_path.with_extension("bitmap");
+    let rev = pack_path.with_extension("rev");
+    let mtimes = pack_path.with_extension("mtimes");
+    let tmp = pack_path.with_extension("tmp");
+    for path in [&bitmap, &rev, &mtimes, &tmp] {
+        fs::write(path, b"sidecar").expect("failed to write sidecar");
+        make_file_old(path);
+    }
+
+    let output = run_libra_command(&["gc", "--prune=now"], repo.path());
+    assert_cli_success(&output, "gc should keep valid pack sidecars");
+
+    assert!(bitmap.exists());
+    assert!(rev.exists());
+    assert!(mtimes.exists());
+    assert!(!tmp.exists());
 }
 
 #[test]
