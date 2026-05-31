@@ -114,6 +114,7 @@ Every Libra command accepts the following global flags:
 |---------|-------|-------------|-----|
 | `libra cat-file` | | Inspect Git objects and AI objects by type, size, or pretty-printed content | [cat-file.md](cat-file.md) |
 | `libra fsck` | | Verify the integrity of objects, refs, and index in a Libra repository | [fsck.md](fsck.md) |
+| `libra gc` | | Prune unreachable loose objects and clean stale pack sidecar files | [gc.md](gc.md) |
 | `libra hash-object` | | Compute Git-compatible blob object IDs from files or standard input | [hash-object.md](hash-object.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |

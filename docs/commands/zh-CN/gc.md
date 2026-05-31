@@ -1,0 +1,128 @@
+# `libra gc`
+
+清理不可达 loose object，并移除陈旧的 pack 辅助文件。
+
+## 概要
+
+```bash
+libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--force]
+```
+
+## 说明
+
+`libra gc` 会从仓库引用、reflog 和索引出发追踪可达对象，然后按照 prune
+截止时间删除不可达的 loose object。它还会检查 `.libra/objects/pack/`，在没有
+对应 `.keep` 保护且达到 prune 条件时，清理孤立 `.idx` 等陈旧 pack 辅助文件。
+
+有效的 `.pack` + `.idx` 配对会复用 Libra 已有的 `verify-pack` / pack 解码路径
+进行校验。当前实现不会重写有效 pack、不会做 delta compression、不会创建 cruft
+pack、不会过期 reflog，也不会把 loose reachable objects 重新打包。
+
+## 选项
+
+| 标志 | 短选项 | 说明 | 默认值 |
+|------|-------|-------------|---------|
+| `--dry-run` | `-n` | 只报告将被删除的对象和 pack 辅助文件，不实际删除 | 关闭 |
+| `--prune <DATE>` | | 删除早于 `<DATE>` 的不可达 loose object；支持 `now`、`never`、`N.seconds.ago`、`N.minutes.ago`、`N.hours.ago`、`N.days.ago`、`N.weeks.ago`、`N.months.ago` 和 `N.years.ago` | `2.weeks.ago` |
+| `--no-prune` | | 禁用删除，只检查可达性和 pack 状态 | 关闭 |
+| `--aggressive` | | 为 Git 兼容接受该参数；Libra 当前尚不执行 repack 或 delta compression | 关闭 |
+| `--auto` | | 为 Git 兼容接受该参数；Libra 仍执行一次确定性的本地检查 | 关闭 |
+| `--force` | | 为 Git 兼容接受该参数；当前实现没有 gc lock | 关闭 |
+| `--json` | | 输出结构化 JSON 信封 | 关闭 |
+| `--machine` | | 以一行紧凑 JSON 输出同一信封 | 关闭 |
+
+## 示例
+
+```bash
+libra gc
+libra gc --dry-run --prune=now
+libra gc --prune=now
+libra gc --prune=never --json
+```
+
+## 人类可读输出
+
+人类可读模式会打印 loose object 摘要和 pack 目录统计：
+
+```text
+Enumerating loose objects: 3 scanned, 2 reachable, 1 unreachable.
+Pruned 1 loose object(s).
+Checked 1 pack(s), containing 42 indexed object(s).
+Cleaned 0 stale pack file(s).
+```
+
+`--dry-run` 会把删除行切换为 `Would prune` / `Would clean`。`--quiet` 会抑制
+stdout，同时保留 stderr 上的错误和警告。
+
+## 结构化输出
+
+使用 `--json` 时，`libra gc` 返回 `gc` 信封，包含：
+
+- `loose_objects.scanned`、`reachable`、`unreachable`、`pruned`、`retained`
+- `reachable_objects`
+- `unreachable_objects[]`：对象 ID、类型、动作和原因
+- `pack_files.packs_verified`、`objects_in_packs`、`stale_files[]`
+- `warnings[]`：兼容参数被接受但暂不改变行为时的说明
+
+```json
+{
+  "ok": true,
+  "command": "gc",
+  "data": {
+    "prune": "now",
+    "dry_run": false,
+    "loose_objects": {
+      "scanned": 3,
+      "reachable": 2,
+      "unreachable": 1,
+      "pruned": 1,
+      "retained": 0
+    },
+    "reachable_objects": 2,
+    "unreachable_objects": [
+      {
+        "oid": "0123456789abcdef0123456789abcdef01234567",
+        "object_type": "blob",
+        "action": "pruned",
+        "reason": "unreachable loose object matched prune policy"
+      }
+    ],
+    "pack_files": {
+      "directory_exists": true,
+      "packs_verified": 1,
+      "objects_in_packs": 42,
+      "stale_files": []
+    },
+    "warnings": []
+  }
+}
+```
+
+## 兼容性
+
+该命令对齐 Git 的核心安全语义：可达对象会被保留，不可达 loose object 只有在
+prune 策略允许时才会删除。实现范围比 `git gc` 更窄：当前不做完整 repack、bitmap
+生成、commit-graph 维护、reflog 过期或 cruft-pack 创建。
+
+| 功能 | Libra | Git | jj |
+|---------|-------|-----|----|
+| 保留可达对象 | 支持 | 支持 | N/A |
+| 清理旧的不可达 loose object | `--prune <date>` | `--prune=<date>` | N/A |
+| Dry run | `-n` / `--dry-run` | `--dry-run` | N/A |
+| 禁用清理 | `--no-prune` | `--no-prune` | N/A |
+| Pack 校验 | 对有效 pack/index 配对复用 `verify-pack` | 维护流程中 repack/verify | N/A |
+| 重新打包有效对象 | 不支持 | 支持 | N/A |
+| Cruft packs | 不支持 | 支持 | N/A |
+| Reflog 过期 | 不支持 | 支持 | N/A |
+| JSON 输出 | `--json` / `--machine` | N/A | N/A |
+
+## 错误处理
+
+| 场景 | StableErrorCode | 退出码 |
+|----------|-----------------|------|
+| 不在 Libra 仓库内 | `LBR-REPO-001` | 128 |
+| Prune 日期无效 | `LBR-CLI-002` | 129 |
+| 无法读取对象存储 | `LBR-IO-001` | 128 |
+| 可达对象格式错误或缺失 | `LBR-REPO-002` | 128 |
+| Pack/index 配对格式错误或不一致 | `LBR-REPO-002` | 128 |
+| 删除对象或 pack 辅助文件失败 | `LBR-IO-002` | 128 |

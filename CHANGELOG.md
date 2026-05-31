@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`libra gc`**: Maintenance command that traces refs, reflogs, and index
+  entries to keep reachable objects, prunes unreachable loose objects according
+  to `--prune`, supports `--dry-run` and `--json`, and cleans stale pack
+  sidecars while preserving `.keep`-protected packs. Valid pack/index pairs are
+  verified through the existing `verify-pack` path; full Git-style repacking and
+  delta compression remain deferred.
 - **Cross-cutting `--help` EXAMPLES rollout (v0.17.812..v0.17.836, sealed
   v0.17.837)**: every visible command in `src/cli.rs::Commands` now ends
   its `--help` output with an `EXAMPLES:` section listing the canonical
