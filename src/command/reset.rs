@@ -1,4 +1,6 @@
 //! Reset command covering soft/mixed/hard behaviors to move HEAD and align the index or working tree to a chosen commit.
+//!
+//! 重置命令，涵盖软/混合/硬行为，移动 HEAD 并将索引或工作树对齐到所选提交。
 
 use std::{
     collections::HashSet,
@@ -113,6 +115,12 @@ pub struct ResetOutput {
 /// - Soft: Only moves HEAD pointer
 /// - Mixed: Moves HEAD and resets index (default)
 /// - Hard: Moves HEAD, resets index and working directory
+///
+/// 使用给定参数执行重置命令。
+/// 将当前 HEAD 重置到指定状态，具有不同的模式：
+/// - 软：仅移动 HEAD 指针
+/// - 混合：移动 HEAD 和重置索引（默认）
+/// - 硬：移动 HEAD、重置索引和工作目录
 pub async fn execute(args: ResetArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -132,6 +140,18 @@ pub async fn execute(args: ResetArgs) {
 /// Returns [`CliError`] when the repository is missing, the revision or
 /// pathspecs cannot be resolved, object reads fail, or HEAD/index/worktree
 /// updates fail.
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+///
+/// # 副作用
+/// - 将 HEAD/当前分支移动到已解析的目标提交。
+/// - 在混合模式下，从目标树或路径规范重写索引。
+/// - 在硬模式下，重写索引和工作树。
+/// - 为可恢复的文件系统清理问题发出警告。
+///
+/// # 错误
+/// 当存储库缺失、无法解析修订或路径规范、对象读取失败或
+/// HEAD/索引/工作树更新失败时返回 [`CliError`]。
 pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_reset(args).await.map_err(CliError::from)?;
     render_reset_output(&result.output, output)?;
