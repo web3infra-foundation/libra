@@ -1,5 +1,7 @@
 //! Embedded Worker template (`worker/`).
 //!
+//! 嵌入式 Worker 模板 (`worker/`)。
+//!
 //! Phase 6/7 requires the Libra binary to ship the Worker template
 //! source-only — no `node_modules/`, no generated `.next/`, no
 //! `.open-next/`, no `.wrangler/`, no `.env*`. `libra publish init`

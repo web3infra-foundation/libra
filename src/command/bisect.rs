@@ -1,5 +1,7 @@
 //! Binary-search regression hunting (`libra bisect`).
 //!
+//! 二分搜索回归猎取（`libra bisect`）。
+//!
 //! Implements the full `bisect` subcommand family (`start`, `bad`, `good`,
 //! `reset`, `skip`, `log`) by walking the commit graph between a known "good"
 //! ancestor and a known "bad" descendant.

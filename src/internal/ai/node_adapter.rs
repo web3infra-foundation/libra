@@ -1,5 +1,7 @@
 //! DAG node adapters for AI agents.
 //!
+//! AI 代理的 DAG 节点适配器。
+//!
 //! This module is the bridge layer between the high-level AI agent runtime and the
 //! lower-level `dagrs` DAG executor. By implementing the `dagrs::Action` trait on
 //! agent-shaped wrappers, callers can drop an LLM-driven agent into any node of an

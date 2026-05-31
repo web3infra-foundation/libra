@@ -2,6 +2,8 @@
 //! table — persistent telemetry of every external Source / MCP /
 //! OpenAPI call routed through [`SourcePool`].
 //!
+//! [`source_call_log`] 表的 SeaORM 实体 - 通过 [`SourcePool`] 路由的每个外部源/MCP/OpenAPI 调用的持久遥测。
+//!
 //! Migrations land via `sql/migrations/2026052301_source_call_log{,_down}.sql`
 //! and the entity is registered in [`crate::internal::model`].
 //!

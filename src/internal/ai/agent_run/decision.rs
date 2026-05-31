@@ -1,6 +1,8 @@
 //! `MergeCandidate[S]` and `MergeDecision[E]` — Layer 1 aggregate of one or
 //! more `AgentPatchSet`s plus the human-gated decision applied to them.
 //!
+//! `MergeCandidate[S]` 和 `MergeDecision[E]` — 一个或多个 `AgentPatchSet` 加上应用于它们的人工门控决策的第 1 层聚合。
+//!
 //! # Schema-ownership boundaries
 //!
 //! Per CEX-S2-13 ownership rule (and audit-closure note in `mod.rs`), this

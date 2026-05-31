@@ -3,6 +3,11 @@
 //!
 //! Error rendering and stable-code expectations are part of the CLI contract:
 //! see `docs/development/cli-error-contract-design.md`.
+//!
+//! 通过创建 .libra 存储、初始化 HEAD 和默认 refs/config，以及准备支持数据库来初始化存储库。
+//!
+//! 错误呈现和稳定代码期望是 CLI 契约的一部分：
+//! 见 `docs/development/cli-error-contract-design.md`。
 
 use std::{
     env, fs,
@@ -43,6 +48,10 @@ const EXAMPLES: &str = r#"EXAMPLES:
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
 // changing that block, we reference the imported symbols here in a private, dead-code helper.
+//
+// 注意：`src/command/init.rs` 第 3-20 行是此工作空间中受保护的合并冲突块。
+// 该块内的导入必须保持原样。为了避免 `unused_imports` 警告而不更改该块，
+// 我们在此私有、死代码助手中引用导入的符号。
 #[allow(dead_code, deprecated)]
 fn _touch_conflict_imports() {
     let _ = env::current_dir;
@@ -119,6 +128,9 @@ impl From<InitError> for CliError {
             InitError::InvalidArgument { message, hint } => {
                 // Intent: invalid init flags are user-correctable CLI usage
                 // errors, not repository or filesystem failures.
+                //
+                // 意图：无效的 init 标志是用户可纠正的 CLI 使用错误，
+                // 而不是存储库或文件系统故障。
                 let mut cli = CliError::command_usage(message)
                     .with_stable_code(StableErrorCode::CliInvalidArguments);
                 if let Some(hint) = hint {
@@ -130,6 +142,9 @@ impl From<InitError> for CliError {
                 // Intent: this is an invalid repository state, not an I/O
                 // failure. The recovery is to remove the existing Libra state
                 // before retrying.
+                //
+                // 意图：这是一个无效的存储库状态，而不是 I/O 故障。
+                // 恢复是在重试之前移除现有的 Libra 状态。
                 let remove_target = if path.file_name() == Some(std::ffi::OsStr::new(ROOT_DIR)) {
                     ".libra/".to_string()
                 } else {
@@ -145,6 +160,9 @@ impl From<InitError> for CliError {
             InitError::SourcePathNotFound { path } => {
                 // Intent: conversion cannot read the requested source path; the
                 // repository state is unchanged, so classify as a read failure.
+                //
+                // 意图：转换无法读取请求的源路径；
+                // 存储库状态未改变，因此分类为读取失败。
                 CliError::fatal(format!(
                     "source git repository '{}' does not exist",
                     path.display()
@@ -160,6 +178,9 @@ impl From<InitError> for CliError {
             InitError::TemplateNotFound { path } => {
                 // Intent: `--template` points at a filesystem resource that
                 // could not be read; keep the user hint focused on the path.
+                //
+                // 意图：`--template` 指向无法读取的文件系统资源；
+                // 将用户提示保持在路径上。
                 CliError::fatal(format!(
                     "template directory '{}' does not exist",
                     path.display()
@@ -178,6 +199,9 @@ impl From<InitError> for CliError {
                 // Intent: conversion failures may leave partially initialized
                 // repository state, so route agents toward cleanup/retry rather
                 // than treating the source Git repository as merely unreadable.
+                //
+                // 意图：转换失败可能会留下部分初始化的存储库状态，
+                // 因此将代理引导到清理/重试，而不是将源 Git 存储库视为仅不可读。
                 CliError::fatal(format!(
                     "conversion from git repository '{}' failed during {stage}: {message}",
                     repo.display()
@@ -188,6 +212,10 @@ impl From<InitError> for CliError {
                 // Intent: vault setup runs after repository metadata exists;
                 // failure here means an internal initialization invariant broke
                 // and should be reported with enough context for maintainers.
+                //
+                // 意图：保险库设置在存储库元数据存在后运行；
+                // 这里的失败意味着内部初始化不变量破裂，
+                // 应该以足够的上下文为维护人员报告。
                 CliError::fatal(format!("vault initialization failed: {message}"))
                     .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
@@ -211,6 +239,9 @@ impl From<InitError> for CliError {
             InitError::Database(error) => {
                 // Intent: schema/bootstrap failures violate the init contract
                 // because a newly created repo must always have a usable DB.
+                //
+                // 意图：架构/引导失败违反了 init 契约，
+                // 因为新创建的仓库必须始终有一个可用的数据库。
                 CliError::fatal(format!("database initialization failed: {error}"))
                     .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
@@ -339,6 +370,16 @@ impl Drop for CurrentDirGuard {
 /// # Errors
 /// This compatibility entry does not return errors. Call [`execute_safe`] when
 /// the caller must observe failure details or stable error codes.
+///
+/// `libra init` 的快速执行 CLI 分发器入口。
+///
+/// # 副作用
+/// - 使用默认的 [`OutputConfig`] 委托给 [`execute_safe`]。
+/// - 将任何呈现的 [`CliError`] 打印到 stderr。
+///
+/// # 错误
+/// 这个兼容性入口不返回错误。当调用者必须观察失败详情或稳定错误代码时，
+/// 调用 [`execute_safe`]。
 pub async fn execute(args: InitArgs) {
     if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
         error.print_stderr();
@@ -364,6 +405,22 @@ pub async fn execute(args: InitArgs) {
 /// already initialized, layout/database creation fails, Git conversion fails, or
 /// vault/signing setup cannot complete. Stable error-code mapping follows
 /// `docs/development/cli-error-contract-design.md`.
+///
+/// 执行存储库初始化并呈现请求的输出格式。
+///
+/// # 副作用
+/// - 创建目标存储库存储布局（非裸库的 `.libra/`，或 `--bare` 的目标目录）。
+/// - 初始化 SQLite 数据库并写入核心配置加 HEAD/分支参考行。
+/// - 安装默认钩子和排除模板，除非 `--template` 提供替代品。
+/// - 为非裸库创建或更新根 `.libraignore`。
+/// - 可选择从现有 Git 存储库转换对象/参考。
+/// - 初始化保险库凭据和 PGP 签名密钥，除非 `--vault false`。
+/// - 根据 [`OutputConfig`] 发出人类可读或 JSON 输出。
+///
+/// # 错误
+/// 当验证失败、存储库已初始化、布局/数据库创建失败、Git 转换失败或
+/// 保险库/签名设置无法完成时，返回结构化的 [`CliError`]。稳定错误代码
+/// 映射遵循 `docs/development/cli-error-contract-design.md`。
 pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()> {
     let mut effective_output = output.clone();
     if args.quiet {
@@ -455,6 +512,16 @@ fn display_home_relative(path: &str) -> String {
 /// # Errors
 /// Returns [`InitError`] directly so tests and higher-level commands can assert
 /// the domain failure before CLI error mapping.
+///
+/// 运行初始化而不呈现输出。
+///
+/// # 副作用
+/// 与 [`execute_safe`] 相同的存储库、数据库、参考、转换、忽略文件和保险库写入，
+/// 但不发出人类可读/JSON 成功输出。
+///
+/// # 错误
+/// 直接返回 [`InitError`]，以便测试和更高级命令可以在 CLI 错误映射之前
+/// 断言域失败。
 pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError> {
     run_init_internal(args, &InitProgress::disabled()).await
 }
@@ -467,6 +534,14 @@ pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError> {
 ///
 /// # Errors
 /// Returns the underlying [`InitError`] and discards the success metadata.
+///
+/// 为测试和较旧的调用站点保留的旧初始化帮助器。
+///
+/// # 副作用
+/// 执行与 [`run_init`] 相同的存储库初始化写入。
+///
+/// # 错误
+/// 返回底层的 [`InitError`] 并丢弃成功元数据。
 pub async fn init(args: InitArgs) -> Result<(), InitError> {
     run_init(args).await.map(|_| ())
 }
@@ -517,6 +592,9 @@ async fn run_init_internal(
     // INVARIANT: the database must exist before refs, config, conversion, or
     // vault setup run; those later stages persist their durable state through
     // this connection/path and assume schema bootstrap has completed.
+    //
+    // 不变量：数据库必须在参考、配置、转换或保险库设置运行之前存在；
+    // 这些后期阶段通过此连接/路径保持其持久状态，并假设架构引导已完成。
     let conn = create_database_connection(&database_path).await?;
     let repo_id = init_config(&conn, args.bare, &object_format, &ref_format).await?;
 
@@ -524,6 +602,9 @@ async fn run_init_internal(
     // INVARIANT: refs are initialized after core config so HEAD/branch rows are
     // tied to the repository identity and hash/ref-format choices already stored
     // in config.
+    //
+    // 不变量：在核心配置之后初始化参考，以便 HEAD/分支行与
+    // 已存储在配置中的存储库身份和哈希/参考格式选择相关联。
     initialize_refs(&conn, &initial_branch_name).await?;
 
     set_dir_hidden(&root_dir)?;
@@ -549,6 +630,9 @@ async fn run_init_internal(
         // INVARIANT: conversion helpers read/write paths relative to the target
         // worktree, so the temporary cwd switch must be active for the full
         // conversion call and must be dropped before later stages continue.
+        //
+        // 不变量：转换助手相对于目标工作树读取/写入路径，因此临时 cwd
+        // 切换必须对整个转换调用处于活动状态，并且必须在后续阶段继续之前被放弃。
         let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
         let report = convert::convert_from_git_repository(&source, args.bare).await?;
         warnings.extend(report.warnings);
@@ -562,6 +646,10 @@ async fn run_init_internal(
         // INVARIANT: vault bootstrap runs after DB/config/ref initialization
         // because it records signing state in the repo DB and must roll back its
         // own vault files if credential or key generation fails.
+        //
+        // 不变量：保险库引导在数据库/配置/参考初始化之后运行，
+        // 因为它在仓库数据库中记录签名状态，并且如果凭据或密钥生成失败，
+        // 必须回滚其自己的保险库文件。
         let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
         init_vault_for_repo(&root_dir, &database_path).await?;
     } else {
@@ -1122,6 +1210,13 @@ mod tests {
     use super::{DEFAULT_BRANCH, InitArgs, InitError, run_init};
     use crate::utils::test::{self, ChangeDirGuard};
 
+    /// Test scenario: Verify that InitError display trait correctly renders all error variants.
+    /// This test ensures that error messages are human-readable and preserve all context
+    /// information (path, message, stage) needed for debugging.
+    ///
+    /// 测试场景：验证 InitError 显示 trait 正确呈现所有错误变体。
+    /// 此测试确保错误消息可被人类读取，并保留调试所需的所有上下文信息
+    /// （路径、消息、阶段）。
     #[test]
     fn init_error_display_pins_owned_variants() {
         assert_eq!(
@@ -1185,6 +1280,14 @@ mod tests {
         );
     }
 
+    /// Test scenario: Verify that run_init does not emit progress or summary output to stdout/stderr
+    /// when called by internal callers. This ensures the function remains composable in library contexts
+    /// where output would be unwanted. Tests three output scenarios: progress messages, summary messages,
+    /// and correct return metadata despite silent execution.
+    ///
+    /// 测试场景：验证当由内部调用者调用时，run_init 不会向 stdout/stderr 发出进度或摘要输出。
+    /// 这确保该函数在不需要输出的库上下文中保持可组合性。测试三种输出场景：
+    /// 进度消息、摘要消息，以及尽管执行无声但仍然返回正确的元数据。
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn run_init_is_silent_for_internal_callers() {

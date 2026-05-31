@@ -1,4 +1,6 @@
 //! Implements `clean` to remove untracked files from the working tree.
+//!
+//! 实现 `clean` 以从工作树中删除未跟踪的文件。
 
 use std::{
     fs,

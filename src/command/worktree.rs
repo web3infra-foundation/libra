@@ -1,5 +1,7 @@
 //! `libra worktree` command implementation.
 //!
+//! `libra worktree` 命令实现。
+//!
 //! Boundary: manages linked worktree metadata and filesystem layout while preserving
 //! main-worktree safety invariants. Command tests cover add/list/remove, duplicate
 //! paths, and main-worktree protection.

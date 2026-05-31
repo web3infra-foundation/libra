@@ -1,5 +1,7 @@
 //! Terminal management for the TUI.
 //!
+//! TUI 的终端管理。
+//!
 //! Owns the crossterm bootstrap (raw mode, bracketed paste, keyboard
 //! enhancement flags, focus change, alternate screen), the matching teardown,
 //! and a unified [`TuiEvent`] stream that merges:

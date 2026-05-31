@@ -1,4 +1,6 @@
 //! Implements `verify-pack` for validating `.idx` files against their pack.
+//!
+//! 实现 `verify-pack` 以验证 `.idx` 文件与其 pack 的对应关系。
 
 use std::{
     collections::BTreeMap,

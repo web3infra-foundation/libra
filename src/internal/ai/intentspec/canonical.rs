@@ -1,6 +1,8 @@
 //! Canonicalization logic that converts draft IntentSpec data into stable serialized
 //! form.
 //!
+//! 将草稿 IntentSpec 数据转换为稳定序列化形式的规范化逻辑。
+//!
 //! Boundary: canonicalization normalizes order, defaults, and aliases while preserving
 //! user intent; semantic validation is left to `validator`. Tests compare canonical
 //! JSON output so AI plans and persisted objects remain stable across refactors.

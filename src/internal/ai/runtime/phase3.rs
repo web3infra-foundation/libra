@@ -1,4 +1,6 @@
 //! Phase 3 validation pipeline and derived-record persistence.
+//!
+//! 阶段 3 验证管道和派生记录持久化。
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

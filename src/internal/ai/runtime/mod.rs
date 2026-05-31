@@ -1,5 +1,7 @@
 //! Shared runtime contracts for the `libra code` workflow.
 //!
+//! `libra code` 工作流的共享运行时契约。
+//!
 //! Phase 0 keeps this module contract-only so existing provider paths can adapt
 //! to one stable surface before scheduler and provider cutover starts.
 

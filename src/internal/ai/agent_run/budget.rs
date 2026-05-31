@@ -1,5 +1,7 @@
 //! `AgentBudget[S]` snapshot.
 //!
+//! `AgentBudget[S]` 快照。
+//!
 //! Five enforcement dimensions per CEX-S2-12 (3) and the `RunUsage[E]` row of
 //! the Step 2 core-objects table. Concrete field names mirror the
 //! `agent_usage_stats` schema owned by Step 1.11 / CEX-16.

@@ -1,4 +1,6 @@
 //! SeaORM entity for per-thread scheduler state.
+//!
+//! 每个线程调度器状态的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

@@ -4,6 +4,11 @@
 //! The execution layer (`execute_clone`) produces a structured [`CloneOutput`]
 //! and the rendering layer (`execute_safe`) converts it to human / JSON /
 //! machine output according to the global [`OutputConfig`].
+//!
+//! 支持通过解析 URL、通过协议客户端获取对象、检出工作树和写入初始参考/配置来克隆存储库。
+//!
+//! 执行层（`execute_clone`）生成结构化 [`CloneOutput`]，
+//! 呈现层（`execute_safe`）根据全局 [`OutputConfig`] 将其转换为人类可读 / JSON / 机器输出。
 
 use std::{
     collections::BTreeSet,
@@ -961,6 +966,8 @@ fn clear_directory_contents(dir: &Path) -> io::Result<()> {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Fire-and-forget entry point for the clone command.
+/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: CloneArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -984,6 +991,25 @@ pub async fn execute(args: CloneArgs) {
 ///
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
+///
+/// 克隆命令的快速执行入口。
+/// 委托给 execute_safe 并将任何错误打印到 stderr。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+///
+/// # 副作用
+/// - 创建目标存储库布局和对象存储。
+/// - 从远程 URL 获取对象并写入参考/配置。
+/// - 为非裸克隆检出工作树。
+/// - 在成功或失败后还原原始进程工作目录。
+/// - 需要克隆清理时可能删除部分创建的目标。
+///
+/// # 错误
+/// 当目标验证失败、远程协商或对象传输失败、参考/配置无法写入、
+/// 检出失败、清理失败或无法还原原始工作目录时返回 [`CliError`]。
+///
+/// 这是 **呈现层**：它调用 `execute_clone()` 获取 `CloneOutput`，
+/// 然后根据 `OutputConfig` 呈现它。
 pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
     let original_dir = util::cur_dir();
     let (result, cleanup_warning) = execute_clone(&args, &original_dir, output).await;

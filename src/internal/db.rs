@@ -1,5 +1,7 @@
 //! SQLite connection bootstrapping and schema migration.
 //!
+//! SQLite 连接引导和模式迁移。
+//!
 //! Responsibilities:
 //! - Open SQLite databases under `.libra/libra.db` (per-repo) and
 //!   `~/.libra/config.db` (global), cached by path.

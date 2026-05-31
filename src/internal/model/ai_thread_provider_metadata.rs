@@ -1,4 +1,6 @@
 //! SeaORM entity for provider-specific thread diagnostics metadata.
+//!
+//! 提供商特定线程诊断元数据的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

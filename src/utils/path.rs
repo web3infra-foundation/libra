@@ -1,4 +1,6 @@
 //! Path builders for repository storage: index, objects, database, hooks, and attributes locations relative to the working directory.
+//!
+//! 存储库存储的路径构建器：相对于工作目录的索引、对象、数据库、钩子和属性位置。
 
 use std::{io, path::PathBuf};
 

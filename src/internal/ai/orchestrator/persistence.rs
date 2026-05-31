@@ -1,6 +1,8 @@
 //! Persistence layer for orchestrator plans, tasks, runs, evidence, decisions, and
 //! projection records.
 //!
+//! 编排器计划、任务、运行、证据、决策和投影记录的持久化层。
+//!
 //! Boundary: persistence writes immutable AI objects plus index rows; it must preserve
 //! idempotency for retries and produce rebuildable projection state. Storage-flow,
 //! schema-migration, and scheduler tests cover replay, duplicate writes, and missing

@@ -1,4 +1,6 @@
 //! Main application structure and event loop.
+//!
+//! 主应用程序结构和事件循环。
 //! 中文：该注释与英文“Main application structure and event loop.”含义一致。
 //!
 //! The `App` struct manages the TUI state and coordinates between

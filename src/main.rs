@@ -1,4 +1,12 @@
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    reason = "Bilingual mirrored rustdoc keeps source comments readable but does not always map cleanly to Markdown list indentation"
+)]
+
 //! Binary entry point for the `libra` CLI.
+//!
+//! `libra` CLI 的二进制入口点。
 //!
 //! Responsibilities, in order:
 //! 1. Initialise the tracing subscriber (controlled by `LIBRA_LOG` / `RUST_LOG` and the
@@ -8,6 +16,14 @@
 //! 3. Block on the CLI dispatcher and translate its result into a process exit code,
 //!    rendering errors through the same [`OutputConfig`] machinery the dispatcher uses
 //!    so that `--json` and friends keep behaving consistently when parsing itself fails.
+//!
+//! `libra` CLI 的二进制入口点。
+//!
+//! 职责，按顺序：
+//! 1. 初始化追踪订阅者（由 `LIBRA_LOG` / `RUST_LOG` 和可选的 `LIBRA_LOG_FILE` 环境变量控制）。
+//! 2. 生成一个专用线程，堆栈大小为 32 MiB，使智能协议代码路径中的深层调用链不会溢出默认线程堆栈。
+//! 3. 在 CLI 分发器上阻塞并将其结果翻译为进程退出代码，通过与分发器相同的 [`OutputConfig`] 机制渲染错误，
+//!    以便 `--json` 等在解析本身失败时保持一致的行为。
 
 use std::{fs::OpenOptions, path::PathBuf, sync::Mutex};
 
@@ -32,6 +48,19 @@ use tracing_subscriber::EnvFilter;
 ///   hint; thread panics bypass the `CliError` rendering path.
 /// - On a clean `Err(CliError)`, the exit code is sourced from
 ///   [`CliError::exit_code`] so each error class has a stable code.
+///
+/// 进程入口点。
+///
+/// 功能范围：
+/// - 设置日志记录，在高堆栈线程上运行 CLI，并将任何错误转换为非零退出代码。该函数有意不返回
+///   `Result` — 退出代码是二进制入口点的唯一有意义的表面。
+///
+/// 边界条件：
+/// - 如果 CLI 线程生成失败，则以代码 `1` 退出并在 stderr 上显示致命消息（无 JSON，因为我们
+///   从未达到足够了解用户偏好的程度）以及标准的内部错误报告提示。
+/// - 如果 CLI 线程崩溃，也以代码 `1` 退出，并显示固定消息加上相同的提示；线程崩溃绕过 `CliError`
+///   渲染路径。
+/// - 在干净的 `Err(CliError)` 上，退出代码源自 [`CliError::exit_code`]，因此每个错误类都有一个稳定的代码。
 fn main() {
     init_tracing();
 
@@ -87,6 +116,21 @@ fn main() {
 ///   to stderr but never fail the process.
 /// - If `LIBRA_LOG_FILE` cannot be opened, we warn on stderr and leave tracing
 ///   disabled — we never crash the CLI just because logging failed.
+///
+/// 配置全局 [`tracing`] 订阅者。
+///
+/// 功能范围：
+/// - 从 `LIBRA_LOG` 读取过滤器指令，回退到 `RUST_LOG`，仅在设置 `LIBRA_LOG_FILE` 时回退到 `libra=debug`
+///   （这样文件永远不会以没有有用内容的方式创建）。
+/// - 当设置 `LIBRA_LOG_FILE` 时，以追加模式打开该文件并将事件路由到该文件，禁用 ANSI 转义。
+///   否则以默认格式化方式发送到 stderr。
+///
+/// 边界条件：
+/// - 当没有环境变量被设置时，默认情况下返回而不安装任何订阅者，以便普通 CLI 使用不产生日志噪声。
+/// - 订阅者安装是尽力而为的：如果全局订阅者已经被安装（例如，因为库消费者首先设置了），我们会在
+///   stderr 上打印警告，但永远不会导致进程失败。
+/// - 如果 `LIBRA_LOG_FILE` 无法打开，我们会在 stderr 上警告并禁用追踪 — 我们永远不会仅因为日志记录
+///   失败就崩溃 CLI。
 fn init_tracing() {
     let log_file = std::env::var_os("LIBRA_LOG_FILE");
     let log_filter = std::env::var_os("LIBRA_LOG")
@@ -147,6 +191,19 @@ fn init_tracing() {
 /// - The added directive is a static literal whose parse cannot fail in any
 ///   supported `tracing-subscriber` version; the `expect` is a hard
 ///   invariant, not a runtime fallback.
+///
+/// 构建驱动全局追踪订阅者的 [`EnvFilter`]。
+///
+/// 功能范围：
+/// - 解析 `directives`（`LIBRA_LOG`/`RUST_LOG`/`libra=debug` 回退的已解析值），当用户没有
+///   提及 `rfuse3` 目标时，锁定 `rfuse3::raw::session=error` 以使每次对工作树 FUSE 挂载的
+///   子页写入触发的嘈杂 `"The data is not 4096 bytes aligned"` 警告不会出现在正常日志中。
+///
+/// 边界条件：
+/// - 如果用户通过在其过滤器字符串中的任何地方提及 `rfuse3` 来选择加入（例如
+///   `LIBRA_LOG=rfuse3=warn`），我们跳过抑制，以便用户的指令直接获胜。
+/// - 添加的指令是一个静态字面量，其解析在任何受支持的 `tracing-subscriber` 版本中都不会失败；
+///   `expect` 是一个硬不变量，而不是运行时回退。
 fn build_env_filter(directives: &str) -> EnvFilter {
     let env_filter = EnvFilter::new(directives);
     if directives.contains("rfuse3") {

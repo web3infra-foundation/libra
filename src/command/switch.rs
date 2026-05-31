@@ -1,4 +1,6 @@
 //! Switch command to change branches safely, validating clean state, handling creation, and delegating checkout behavior to restore logic.
+//!
+//! 切换命令，安全地改变分支、验证干净状态、处理创建和委托还原逻辑的检出行为。
 
 use clap::Parser;
 use git_internal::{
@@ -499,6 +501,7 @@ fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), Switch
     Ok(())
 }
 
+/// Fire-and-forget entry point for the switch command.
 pub async fn execute(args: SwitchArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -509,6 +512,12 @@ pub async fn execute(args: SwitchArgs) {
 /// errors and exiting. When a branch or commit change will occur, validates a
 /// clean working-tree state before switching, creating, or detaching HEAD.
 /// No-op "already on" cases return before the cleanliness check.
+///
+/// 切换命令的快速执行入口。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+/// 当将发生分支或提交更改时，在切换、创建或分离 HEAD 之前验证干净的工作树状态。
+/// No-op "已在"情况在清洁检查之前返回。
 pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_switch(args, output).await.map_err(CliError::from)?;
     render_switch_output(&result, output)?;

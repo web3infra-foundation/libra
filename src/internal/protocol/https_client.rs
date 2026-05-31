@@ -1,4 +1,6 @@
 //! HTTPS smart protocol client that discovers refs, negotiates upload-pack/receive-pack, streams pack data, and supports basic authentication.
+//!
+//! HTTPS 智能协议客户端，发现引用、协商 upload-pack/receive-pack、流式传输包数据并支持基本身份验证。
 
 use std::{io::Error as IoError, ops::Deref, sync::Mutex};
 

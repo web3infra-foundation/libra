@@ -1,4 +1,6 @@
 //! Push command wiring that reads remote configuration, negotiates with servers, and sends local refs and pack data for update.
+//!
+//! 推送命令配置，读取远程配置，与服务器协商，并发送本地参考和包数据以供更新。
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -423,6 +425,8 @@ struct RefUpdatePlan {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Fire-and-forget entry point for the push command.
+/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: PushArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -442,6 +446,21 @@ pub async fn execute(args: PushArgs) {
 /// Returns [`CliError`] when arguments are incomplete, HEAD is detached, remote
 /// configuration is missing, authentication/network negotiation fails, pack data
 /// cannot be read, or upstream config cannot be written.
+///
+/// 推送命令的快速执行入口。
+/// 委托给 execute_safe 并将任何错误打印到 stderr。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+///
+/// # 副作用
+/// - 读取当前分支和远程配置。
+/// - 与远程服务器协商并上传包数据/参考更新。
+/// - 使用 `--set-upstream` 时可能更新上游跟踪配置。
+/// - 以人类可读或 JSON 形式呈现推送状态。
+///
+/// # 错误
+/// 当参数不完整、HEAD 分离、远程配置缺失、身份验证/网络协商失败、
+/// 无法读取包数据或无法写入上游配置时返回 [`CliError`]。
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     validate_push_args(&args).map_err(CliError::from)?;
 

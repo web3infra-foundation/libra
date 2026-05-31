@@ -1,3 +1,7 @@
+//! LFS schema definitions for lock, batch, and object structures.
+//!
+//! LFS 锁、批量和对象结构的架构定义。
+
 use serde::Serialize;
 
 use crate::lfs_structs::Lock;

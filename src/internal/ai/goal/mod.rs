@@ -1,5 +1,7 @@
 //! Codex-like Goal mode runtime contract (OC-Phase 6).
 //!
+//! 类似 Codex 的 Goal 模式运行时契约（OC-Phase 6）。
+//!
 //! Per `docs/improvement/opencode.md` line 532, Goal mode is a runtime layer
 //! that **prevents the assistant's normal final answer from putting the
 //! session into idle while a Goal is still active**. The schema here is the

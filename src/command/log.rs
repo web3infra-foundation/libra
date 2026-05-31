@@ -1,4 +1,6 @@
 //! Log command rendering commit history with optional decorations, filtering, and custom formatting utilities.
+//!
+//! 日志命令，呈现提交历史，支持可选的装饰、过滤和自定义格式化实用程序。
 
 use std::{
     cell::RefCell,
@@ -451,6 +453,8 @@ async fn resolve_decorate_option(args: &LogArgs) -> CliResult<DecorateOptions> {
     })
 }
 
+/// Fire-and-forget entry point for the log command.
+/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: LogArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -460,6 +464,12 @@ pub async fn execute(args: LogArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
+///
+/// 日志命令的快速执行入口。
+/// 委托给 execute_safe 并将任何错误打印到 stderr。
+///
+/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
+/// 遍历提交历史应用过滤器（日期范围、作者、路径）并呈现格式化的日志输出。
 pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
     let decorate_option = resolve_decorate_option(&args).await?;
 

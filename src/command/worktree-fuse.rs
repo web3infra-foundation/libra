@@ -1,5 +1,7 @@
 //! `libra worktree` command implementation for mounting worktree overlays.
 //!
+//! `libra worktree` 命令实现，用于挂载工作树覆盖。
+//!
 //! Boundary: this command is Unix-only and focuses on FUSE mount lifecycle; generic
 //! worktree management remains in `command::worktree`. Worktree-fuse command tests
 //! cover argument parsing and unsupported-platform behavior.

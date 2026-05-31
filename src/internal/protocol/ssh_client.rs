@@ -1,5 +1,7 @@
 //! SSH protocol client that spawns an `ssh` subprocess for Git transport.
 //!
+//! SSH 协议客户端，为 Git 传输生成 `ssh` 子流程。
+//!
 //! Supports both `ssh://[user@]host[:port]/path` and `user@host:path` URL formats.
 //! Uses the vault-generated SSH private key for authentication when available.
 

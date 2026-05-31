@@ -1,4 +1,6 @@
 //! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
+//!
+//! 本地协议客户端，使用文件系统路径在本地运行 upload-pack/receive-pack 并通过异步管道流式传输包数据。
 
 use std::{
     collections::HashSet,

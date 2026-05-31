@@ -1,6 +1,8 @@
 //! Persistence bridge for storing and loading canonical IntentSpecs in Libra's AI
 //! object history.
 //!
+//! 在 Libra 的 AI 对象历史中存储和加载规范 IntentSpec 的持久化桥梁。
+//!
 //! Boundary: this module maps between human-facing intent identifiers and immutable
 //! object storage records; it must preserve IDs, status, and validation metadata across
 //! round trips. The storage and migration paths are covered by

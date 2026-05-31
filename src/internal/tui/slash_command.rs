@@ -1,5 +1,7 @@
 //! Built-in TUI commands that are intercepted before reaching the AI model.
 //!
+//! 在到达 AI 模型之前被拦截的内置 TUI 命令。
+//!
 //! These are distinct from the YAML-defined slash commands in `ai::commands`,
 //! which expand into prompts sent to the model. Built-in commands perform
 //! direct TUI actions (clear history, quit, show info, etc.) and never touch

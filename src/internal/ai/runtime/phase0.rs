@@ -1,5 +1,7 @@
 //! Phase 0 Intent — formal write helpers.
 //!
+//! 阶段 0 意图 — 正式写入助手。
+//!
 //! The Code UI Phase Workflow models Phase 0 as the **Intent** phase: a user
 //! request is canonicalised into an [`IntentSpec`] and recorded as a draft
 //! `Intent` revision in the AI object store. This module is the *formal

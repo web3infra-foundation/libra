@@ -1,4 +1,6 @@
 //! SeaORM entity for runtime-owned decision proposals.
+//!
+//! 运行时所有决策建议的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

@@ -1,5 +1,7 @@
 //! Deterministic repair passes for incomplete or loosely-formed IntentSpec drafts.
 //!
+//! 不完整或松散形成的 IntentSpec 草稿的确定性修复通道。
+//!
 //! Boundary: repair may add defaults and normalize fields, but it must not invent
 //! hidden goals or widen user scope. Edge cases around absent checks, duplicated
 //! artifacts, and missing acceptance criteria are exercised by the intent-flow tests.

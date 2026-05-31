@@ -1,4 +1,6 @@
 //! Execution environment boundary for scheduler-owned task attempts.
+//!
+//! 调度器拥有的任务尝试的执行环境边界。
 
 use std::{
     io,

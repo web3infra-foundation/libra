@@ -1,4 +1,6 @@
 //! Protocol abstraction for Git transport with shared advertisement parsing and traits implemented by HTTPS, local, and LFS clients.
+//!
+//! Git 传输的协议抽象，具有共享广告解析和由 HTTPS、本地和 LFS 客户端实现的特性。
 
 use std::cell::RefCell;
 

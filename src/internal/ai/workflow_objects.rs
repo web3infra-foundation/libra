@@ -1,6 +1,8 @@
 //! Bridge between Libra's high-level orchestrator types and the persisted
 //! `git-internal` workflow objects (Intent / Plan / Task).
 //!
+//! Libra 的高级编排器类型与持久化 `git-internal` 工作流对象（Intent / Plan / Task）之间的桥梁。
+//!
 //! The orchestrator deals with rich, in-memory specs (`IntentSpec`,
 //! `ExecutionPlanSpec`, `TaskSpec`) that carry agent-level metadata such as
 //! gate stages, scope rules, and check definitions. Those types are not

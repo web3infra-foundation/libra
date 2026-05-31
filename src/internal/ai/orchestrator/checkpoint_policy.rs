@@ -1,6 +1,8 @@
 //! Checkpoint policy for deciding when an orchestrated AI run should save durable
 //! progress.
 //!
+//! 决定编排 AI 运行何时保存持久进度的检查点策略。
+//!
 //! Boundary: policy reads intent risk and plan state but does not persist records
 //! directly. Scheduler and storage-flow tests cover high-risk plans, skipped phases,
 //! and final validation checkpoints.

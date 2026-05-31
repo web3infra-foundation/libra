@@ -1,5 +1,7 @@
 //! External-Agent capture (CEX-EntireIO).
 //!
+//! 外部代理捕获（CEX-EntireIO）。
+//!
 //! This module owns the runtime that observes lifecycle events from
 //! externally-hosted AI agents (Claude Code, Gemini CLI, Cursor, …) and
 //! materialises them into Libra's catalog (`agent_session`, `agent_checkpoint`)

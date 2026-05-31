@@ -1,5 +1,7 @@
 //! Goal continuation-prompt builder — extracted from
-//! [`super::supervisor`] for OC-Phase 6 P6.3 file-organisation parity
+//! [`super::supervisor`] for OC-Phase 6 P6.3 file-organisation parity.
+//!
+//! 目标延续提示构建器 — 从 [`super::supervisor`] 提取，用于 OC-Phase 6 P6.3 文件组织奇偶性。
 //! with `docs/improvement/opencode.md:1469` (which lists
 //! `goal/prompt.rs` as the canonical home for the builder).
 //!

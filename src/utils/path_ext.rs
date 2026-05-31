@@ -1,4 +1,6 @@
 //! Path extension helpers for converting between workdir and absolute paths, string conversions, and containment checks across path lists.
+//!
+//! 路径扩展助手，用于在工作目录和绝对路径之间转换、字符串转换和路径列表中的包含检查。
 
 use std::path::{Path, PathBuf};
 

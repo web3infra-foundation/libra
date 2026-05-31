@@ -1,5 +1,7 @@
 //! Per-line authorship attribution (`libra blame`).
 //!
+//! 按行作者署名归属（`libra blame`）。
+//!
 //! Implements the `blame` subcommand. Loads the file at the requested
 //! revision, walks the commit graph backwards from that revision, and uses
 //! `compute_diff` against each parent to migrate line ownership to the
@@ -146,6 +148,8 @@ impl From<BlameError> for CliError {
 /// Functional scope:
 /// - Calls [`execute_safe`] with a default [`OutputConfig`] and prints any
 ///   error to stderr without propagating it.
+///
+/// `libra blame` 的快速执行 CLI 分发器。
 pub async fn execute(args: BlameArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -167,6 +171,8 @@ pub async fn execute(args: BlameArgs) {
 /// in src/command/blame.rs:367;
 /// tests::test_blame_json_output_includes_lines in
 /// tests/command/blame_test.rs:50.
+///
+/// 由 `cli::parse` 和集成测试使用的结构化入口点。
 pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
     let result = run_blame(&args).await.map_err(CliError::from)?;
 
