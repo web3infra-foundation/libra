@@ -340,8 +340,10 @@ async fn collect_starting_points(
             CliError::fatal(format!("failed to load index: {error}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-        for entry in index.tracked_entries(0) {
-            starting_points.insert(entry.hash);
+        for stage in 0..3 {
+            for entry in index.tracked_entries(stage) {
+                starting_points.insert(entry.hash);
+            }
         }
     }
 
@@ -478,27 +480,34 @@ fn apply_prune_plan(
 
 /// Remove a loose object file and prune empty parent directories.
 fn remove_loose_object(info: &LooseObjectInfo, objects_dir: &Path) -> CliResult<()> {
-    if !info.path.starts_with(objects_dir) {
+    let abs_path = fs::canonicalize(&info.path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to resolve object path '{}': {error}",
+            info.path.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if !abs_path.starts_with(objects_dir) {
         return Err(CliError::fatal(format!(
             "refusing to prune object outside objects dir: {}",
-            info.path.display()
+            abs_path.display()
         ))
         .with_stable_code(StableErrorCode::InternalInvariant));
     }
 
-    match fs::remove_file(&info.path) {
+    match fs::remove_file(&abs_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(CliError::fatal(format!(
                 "failed to remove object '{}': {error}",
-                info.path.display()
+                abs_path.display()
             ))
             .with_stable_code(StableErrorCode::IoWriteFailed));
         }
     }
 
-    let Some(parent) = info.path.parent() else {
+    let Some(parent) = abs_path.parent() else {
         return Ok(());
     };
 
@@ -571,8 +580,14 @@ fn list_loose_objects(
             ))
             .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
-        let path = entry.path();
-        if !path.is_dir() {
+        let path = fs::canonicalize(entry.path()).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to resolve object directory '{}': {error}",
+                entry.path().display()
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        if !path.is_dir() || !path.starts_with(objects_dir) {
             continue;
         }
 
@@ -758,5 +773,42 @@ mod tests {
 
         let read = list_idx_objects(&idx_path).expect("read idx objects");
         assert_eq!(read, hashes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_loose_objects_skips_symlinked_outside_dirs() {
+        let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+        let temp = tempdir().expect("tempdir");
+
+        let objects_dir = temp.path().join("objects");
+        let storage = ClientStorage::init(objects_dir.clone());
+
+        let inside_hash = ObjectHash::from_bytes(&[0xBB; 20]).expect("inside hash");
+        storage
+            .put(&inside_hash, b"inside", ObjectType::Blob)
+            .expect("write inside object");
+
+        let outside_dir = temp.path().join("outside");
+        let outside_storage = ClientStorage::init(outside_dir.clone());
+        let outside_hash = ObjectHash::from_bytes(&[0xAA; 20]).expect("outside hash");
+        outside_storage
+            .put(&outside_hash, b"outside", ObjectType::Blob)
+            .expect("write outside object");
+
+        let outside_prefix = outside_dir.join("aa");
+        let link_path = objects_dir.join("aa");
+        std::os::unix::fs::symlink(&outside_prefix, &link_path)
+            .expect("create symlink to outside dir");
+
+        let objects = list_loose_objects(&storage, false).expect("list loose objects");
+        let has_inside = objects.iter().any(|info| info.hash == inside_hash);
+        let has_outside = objects.iter().any(|info| info.hash == outside_hash);
+
+        assert!(has_inside, "expected inside object to be listed");
+        assert!(
+            !has_outside,
+            "symlinked outside object should not be listed"
+        );
     }
 }

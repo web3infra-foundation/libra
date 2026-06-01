@@ -131,6 +131,14 @@ Example:
 }
 ```
 
+## Notes
+
+In most cases, users will not need to call `libra prune` directly, but should instead call `libra gc`, which handles pruning along with many other housekeeping tasks.
+
+ When `libra prune` runs concurrently with another process, There is a risk of it deleting an object that the other process is using but hasn’t created a reference to. This may just cause the other process to fail or may corrupt the repository if the other process later adds a reference to the deleted object. 
+ 
+ Typically, an explicit `--expire` value significantly mitigates this problem. When users really need to directly run this command, it is recommended to attach an expiration value like `--expire 2.weeks.ago`, and run in dry-run mode first to preview objects that will be pruned.
+
 ## Error Handling
 
 | Scenario | StableErrorCode | Exit |
