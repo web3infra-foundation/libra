@@ -74,6 +74,9 @@ EXAMPLES:
     libra shortlog HEAD~5           Summarize a subset of history starting from a revision
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
+    libra shortlog --top 3          Show only the top 3 authors by commit count
+    libra shortlog --min-count 5    Show only authors with at least 5 commits
+    libra shortlog --reverse        Reverse the sort order
     libra shortlog --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -98,6 +101,18 @@ pub struct ShortlogArgs {
     /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
     #[clap(long = "until", value_name = "DATE")]
     pub until: Option<String>,
+
+    /// Show only the top N authors (by commit count)
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Show only authors with at least N commits
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse the sort order
+    #[clap(long = "reverse")]
+    pub reverse: bool,
 
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
@@ -140,6 +155,9 @@ struct ShortlogOutput {
     numbered: bool,
     summary: bool,
     email: bool,
+    top: Option<usize>,
+    min_count: Option<usize>,
+    reverse: bool,
     total_authors: usize,
     total_commits: usize,
     authors: Vec<ShortlogAuthor>,
@@ -249,11 +267,26 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| stats.name.to_lowercase());
     }
 
+    if args.reverse {
+        authors.reverse();
+    }
+
+    if let Some(min_count) = args.min_count {
+        authors.retain(|stats| stats.count >= min_count);
+    }
+
+    if let Some(top) = args.top {
+        authors.truncate(top);
+    }
+
     ShortlogOutput {
         revision: revision.to_string(),
         numbered: args.numbered,
         summary: args.summary,
         email: args.email,
+        top: args.top,
+        min_count: args.min_count,
+        reverse: args.reverse,
         total_authors: authors.len(),
         total_commits,
         authors,
@@ -391,6 +424,9 @@ mod tests {
         assert!(!args.numbered);
         assert!(!args.summary);
         assert!(!args.email);
+        assert!(!args.reverse);
+        assert_eq!(args.top, None);
+        assert_eq!(args.min_count, None);
 
         let args = ShortlogArgs::parse_from(["shortlog", "-n", "-s", "-e"]);
         assert!(args.numbered);
@@ -399,6 +435,15 @@ mod tests {
 
         let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
         assert!(args.since.is_some());
+
+        let args = ShortlogArgs::parse_from(["shortlog", "--top", "3"]);
+        assert_eq!(args.top, Some(3));
+
+        let args = ShortlogArgs::parse_from(["shortlog", "--min-count", "5"]);
+        assert_eq!(args.min_count, Some(5));
+
+        let args = ShortlogArgs::parse_from(["shortlog", "--reverse"]);
+        assert!(args.reverse);
     }
 
     #[test]

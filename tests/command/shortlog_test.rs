@@ -724,3 +724,174 @@ async fn test_shortlog_committer_date_filter() {
     assert!(output.contains("TEST"));
     assert!(output.contains("Test Commit"));
 }
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_top_n() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let args = ShortlogArgs::try_parse_from(["libra", "-n", "--top", "3"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+   2  SHY
+      Commit_13
+      Commit_5
+   2  SunZo
+      Commit_14
+      Commit_9
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_min_count() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let args = ShortlogArgs::try_parse_from(["libra", "--min-count", "3"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+
+    let args = ShortlogArgs::try_parse_from(["libra", "--min-count", "5"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_reverse() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let args = ShortlogArgs::try_parse_from(["libra", "--reverse"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   2  SunZo
+      Commit_14
+      Commit_9
+   2  SHY
+      Commit_13
+      Commit_5
+   1  MMONK
+      Commit_10
+   1  LENGSA
+      Commit_8
+   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+   1  GUXUE
+      Commit_7
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+
+    let args = ShortlogArgs::try_parse_from(["libra", "-n", "--reverse"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   1  MMONK
+      Commit_10
+   1  LENGSA
+      Commit_8
+   1  GUXUE
+      Commit_7
+   2  SunZo
+      Commit_14
+      Commit_9
+   2  SHY
+      Commit_13
+      Commit_5
+   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_top_min_count_combined() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    let _ = create_test_commit_tree().await;
+
+    let args = ShortlogArgs::try_parse_from(["libra", "-n", "--top", "2", "--min-count", "2"]).unwrap();
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+    let output = String::from_utf8(buf).unwrap();
+
+    let expected = r#"   5  LEAVE
+      Commit_12
+      Commit_11
+      Commit_4
+      Commit_2
+      Commit_1
+   2  SHY
+      Commit_13
+      Commit_5
+"#;
+
+    let out_lines: Vec<_> = output.lines().collect();
+    let exp_lines: Vec<_> = expected.lines().collect();
+    assert_eq!(out_lines, exp_lines);
+}
