@@ -338,10 +338,10 @@ async fn create_task_impl_threads_actor_into_authz_principal() {
 }
 
 /// CEX-S2-16 (`docs/improvement/agent.md:1631`): the four readable agent-run
-/// detail URIs are advertised as resource *templates* (discoverable via
-/// `resources/templates/list`), alongside the two original AI-object templates.
-/// `merge-candidates/{id}` is intentionally NOT advertised — its records are not
-/// yet persisted, so the server cannot serve it and must not claim it.
+/// detail URIs plus the `merge-candidates/{id}` view are advertised as resource
+/// *templates* (discoverable via `resources/templates/list`), alongside the two
+/// original AI-object templates. `merge-candidates/{id}` is now served from the
+/// dispatcher-persisted records (B2a/B2b), so the server advertises it.
 #[test]
 fn ai_resource_templates_advertises_readable_agent_run_views() {
     let uris: Vec<String> = crate::internal::ai::mcp::server::ai_resource_templates()
@@ -352,7 +352,7 @@ fn ai_resource_templates_advertises_readable_agent_run_views() {
     // The two original AI-object templates remain.
     assert!(uris.iter().any(|u| u == "libra://object/{object_id}"));
     assert!(uris.iter().any(|u| u == "libra://objects/{object_type}"));
-    // The four readable agent-run detail views are now discoverable.
+    // The four readable agent-run detail views are discoverable.
     assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}"));
     assert!(
         uris.iter()
@@ -360,14 +360,15 @@ fn ai_resource_templates_advertises_readable_agent_run_views() {
     );
     assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}/budget"));
     assert!(uris.iter().any(|u| u == "libra://agents/runs/{id}/context"));
-    // The non-servable merge-candidates resource is not advertised.
+    // The merge-candidates view is now servable, so it is advertised.
     assert!(
-        !uris.iter().any(|u| u.contains("merge-candidates")),
-        "merge-candidates must not be advertised until its records are persisted",
+        uris.iter()
+            .any(|u| u == "libra://agents/merge-candidates/{id}"),
+        "merge-candidates must be advertised now that its records are persisted",
     );
     assert_eq!(
         uris.len(),
-        6,
-        "exactly the 2 object + 4 agent-run templates"
+        7,
+        "exactly the 2 object + 4 agent-run + 1 merge-candidate templates"
     );
 }

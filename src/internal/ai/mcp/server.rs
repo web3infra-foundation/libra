@@ -293,11 +293,11 @@ impl LibraMcpServer {
         request: super::agents_resource::AgentResourceRequest,
     ) -> Result<Vec<ResourceContents>, ErrorData> {
         use super::agents_resource::{
-            AgentResourceRequest, render_run_budget, render_run_context, render_run_detail,
-            render_run_list, render_run_permissions,
+            AgentResourceRequest, render_merge_candidate, render_run_budget, render_run_context,
+            render_run_detail, render_run_list, render_run_permissions,
         };
         use crate::internal::ai::agent_run::{
-            AgentBudget, AgentRunId, event_store::AgentRunEventStore,
+            AgentBudget, AgentRunId, MergeCandidateId, event_store::AgentRunEventStore,
         };
 
         // Build the snapshot/permissions store rooted at the same sessions root
@@ -417,14 +417,36 @@ impl LibraMcpServer {
                     )),
                 }
             }
-            other => Err(ErrorData::resource_not_found(
-                format!(
-                    "Sub-agent run resource `{}` has no persisted record through this server yet \
-                     (merge candidates are not persisted)",
-                    other.run_id().unwrap_or("<merge-candidate>"),
-                ),
-                None,
-            )),
+            AgentResourceRequest::MergeCandidate { ref candidate_id } => {
+                // Merge candidates are keyed by their own id (not a run id) and
+                // may live under any thread, so `find_merge_candidate` scans the
+                // sessions root. The dispatcher persists one per successful
+                // sub-agent run (CEX-S2-16).
+                let candidate = match (
+                    uuid::Uuid::parse_str(candidate_id)
+                        .ok()
+                        .map(MergeCandidateId::from),
+                    store.as_ref(),
+                ) {
+                    (Some(id), Some(store)) => store.find_merge_candidate(id).map_err(|err| {
+                        ErrorData::internal_error(
+                            format!("failed to read merge candidate: {err}"),
+                            None,
+                        )
+                    })?,
+                    _ => None,
+                };
+                match candidate {
+                    Some(candidate) => {
+                        let body = render_merge_candidate(&candidate);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted merge candidate for `{candidate_id}`"),
+                        None,
+                    )),
+                }
+            }
         }
     }
 
@@ -643,11 +665,13 @@ impl ServerHandler for LibraMcpServer {
 
 /// The MCP resource *templates* (parameterized URIs) this server advertises via
 /// `resources/templates/list`: the two AI-object templates plus the four
-/// readable agent-run detail views (CEX-S2-16, `docs/improvement/agent.md:1631`
-/// "6 个新 URI 模板"). The non-parameterized `libra://agents/runs` list URI is a
-/// concrete resource (advertised by `list_resources_impl`), not a template, and
-/// `merge-candidates/{id}` is omitted until its records are persisted — a
-/// template is only advertised for resources this server can actually serve.
+/// readable agent-run detail views and the `merge-candidates/{id}` view
+/// (CEX-S2-16, `docs/improvement/agent.md:1631` "6 个新 URI 模板"). The
+/// non-parameterized `libra://agents/runs` list URI is a concrete resource
+/// (advertised by `list_resources_impl`), not a template. `merge-candidates/{id}`
+/// is now served from the dispatcher-persisted records (CEX-S2-16 B2a/B2b), so a
+/// template is advertised for it — every advertised template is one this server
+/// can actually serve.
 ///
 /// Extracted as a free function so it is unit-testable without fabricating a
 /// `RequestContext` for the trait method.
@@ -680,6 +704,10 @@ pub(crate) fn ai_resource_templates() -> Vec<ResourceTemplate> {
         template(
             "libra://agents/runs/{id}/context",
             "Get sub-agent run context pack",
+        ),
+        template(
+            "libra://agents/merge-candidates/{id}",
+            "Get sub-agent merge candidate",
         ),
     ]
 }

@@ -392,6 +392,92 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
     );
 }
 
+/// Scenario (CEX-S2-16 B2a/B2b): once the dispatcher has persisted a
+/// `MergeCandidate` under the working dir's sessions root, the MCP
+/// `libra://agents/merge-candidates/{id}` view resolves it (scanning the thread
+/// dirs) and an unknown id is a clean structured not-found. Pins the read path
+/// that B2a/B2b made servable (the template is now advertised).
+#[tokio::test]
+async fn test_mcp_agents_merge_candidate_view_serves_persisted_record() {
+    use libra::internal::ai::agent_run::{
+        AgentPatchSet, AgentPatchSetId, AgentRunId, MergeCandidate, MergeCandidateId,
+        event_store::AgentRunEventStore,
+    };
+
+    let temp_dir = tempdir().unwrap();
+    let working_dir = temp_dir.path().to_path_buf();
+    let storage = Arc::new(LocalStorage::new(working_dir.join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        working_dir.clone(),
+        db_conn,
+    ));
+
+    let sessions_root = working_dir.join(".libra").join("sessions");
+    let store = AgentRunEventStore::new(&sessions_root);
+    let thread_id = uuid::Uuid::new_v4();
+    let run_id = AgentRunId::new();
+    let patchset = AgentPatchSet {
+        id: AgentPatchSetId::new(),
+        agent_run_id: run_id,
+        patchset_id: uuid::Uuid::new_v4(),
+        workspace_scope_constrained: true,
+    };
+    let candidate =
+        MergeCandidate::from_patchsets(MergeCandidateId::new(), std::slice::from_ref(&patchset));
+    let candidate_id = candidate.id;
+    store
+        .write_merge_candidate(thread_id, &candidate)
+        .expect("persist merge candidate");
+
+    let server =
+        LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
+
+    let uri = format!("libra://agents/merge-candidates/{}", candidate_id.0);
+    let contents = server
+        .read_resource_impl(&uri)
+        .await
+        .expect("merge-candidates/{id} must read the persisted record");
+    let text = match &contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let body: serde_json::Value = serde_json::from_str(&text).expect("valid JSON body");
+    assert_eq!(body["id"], candidate_id.0.to_string());
+    assert!(
+        body["agent_run_ids"]
+            .as_array()
+            .expect("agent_run_ids array")
+            .iter()
+            .any(|r| r == &run_id.0.to_string()),
+        "the candidate's owning run id must surface: {body}",
+    );
+    assert!(
+        body["patchset_ids"]
+            .as_array()
+            .expect("patchset_ids array")
+            .iter()
+            .any(|p| p == &patchset.id.0.to_string()),
+        "the candidate's patchset id must surface: {body}",
+    );
+
+    // An unknown candidate id is a clean structured not-found, not an internal
+    // error, and names the missing id.
+    let missing = uuid::Uuid::new_v4();
+    let missing_uri = format!("libra://agents/merge-candidates/{missing}");
+    let err = server
+        .read_resource_impl(&missing_uri)
+        .await
+        .expect_err("unknown merge candidate must be a not-found");
+    assert!(
+        err.message.contains("No persisted merge candidate")
+            && err.message.contains(&missing.to_string()),
+        "not-found error should name the missing candidate: {}",
+        err.message,
+    );
+}
+
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.
 /// Steps: `create_task_impl` → parse the returned ID out of the success message →
 /// `read_resource_impl(libra://object/<id>)` → `list_tasks` and confirm the new ID
