@@ -46,6 +46,7 @@ enum IdxVersion {
 pub struct LocalStorage {
     base_path: PathBuf,
     hash_kind: Option<HashKind>, // Capture hash kind from creation thread
+    rebuild_pack_indexes: bool,
 }
 
 impl LocalStorage {
@@ -60,6 +61,16 @@ impl LocalStorage {
         Self {
             base_path,
             hash_kind: Some(get_hash_kind()),
+            rebuild_pack_indexes: true,
+        }
+    }
+
+    /// Open a local object store without creating directories or rebuilding indexes.
+    pub fn open_existing(base_path: PathBuf) -> Self {
+        Self {
+            base_path,
+            hash_kind: Some(get_hash_kind()),
+            rebuild_pack_indexes: false,
         }
     }
 
@@ -178,8 +189,8 @@ impl LocalStorage {
             }
         }
         let pack_dir = self.base_path.join("pack");
-        let metadata = match fs::symlink_metadata(&pack_dir) {
-            Ok(metadata) if metadata.file_type().is_dir() => metadata,
+        match fs::symlink_metadata(&pack_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
                     tracing::warn!(
@@ -200,9 +211,6 @@ impl LocalStorage {
                 );
                 return Vec::new();
             }
-        };
-        if !metadata.file_type().is_dir() {
-            return Vec::new();
         }
         let mut packs = Vec::new();
         let entries = match fs::read_dir(&pack_dir) {
@@ -282,6 +290,14 @@ impl LocalStorage {
             };
 
             if needs_rebuild {
+                if !self.rebuild_pack_indexes {
+                    tracing::warn!(
+                        pack = %pack.display(),
+                        idx = %idx.display(),
+                        "skipping pack that needs index rebuild in read-only local storage"
+                    );
+                    continue;
+                }
                 if idx_metadata
                     .as_ref()
                     .is_some_and(Self::pack_index_has_multiple_links)
@@ -894,5 +910,21 @@ mod tests {
         assert!(LocalStorage::pack_index_has_multiple_links(
             &fs::symlink_metadata(&idx).unwrap()
         ));
+    }
+
+    #[test]
+    fn open_existing_does_not_build_missing_pack_indexes() {
+        let dir = tempdir().unwrap();
+        let objects = dir.path().join("objects");
+        let pack_dir = objects.join("pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let pack = pack_dir.join("pack-readonly.pack");
+        let idx = pack.with_extension("idx");
+        fs::write(&pack, b"PACK").unwrap();
+
+        let storage = LocalStorage::open_existing(objects);
+
+        assert!(storage.list_all_idx().is_empty());
+        assert!(!idx.exists());
     }
 }

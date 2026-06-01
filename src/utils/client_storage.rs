@@ -80,8 +80,8 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("failed to build dedicated tokio runtime for ClientStorage IO")
 });
 
-// Message describing a single object_index update queued by `ClientStorage::put`.
-// Carries enough state for the consumer to run independently of the calling thread.
+/// Message describing a single object_index update queued by `ClientStorage::put`.
+/// Carries enough state for the consumer to run independently of the calling thread.
 struct IndexUpdateMsg {
     hash: String,
     obj_type: String,
@@ -89,11 +89,10 @@ struct IndexUpdateMsg {
     db_path: PathBuf,
 }
 
-// RAII guard that decrements PENDING_TASKS exactly once even if the consumer task panics.
-// Drop runs on both the success path and during unwinding, so the pending counter
-// observed by `wait_for_background_tasks` cannot drift on errors.
+/// RAII guard that decrements `PENDING_TASKS` even if the consumer task panics.
 struct TaskGuard;
 impl Drop for TaskGuard {
+    /// Decrement the pending-task counter when the consumer scope exits.
     fn drop(&mut self) {
         PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
     }
@@ -154,6 +153,7 @@ pub struct ClientStorage {
 }
 
 impl ClientStorage {
+    /// Return the local object database path associated with this storage.
     pub fn base_path(&self) -> &PathBuf {
         &self.base_path
     }
@@ -172,6 +172,17 @@ impl ClientStorage {
     ///   the CLI.
     pub fn init(base_path: PathBuf) -> ClientStorage {
         let storage = Self::create_storage_backend(base_path.clone());
+        ClientStorage { storage, base_path }
+    }
+
+    /// Construct a `ClientStorage` that reads and writes only the local object store.
+    ///
+    /// Maintenance commands use this to avoid remote tier side effects such as
+    /// fetching missing objects or writing remote-cache entries while inspecting
+    /// `.libra/objects`. This constructor also avoids creating a missing object
+    /// directory and does not rebuild missing or outdated pack indexes.
+    pub fn local(base_path: PathBuf) -> ClientStorage {
+        let storage = Arc::new(LocalStorage::open_existing(base_path.clone()));
         ClientStorage { storage, base_path }
     }
 
@@ -579,8 +590,9 @@ impl ClientStorage {
     ///   updating local metadata that must reflect `.libra/objects`, not cloud state.
     /// - Pack lookup follows [`LocalStorage::exist`] semantics, including treating
     ///   unreadable pack data as missing after logging a warning.
+    /// - Does not create a missing object directory or rebuild pack indexes.
     pub fn local_exist(&self, obj_id: &ObjectHash) -> bool {
-        let storage = LocalStorage::new(self.base_path.clone());
+        let storage = LocalStorage::open_existing(self.base_path.clone());
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist(&hash).await })
     }
@@ -903,12 +915,14 @@ pub(crate) fn enqueue_agent_blob_object_index_update(
 
 #[async_trait]
 impl Storage for ClientStorage {
+    /// Load an object through the configured client storage backend.
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
         let storage = self.storage.clone();
         let hash = *hash;
         self.block_on_storage(async move { storage.get(&hash).await })
     }
 
+    /// Store an object through the configured client storage backend.
     async fn put(
         &self,
         hash: &ObjectHash,
@@ -918,10 +932,12 @@ impl Storage for ClientStorage {
         ClientStorage::put(self, hash, data, obj_type).map_err(GitError::IOError)
     }
 
+    /// Return whether an object exists in the configured client storage backend.
     async fn exist(&self, hash: &ObjectHash) -> bool {
         ClientStorage::exist(self, hash)
     }
 
+    /// Search object IDs by prefix through the configured client storage backend.
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
         ClientStorage::search(self, prefix).await
     }
