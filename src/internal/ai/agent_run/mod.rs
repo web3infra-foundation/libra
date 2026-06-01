@@ -69,6 +69,7 @@ pub mod hook_dispatch;
 pub mod merge_metrics;
 pub mod merge_pipeline;
 pub mod parallel;
+pub mod patch_capture;
 pub mod patchset;
 pub mod permission;
 pub mod review_summary;
