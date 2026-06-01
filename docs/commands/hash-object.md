@@ -21,6 +21,7 @@ repository because it stores the object in the repository object database.
 |--------|-------|-------------|
 | `<PATH>...` | | File paths to hash |
 | `--stdin` | | Read bytes from standard input instead of file paths |
+| `--stdin-paths` | | Read newline-delimited file paths from standard input |
 | `--write` | `-w` | Store the computed blob in the repository object database |
 | `--type <TYPE>` | `-t` | Object type to hash. Only `blob` is currently supported |
 | `--json` | | Emit a structured JSON envelope |
@@ -44,6 +45,12 @@ Hash bytes from standard input:
 
 ```bash
 printf 'hello' | libra hash-object --stdin
+```
+
+Hash file paths listed on standard input:
+
+```bash
+printf 'a.txt\nb.txt\n' | libra hash-object --stdin-paths
 ```
 
 ## Output
@@ -81,6 +88,7 @@ Structured output:
 |---------|-------|-----|---------|
 | Hash file as blob | `libra hash-object <path>` | `git hash-object <path>` | N/A |
 | Read from stdin | `--stdin` | `--stdin` | N/A |
+| Read paths from stdin | `--stdin-paths` | `--stdin-paths` | N/A |
 | Write object | `-w` / `--write` | `-w` | N/A |
 | Select object type | Only `blob` | `-t <type>` | N/A |
 | Path filters / attributes | Not supported | `--path`, filters | N/A |

@@ -64,7 +64,7 @@ batch document.
 | blame | supported | |
 | revert | supported | |
 | remote | supported | |
-| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
+| hash-object | partial | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
 | config | supported | vault-backed |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |

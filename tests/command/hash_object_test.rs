@@ -43,6 +43,33 @@ async fn hash_object_stdin_matches_git_blob_hash() {
 }
 
 #[tokio::test]
+async fn hash_object_stdin_paths_hashes_each_listed_file() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("a.txt"), b"hello").expect("write first fixture");
+    fs::write(repo.path().join("b.txt"), b"world").expect("write second fixture");
+
+    let output = run_libra_command_with_stdin(
+        &["hash-object", "--stdin-paths"],
+        repo.path(),
+        "a.txt\nb.txt\n",
+    );
+    assert_cli_success(&output, "hash-object --stdin-paths should succeed");
+
+    let hashes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hashes,
+        vec![
+            "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
+            "04fea06420ca60892f73becee3614f6d023a4b7f",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn hash_object_read_only_uses_sha256_repository_format() {
     let repo = tempfile::tempdir().expect("create temp repo");
     let init = run_libra_command(&["init", "--object-format", "sha256"], repo.path());
