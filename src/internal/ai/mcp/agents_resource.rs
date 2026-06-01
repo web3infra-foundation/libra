@@ -10,11 +10,19 @@
 //! - `libra://agents/runs/{id}/context` — its context pack
 //! - `libra://agents/merge-candidates/{id}` — one merge candidate's detail
 //!
-//! This module owns the **pure** URI → typed-request routing. Resolving a
-//! request against persisted run state is the server's job (and lands with the
-//! run-persistence path); keeping the parse separate makes the URI grammar
+//! This module owns the **pure** URI → typed-request routing *and* the
+//! request → JSON-body rendering ([`render_agent_resource`]). Loading the
+//! `AgentRun` / `MergeCandidate` records is the server's job (and lands with the
+//! run-persistence path); this module renders whatever records the server
+//! supplies. Keeping parse + render pure makes the whole resource family
 //! exhaustively unit-testable without any storage, and gives the server one
-//! place to dispatch from. Parsing performs no I/O.
+//! place to dispatch from. Neither parsing nor rendering performs I/O.
+
+use serde_json::{Value, json};
+
+use crate::internal::ai::agent_run::{
+    AgentBudget, AgentContextPack, AgentPermissionProfile, AgentRun, MergeCandidate, RunUsage,
+};
 
 /// A parsed `libra://agents/*` resource request. The `{id}` segments are
 /// captured as raw strings; validating them as real run / candidate ids is the
@@ -98,6 +106,102 @@ fn non_empty_single_segment(seg: &str) -> Option<String> {
     } else {
         Some(seg.to_string())
     }
+}
+
+/// Render one [`AgentRun`] into the summary row used by the `runs` list view.
+pub fn render_run_row(run: &AgentRun) -> Value {
+    json!({
+        "id": run.id.0.to_string(),
+        "task_id": run.task_id.0.to_string(),
+        "status": run.status,
+        "provider": run.provider,
+        "model": run.model,
+        "transcript_path": run.transcript_path,
+        "workspace_path": run.workspace_path,
+    })
+}
+
+/// Render the `libra://agents/runs` list body for the supplied runs (in the
+/// order given). A read-only projection — no I/O.
+pub fn render_run_list(runs: &[AgentRun]) -> Value {
+    json!({ "runs": runs.iter().map(render_run_row).collect::<Vec<_>>() })
+}
+
+/// Render the `libra://agents/runs/{id}` detail body.
+pub fn render_run_detail(run: &AgentRun) -> Value {
+    render_run_row(run)
+}
+
+/// Render the `libra://agents/runs/{id}/permissions` body from the run's
+/// permission profile.
+pub fn render_run_permissions(run_id: &str, profile: &AgentPermissionProfile) -> Value {
+    json!({
+        "agent_run_id": run_id,
+        "allowed_tools": profile.allowed_tools.iter().collect::<Vec<_>>(),
+        "denied_tools": profile.denied_tools.iter().collect::<Vec<_>>(),
+        "allowed_source_slugs": profile.allowed_source_slugs.iter().collect::<Vec<_>>(),
+        "approval_routing": profile.approval_routing,
+        "may_spawn_sub_agents": profile.may_spawn_sub_agents,
+    })
+}
+
+/// Render the `libra://agents/runs/{id}/budget` body: the configured budget plus
+/// the run's current usage and the dimensions (if any) it has exceeded.
+pub fn render_run_budget(
+    run_id: &str,
+    budget: &AgentBudget,
+    usage: &RunUsage,
+    source_call_count: u32,
+) -> Value {
+    let exceeded = budget.exceeded_dimensions(usage, source_call_count);
+    json!({
+        "agent_run_id": run_id,
+        "budget": budget,
+        "usage": {
+            "total_tokens": usage.total_tokens(),
+            "tool_call_count": usage.tool_call_count,
+            "wall_clock_ms": usage.wall_clock_ms,
+            "source_call_count": source_call_count,
+            "cost_estimate_micro_dollars": usage.cost_estimate_micro_dollars,
+        },
+        "exceeded_dimensions": exceeded,
+    })
+}
+
+/// Render the `libra://agents/runs/{id}/context` body from the run's context
+/// pack.
+pub fn render_run_context(run_id: &str, pack: &AgentContextPack) -> Value {
+    json!({
+        "agent_run_id": run_id,
+        "task_id": pack.task_id.0.to_string(),
+        "goal": pack.goal,
+        "read_scope": pack.read_scope,
+        "write_scope": pack.write_scope,
+        "source_intent_id": pack.source_intent_id.map(|id| id.to_string()),
+    })
+}
+
+/// Render the `libra://agents/merge-candidates/{id}` body.
+pub fn render_merge_candidate(candidate: &MergeCandidate) -> Value {
+    json!({
+        "id": candidate.id.0.to_string(),
+        "review_state": candidate.review_state,
+        "patchset_ids": candidate
+            .patchset_ids
+            .iter()
+            .map(|p| p.0.to_string())
+            .collect::<Vec<_>>(),
+        "agent_run_ids": candidate
+            .agent_run_ids
+            .iter()
+            .map(|r| r.0.to_string())
+            .collect::<Vec<_>>(),
+        "review_evidence": candidate
+            .review_evidence
+            .iter()
+            .map(|e| e.0.to_string())
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
@@ -221,5 +325,97 @@ mod tests {
             None,
             "a merge-candidate request targets no run id",
         );
+    }
+
+    mod render {
+        use uuid::Uuid;
+
+        use super::super::*;
+        use crate::internal::ai::agent_run::{
+            AgentBudget, AgentContextPack, AgentPermissionProfile, AgentRun, AgentRunId,
+            AgentRunStatus, AgentTaskId, MergeCandidate, MergeCandidateId, RunUsage,
+        };
+
+        fn run() -> AgentRun {
+            AgentRun {
+                id: AgentRunId(Uuid::from_u128(1)),
+                task_id: AgentTaskId(Uuid::from_u128(2)),
+                thread_id: Uuid::from_u128(3),
+                provider: "deepseek".to_string(),
+                model: "deepseek-chat".to_string(),
+                transcript_path: ".libra/sessions/t/agents/r.jsonl".to_string(),
+                workspace_path: None,
+                status: AgentRunStatus::Running,
+            }
+        }
+
+        #[test]
+        fn run_list_renders_each_run_row() {
+            let body = render_run_list(std::slice::from_ref(&run()));
+            let runs = body["runs"].as_array().expect("runs array");
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0]["status"], json!("running"));
+            assert_eq!(runs[0]["provider"], json!("deepseek"));
+            assert_eq!(runs[0]["id"], json!(Uuid::from_u128(1).to_string()));
+            // Unmaterialized workspace renders as JSON null.
+            assert!(runs[0]["workspace_path"].is_null());
+        }
+
+        #[test]
+        fn empty_run_list_renders_empty_array() {
+            let body = render_run_list(&[]);
+            assert_eq!(body["runs"], json!([]));
+        }
+
+        #[test]
+        fn permissions_view_lists_default_deny_profile() {
+            let profile = AgentPermissionProfile::default();
+            let body = render_run_permissions("r1", &profile);
+            assert_eq!(body["agent_run_id"], json!("r1"));
+            assert_eq!(body["allowed_tools"], json!([]));
+            assert_eq!(body["may_spawn_sub_agents"], json!(false));
+            assert_eq!(body["approval_routing"], json!("layer1_human"));
+        }
+
+        #[test]
+        fn budget_view_reports_exceeded_dimensions() {
+            let budget = AgentBudget {
+                max_tokens: Some(10),
+                ..AgentBudget::default()
+            };
+            let usage = RunUsage {
+                prompt_tokens: 100,
+                ..RunUsage::default()
+            };
+            let body = render_run_budget("r1", &budget, &usage, 0);
+            assert_eq!(body["usage"]["total_tokens"], json!(100));
+            assert_eq!(body["exceeded_dimensions"], json!(["token"]));
+        }
+
+        #[test]
+        fn context_view_renders_scope_and_goal() {
+            let pack = AgentContextPack {
+                task_id: AgentTaskId(Uuid::from_u128(7)),
+                goal: "fix the bug".to_string(),
+                read_scope: vec!["src".to_string()],
+                write_scope: vec!["src/a.rs".to_string()],
+                source_intent_id: None,
+            };
+            let body = render_run_context("r1", &pack);
+            assert_eq!(body["goal"], json!("fix the bug"));
+            assert_eq!(body["read_scope"], json!(["src"]));
+            assert_eq!(body["write_scope"], json!(["src/a.rs"]));
+            assert!(body["source_intent_id"].is_null());
+        }
+
+        #[test]
+        fn merge_candidate_view_renders_aggregate_ids_and_state() {
+            let candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+            let body = render_merge_candidate(&candidate);
+            // S2-INV-07 default surfaces to the observer.
+            assert_eq!(body["review_state"], json!("needs_human_review"));
+            assert_eq!(body["patchset_ids"], json!([]));
+            assert_eq!(body["agent_run_ids"], json!([]));
+        }
     }
 }
