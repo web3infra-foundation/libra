@@ -292,7 +292,8 @@ pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
 pub use trace::ToolCallTraceId;
 pub use validator::{
-    collect_distillable_evidence_ids, resolve_task_for_patchset, validate_merge_candidate,
+    collect_distillable_evidence_ids, count_unverified_patch_scope, resolve_task_for_patchset,
+    validate_merge_candidate,
 };
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,

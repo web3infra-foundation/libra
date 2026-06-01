@@ -62,6 +62,23 @@ pub fn resolve_task_for_patchset(
         .map(|run| run.task_id)
 }
 
+/// Count the patch sets whose write scope is **unverified** — the
+/// `unverified_patch_scope` risk-score input [`validate_merge_candidate`]
+/// otherwise takes as a caller-supplied number (CEX-S2-15 risk inputs).
+///
+/// A patch set is unverified exactly when [`AgentPatchSet::workspace_scope_constrained`]
+/// is `true`: that flag marks a run that used a sparse / blocked workspace
+/// materialization (CEX-S2-11), so its writes were **not** validated against the
+/// real tree during execution and "merge review must double-check write scope".
+/// A full-copy run (`false`) ran against the real tree, so its scope is already
+/// verified and contributes nothing. Pure — a count over the supplied patch sets.
+pub fn count_unverified_patch_scope(patchsets: &[AgentPatchSet]) -> u32 {
+    patchsets
+        .iter()
+        .filter(|patchset| patchset.workspace_scope_constrained)
+        .count() as u32
+}
+
 /// Assemble the validated [`MergeDecision`] for a reviewed candidate — the
 /// **pure output stage** of the CEX-S2-15 ValidatorEngine (完成判定: "填充
 /// CEX-S2-13 已声明的字段"). Composes the merge risk score (gathered from the
@@ -246,6 +263,38 @@ mod tests {
             resolve_task_for_patchset(&patchset(AgentRunId::new()), &[]),
             None,
         );
+    }
+
+    /// CEX-S2-15 risk input: `count_unverified_patch_scope` counts exactly the
+    /// patch sets that used a sparse/blocked workspace
+    /// (`workspace_scope_constrained = true`, "merge review must double-check");
+    /// full-copy runs (`false`) and an empty set contribute nothing.
+    #[test]
+    fn count_unverified_patch_scope_counts_only_constrained_patchsets() {
+        // `patchset(..)` builds `workspace_scope_constrained = false` (verified);
+        // override the flag for the constrained (unverified) ones.
+        let constrained = |run: AgentRunId| AgentPatchSet {
+            workspace_scope_constrained: true,
+            ..patchset(run)
+        };
+
+        let sets = vec![
+            constrained(AgentRunId::new()),
+            patchset(AgentRunId::new()),
+            constrained(AgentRunId::new()),
+        ];
+        assert_eq!(
+            count_unverified_patch_scope(&sets),
+            2,
+            "only the two sparse/blocked patch sets are unverified",
+        );
+
+        // All full-copy → nothing unverified; empty → 0, never a panic.
+        assert_eq!(
+            count_unverified_patch_scope(&[patchset(AgentRunId::new())]),
+            0,
+        );
+        assert_eq!(count_unverified_patch_scope(&[]), 0);
     }
 
     /// CEX-S2-15 完成判定: the ValidatorEngine's pure output stage fills every
