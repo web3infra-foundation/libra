@@ -17,7 +17,8 @@ use clap::Subcommand;
 
 use crate::{
     internal::ai::capability_package::{
-        CapabilityDiff, InstalledPackageStore, load_package_dir, prepare_install,
+        CapabilityDiff, InstalledPackage, InstalledPackageStore, active_capabilities,
+        load_package_dir, prepare_install,
     },
     utils::{
         error::{CliError, CliResult},
@@ -123,7 +124,39 @@ fn run_list(store: &InstalledPackageStore) -> CliResult<()> {
             manifest.package_id.0, manifest.version, state, manifest.publisher,
         );
     }
+    // Show the *effective* capability set — the union contributed by ENABLED
+    // packages only, which is what a session registers (CEX-S2-17: "未启用的
+    // package 不会注册"). A disabled package above contributes nothing here.
+    if let Some(summary) = effective_capability_summary(&installed) {
+        print!("{summary}");
+    }
     Ok(())
+}
+
+/// Render the effective active capability set — the de-duplicated union of every
+/// **enabled** package's bundles ([`active_capabilities`]) — as an indented
+/// `category: a, b, c` block. Returns `None` when nothing is enabled (so the
+/// caller prints no "Active capabilities" header for a disabled-only install
+/// set). Pure — no I/O.
+fn effective_capability_summary(installed: &[InstalledPackage]) -> Option<String> {
+    let active = active_capabilities(installed);
+    if active.is_empty() {
+        return None;
+    }
+    let mut out = String::from("Effective active capabilities (enabled packages only):\n");
+    let categories = [
+        ("skills", &active.skills),
+        ("commands", &active.commands),
+        ("sources", &active.sources),
+        ("sub-agents", &active.sub_agents),
+    ];
+    for (label, set) in categories {
+        if !set.is_empty() {
+            let joined = set.iter().cloned().collect::<Vec<_>>().join(", ");
+            out.push_str(&format!("  {label}: {joined}\n"));
+        }
+    }
+    Some(out)
 }
 
 fn run_diff(path: &Path) -> CliResult<()> {
@@ -233,4 +266,70 @@ fn render_diff(diff: &CapabilityDiff) -> String {
         out.push_str("  (no capability changes)\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::{
+        agent_run::{PackageId, Sha256},
+        capability_package::{BundledCapabilities, CapabilityPackageManifest},
+    };
+
+    fn package(id: &str, skill: &str, source: &str, enabled: bool) -> InstalledPackage {
+        InstalledPackage {
+            manifest: CapabilityPackageManifest {
+                package_id: PackageId(id.to_string()),
+                version: "1.0.0".to_string(),
+                publisher: "acme".to_string(),
+                checksum: Sha256("a".repeat(64)),
+                bundled: BundledCapabilities {
+                    skills: vec![skill.to_string()],
+                    sources: vec![source.to_string()],
+                    ..BundledCapabilities::default()
+                },
+                requested_permissions: Vec::new(),
+                install_warnings: Vec::new(),
+            },
+            enabled,
+        }
+    }
+
+    #[test]
+    fn effective_summary_is_none_when_nothing_enabled() {
+        // An empty set, and an installed-but-disabled-only set, both register
+        // nothing — so the summary is omitted entirely.
+        assert!(effective_capability_summary(&[]).is_none());
+        let disabled = vec![package("acme.a", "explore", "src-a", false)];
+        assert!(
+            effective_capability_summary(&disabled).is_none(),
+            "a disabled package must contribute no effective capability",
+        );
+    }
+
+    #[test]
+    fn effective_summary_unions_only_enabled_packages() {
+        let installed = vec![
+            package("acme.a", "explore", "src-a", true),
+            package("acme.b", "review", "src-b", false), // disabled: excluded
+            package("acme.c", "build", "src-c", true),
+        ];
+        let summary = effective_capability_summary(&installed).expect("some enabled");
+        // Enabled packages' capabilities appear...
+        assert!(summary.contains("explore"), "{summary}");
+        assert!(summary.contains("build"), "{summary}");
+        assert!(
+            summary.contains("src-a") && summary.contains("src-c"),
+            "{summary}"
+        );
+        // ...the disabled package's do NOT (CEX-S2-17: disabled registers nothing).
+        assert!(
+            !summary.contains("review"),
+            "disabled skill leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("src-b"),
+            "disabled source leaked: {summary}"
+        );
+    }
 }
