@@ -340,7 +340,7 @@ async fn collect_starting_points(
             CliError::fatal(format!("failed to load index: {error}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-        for stage in 0..3 {
+        for stage in [0, 1, 2, 3] {
             for entry in index.tracked_entries(stage) {
                 starting_points.insert(entry.hash);
             }
@@ -379,16 +379,33 @@ async fn collect_starting_points(
 
 /// Resolve a user-provided head argument to an object hash.
 async fn resolve_head_object(head: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
+    let mut results = HashSet::new();
     if let Some(hash) = resolve_tag_object_ref(head).await {
-        return Ok(hash);
-    }
-
-    if let Ok(hash) = util::get_commit_base(head).await {
-        return Ok(hash);
+        results.insert(hash);
     }
 
     if let Ok(hash) = ObjectHash::from_str(head) {
-        return Ok(hash);
+        results.insert(hash);
+        if let Ok(obj_type) = storage.get_object_type(&hash)
+            && obj_type != ObjectType::Tag
+        {
+            if let Ok(hash) = util::get_commit_base(head).await {
+                results.insert(hash);
+            }
+        }
+    } else if let Ok(hash) = util::get_commit_base(head).await {
+        results.insert(hash);
+    }
+
+    if results.len() == 1 {
+        return Ok(results.into_iter().next().unwrap());
+    }
+    if results.len() > 1 {
+        return Err(CliError::command_usage(format!(
+            "ambiguous argument '{head}': matched {} objects",
+            results.len()
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
 
     let results = storage.search_result(head).await.map_err(|error| {
@@ -462,7 +479,10 @@ fn apply_prune_plan(
     dry_run: bool,
     report: bool,
 ) -> CliResult<()> {
-    let objects_dir = storage.base_path();
+    let objects_dir = &fs::canonicalize(storage.base_path()).map_err(|error| {
+        CliError::fatal(format!("failed to resolve objects directory: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
     for info in &plan.prunable {
         if report {
             println!("{} {}", info.hash, info.obj_type);
@@ -560,7 +580,10 @@ fn list_loose_objects(
     storage: &ClientStorage,
     needs_mtime: bool,
 ) -> CliResult<Vec<LooseObjectInfo>> {
-    let objects_dir = storage.base_path();
+    let objects_dir = &fs::canonicalize(storage.base_path()).map_err(|error| {
+        CliError::fatal(format!("failed to resolve objects directory: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
     if !objects_dir.exists() {
         return Ok(Vec::new());
     }

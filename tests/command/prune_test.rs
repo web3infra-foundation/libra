@@ -266,7 +266,7 @@ fn test_prune_verbose_reports_deletions() {
 fn test_prune_keeps_tagged_commit_object() {
     let repo = create_committed_repo_via_cli();
     let (commit, tree, blob) = create_unreachable_commit(repo.path(), "tagged-commit");
-    let _tag = create_annotated_tag(repo.path(), &commit, "v1.2.3");
+    let tag = create_annotated_tag(repo.path(), &commit, "v1.2.3");
 
     assert!(object_exists(repo.path(), &commit.to_string()));
     assert!(object_exists(repo.path(), &tree.to_string()));
@@ -275,6 +275,7 @@ fn test_prune_keeps_tagged_commit_object() {
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should keep annotated tag targets");
 
+    assert!(object_exists(repo.path(), &tag.to_string()));
     assert!(object_exists(repo.path(), &commit.to_string()));
     assert!(object_exists(repo.path(), &tree.to_string()));
     assert!(object_exists(repo.path(), &blob.to_string()));
@@ -612,6 +613,23 @@ fn test_prune_invalid_ref_oid_fails() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid ref oid"));
+}
+
+#[test]
+#[serial]
+fn test_prune_ambiguous_tag_ref_fails() {
+    let repo = create_committed_repo_via_cli();
+    let (commit, tree, blob) = create_unreachable_commit(repo.path(), "tagged-commit");
+    let tag = create_annotated_tag(repo.path(), &commit, &commit.to_string());
+
+    assert!(object_exists(repo.path(), &commit.to_string()));
+    assert!(object_exists(repo.path(), &tree.to_string()));
+    assert!(object_exists(repo.path(), &blob.to_string()));
+
+    let output = run_libra_command(&["prune", &tag.to_string()], repo.path());
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous argument"));
 }
 
 #[test]
