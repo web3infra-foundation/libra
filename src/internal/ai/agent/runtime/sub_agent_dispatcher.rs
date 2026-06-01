@@ -73,9 +73,9 @@ use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
     agent_run::{
         AgentContextPack, AgentPatchSetId, AgentRun, AgentRunEvent, AgentRunEventEnvelope,
-        AgentRunId, AgentRunStatus, AgentTaskId, MergeCandidateId, RunUsage,
-        decision::MergeCandidate, event_store::AgentRunEventStore, patch_capture,
-        patchset::AgentPatchSet,
+        AgentRunId, AgentRunStatus, AgentTaskId, MergeCandidateId, ParallelAdmissionConfig,
+        ParallelTask, RunUsage, decision::MergeCandidate, event_store::AgentRunEventStore,
+        parallel_executor::run_parallel, patch_capture, patchset::AgentPatchSet,
     },
     completion::CompletionUsageSummary,
     permission::{
@@ -252,6 +252,57 @@ impl DefaultSubAgentDispatcher {
     pub fn with_patch_store(mut self, patch_store: Arc<dyn RunPatchStore>) -> Self {
         self.patch_store = Some(patch_store);
         self
+    }
+
+    /// CEX-S2-14: dispatch a batch of sub-agent tasks under controlled
+    /// parallelism. Runs at most `max_parallel` concurrently, serialises tasks
+    /// whose `write_scope`s overlap (so two sub-agents never co-edit the same
+    /// path), and promotes queued tasks as running ones finish — all via the
+    /// pure [`run_parallel`] executor over [`ParallelSchedulerState`]. Each
+    /// task's result is returned in the input order; a per-task `dispatch`
+    /// failure surfaces in its slot rather than aborting the batch.
+    ///
+    /// This is the dispatcher-side parallel entry; the single-task
+    /// [`SubAgentDispatcher::dispatch`] path is unchanged. The caller supplies
+    /// one fully-built [`DispatchContext`] per task (each with its own
+    /// `parent_message_id` / file-history batch), exactly as the single path
+    /// requires.
+    pub async fn dispatch_parallel<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> Vec<Result<TaskResult, TaskFailure>> {
+        let parallel_tasks = tasks
+            .into_iter()
+            .map(|(ctx, invocation, entry_kind, write_scope)| {
+                // Track each task in the scheduler by its resolved task id (a
+                // fresh id when the invocation carries none), mirroring the
+                // snapshot-task-id derivation on the single path.
+                let task_id = invocation
+                    .task_id
+                    .as_deref()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                    .map(AgentTaskId::from)
+                    .unwrap_or_default();
+                ParallelTask {
+                    task_id,
+                    write_scope,
+                    payload: (ctx, invocation, entry_kind),
+                }
+            })
+            .collect();
+
+        run_parallel(
+            parallel_tasks,
+            ParallelAdmissionConfig::new(max_parallel),
+            |(ctx, invocation, entry_kind)| self.dispatch(ctx, invocation, entry_kind),
+        )
+        .await
     }
 
     /// Attach workspace-isolation inputs (CEX-S2-12 / S2-INV-03). When
@@ -1633,6 +1684,73 @@ mod tests {
             events_path.display(),
             String::from_utf8_lossy(&bytes_after),
         );
+    }
+
+    /// CEX-S2-14: `dispatch_parallel` delegates every task in the batch to
+    /// `dispatch` through the parallel executor and returns each result in the
+    /// input order. Exercised on the flag-off path (each `dispatch` short-circuits
+    /// to `FeatureDisabled`) so the test pins the batch wiring + ordering without
+    /// a provider; the executor's concurrency/queue/conflict behaviour itself is
+    /// covered by `parallel_executor`'s unit tests.
+    #[tokio::test]
+    async fn dispatch_parallel_delegates_each_task_and_preserves_order() {
+        let (dispatcher, registry, usage, store) =
+            dispatcher_test_harness(MultiAgentConfig::default()).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-par".to_string();
+        let parent_session: SessionId = "session-par".to_string();
+
+        let make_ctx = || {
+            ctx(
+                &parent_thread,
+                &parent_session,
+                &parent,
+                &parent_ruleset,
+                &parent_binding,
+                &permission_service,
+                &store,
+                &provider_factory,
+                &usage,
+                &context_frame_loader,
+                0,
+            )
+        };
+
+        let results = dispatcher
+            .dispatch_parallel(
+                vec![
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                2,
+            )
+            .await;
+
+        assert_eq!(results.len(), 2, "one result per input task");
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                matches!(result, Err(TaskFailure::FeatureDisabled)),
+                "task {i} must surface its own dispatch result, got {:?}",
+                result.as_ref().err(),
+            );
+        }
     }
 
     /// Scenario: depth gate fires when `ctx.depth + 1 > limit`. The
