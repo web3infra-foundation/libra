@@ -5162,7 +5162,7 @@ where
                     ))));
             }
             BuiltinCommand::Agent => {
-                let message = self.format_agent_command_response(args);
+                let message = self.format_agent_command_response(args).await;
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(message)));
             }
@@ -5229,10 +5229,10 @@ where
     /// **runs** projected from their persisted snapshots (distinct from
     /// `/agents`, which shows the declarative agent config); `/agent cancel
     /// <id>` requests cancellation of a single run without ending the session.
-    fn format_agent_command_response(&mut self, args: &str) -> String {
+    async fn format_agent_command_response(&mut self, args: &str) -> String {
         use super::agent_command::{AgentSubcommand, parse_agent_subcommand};
         match parse_agent_subcommand(args) {
-            Ok(AgentSubcommand::List) => self.format_agent_runs_pane(),
+            Ok(AgentSubcommand::List) => self.format_agent_runs_pane().await,
             Ok(AgentSubcommand::Cancel { run_id }) => self.cancel_agent_run(&run_id),
             Err(err) => err.to_string(),
         }
@@ -5245,7 +5245,7 @@ where
     /// fallback, then `sessions`) so the same runs are surfaced. Reading is
     /// best-effort: an unreadable store renders the empty-pane placeholder
     /// rather than failing the command.
-    fn format_agent_runs_pane(&self) -> String {
+    async fn format_agent_runs_pane(&self) -> String {
         use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
 
         let working_dir = self.registry.working_dir().to_path_buf();
@@ -5254,11 +5254,25 @@ where
             .join("sessions");
         let store = AgentRunEventStore::new(sessions_root);
         let runs = store.list_all_snapshots().unwrap_or_default();
-        // Join each run's persisted terminal usage (tokens + cost estimate); a
-        // missing/unreadable record leaves the token/cost cells as `-`.
-        super::agent_pane::format_agent_run_pane_with_usage(&runs, |run| {
-            store.read_run_usage(run.thread_id, run.id).ok().flatten()
-        })
+        // Count persisted Source Pool / MCP / OpenAPI calls per run from
+        // `source_call_log` (CEX-S2-16 "source calls"; the per-run trace link
+        // landed v0.17.1254). Best-effort: with no usage DB or on a query error
+        // the `src` column simply renders `-`.
+        let source_call_counts = match self.config.usage_recorder.as_ref() {
+            Some(recorder) => {
+                crate::internal::model::source_call_log::count_by_agent_run(&recorder.connection())
+                    .await
+                    .unwrap_or_default()
+            }
+            None => std::collections::HashMap::new(),
+        };
+        // Join each run's persisted terminal usage (tokens + cost estimate) and
+        // its source-call count; missing records leave those cells as `-`.
+        super::agent_pane::format_agent_run_pane_with_usage_and_sources(
+            &runs,
+            |run| store.read_run_usage(run.thread_id, run.id).ok().flatten(),
+            |run| source_call_counts.get(&run.id.0.to_string()).copied(),
+        )
     }
 
     /// Request cancellation of a single sub-agent run by id, leaving the main

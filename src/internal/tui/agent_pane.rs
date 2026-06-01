@@ -40,6 +40,11 @@ pub struct AgentRunRow {
     /// from the run's `RunUsage` record when available. `None` when the run has
     /// no terminal usage record yet (e.g. still in flight) or the join is skipped.
     pub usage: Option<RunUsage>,
+    /// Count of external Source Pool / MCP / OpenAPI calls this run made,
+    /// joined from the persisted `source_call_log` rows keyed by `agent_run_id`
+    /// (CEX-S2-16 "source calls" pane field; the trace link landed in
+    /// v0.17.1254). `None` when the join is skipped or no rows exist for the run.
+    pub source_calls: Option<u64>,
 }
 
 impl AgentRunRow {
@@ -55,6 +60,7 @@ impl AgentRunRow {
             transcript_path: run.transcript_path.clone(),
             workspace_path: run.workspace_path.clone(),
             usage: None,
+            source_calls: None,
         }
     }
 }
@@ -80,11 +86,29 @@ pub fn agent_pane_rows_with_usage<F>(runs: &[AgentRun], usage_lookup: F) -> Vec<
 where
     F: Fn(&AgentRun) -> Option<RunUsage>,
 {
+    agent_pane_rows_with_usage_and_sources(runs, usage_lookup, |_| None)
+}
+
+/// Like [`agent_pane_rows_with_usage`], but additionally joins each run's
+/// persisted source-call count via `source_calls_lookup` (e.g. a `source_call_log`
+/// `GROUP BY agent_run_id` map). Ordering is identical and deterministic. Pure —
+/// both joins live in the caller's closures, so a replay caller can rebuild an
+/// identical pane (CEX-S2-16 验收 (5)).
+pub fn agent_pane_rows_with_usage_and_sources<F, G>(
+    runs: &[AgentRun],
+    usage_lookup: F,
+    source_calls_lookup: G,
+) -> Vec<AgentRunRow>
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+    G: Fn(&AgentRun) -> Option<u64>,
+{
     let mut rows: Vec<AgentRunRow> = runs
         .iter()
         .map(|run| {
             let mut row = AgentRunRow::from_run(run);
             row.usage = usage_lookup(run);
+            row.source_calls = source_calls_lookup(run);
             row
         })
         .collect();
@@ -110,6 +134,26 @@ where
     render_pane(&agent_pane_rows_with_usage(runs, usage_lookup))
 }
 
+/// Like [`format_agent_run_pane_with_usage`], but also joins each run's persisted
+/// source-call count (CEX-S2-16 "source calls" column) via `source_calls_lookup`.
+/// A run with no source calls — or when the join is skipped — renders `-` in the
+/// `src` column. Pure — the I/O lives in the closures.
+pub fn format_agent_run_pane_with_usage_and_sources<F, G>(
+    runs: &[AgentRun],
+    usage_lookup: F,
+    source_calls_lookup: G,
+) -> String
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+    G: Fn(&AgentRun) -> Option<u64>,
+{
+    render_pane(&agent_pane_rows_with_usage_and_sources(
+        runs,
+        usage_lookup,
+        source_calls_lookup,
+    ))
+}
+
 /// Shared table renderer over already-ordered rows, factored out of the public
 /// entry point so the layout has a single source of truth.
 fn render_pane(rows: &[AgentRunRow]) -> String {
@@ -119,8 +163,8 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
 
     let mut out = String::from("Agent runs:\n");
     let header = format!(
-        "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10}",
-        "run", "status", "provider", "model", "elapsed", "tokens", "cost"
+        "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6}",
+        "run", "status", "provider", "model", "elapsed", "tokens", "cost", "src"
     );
     out.push_str(&header);
     out.push('\n');
@@ -138,8 +182,13 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
             ),
             None => ("-".to_string(), "-".to_string(), "-".to_string()),
         };
+        // `src` is the count of persisted Source Pool / MCP / OpenAPI calls
+        // attributed to this run; `-` when the join is skipped or none exist.
+        let source_calls = row
+            .source_calls
+            .map_or_else(|| "-".to_string(), |count| count.to_string());
         out.push_str(&format!(
-            "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10}\n",
+            "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6}\n",
             row.agent_run_id.0,
             status_label(row.status),
             truncate(&row.provider, 12),
@@ -147,6 +196,7 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
             elapsed,
             tokens,
             cost,
+            source_calls,
         ));
     }
     out
@@ -414,6 +464,53 @@ mod tests {
         assert!(
             out.contains("tokens") && out.contains('-'),
             "no-usage rows show dashes in the token/cost columns: {out}",
+        );
+    }
+
+    #[test]
+    fn rows_with_sources_join_source_call_count() {
+        let runs = vec![
+            run(45, AgentRunStatus::Completed),
+            run(46, AgentRunStatus::Completed),
+        ];
+        // Join a source-call count only for run 45; 46 has no rows.
+        let rows = agent_pane_rows_with_usage_and_sources(
+            &runs,
+            |_| None,
+            |r| (r.id == AgentRunId(Uuid::from_u128(45))).then_some(7),
+        );
+        let row_45 = rows
+            .iter()
+            .find(|r| r.agent_run_id == AgentRunId(Uuid::from_u128(45)))
+            .expect("run 45 present");
+        let row_46 = rows
+            .iter()
+            .find(|r| r.agent_run_id == AgentRunId(Uuid::from_u128(46)))
+            .expect("run 46 present");
+        assert_eq!(row_45.source_calls, Some(7));
+        assert_eq!(row_46.source_calls, None);
+    }
+
+    #[test]
+    fn format_pane_shows_source_call_count_and_dash_when_absent() {
+        let runs = vec![run(47, AgentRunStatus::Completed)];
+        // With a join: the `src` header and the count render.
+        let out = format_agent_run_pane_with_usage_and_sources(&runs, |_| None, |_| Some(12));
+        assert!(out.contains("src"), "src header present: {out}");
+        assert!(out.contains("12"), "source-call count must render: {out}");
+
+        // Without a join (the back-compat `_with_usage` path): `src` shows `-`.
+        let out_dash = format_agent_run_pane_with_usage(&runs, |_| None);
+        assert!(
+            out_dash.contains("src"),
+            "src header still present: {out_dash}"
+        );
+        // The src cell is a dash; the row line ends with a `-` column.
+        assert!(
+            out_dash.lines().any(|line| line
+                .contains(&run(47, AgentRunStatus::Completed).id.0.to_string())
+                && line.trim_end().ends_with('-')),
+            "no-join src cell renders a dash: {out_dash}",
         );
     }
 

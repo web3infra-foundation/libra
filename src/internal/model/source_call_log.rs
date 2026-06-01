@@ -10,7 +10,9 @@
 //! v0.17.800 adds the on-disk shape so a session crash no longer
 //! drops the audit trail.
 
-use sea_orm::entity::prelude::*;
+use std::collections::HashMap;
+
+use sea_orm::{ConnectionTrait, Statement, entity::prelude::*};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "source_call_log")]
@@ -68,3 +70,96 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Count persisted Source Pool / MCP / OpenAPI calls grouped by the owning
+/// sub-agent run (CEX-S2-16 agent-pane "source calls" column). Rows whose
+/// `agent_run_id` is NULL — main-session calls not attributed to a sub-agent
+/// run — are excluded. The map is keyed by exactly the string the trace chain
+/// wrote (`AgentRunId.0.to_string()`, v0.17.1254) so a caller can look up a
+/// run's count by `run.id.0.to_string()`.
+///
+/// Read-only and side-effect free; an empty table yields an empty map.
+pub async fn count_by_agent_run<C: ConnectionTrait>(
+    conn: &C,
+) -> Result<HashMap<String, u64>, DbErr> {
+    let backend = conn.get_database_backend();
+    let rows = conn
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT agent_run_id, COUNT(*) AS cnt \
+             FROM source_call_log \
+             WHERE agent_run_id IS NOT NULL \
+             GROUP BY agent_run_id"
+                .to_string(),
+        ))
+        .await?;
+
+    let mut counts = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let run_id: String = row.try_get_by_index(0)?;
+        // SQLite COUNT(*) returns an i64; clamp defensively before the cast.
+        let count: i64 = row.try_get_by_index(1)?;
+        counts.insert(run_id, count.max(0) as u64);
+    }
+    Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
+
+    use super::*;
+    use crate::internal::db::migration::run_builtin_migrations;
+
+    fn row(id: usize, agent_run_id: Option<&str>) -> ActiveModel {
+        ActiveModel {
+            id: Set(format!("call-{id}")),
+            session_id: Set("sess".to_string()),
+            source_slug: Set("mcp:git".to_string()),
+            tool_name: Set("status".to_string()),
+            registered_tool_name: Set("status".to_string()),
+            tool_call_id: Set(format!("tc-{id}")),
+            agent_run_id: Set(agent_run_id.map(str::to_string)),
+            credential_ref: Set(None),
+            latency_ms: Set(None),
+            input_bytes: Set(0),
+            output_bytes: Set(0),
+            cost_estimate_micros: Set(None),
+            approval_decision: Set(None),
+            state_namespace: Set("mcp:git".to_string()),
+            success: Set(1),
+            created_at: Set("2026-06-02T00:00:00Z".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn count_by_agent_run_groups_per_run_and_skips_null() {
+        let conn = Database::connect("sqlite::memory:").await.expect("db");
+        run_builtin_migrations(&conn).await.expect("migrations");
+
+        // Two calls for run-A, one for run-B, one main-session (NULL run).
+        for (i, run) in [Some("run-A"), Some("run-A"), Some("run-B"), None]
+            .into_iter()
+            .enumerate()
+        {
+            row(i, run).insert(&conn).await.expect("insert");
+        }
+
+        let counts = count_by_agent_run(&conn).await.expect("count");
+        assert_eq!(counts.get("run-A").copied(), Some(2));
+        assert_eq!(counts.get("run-B").copied(), Some(1));
+        assert_eq!(
+            counts.len(),
+            2,
+            "rows with a NULL agent_run_id (main-session calls) are excluded",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_by_agent_run_empty_table_yields_empty_map() {
+        let conn = Database::connect("sqlite::memory:").await.expect("db");
+        run_builtin_migrations(&conn).await.expect("migrations");
+        let counts = count_by_agent_run(&conn).await.expect("count");
+        assert!(counts.is_empty());
+    }
+}

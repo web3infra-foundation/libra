@@ -87,6 +87,71 @@ fn agents_pane_shows_persisted_token_usage_and_cost() {
     );
 }
 
+/// 验收 (1): persisted Source Pool / MCP / OpenAPI calls surface as the `src`
+/// column, joined from the `source_call_log` table by `agent_run_id` (the
+/// per-run trace link landed v0.17.1254). End-to-end: persist a run, populate
+/// three source-call rows attributed to it, then render via the same
+/// query + pure pane projection the App uses.
+#[tokio::test]
+async fn agents_pane_shows_source_call_count_from_source_call_log() {
+    use libra::internal::{
+        db::migration::run_builtin_migrations,
+        model::source_call_log::{self, ActiveModel},
+        tui::format_agent_run_pane_with_usage_and_sources,
+    };
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
+
+    let temp = tempdir().unwrap();
+    let sessions_root = temp.path().join(".libra").join("sessions");
+    let store = AgentRunEventStore::new(&sessions_root);
+    let thread_id = Uuid::from_u128(0xabc);
+    let run_id = persist_run(&store, thread_id, 7, AgentRunStatus::Completed, None);
+
+    // Populate `source_call_log` with three calls attributed to this run, plus
+    // one main-session call (NULL agent_run_id) that must NOT be counted.
+    let conn = Database::connect("sqlite::memory:").await.unwrap();
+    run_builtin_migrations(&conn).await.unwrap();
+    for (i, attributed) in [true, true, true, false].into_iter().enumerate() {
+        ActiveModel {
+            id: Set(format!("c-{i}")),
+            session_id: Set("s".to_string()),
+            source_slug: Set("mcp:git".to_string()),
+            tool_name: Set("status".to_string()),
+            registered_tool_name: Set("status".to_string()),
+            tool_call_id: Set(format!("tc-{i}")),
+            agent_run_id: Set(attributed.then(|| run_id.0.to_string())),
+            credential_ref: Set(None),
+            latency_ms: Set(None),
+            input_bytes: Set(0),
+            output_bytes: Set(0),
+            cost_estimate_micros: Set(None),
+            approval_decision: Set(None),
+            state_namespace: Set("mcp:git".to_string()),
+            success: Set(1),
+            created_at: Set("2026-06-02T00:00:00Z".to_string()),
+        }
+        .insert(&conn)
+        .await
+        .unwrap();
+    }
+
+    let counts = source_call_log::count_by_agent_run(&conn).await.unwrap();
+    let runs = store.list_all_snapshots().unwrap();
+    let pane = format_agent_run_pane_with_usage_and_sources(
+        &runs,
+        |run| store.read_run_usage(run.thread_id, run.id).ok().flatten(),
+        |run| counts.get(&run.id.0.to_string()).copied(),
+    );
+
+    assert!(pane.contains("src"), "src header present: {pane}");
+    // The run's row (rightmost `src` column) reports exactly 3 attributed calls.
+    assert!(
+        pane.lines()
+            .any(|line| line.contains(&run_id.0.to_string()) && line.trim_end().ends_with('3')),
+        "the run's src column must show 3 source calls: {pane}",
+    );
+}
+
 /// 验收 (5): rebuild after a cache wipe yields a byte-identical pane. The pane
 /// reads only the on-disk snapshot/usage records — there is no hidden in-memory
 /// state — so two independent reads (with a `.libra/cache/` deletion between
