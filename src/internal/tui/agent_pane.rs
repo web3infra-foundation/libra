@@ -10,12 +10,14 @@
 //!
 //! The full pane the card describes also shows live per-run telemetry — current
 //! tool / file, elapsed, token usage, budget remaining, cost estimate, source
-//! calls, context-pack hash and permission profile. None of that lives on the
-//! [`AgentRun`] snapshot; it is joined from the usage / budget / event /
-//! context-pack records by a later slice. This projection surfaces only the
-//! fields the snapshot itself carries.
+//! calls, context-pack hash and permission profile. Most of that is still joined
+//! by later slices; this slice joins the **persisted per-run [`RunUsage`]** (the
+//! dispatcher writes one on each terminal run) so the pane can show total tokens
+//! and cost estimate alongside the snapshot fields. The join itself is the
+//! caller's job (via [`agent_pane_rows_with_usage`] /
+//! [`format_agent_run_pane_with_usage`]) — this module stays pure (no I/O).
 
-use crate::internal::ai::agent_run::{AgentRun, AgentRunId, AgentRunStatus, AgentTaskId};
+use crate::internal::ai::agent_run::{AgentRun, AgentRunId, AgentRunStatus, AgentTaskId, RunUsage};
 
 /// One row of the agent-run pane, projected from an [`AgentRun`] snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,10 +36,15 @@ pub struct AgentRunRow {
     pub transcript_path: String,
     /// Isolated workspace path, if one has been materialized.
     pub workspace_path: Option<String>,
+    /// Persisted per-run usage (total tokens, cost estimate, tool calls), joined
+    /// from the run's `RunUsage` record when available. `None` when the run has
+    /// no terminal usage record yet (e.g. still in flight) or the join is skipped.
+    pub usage: Option<RunUsage>,
 }
 
 impl AgentRunRow {
     /// Project a single [`AgentRun`] snapshot into a display row (1:1 field map).
+    /// `usage` is left unset; use [`agent_pane_rows_with_usage`] to join it.
     fn from_run(run: &AgentRun) -> Self {
         Self {
             agent_run_id: run.id,
@@ -47,6 +54,7 @@ impl AgentRunRow {
             model: run.model.clone(),
             transcript_path: run.transcript_path.clone(),
             workspace_path: run.workspace_path.clone(),
+            usage: None,
         }
     }
 }
@@ -63,37 +71,90 @@ pub fn agent_pane_rows(runs: &[AgentRun]) -> Vec<AgentRunRow> {
     rows
 }
 
-/// Render the agent-run pane as a stable monospace table for the `/agent list`
-/// TUI surface (and any future `libra agent status` CLI). Rows are ordered by
-/// [`agent_pane_rows`] — in-flight runs first, then by id — so a pane rebuilt
-/// from persisted snapshots renders deterministically. An empty input yields a
-/// documented placeholder so the surface never shows a blank pane. Pure — no I/O.
-pub fn format_agent_run_pane(runs: &[AgentRun]) -> String {
-    let rows = agent_pane_rows(runs);
+/// Like [`agent_pane_rows`], but joins each run's persisted [`RunUsage`] via the
+/// caller-supplied `usage_lookup` (e.g. `AgentRunEventStore::read_run_usage`).
+/// Ordering is identical and deterministic. Pure — the I/O lives in the closure,
+/// so a JSONL-replay caller can pass the same lookup and rebuild an identical
+/// pane (CEX-S2-16 验收 (5)).
+pub fn agent_pane_rows_with_usage<F>(runs: &[AgentRun], usage_lookup: F) -> Vec<AgentRunRow>
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+{
+    let mut rows: Vec<AgentRunRow> = runs
+        .iter()
+        .map(|run| {
+            let mut row = AgentRunRow::from_run(run);
+            row.usage = usage_lookup(run);
+            row
+        })
+        .collect();
+    rows.sort_by_key(|row| (row.status.is_terminal(), row.agent_run_id.0));
+    rows
+}
+
+/// Render the agent-run pane as a stable monospace table for the `/agents` TUI
+/// surface (and any future `libra agent status` CLI). Rows are ordered by
+/// [`agent_pane_rows_with_usage`] — in-flight runs first, then by id — so a pane
+/// rebuilt from persisted snapshots renders deterministically. An empty input
+/// yields a documented placeholder so the surface never shows a blank pane.
+///
+/// Each run's persisted [`RunUsage`] is joined via `usage_lookup` (e.g.
+/// `AgentRunEventStore::read_run_usage`) so the `tokens` / `cost` columns show
+/// real totals; a run with no usage record renders `-` in those cells. Pass
+/// `|_| None` to render the table without any usage join. Pure — the I/O lives
+/// in the closure.
+pub fn format_agent_run_pane_with_usage<F>(runs: &[AgentRun], usage_lookup: F) -> String
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+{
+    render_pane(&agent_pane_rows_with_usage(runs, usage_lookup))
+}
+
+/// Shared table renderer over already-ordered rows, factored out of the public
+/// entry point so the layout has a single source of truth.
+fn render_pane(rows: &[AgentRunRow]) -> String {
     if rows.is_empty() {
         return "No sub-agent runs recorded yet.".to_string();
     }
 
     let mut out = String::from("Agent runs:\n");
     let header = format!(
-        "  {:<36} {:<10} {:<12} {:<28}",
-        "run", "status", "provider", "model"
+        "  {:<36} {:<10} {:<12} {:<24} {:>10} {:>10}",
+        "run", "status", "provider", "model", "tokens", "cost"
     );
     out.push_str(&header);
     out.push('\n');
     out.push_str("  ");
     out.push_str(&"-".repeat(header.len() - 2));
     out.push('\n');
-    for row in &rows {
+    for row in rows {
+        let (tokens, cost) = match row.usage {
+            Some(usage) => (
+                usage.total_tokens().to_string(),
+                format_micro_dollars(usage.cost_estimate_micro_dollars),
+            ),
+            None => ("-".to_string(), "-".to_string()),
+        };
         out.push_str(&format!(
-            "  {:<36} {:<10} {:<12} {:<28}\n",
+            "  {:<36} {:<10} {:<12} {:<24} {:>10} {:>10}\n",
             row.agent_run_id.0,
             status_label(row.status),
             truncate(&row.provider, 12),
-            truncate(&row.model, 28),
+            truncate(&row.model, 24),
+            tokens,
+            cost,
         ));
     }
     out
+}
+
+/// Format a micro-dollar (millionth-of-a-dollar) cost estimate as `$X.XXXX`.
+/// Four decimals keep sub-cent per-run estimates legible without scientific
+/// notation; the value never wraps because it is a plain integer divide.
+fn format_micro_dollars(micro_dollars: u64) -> String {
+    let dollars = micro_dollars / 1_000_000;
+    let frac = (micro_dollars % 1_000_000) / 100; // 4 decimal places (1e-4 dollars)
+    format!("${dollars}.{frac:04}")
 }
 
 /// Stable lower-case label for a run status (the `{:?}` Debug form is not a
@@ -194,7 +255,7 @@ mod tests {
 
     #[test]
     fn format_pane_empty_yields_placeholder() {
-        let out = format_agent_run_pane(&[]);
+        let out = format_agent_run_pane_with_usage(&[], |_| None);
         assert!(out.contains("No sub-agent runs recorded yet."));
     }
 
@@ -204,7 +265,7 @@ mod tests {
             run(20, AgentRunStatus::Completed),
             run(21, AgentRunStatus::Running),
         ];
-        let out = format_agent_run_pane(&runs);
+        let out = format_agent_run_pane_with_usage(&runs, |_| None);
         assert!(out.contains("Agent runs:"));
         assert!(out.contains("run") && out.contains("status") && out.contains("provider"));
         assert!(out.contains("running") && out.contains("completed"));
@@ -222,7 +283,7 @@ mod tests {
     fn format_pane_truncates_long_model() {
         let mut r = run(30, AgentRunStatus::Running);
         r.model = "acmecorp/some-extremely-long-model-identifier-slug".to_string();
-        let out = format_agent_run_pane(std::slice::from_ref(&r));
+        let out = format_agent_run_pane_with_usage(std::slice::from_ref(&r), |_| None);
         assert!(
             out.contains('…'),
             "an over-long model cell must be truncated"
@@ -245,5 +306,66 @@ mod tests {
         );
         // Re-projecting the same input yields the identical order (replay-stable).
         assert_eq!(agent_pane_rows(&runs), rows);
+    }
+
+    fn usage(prompt: u64, completion: u64, cost_micro: u64) -> RunUsage {
+        RunUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cost_estimate_micro_dollars: cost_micro,
+            ..RunUsage::default()
+        }
+    }
+
+    #[test]
+    fn rows_with_usage_join_and_preserve_ordering() {
+        let runs = vec![
+            run(40, AgentRunStatus::Completed),
+            run(41, AgentRunStatus::Running),
+        ];
+        // Look up usage only for the completed run (41 is still in flight).
+        let rows = agent_pane_rows_with_usage(&runs, |r| {
+            (r.id == AgentRunId(Uuid::from_u128(40))).then(|| usage(120, 60, 1_500))
+        });
+        // In-flight (41) still sorts before terminal (40).
+        assert_eq!(rows[0].agent_run_id, AgentRunId(Uuid::from_u128(41)));
+        assert_eq!(rows[0].usage, None, "the in-flight run has no usage joined");
+        assert_eq!(rows[1].agent_run_id, AgentRunId(Uuid::from_u128(40)));
+        assert_eq!(rows[1].usage.expect("usage joined").total_tokens(), 180);
+    }
+
+    #[test]
+    fn format_pane_with_usage_shows_tokens_and_cost() {
+        let runs = vec![run(50, AgentRunStatus::Completed)];
+        let out = format_agent_run_pane_with_usage(&runs, |_| Some(usage(120, 60, 1_500)));
+        assert!(
+            out.contains("tokens") && out.contains("cost"),
+            "headers present"
+        );
+        assert!(
+            out.contains("180"),
+            "total tokens (120+60) must render: {out}"
+        );
+        // 1_500 micro-dollars = $0.0015.
+        assert!(out.contains("$0.0015"), "cost estimate must render: {out}");
+    }
+
+    #[test]
+    fn format_pane_without_usage_shows_dashes() {
+        let runs = vec![run(60, AgentRunStatus::Running)];
+        let out = format_agent_run_pane_with_usage(&runs, |_| None);
+        // The token/cost cells render `-` when no usage is joined.
+        assert!(
+            out.contains("tokens") && out.contains('-'),
+            "no-usage rows show dashes in the token/cost columns: {out}",
+        );
+    }
+
+    #[test]
+    fn micro_dollars_format_is_four_decimal_dollars() {
+        assert_eq!(format_micro_dollars(0), "$0.0000");
+        assert_eq!(format_micro_dollars(1_500), "$0.0015");
+        assert_eq!(format_micro_dollars(1_000_000), "$1.0000");
+        assert_eq!(format_micro_dollars(2_345_600), "$2.3456");
     }
 }

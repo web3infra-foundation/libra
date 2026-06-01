@@ -5252,10 +5252,13 @@ where
         let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
             .unwrap_or_else(|_| working_dir.join(".libra"))
             .join("sessions");
-        let runs = AgentRunEventStore::new(sessions_root)
-            .list_all_snapshots()
-            .unwrap_or_default();
-        super::agent_pane::format_agent_run_pane(&runs)
+        let store = AgentRunEventStore::new(sessions_root);
+        let runs = store.list_all_snapshots().unwrap_or_default();
+        // Join each run's persisted terminal usage (tokens + cost estimate); a
+        // missing/unreadable record leaves the token/cost cells as `-`.
+        super::agent_pane::format_agent_run_pane_with_usage(&runs, |run| {
+            store.read_run_usage(run.thread_id, run.id).ok().flatten()
+        })
     }
 
     /// Request cancellation of a single sub-agent run by id, leaving the main
