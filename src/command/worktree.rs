@@ -1,7 +1,5 @@
 //! `libra worktree` command implementation.
 //!
-//! `libra worktree` 命令实现。
-//!
 //! Boundary: manages linked worktree metadata and filesystem layout while preserving
 //! main-worktree safety invariants. Command tests cover add/list/remove, duplicate
 //! paths, and main-worktree protection.
@@ -136,18 +134,18 @@ struct WorktreeState {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct WorktreeListOutput {
-    pub(crate) worktrees: Vec<WorktreeListEntry>,
+struct WorktreeListOutput {
+    worktrees: Vec<WorktreeListEntry>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct WorktreeListEntry {
-    pub(crate) kind: &'static str,
-    pub(crate) path: String,
-    pub(crate) is_main: bool,
-    pub(crate) locked: bool,
-    pub(crate) lock_reason: Option<String>,
-    pub(crate) exists: bool,
+struct WorktreeListEntry {
+    kind: &'static str,
+    path: String,
+    is_main: bool,
+    locked: bool,
+    lock_reason: Option<String>,
+    exists: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,10 +205,10 @@ struct WorktreeUmountOutput {
     cleanup_root_removed: bool,
 }
 
-pub(crate) type WorktreeResult<T> = Result<T, WorktreeError>;
+type WorktreeResult<T> = Result<T, WorktreeError>;
 
 #[derive(Debug)]
-pub(crate) enum WorktreeError {
+enum WorktreeError {
     InvalidTarget(String),
     OperationBlocked(String),
     NoSuchWorktree { path: String },
@@ -241,7 +239,7 @@ impl WorktreeError {
         }
     }
 
-    pub(crate) fn into_cli_error(self) -> CliError {
+    fn into_cli_error(self) -> CliError {
         let code = self.stable_code();
         let mut error = CliError::fatal(self.to_string()).with_stable_code(code);
         if matches!(self, Self::DirtyWorktree { .. }) {
@@ -854,7 +852,7 @@ fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
 /// Each registered worktree is printed on its own line as either
 /// `main <path>` or `worktree <path>`, with optional `[locked: <reason>]`
 /// suffix when the entry is locked.
-pub(crate) fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
+fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
     let state = load_state()?;
     let worktrees = state
         .worktrees

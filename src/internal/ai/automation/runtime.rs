@@ -1,7 +1,3 @@
-//! Automation runtime: coordinates scheduler, executor, and history.
-//!
-//! 自动化运行时：协调调度器、执行器和历史记录。
-
 use std::path::Path;
 
 use sea_orm::DatabaseConnection;

@@ -1,7 +1,5 @@
 //! Storage-side glue trait implementations for the [`Intent`] workflow object.
 //!
-//! 为 [`Intent`] 工作流对象的存储端粘合特性实现。
-//!
 //! The Libra storage layer ([`crate::utils::storage_ext::Identifiable`])
 //! abstracts over any object that can be persisted under a stable
 //! `(object_type, object_id)` pair. Most workflow types provide this glue in

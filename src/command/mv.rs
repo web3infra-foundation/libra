@@ -1,6 +1,4 @@
 //! Implementation of `git mv` command, which moves/renames files and directories in the working directory and updates the index accordingly.
-//!
-//! `git mv` 命令的实现，它在工作目录中移动/重命名文件和目录并相应地更新索引。
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},

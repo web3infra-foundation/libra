@@ -1,7 +1,5 @@
 //! Human-readable summaries for IntentSpecs used in CLI, MCP, and review output.
 //!
-//! 用于 CLI、MCP 和审查输出的 IntentSpec 人类可读摘要。
-//!
 //! Boundary: summaries are presentation-only and must not feed back into canonical
 //! storage. Intent-flow coverage checks that high-risk constraints and acceptance
 //! criteria remain visible after normalization.

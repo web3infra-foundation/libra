@@ -36,15 +36,6 @@ export type CodeUiProviderInfo = {
   managed?: boolean;
 };
 
-export type CodeUiUsageSnapshot = {
-  provider: string;
-  model: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  costUsd?: number;
-};
-
 export type CodeUiControllerKind =
   | "none"
   | "browser"
@@ -175,8 +166,6 @@ export type CodeUiSessionSnapshot = {
   controller: CodeUiControllerState;
   status: CodeUiSessionStatus;
   transcript: CodeUiTranscriptEntry[];
-  usage?: CodeUiUsageSnapshot;
-  pendingPlanRevision?: string;
   plans: CodeUiPlanSnapshot[];
   tasks: CodeUiTaskSnapshot[];
   toolCalls: CodeUiToolCallSnapshot[];

@@ -1,6 +1,4 @@
 //! Merge command orchestration that resolves base/target commits, performs recursive merge, stages results, and updates refs or surfaces conflicts.
-//!
-//! 合并命令编排，解析基础/目标提交、执行递归合并、暂存结果、更新参考或呈现冲突。
 
 use std::{
     borrow::Cow,
@@ -274,8 +272,6 @@ impl From<PullMergeError> for CliError {
     }
 }
 
-/// Fire-and-forget entry point for the merge command.
-/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: MergeArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -295,21 +291,6 @@ pub async fn execute(args: MergeArgs) {
 /// # Errors
 /// Returns [`CliError`] when the target is invalid, histories are unrelated,
 /// conflicts need resolution, objects cannot be read, or HEAD/worktree updates fail.
-///
-/// 合并命令的快速执行入口。
-/// 委托给 execute_safe 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
-///
-/// # 副作用
-/// - 解析并读取当前和目标提交。
-/// - 对受支持的情况执行快速前进合并。
-/// - 更新 HEAD/当前分支并将工作树还原到合并的树状态。
-/// - 通过 [`OutputConfig`] 发出合并状态文本。
-///
-/// # 错误
-/// 当目标无效、历史不相关、需要解决冲突、无法读取对象或
-/// HEAD/工作树更新失败时返回 [`CliError`]。
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
     render_merge_output(&result, output)

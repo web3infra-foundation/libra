@@ -1,6 +1,4 @@
 //! SeaORM entity for the `config_kv` flat key/value configuration table with optional vault encryption.
-//!
-//! 具有可选保险库加密的 `config_kv` 平面键/值配置表的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

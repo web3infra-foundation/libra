@@ -1,7 +1,5 @@
 //! Goal verifier — deterministic completion gate.
 //!
-//! 目标验证器 — 确定性完成门。
-//!
 //! Per `docs/improvement/opencode.md` lines 670-681, the first-version
 //! verifier is **deterministic + evidence-based**: it does not call a
 //! model to make the final accept/reject decision. The supervisor

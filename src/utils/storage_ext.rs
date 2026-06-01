@@ -1,7 +1,5 @@
 //! Extension helpers for storage backends that need higher-level object operations.
 //!
-//! 存储后端的扩展助手，这些后端需要更高级的对象操作。
-//!
 //! Boundary: these helpers keep backend-neutral behavior out of individual storage
 //! implementations. Storage-flow and cloud-backup tests cover missing objects,
 //! compression boundaries, and local/remote fallback behavior.

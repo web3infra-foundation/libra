@@ -1,6 +1,4 @@
 //! Repository database maintenance commands.
-//!
-//! 存储库数据库维护命令。
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;

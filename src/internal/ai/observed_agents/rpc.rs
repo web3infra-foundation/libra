@@ -550,14 +550,18 @@ fn pump_stdout_lines(
 ///
 /// Returns an empty vec when `$PATH` is unset or no binaries match.
 pub fn discover_rpc_agents() -> Vec<RpcAgentBinary> {
-    use std::collections::HashSet;
-
     let Some(path_var) = std::env::var_os("PATH") else {
         return Vec::new();
     };
+    discover_rpc_agents_in_path(path_var)
+}
+
+fn discover_rpc_agents_in_path(path_var: impl AsRef<std::ffi::OsStr>) -> Vec<RpcAgentBinary> {
+    use std::collections::HashSet;
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<RpcAgentBinary> = Vec::new();
-    for dir in std::env::split_paths(&path_var) {
+    for dir in std::env::split_paths(path_var.as_ref()) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -605,29 +609,13 @@ mod tests {
     use super::*;
 
     #[test]
-    #[serial(rpc_path_env)]
     fn discover_returns_empty_when_no_binaries_match() {
-        // Point PATH at an empty tempdir — we expect no matches.
         let dir = tempfile::tempdir().unwrap();
-        let original = std::env::var_os("PATH");
-        // SAFETY: tests serialize this env mutation via the
-        // `#[serial(rpc_path_env)]` lock so no other test under this
-        // key races us; we restore PATH before returning.
-        unsafe {
-            std::env::set_var("PATH", dir.path());
-        }
-        let agents = discover_rpc_agents();
-        unsafe {
-            match original {
-                Some(prev) => std::env::set_var("PATH", prev),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        let agents = discover_rpc_agents_in_path(dir.path());
         assert!(agents.is_empty());
     }
 
     #[test]
-    #[serial(rpc_path_env)]
     fn discover_picks_up_libra_agent_prefix() {
         let dir = tempfile::tempdir().unwrap();
         // Plant a file named `libra-agent-test-fixture` and chmod it
@@ -640,17 +628,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let original = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", dir.path());
-        }
-        let agents = discover_rpc_agents();
-        unsafe {
-            match original {
-                Some(prev) => std::env::set_var("PATH", prev),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        let agents = discover_rpc_agents_in_path(dir.path());
 
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].slug, "test-fixture");
@@ -658,7 +636,6 @@ mod tests {
     }
 
     #[test]
-    #[serial(rpc_path_env)]
     fn discover_skips_files_without_executable_bit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("libra-agent-no-exec");
@@ -669,17 +646,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        let original = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", dir.path());
-        }
-        let agents = discover_rpc_agents();
-        unsafe {
-            match original {
-                Some(prev) => std::env::set_var("PATH", prev),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        let agents = discover_rpc_agents_in_path(dir.path());
 
         assert!(
             agents.is_empty(),
@@ -688,7 +655,6 @@ mod tests {
     }
 
     #[test]
-    #[serial(rpc_path_env)]
     fn discover_skips_files_with_empty_slug() {
         // `libra-agent-` (no slug) must NOT match.
         let dir = tempfile::tempdir().unwrap();
@@ -700,17 +666,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let original = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", dir.path());
-        }
-        let agents = discover_rpc_agents();
-        unsafe {
-            match original {
-                Some(prev) => std::env::set_var("PATH", prev),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        let agents = discover_rpc_agents_in_path(dir.path());
 
         assert!(
             agents.is_empty(),
@@ -719,7 +675,6 @@ mod tests {
     }
 
     #[test]
-    #[serial(rpc_path_env)]
     fn discover_dedups_across_path_entries() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
@@ -733,18 +688,8 @@ mod tests {
             }
         }
 
-        let original = std::env::var_os("PATH");
         let combined = std::env::join_paths([dir_a.path(), dir_b.path()]).unwrap();
-        unsafe {
-            std::env::set_var("PATH", &combined);
-        }
-        let agents = discover_rpc_agents();
-        unsafe {
-            match original {
-                Some(prev) => std::env::set_var("PATH", prev),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        let agents = discover_rpc_agents_in_path(&combined);
 
         assert_eq!(agents.len(), 1, "first match wins: {agents:?}");
         assert_eq!(agents[0].slug, "dup");

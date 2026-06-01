@@ -1,7 +1,5 @@
 //! Cloudflare D1 REST API client for database backup and synchronization.
 //!
-//! Cloudflare D1 REST API 客户端，用于数据库备份和同步。
-//!
 //! This module provides a client for interacting with Cloudflare D1 database
 //! via the REST API. It supports executing SQL statements, querying data,
 //! and batch operations for efficient cloud backup.

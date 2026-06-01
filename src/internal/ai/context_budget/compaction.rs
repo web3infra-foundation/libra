@@ -1,7 +1,5 @@
 //! Append-only compaction records for context-frame replay.
 //!
-//! 用于上下文框架回放的仅追加压实记录。
-//!
 //! Carries the [`CompactionEvent`] schema, OC-Phase 4 P4.5
 //! `tail_start_id` field, and the canonical prune / preserve-recent
 //! constants the doc requires (`docs/improvement/opencode.md`

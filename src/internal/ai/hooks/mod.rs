@@ -1,7 +1,5 @@
 //! Hook system for event-driven automation around the AI agent.
 //!
-//! 围绕 AI 代理的事件驱动自动化的钩子系统。
-//!
 //! Hooks are external shell commands triggered by lifecycle events (tool use,
 //! session start/end). They receive a JSON payload on stdin and can optionally
 //! block operations (`PreToolUse` only, signalled via exit code 129).

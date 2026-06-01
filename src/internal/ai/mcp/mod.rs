@@ -1,7 +1,5 @@
 //! MCP tools and resources implementation.
 //!
-//! MCP 工具和资源实现。
-//!
 //! # Tools Interface
 //!
 //! | Tool Name | Description |
@@ -36,6 +34,7 @@
 //!
 //! See `resource.rs` for detailed parameter structures.
 
+pub mod agents_resource;
 pub mod authz;
 pub mod resource;
 pub mod server;

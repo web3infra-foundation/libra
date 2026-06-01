@@ -1,8 +1,6 @@
 //! `MergeCandidate[S]` and `MergeDecision[E]` — Layer 1 aggregate of one or
 //! more `AgentPatchSet`s plus the human-gated decision applied to them.
 //!
-//! `MergeCandidate[S]` 和 `MergeDecision[E]` — 一个或多个 `AgentPatchSet` 加上应用于它们的人工门控决策的第 1 层聚合。
-//!
 //! # Schema-ownership boundaries
 //!
 //! Per CEX-S2-13 ownership rule (and audit-closure note in `mod.rs`), this
@@ -88,6 +86,27 @@ pub struct MergeCandidate {
     pub review_evidence: Vec<EvidenceId>,
 }
 
+/// Why a [`MergeCandidate::try_accept`] was rejected. Surfaced so Layer 1 / the
+/// reviewer UI explains exactly why a candidate could not be accepted.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AcceptError {
+    /// The candidate is not awaiting review — it was already accepted /
+    /// rejected / marked conflicting, so accepting it now would be a
+    /// double-transition.
+    #[error("merge candidate is not awaiting review (current state: {current:?})")]
+    NotPending {
+        /// The candidate's current review state.
+        current: ReviewState,
+    },
+    /// The candidate's decision payload carries unresolved conflicts; per
+    /// S2-INV-07 a conflicted candidate must never be accepted / auto-applied.
+    #[error("merge candidate has {conflict_count} unresolved conflict(s) and cannot be accepted")]
+    HasConflicts {
+        /// Number of conflicts blocking acceptance.
+        conflict_count: usize,
+    },
+}
+
 impl MergeCandidate {
     /// Convenience constructor that respects S2-INV-07 default.
     pub fn new(
@@ -104,6 +123,90 @@ impl MergeCandidate {
             review_state: ReviewState::NeedsHumanReview,
             review_evidence: Vec::new(),
         }
+    }
+
+    /// Aggregate a candidate from the patch sets it bundles (agent.md Step 2.5:
+    /// "`MergeCandidate` 聚合一个或多个 `AgentPatchSet`").
+    ///
+    /// Derives `patchset_ids` and the de-duplicated `agent_run_ids` directly
+    /// from `patchsets` so the candidate's run list can never disagree with the
+    /// patches it actually aggregates (the hand-derive hazard a caller passing
+    /// mismatched id vectors to [`new`](Self::new) would otherwise hit). The
+    /// owning run ids are collected in first-seen order and de-duplicated (one
+    /// run may contribute several patch sets). Starts in
+    /// [`ReviewState::NeedsHumanReview`] per S2-INV-07. Pure — no I/O.
+    pub fn from_patchsets(id: MergeCandidateId, patchsets: &[super::AgentPatchSet]) -> Self {
+        let patchset_ids = patchsets.iter().map(|p| p.id).collect();
+        let mut agent_run_ids = Vec::new();
+        for patch in patchsets {
+            if !agent_run_ids.contains(&patch.agent_run_id) {
+                agent_run_ids.push(patch.agent_run_id);
+            }
+        }
+        Self::new(id, patchset_ids, agent_run_ids)
+    }
+
+    /// Attempt to move the candidate to [`ReviewState::Accepted`] after a human
+    /// (or, later, a flag-gated auto-merge) signs off.
+    ///
+    /// Enforces the S2-INV-07 safety invariant at the type boundary so no caller
+    /// can apply a sub-agent patch set to the main worktree while it is
+    /// conflicted or not yet under review:
+    ///
+    /// - the candidate must currently be in [`ReviewState::NeedsHumanReview`]
+    ///   (otherwise [`AcceptError::NotPending`]);
+    /// - the decision `payload.conflict_list` must be empty (otherwise
+    ///   [`AcceptError::HasConflicts`]) — a conflicted candidate is never
+    ///   auto-applied (agent.md Step 2.5 验收 (2)).
+    ///
+    /// On success the `review_state` becomes `Accepted`. On error the state is
+    /// left unchanged. Pure state transition — no I/O, no patch application
+    /// (applying the accepted patch to the worktree is a separate runtime step).
+    pub fn try_accept(&mut self, payload: &MergeDecisionPayloadV0) -> Result<(), AcceptError> {
+        if self.review_state != ReviewState::NeedsHumanReview {
+            return Err(AcceptError::NotPending {
+                current: self.review_state,
+            });
+        }
+        if !payload.conflict_list.is_empty() {
+            return Err(AcceptError::HasConflicts {
+                conflict_count: payload.conflict_list.len(),
+            });
+        }
+        self.review_state = ReviewState::Accepted;
+        Ok(())
+    }
+
+    /// Reject a candidate awaiting review, moving it to
+    /// [`ReviewState::Rejected`]. Unlike [`try_accept`](Self::try_accept) a
+    /// reject is always safe regardless of conflicts — the patch is discarded,
+    /// not applied — but the candidate must still be pending so a decided
+    /// candidate is not silently re-decided ([`AcceptError::NotPending`]
+    /// otherwise). Pure; leaves the state unchanged on error.
+    pub fn reject(&mut self) -> Result<(), AcceptError> {
+        self.transition_from_pending(ReviewState::Rejected)
+    }
+
+    /// Mark a candidate as [`ReviewState::Conflict`] when conflict detection
+    /// found unresolved conflicts. A subsequent [`try_accept`](Self::try_accept)
+    /// then fails with [`AcceptError::NotPending`], so a conflicted candidate
+    /// can never be accepted without first being re-reviewed. Must be pending
+    /// to mark; pure; leaves the state unchanged on error.
+    pub fn mark_conflict(&mut self) -> Result<(), AcceptError> {
+        self.transition_from_pending(ReviewState::Conflict)
+    }
+
+    /// Move from [`ReviewState::NeedsHumanReview`] to `next`, or return
+    /// [`AcceptError::NotPending`] with the current state. Shared by
+    /// [`reject`](Self::reject) and [`mark_conflict`](Self::mark_conflict).
+    fn transition_from_pending(&mut self, next: ReviewState) -> Result<(), AcceptError> {
+        if self.review_state != ReviewState::NeedsHumanReview {
+            return Err(AcceptError::NotPending {
+                current: self.review_state,
+            });
+        }
+        self.review_state = next;
+        Ok(())
     }
 }
 
@@ -152,6 +255,28 @@ pub struct MergeDecision {
     pub payload: MergeDecisionPayloadV0,
 }
 
+impl MergeDecision {
+    /// Build the `Decision[E]` event recording the verdict applied to a
+    /// reviewed `candidate` (agent.md Step 2.5 验收 (4): "final decision 写入
+    /// `Decision[E]`").
+    ///
+    /// Derives the aggregate id fields — `merge_candidate_id` and
+    /// `agent_run_ids` — and `resulting_state` directly from `candidate` so the
+    /// event can never desync from the candidate it decides (the exact failure
+    /// the CEX-S2-10 (2) "`merge_candidate_id + agent_run_ids`" aggregate-id rule
+    /// exists to prevent). A fresh [`DecisionId`] is allocated for the event.
+    /// Pure — no I/O; persisting the event is the caller's job.
+    pub fn for_candidate(candidate: &MergeCandidate, payload: MergeDecisionPayloadV0) -> Self {
+        Self {
+            id: DecisionId::new(),
+            merge_candidate_id: candidate.id,
+            agent_run_ids: candidate.agent_run_ids.clone(),
+            resulting_state: candidate.review_state,
+            payload,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +306,147 @@ mod tests {
         );
     }
 
+    fn conflict() -> Conflict {
+        Conflict {
+            kind: "both_modified".to_string(),
+            path: "src/a.rs".to_string(),
+            detail: None,
+        }
+    }
+
+    /// **S2-INV-07**: a clean candidate awaiting review can be accepted, and the
+    /// state transitions to `Accepted`.
+    #[test]
+    fn try_accept_succeeds_for_clean_pending_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0::default();
+        assert_eq!(candidate.try_accept(&payload), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Accepted);
+    }
+
+    /// **S2-INV-07 safety**: a candidate whose payload carries conflicts MUST
+    /// NOT be acceptable; the state is left unchanged so a conflicted patch can
+    /// never reach the main worktree.
+    #[test]
+    fn try_accept_rejects_conflicted_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0 {
+            conflict_list: vec![conflict(), conflict()],
+            ..MergeDecisionPayloadV0::default()
+        };
+        assert_eq!(
+            candidate.try_accept(&payload),
+            Err(AcceptError::HasConflicts { conflict_count: 2 }),
+        );
+        assert_eq!(
+            candidate.review_state,
+            ReviewState::NeedsHumanReview,
+            "a rejected accept must leave the candidate awaiting review",
+        );
+    }
+
+    /// Accepting a candidate that is not pending (already accepted) is a
+    /// double-transition and is rejected with the current state.
+    #[test]
+    fn try_accept_rejects_non_pending_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0::default();
+        candidate
+            .try_accept(&payload)
+            .expect("first accept succeeds");
+        assert_eq!(
+            candidate.try_accept(&payload),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Accepted,
+            }),
+        );
+    }
+
+    /// `for_candidate` derives the aggregate id fields and resulting state from
+    /// the candidate verbatim — the event can never desync from the candidate
+    /// it decides (CEX-S2-10 (2) aggregate-id rule).
+    #[test]
+    fn for_candidate_derives_aggregate_ids_and_state() {
+        let mut candidate = MergeCandidate::new(
+            MergeCandidateId::new(),
+            vec![AgentPatchSetId::new()],
+            vec![AgentRunId::new(), AgentRunId::new()],
+        );
+        candidate
+            .try_accept(&MergeDecisionPayloadV0::default())
+            .expect("accept");
+
+        let payload = MergeDecisionPayloadV0 {
+            test_evidence: vec![EvidenceId::new()],
+            ..MergeDecisionPayloadV0::default()
+        };
+        let decision = MergeDecision::for_candidate(&candidate, payload.clone());
+
+        assert_eq!(decision.merge_candidate_id, candidate.id);
+        assert_eq!(decision.agent_run_ids, candidate.agent_run_ids);
+        assert_eq!(decision.resulting_state, ReviewState::Accepted);
+        assert_eq!(
+            decision.payload.test_evidence, payload.test_evidence,
+            "the supplied payload is threaded through unchanged",
+        );
+    }
+
+    /// Two decisions built for the same candidate get distinct `DecisionId`s —
+    /// the event id is freshly allocated, not derived from the candidate.
+    #[test]
+    fn for_candidate_allocates_a_fresh_decision_id() {
+        let candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let a = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
+        let b = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
+        assert_ne!(a.id, b.id, "each decision event needs its own id");
+    }
+
+    /// `reject` moves a pending candidate to `Rejected` — even one carrying
+    /// conflicts, since a reject discards the patch rather than applying it.
+    #[test]
+    fn reject_moves_pending_candidate_to_rejected() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        assert_eq!(candidate.reject(), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Rejected);
+    }
+
+    /// `mark_conflict` moves a pending candidate to `Conflict`, after which
+    /// `try_accept` fails with `NotPending` — a conflicted candidate can never
+    /// be accepted without re-review. This closes the conflict→accept loop.
+    #[test]
+    fn mark_conflict_then_accept_is_blocked() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        assert_eq!(candidate.mark_conflict(), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Conflict);
+        assert_eq!(
+            candidate.try_accept(&MergeDecisionPayloadV0::default()),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Conflict,
+            }),
+            "a candidate marked Conflict must not be acceptable",
+        );
+    }
+
+    /// `reject` / `mark_conflict` are double-transition-safe: a decided
+    /// candidate cannot be re-decided.
+    #[test]
+    fn transitions_reject_non_pending_candidate() {
+        let mut rejected = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        rejected.reject().expect("first reject succeeds");
+        assert_eq!(
+            rejected.reject(),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Rejected,
+            }),
+        );
+        assert_eq!(
+            rejected.mark_conflict(),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Rejected,
+            }),
+        );
+    }
+
     /// The constructor threads the supplied ids through verbatim — the
     /// aggregate `MergeDecision` later references the candidate's
     /// `agent_run_ids`, so they must survive construction unchanged.
@@ -194,6 +460,52 @@ mod tests {
         assert_eq!(candidate.id, id);
         assert_eq!(candidate.patchset_ids, patchsets);
         assert_eq!(candidate.agent_run_ids, runs);
+    }
+
+    /// `from_patchsets` derives `patchset_ids` verbatim and `agent_run_ids`
+    /// de-duplicated in first-seen order — two patch sets from one run collapse
+    /// to a single run id, so the candidate's run list always matches its
+    /// patches.
+    #[test]
+    fn from_patchsets_aggregates_and_dedups_run_ids() {
+        use crate::internal::ai::agent_run::AgentPatchSet;
+
+        let run_a = AgentRunId::new();
+        let run_b = AgentRunId::new();
+        let patch = |run: AgentRunId| AgentPatchSet {
+            id: AgentPatchSetId::new(),
+            agent_run_id: run,
+            patchset_id: uuid::Uuid::new_v4(),
+            workspace_scope_constrained: false,
+        };
+        // run_a contributes two patch sets, run_b one.
+        let patches = vec![patch(run_a), patch(run_b), patch(run_a)];
+
+        let id = MergeCandidateId::new();
+        let candidate = MergeCandidate::from_patchsets(id, &patches);
+
+        assert_eq!(candidate.id, id);
+        assert_eq!(
+            candidate.patchset_ids,
+            patches.iter().map(|p| p.id).collect::<Vec<_>>(),
+            "every patch set id is aggregated in order",
+        );
+        assert_eq!(
+            candidate.agent_run_ids,
+            vec![run_a, run_b],
+            "run ids are de-duplicated in first-seen order",
+        );
+        assert_eq!(candidate.review_state, ReviewState::NeedsHumanReview);
+    }
+
+    /// Aggregating an empty patch-set slice yields an empty candidate that still
+    /// defaults to needing human review.
+    #[test]
+    fn from_patchsets_empty_is_pending_and_empty() {
+        let candidate = MergeCandidate::from_patchsets(MergeCandidateId::new(), &[]);
+        assert!(candidate.patchset_ids.is_empty());
+        assert!(candidate.agent_run_ids.is_empty());
+        assert_eq!(candidate.review_state, ReviewState::NeedsHumanReview);
     }
 
     /// `MergeDecisionPayloadV0::default()` (what CEX-S2-10 always

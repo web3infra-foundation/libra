@@ -1,7 +1,5 @@
 //! Planner that turns a validated IntentSpec into executable orchestrator tasks.
 //!
-//! 将经过验证的 IntentSpec 转换为可执行编排器任务的规划器。
-//!
 //! Boundary: planning creates task graphs and quality gates but does not execute them.
 //! Scheduler plan-set tests cover duplicate steps, missing acceptance checks, and
 //! risk-aware verification tasks.

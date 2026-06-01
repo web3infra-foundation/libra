@@ -1,7 +1,5 @@
 //! Goal specification — the immutable "what" the user asked for.
 //!
-//! 目标规范 — 用户要求的不可变"是什么"。
-//!
 //! Per `docs/improvement/opencode.md` lines 537-555, a [`GoalSpec`] is the
 //! immutable seed of an active Goal: objective, acceptance criteria,
 //! constraints, evidence policy, budget, and provenance. It pins down what

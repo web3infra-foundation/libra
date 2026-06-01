@@ -1,7 +1,5 @@
 //! Global output configuration for the Libra CLI.
 //!
-//! Libra CLI 的全局输出配置。
-//!
 //! This module resolves the raw global CLI flags (`--json`, `--machine`,
 //! `--color`, `--quiet`, `--no-pager`, `--progress`, `--exit-code-on-warning`)
 //! into a single [`OutputConfig`] that every command handler receives.

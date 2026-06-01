@@ -1,6 +1,4 @@
 //! SeaORM entity for thread -> intent membership.
-//!
-//! 线程 -> 意图成员资格的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

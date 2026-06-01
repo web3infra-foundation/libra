@@ -1,6 +1,4 @@
 //! Rebase implementation that parses onto/branch arguments, replays commits onto a new base, handles conflicts, and updates branch refs.
-//!
-//! 变基实现，解析 onto/分支参数、将提交重放到新的基础、处理冲突和更新分支参考。
 
 use std::{
     borrow::Cow,
@@ -755,18 +753,6 @@ impl From<RebaseError> for CliError {
 ///
 /// The process maintains commit order but changes their parent relationships,
 /// effectively "moving" the branch to start from the upstream commit.
-///
-/// 执行变基命令
-///
-/// 变基将一系列提交移动或组合到新的基础提交。
-/// 此实现通过以下方式执行线性变基：
-/// 1. 查找当前分支和上游之间的共同祖先
-/// 2. 从共同祖先收集所有提交到当前 HEAD
-/// 3. 将每个提交重放到上游分支的顶部
-/// 4. 更新当前分支参考以指向最终提交
-///
-/// 该过程保持提交顺序，但更改其父关系，
-/// 有效地将分支"移动"到从上游提交开始。
 pub async fn execute(args: RebaseArgs) {
     if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
         error.print_stderr();
@@ -774,8 +760,6 @@ pub async fn execute(args: RebaseArgs) {
 }
 
 /// Safe CLI entry point with preflight validation for argument and state errors.
-///
-/// 具有参数和状态错误预检验证的安全 CLI 入口点。
 pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

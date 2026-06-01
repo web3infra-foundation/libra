@@ -1,7 +1,3 @@
-//! Automation configuration loading and rule management.
-//!
-//! 自动化配置加载和规则管理。
-
 use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};

@@ -17,22 +17,6 @@
 //!   self-build does not accidentally stage its own binary.
 //! - Honors the `force` flag by folding ignored paths back into the visible
 //!   change set before pathspec validation runs.
-//!
-//! 为下一次提交暂存更改（`libra add`）。
-//!
-//! 实现 `add` 子命令：解析路径规范和模式标志，应用忽略策略（`.libraignore`），
-//! 根据工作树和磁盘索引对每个路径进行分类，在存储库的对象存储下写入新的 blob 对象，
-//! 最后持久化更新的索引。
-//!
-//! 不明显的职责：
-//! - 将低级 [`GitError`] / [`io::Error`] 变体映射到结构化 [`AddError`] 案例，
-//!   每个案例都携带稳定的错误代码和人类可读的提示
-//!   （见 `From<AddError> for CliError` impl）。
-//! - 在 [`render_add_output`] 中支持四个输出通道：JSON、静默
-//!   （仅在 stderr 上警告）、正常（摘要）和详细（每个路径）。
-//! - 提供"仅刷新"模式，更新索引统计元数据，无需重写 blob。
-//! - 从暂存候选者中过滤正在运行的 `libra` 可执行文件，以便自构建不会意外暂存其自己的二进制文件。
-//! - 通过在路径规范验证运行之前将被忽略的路径折叠回可见的更改集来尊重 `force` 标志。
 
 use std::{
     env,
@@ -127,13 +111,6 @@ pub struct AddArgs {
 /// translated into a [`CliError`] (with a stable code and hints) by the
 /// `From<AddError> for CliError` impl below. Variants are not numbered in the
 /// public API; classification happens inside that impl.
-///
-/// `libra add` 的域错误。
-///
-/// 每个变体映射到暂存管道的特定失败模式，并通过下面的
-/// `From<AddError> for CliError` impl 转换为 [`CliError`]
-/// （带有稳定代码和提示）。变体在公共 API 中未编号；
-/// 分类发生在该 impl 内。
 #[derive(thiserror::Error, Debug)]
 pub enum AddError {
     /// No `.libra` directory was found walking up from the CWD. Surfaced as
@@ -240,12 +217,6 @@ pub struct AddFailure {
 /// Built by [`run_add`] and consumed by [`render_add_output`] (text mode) or
 /// emitted directly through `output::emit_json_data` (JSON mode). The fields
 /// always reference paths relative to the working directory.
-///
-/// 单个 `libra add` 调用的结构化结果。
-///
-/// 由 [`run_add`] 构建，由 [`render_add_output`]（文本模式）使用，或
-/// 直接通过 `output::emit_json_data`（JSON 模式）发出。字段始终引用
-/// 相对于工作目录的路径。
 #[derive(Debug, Clone, Serialize)]
 pub struct AddOutput {
     /// New files staged
@@ -340,16 +311,6 @@ struct ValidatedPathspecs {
 /// Boundary conditions:
 /// - Does not propagate errors, so callers that care about the exit status
 ///   should call [`execute_safe`] directly.
-///
-/// 简单 CLI 分发器使用的快速执行入口。
-///
-/// 功能范围：
-/// - 使用默认的 [`OutputConfig`] 委托给 [`execute_safe`]。
-/// - 出错时，将呈现的 [`CliError`] 打印到 stderr 并返回；
-///   进程退出代码是分发器的责任。
-///
-/// 边界条件：
-/// - 不传播错误，因此关心退出状态的调用者应直接调用 [`execute_safe`]。
 pub async fn execute(args: AddArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -382,30 +343,6 @@ pub async fn execute(args: AddArgs) {
 ///   runs after a successful staging pass.
 ///
 /// See: tests::test_add_single_file in tests/command/add_test.rs:12.
-///
-/// 由 `cli::parse` 和集成测试使用的结构化入口点。
-///
-/// # 副作用
-/// - 通过 [`run_add`] 运行暂存管道。
-/// - 持久化索引更新，除非 `--dry-run` 或 `--refresh` 短路写入路径。
-/// - 呈现成功输出并为被忽略或部分失败的路径规范记录进程级警告。
-///
-/// # 错误
-/// 当存储库发现失败、路径规范验证失败、被忽略的路径阻止暂存、
-/// 对象/索引 I/O 失败或输出呈现失败时返回 [`CliError`]。
-///
-/// 功能范围：
-/// - 通过 [`run_add`] 运行完整的暂存管道。
-/// - 以用户请求的格式呈现 [`AddOutput`]
-///   （`OutputConfig::is_json`、`quiet`、正常、详细）。
-/// - 当任何路径被忽略或通过 `--ignore-errors` 时，
-///   记录进程级警告（通过 [`output::record_warning`]）。
-///
-/// 边界条件：
-/// - 返回由 [`run_add`] 生成的相同 `Err(CliError)`；
-///   呈现仅在成功的暂存通过后运行。
-///
-/// 见：tests::test_add_single_file in tests/command/add_test.rs:12。
 pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()> {
     let verbose = args.verbose;
     let dry_run = args.dry_run;
@@ -450,30 +387,6 @@ pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()>
 ///
 /// See: tests::test_add_all_flag in tests/command/add_test.rs:100;
 /// tests::test_add_force_tracks_ignored_file in tests/command/add_test.rs:319.
-///
-/// 生成 [`AddOutput`] 而不打印的纯暂存实现。
-///
-/// 功能范围：
-/// - 解析存储库路径（`workdir`、`.libra/index`、对象存储），
-///   加载索引，并运行 `status::changes_to_be_staged_split_safe`。
-/// - 验证路径规范，设置 `--force` 时可选地折叠被忽略的路径，
-///   设置 `--refresh` 时短路到刷新模式。
-/// - 针对请求的路径规范集过滤树变化，然后通过 [`stage_a_file`]
-///   对每个文件进行分类（dry-run）或暂存。
-/// - 在非 dry-run 路径上将索引持久化回磁盘。
-///
-/// 边界条件：
-/// - 当工作目录、索引或存储路径查找引发 [`io::ErrorKind::NotFound`] 时，
-///   返回 [`AddError::NotInRepo`]；其他 I/O 错误映射到 [`AddError::Workdir`]。
-/// - 当未给出路径规范且未设置 `-A`、`-u`、`--refresh` 时，
-///   返回 `CliError::command_usage`（稳定代码 `CliInvalidArguments`）—
-///   见 `tests/command/add_test.rs:518` 中的
-///   `tests::test_add_without_path_should_error`。
-/// - 除非在每个文件暂存循环期间设置了 `--ignore-errors`，
-///   否则对于未知路径规范返回 `Err(AddError::PathspecNotMatched)`。
-///
-/// 见：tests/command/add_test.rs:100 中的 tests::test_add_all_flag；
-/// tests/command/add_test.rs:319 中的 tests::test_add_force_tracks_ignored_file。
 pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
@@ -1177,11 +1090,6 @@ fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
 mod test {
     use super::*;
 
-    /// Test scenario: Verify that AddError Display trait correctly renders static message variants.
-    /// This test ensures error messages are user-friendly and match the expected format when
-    /// displayed. Source-chained variants with wrapped error sources are intentionally skipped
-    /// in this test.
-    ///
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`AddError`]. These strings are used as the `CliError`
     /// message via `From<AddError> for CliError` and surface in both
@@ -1191,18 +1099,6 @@ mod test {
     /// CreateIndexEntry, Workdir, Status) wrap upstream error sources
     /// and are intentionally skipped — their `{source}` slot is owned
     /// by the wrapped error type.
-    ///
-    /// 测试场景：验证 AddError Display trait 正确呈现静态消息变体。
-    /// 此测试确保错误消息对用户友好，并在显示时与预期的格式匹配。
-    /// 具有包装错误源的源链变体在此测试中被有意跳过。
-    ///
-    /// 锁定 [`AddError`] 的静态消息和直接消息变体的 `Display` 格式。
-    /// 这些字符串通过 `From<AddError> for CliError` 用作 `CliError` 消息，
-    /// 并在人类可读和 `--json` 信封中呈现。
-    ///
-    /// 源链变体（IndexLoad、IndexSave、RefreshFailed、CreateIndexEntry、
-    /// Workdir、Status）包装上游错误源，被有意跳过 — 它们的 `{source}`
-    /// 槽由包装的错误类型拥有。
     #[test]
     fn add_error_display_pins_static_message_variants() {
         assert_eq!(

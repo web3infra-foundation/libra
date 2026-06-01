@@ -1,7 +1,3 @@
-//! Usage recorder for persisting token consumption per session and provider.
-//!
-//! 每个会话和提供商持久化令牌消耗的使用记录器。
-
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
 use uuid::Uuid;

@@ -1,6 +1,4 @@
 //! SeaORM entity for the run -> patchset reverse index.
-//!
-//! 运行 -> 补丁集反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

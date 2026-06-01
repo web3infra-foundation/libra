@@ -1,8 +1,6 @@
 //! Derived record creation for projecting runtime phase outputs into auditable AI
 //! history objects.
 //!
-//! 将运行时阶段输出投影到可审计 AI 历史对象中的派生记录创建。
-//!
 //! Boundary: derived records must be deterministic from runtime inputs so replay and
 //! migration checks can compare object graphs. Storage-flow and schema-migration tests
 //! exercise missing artifacts, duplicate IDs, and validation decisions.

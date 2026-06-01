@@ -1,6 +1,4 @@
 //! SeaORM entity for the intent -> plan reverse index.
-//!
-//! 意图 -> 计划反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

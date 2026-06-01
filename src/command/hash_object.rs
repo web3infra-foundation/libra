@@ -1,6 +1,4 @@
 //! Implements `hash-object` for computing Git-compatible blob object IDs.
-//!
-//! 实现 `hash-object` 以计算 Git 兼容的 blob 对象 ID。
 
 use std::{
     fs,

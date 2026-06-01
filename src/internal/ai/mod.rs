@@ -1,7 +1,5 @@
 //! AI Agent Infrastructure for Libra.
 //!
-//! Libra 的 AI 代理基础设施。
-//!
 //! This module is the root of every AI-related capability used by `libra code`,
 //! the MCP server, and the workflow orchestrator. It is organised as a small set
 //! of focused submodules that snap together at runtime:
@@ -56,6 +54,7 @@
 pub mod agent;
 // Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
 pub mod automation;
+pub mod capability_package;
 // Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold) plus the
 // runtime extensions that landed with the OC orchestration runtime
 // (`feat(code): land opencode orchestration runtime`). Originally

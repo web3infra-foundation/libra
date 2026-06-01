@@ -1,7 +1,5 @@
 //! Shared pager policy for CLI commands.
 //!
-//! CLI 命令的共享寻呼机策略。
-//!
 //! Commands that want paged output should go through this module instead of
 //! spawning `less` directly. That keeps test runs non-interactive by default
 //! while still allowing explicit pager-path coverage via `LIBRA_PAGER=always`.

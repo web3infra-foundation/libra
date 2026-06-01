@@ -1,7 +1,5 @@
 //! Provider-aware context budget planning and allocation.
 //!
-//! 提供商感知的上下文预算规划和分配。
-//!
 //! CEX-13a defined the segment budget contract and deterministic allocation
 //! behavior. CEX-13b layers append-only context frames, attachment references,
 //! and compaction replay records on top of that core. CEX-13c adds reviewed

@@ -1,6 +1,4 @@
 //! Context budget profiles and provider capability adaptation.
-//!
-//! 上下文预算配置文件和提供商功能适应。
 
 use std::{collections::HashSet, fmt};
 
