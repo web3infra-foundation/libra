@@ -155,6 +155,38 @@ impl MergeCandidate {
         self.review_state = ReviewState::Accepted;
         Ok(())
     }
+
+    /// Reject a candidate awaiting review, moving it to
+    /// [`ReviewState::Rejected`]. Unlike [`try_accept`](Self::try_accept) a
+    /// reject is always safe regardless of conflicts — the patch is discarded,
+    /// not applied — but the candidate must still be pending so a decided
+    /// candidate is not silently re-decided ([`AcceptError::NotPending`]
+    /// otherwise). Pure; leaves the state unchanged on error.
+    pub fn reject(&mut self) -> Result<(), AcceptError> {
+        self.transition_from_pending(ReviewState::Rejected)
+    }
+
+    /// Mark a candidate as [`ReviewState::Conflict`] when conflict detection
+    /// found unresolved conflicts. A subsequent [`try_accept`](Self::try_accept)
+    /// then fails with [`AcceptError::NotPending`], so a conflicted candidate
+    /// can never be accepted without first being re-reviewed. Must be pending
+    /// to mark; pure; leaves the state unchanged on error.
+    pub fn mark_conflict(&mut self) -> Result<(), AcceptError> {
+        self.transition_from_pending(ReviewState::Conflict)
+    }
+
+    /// Move from [`ReviewState::NeedsHumanReview`] to `next`, or return
+    /// [`AcceptError::NotPending`] with the current state. Shared by
+    /// [`reject`](Self::reject) and [`mark_conflict`](Self::mark_conflict).
+    fn transition_from_pending(&mut self, next: ReviewState) -> Result<(), AcceptError> {
+        if self.review_state != ReviewState::NeedsHumanReview {
+            return Err(AcceptError::NotPending {
+                current: self.review_state,
+            });
+        }
+        self.review_state = next;
+        Ok(())
+    }
 }
 
 /// CEX-S2-13 stub payload. Fields exist with `None` / empty defaults; CEX-S2-15
@@ -346,6 +378,52 @@ mod tests {
         let a = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
         let b = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
         assert_ne!(a.id, b.id, "each decision event needs its own id");
+    }
+
+    /// `reject` moves a pending candidate to `Rejected` — even one carrying
+    /// conflicts, since a reject discards the patch rather than applying it.
+    #[test]
+    fn reject_moves_pending_candidate_to_rejected() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        assert_eq!(candidate.reject(), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Rejected);
+    }
+
+    /// `mark_conflict` moves a pending candidate to `Conflict`, after which
+    /// `try_accept` fails with `NotPending` — a conflicted candidate can never
+    /// be accepted without re-review. This closes the conflict→accept loop.
+    #[test]
+    fn mark_conflict_then_accept_is_blocked() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        assert_eq!(candidate.mark_conflict(), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Conflict);
+        assert_eq!(
+            candidate.try_accept(&MergeDecisionPayloadV0::default()),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Conflict,
+            }),
+            "a candidate marked Conflict must not be acceptable",
+        );
+    }
+
+    /// `reject` / `mark_conflict` are double-transition-safe: a decided
+    /// candidate cannot be re-decided.
+    #[test]
+    fn transitions_reject_non_pending_candidate() {
+        let mut rejected = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        rejected.reject().expect("first reject succeeds");
+        assert_eq!(
+            rejected.reject(),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Rejected,
+            }),
+        );
+        assert_eq!(
+            rejected.mark_conflict(),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Rejected,
+            }),
+        );
     }
 
     /// The constructor threads the supplied ids through verbatim — the
