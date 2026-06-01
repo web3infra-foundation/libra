@@ -74,7 +74,7 @@ mod theme;
 mod welcome_shader;
 
 // Curated public surface: only types that callers outside the module need.
-pub use agent_pane::{AgentRunRow, agent_pane_rows};
+pub use agent_pane::{AgentRunRow, agent_pane_rows, format_agent_run_pane_with_usage};
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use code_ui_adapter::TuiCodeUiAdapter;
