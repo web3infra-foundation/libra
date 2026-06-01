@@ -125,6 +125,27 @@ impl MergeCandidate {
         }
     }
 
+    /// Aggregate a candidate from the patch sets it bundles (agent.md Step 2.5:
+    /// "`MergeCandidate` 聚合一个或多个 `AgentPatchSet`").
+    ///
+    /// Derives `patchset_ids` and the de-duplicated `agent_run_ids` directly
+    /// from `patchsets` so the candidate's run list can never disagree with the
+    /// patches it actually aggregates (the hand-derive hazard a caller passing
+    /// mismatched id vectors to [`new`](Self::new) would otherwise hit). The
+    /// owning run ids are collected in first-seen order and de-duplicated (one
+    /// run may contribute several patch sets). Starts in
+    /// [`ReviewState::NeedsHumanReview`] per S2-INV-07. Pure — no I/O.
+    pub fn from_patchsets(id: MergeCandidateId, patchsets: &[super::AgentPatchSet]) -> Self {
+        let patchset_ids = patchsets.iter().map(|p| p.id).collect();
+        let mut agent_run_ids = Vec::new();
+        for patch in patchsets {
+            if !agent_run_ids.contains(&patch.agent_run_id) {
+                agent_run_ids.push(patch.agent_run_id);
+            }
+        }
+        Self::new(id, patchset_ids, agent_run_ids)
+    }
+
     /// Attempt to move the candidate to [`ReviewState::Accepted`] after a human
     /// (or, later, a flag-gated auto-merge) signs off.
     ///
@@ -439,6 +460,52 @@ mod tests {
         assert_eq!(candidate.id, id);
         assert_eq!(candidate.patchset_ids, patchsets);
         assert_eq!(candidate.agent_run_ids, runs);
+    }
+
+    /// `from_patchsets` derives `patchset_ids` verbatim and `agent_run_ids`
+    /// de-duplicated in first-seen order — two patch sets from one run collapse
+    /// to a single run id, so the candidate's run list always matches its
+    /// patches.
+    #[test]
+    fn from_patchsets_aggregates_and_dedups_run_ids() {
+        use crate::internal::ai::agent_run::AgentPatchSet;
+
+        let run_a = AgentRunId::new();
+        let run_b = AgentRunId::new();
+        let patch = |run: AgentRunId| AgentPatchSet {
+            id: AgentPatchSetId::new(),
+            agent_run_id: run,
+            patchset_id: uuid::Uuid::new_v4(),
+            workspace_scope_constrained: false,
+        };
+        // run_a contributes two patch sets, run_b one.
+        let patches = vec![patch(run_a), patch(run_b), patch(run_a)];
+
+        let id = MergeCandidateId::new();
+        let candidate = MergeCandidate::from_patchsets(id, &patches);
+
+        assert_eq!(candidate.id, id);
+        assert_eq!(
+            candidate.patchset_ids,
+            patches.iter().map(|p| p.id).collect::<Vec<_>>(),
+            "every patch set id is aggregated in order",
+        );
+        assert_eq!(
+            candidate.agent_run_ids,
+            vec![run_a, run_b],
+            "run ids are de-duplicated in first-seen order",
+        );
+        assert_eq!(candidate.review_state, ReviewState::NeedsHumanReview);
+    }
+
+    /// Aggregating an empty patch-set slice yields an empty candidate that still
+    /// defaults to needing human review.
+    #[test]
+    fn from_patchsets_empty_is_pending_and_empty() {
+        let candidate = MergeCandidate::from_patchsets(MergeCandidateId::new(), &[]);
+        assert!(candidate.patchset_ids.is_empty());
+        assert!(candidate.agent_run_ids.is_empty());
+        assert_eq!(candidate.review_state, ReviewState::NeedsHumanReview);
     }
 
     /// `MergeDecisionPayloadV0::default()` (what CEX-S2-10 always
