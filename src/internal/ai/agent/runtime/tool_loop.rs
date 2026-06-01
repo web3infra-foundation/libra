@@ -490,6 +490,32 @@ where
                 content: assistant_content,
             });
 
+            // CEX-S2-14: when a single turn emits a homogeneous batch of
+            // `task` calls and the sub-agent runtime permits concurrency
+            // (`max_parallel >= 2`, no hooks), dispatch them in parallel and
+            // advance to the next turn. Otherwise (the default, including all
+            // production traffic while the CP-S2-4 cap forces `max_parallel ==
+            // 1`) fall through to the byte-identical sequential loop below.
+            if should_dispatch_task_calls_in_parallel(&tool_calls, &config) {
+                match dispatch_task_calls_in_parallel(
+                    &tool_calls,
+                    &config,
+                    &mut history,
+                    observer,
+                    &mut blocked_signatures,
+                    &mut executed_tool_signatures,
+                    &mut executed_tool_signature_counts,
+                    repeat_detection_window,
+                    repeat_warning_threshold,
+                    repeat_abort_threshold,
+                )
+                .await
+                {
+                    TaskBatchOutcome::Continue => continue,
+                    TaskBatchOutcome::Abort(err) => return Err(*err),
+                }
+            }
+
             for call in tool_calls {
                 observer.on_tool_call_begin(
                     &call.id,
@@ -953,6 +979,202 @@ fn parse_task_invocation(arguments: &Value) -> Result<TaskInvocation, String> {
 
 fn task_tool_allowed_by_runtime(config: &ToolLoopConfig, tool_name: &str) -> bool {
     tool_name == "task" && config.subagent_runtime.is_some()
+}
+
+/// Outcome of the CEX-S2-14 parallel `task`-batch branch: fall through to the
+/// next assistant turn (`Continue`), or abort the loop with an error
+/// (`Abort`) — mirroring the sequential loop's early-return conditions.
+enum TaskBatchOutcome {
+    Continue,
+    Abort(Box<CompletionError>),
+}
+
+/// CEX-S2-14: decide whether a turn's tool calls qualify for the parallel
+/// `task`-batch fast path.
+///
+/// True only when the sub-agent runtime permits concurrency
+/// (`max_parallel >= 2`), the turn is a homogeneous batch of at least two
+/// `task` calls, and **no hooks are configured**. The no-hook gate keeps the
+/// parallel branch free of PreToolUse/PostToolUse ordering concerns, so any
+/// hooked session deterministically falls back to the sequential loop. The
+/// flag-off production value (`max_parallel == 1`, forced by the CP-S2-4 gate)
+/// always returns false, leaving the sequential path byte-identical.
+fn should_dispatch_task_calls_in_parallel(
+    tool_calls: &[crate::internal::ai::completion::ToolCall],
+    config: &ToolLoopConfig,
+) -> bool {
+    if config.hook_runner.is_some() {
+        return false;
+    }
+    let Some(runtime) = config.subagent_runtime.as_ref() else {
+        return false;
+    };
+    if runtime.max_parallel < 2 || tool_calls.len() < 2 {
+        return false;
+    }
+    tool_calls.iter().all(|call| {
+        call.function.name == "task" && task_tool_allowed_by_runtime(config, &call.function.name)
+    })
+}
+
+/// CEX-S2-14: dispatch a homogeneous batch of `task` calls under controlled
+/// parallelism, preserving every per-call effect the sequential loop produces
+/// (observer callbacks, blocked-call gating, repeat detection, history order).
+///
+/// The caller guarantees (via [`should_dispatch_task_calls_in_parallel`]) that
+/// every call is an allowed `task`, that a sub-agent runtime is present with
+/// `max_parallel >= 2`, and that no hooks are configured. Concurrency is bounded
+/// by `runtime.max_parallel`; the per-task `write_scope` is empty (the tool-loop
+/// layer has no per-task scope, so the scheduler imposes no conflict
+/// serialisation). The reordering of side effects relative to the sequential
+/// loop is the *intended* parallel behaviour, not a regression — the sequential
+/// path stays the default whenever this branch does not apply.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_task_calls_in_parallel<O: ToolLoopObserver>(
+    tool_calls: &[crate::internal::ai::completion::ToolCall],
+    config: &ToolLoopConfig,
+    history: &mut Vec<Message>,
+    observer: &mut O,
+    blocked_signatures: &mut HashMap<String, usize>,
+    executed_tool_signatures: &mut VecDeque<String>,
+    executed_tool_signature_counts: &mut HashMap<String, usize>,
+    repeat_detection_window: usize,
+    repeat_warning_threshold: usize,
+    repeat_abort_threshold: usize,
+) -> TaskBatchOutcome {
+    // INVARIANT: the caller verified a sub-agent runtime is present.
+    let runtime = config
+        .subagent_runtime
+        .as_ref()
+        .expect("parallel task batch requires a sub-agent runtime");
+
+    // Phase 1 — per-call guards in input order. A call that clears preflight is
+    // collected for the batch; a blocked or unparsable call is finalised inline
+    // exactly as the sequential loop does. (allowed_tools never blocks `task`,
+    // and the no-hook gate means PreToolUse cannot fire here.)
+    let mut pending: Vec<(usize, TaskInvocation)> = Vec::new();
+    for (idx, call) in tool_calls.iter().enumerate() {
+        observer.on_tool_call_begin(&call.id, &call.function.name, &call.function.arguments);
+
+        if let Err(reason) =
+            observer.on_tool_call_preflight(&call.id, &call.function.name, &call.function.arguments)
+        {
+            let blocked_result: Result<ToolOutput, String> = Err(reason.clone());
+            observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);
+            let result_json = ToolOutput::failure(reason).into_response();
+            history.push(Message::User {
+                content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    result: result_json,
+                })),
+            });
+            let signature =
+                blocked_tool_call_signature(&call.function.name, &call.function.arguments);
+            if increment_blocked_count(blocked_signatures, &signature)
+                >= MAX_IDENTICAL_BLOCKED_TOOL_CALLS
+            {
+                return TaskBatchOutcome::Abort(Box::new(CompletionError::ResponseError(format!(
+                    "Tool loop aborted after repeated blocked calls to '{}' with identical arguments",
+                    call.function.name
+                ))));
+            }
+            continue;
+        }
+
+        match parse_task_invocation(&call.function.arguments) {
+            Ok(invocation) => pending.push((idx, invocation)),
+            Err(err) => {
+                let tool_result: Result<ToolOutput, String> = Err(err.clone());
+                observer.on_tool_call_end(&call.id, &call.function.name, &tool_result);
+                let result_json = ToolOutput::failure(err).into_response();
+                history.push(Message::User {
+                    content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        result: result_json,
+                    })),
+                });
+            }
+        }
+    }
+
+    if pending.is_empty() {
+        return TaskBatchOutcome::Continue;
+    }
+
+    // Phase 2 — dispatch all pending task calls concurrently via the
+    // `dispatch_batch` trait seam (each with its own DispatchContext: own
+    // message id + child abort token), preserving input order in the results.
+    let indices: Vec<usize> = pending.iter().map(|(idx, _)| *idx).collect();
+    let tasks: Vec<_> = pending
+        .into_iter()
+        .map(|(idx, invocation)| {
+            let call = &tool_calls[idx];
+            let ctx = runtime.dispatch_context(
+                format!("tool-call:{}", call.id),
+                config.runtime_context.clone(),
+            );
+            (ctx, invocation, TaskEntryKind::LlmInitiated, Vec::new())
+        })
+        .collect();
+    let results = runtime
+        .dispatcher
+        .dispatch_batch(tasks, runtime.max_parallel)
+        .await;
+
+    // Phase 3 — finalise each result in input order (record signature, observer
+    // end, history). No PostToolUse (no hooks) and no terminal-tool
+    // short-circuit (`task` is never a terminal tool).
+    for (idx, dispatch_result) in indices.into_iter().zip(results) {
+        let call = &tool_calls[idx];
+        let tool_name = call.function.name.clone();
+        let mut tool_result: Result<ToolOutput, String> = match dispatch_result {
+            Ok(result) => {
+                observer.on_sub_agent_completed(&result.agent_name, &result.usage);
+                Ok(task_result_output(result))
+            }
+            Err(failure) => Err(format!(
+                "Task dispatch failed: {}",
+                task_failure_label(&failure)
+            )),
+        };
+        blocked_signatures.clear();
+        let repeat_status = record_executed_tool_signature(
+            executed_tool_signatures,
+            executed_tool_signature_counts,
+            &tool_name,
+            &call.function.arguments,
+            repeat_detection_window,
+            repeat_warning_threshold,
+        );
+        if let Some(warning) = repeat_status.warning.as_deref() {
+            append_repeat_warning_to_tool_result(&mut tool_result, warning);
+        }
+        observer.on_tool_call_end(&call.id, &tool_name, &tool_result);
+        let result_json = match &tool_result {
+            Ok(output) => output.clone().into_response(),
+            Err(message) => ToolOutput::failure(message.clone()).into_response(),
+        };
+        history.push(Message::User {
+            content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                id: call.id.clone(),
+                name: tool_name.clone(),
+                result: result_json,
+            })),
+        });
+        if should_abort_repeated_tool_call(repeat_status.count, repeat_abort_threshold) {
+            return TaskBatchOutcome::Abort(Box::new(CompletionError::ResponseError(format!(
+                "Tool loop aborted after repeated calls to '{}' with identical arguments {} times in the last {} executed tool calls: {}",
+                tool_name,
+                repeat_status.count,
+                repeat_detection_window,
+                truncate_signature_arguments(&call.function.arguments),
+            ))));
+        }
+    }
+
+    TaskBatchOutcome::Continue
 }
 
 fn trim_required_task_string(key: &str, value: String) -> Result<String, String> {
@@ -2073,6 +2295,7 @@ mod tests {
             depth: 0,
             compaction_model: None,
             hook_runner: None,
+            max_parallel: 1,
         };
 
         // The parent loop's LIVE per-turn context: the runtime above
@@ -2174,6 +2397,191 @@ mod tests {
         assert_eq!(sub_name, "explore");
         assert_eq!(sub_usage.input_tokens, 100);
         assert_eq!(sub_usage.output_tokens, 42);
+    }
+
+    /// CEX-S2-14: the parallel `task`-batch gate. Pins exactly when the tool
+    /// loop takes the parallel branch vs. the byte-identical sequential path.
+    mod parallel_gate {
+        use std::sync::Arc;
+
+        use futures::future::BoxFuture;
+        use sea_orm::Database;
+        use serde_json::json;
+        use tempfile::TempDir;
+
+        use super::{
+            super::{ToolLoopConfig, should_dispatch_task_calls_in_parallel},
+            Function, ToolCall,
+        };
+        use crate::internal::ai::{
+            agent::{
+                profile::{AgentExecutionSpec, ModelBinding},
+                runtime::{
+                    AbortToken, ContextFrameLoader, DispatchContext, PermissionAskRequest,
+                    PermissionAsker, PermissionReply, PermissionService, SubAgentDispatcher,
+                    SubAgentToolLoopRuntime, TaskEntryKind, TaskFailure, TaskInvocation,
+                    TaskResult,
+                },
+            },
+            hooks::{HookRunner, config::HookConfig},
+            providers::{ProviderBuildOptions, ProviderFactory},
+            session::jsonl::SessionJsonlStore,
+            tools::ToolRegistry,
+            usage::UsageRecorder,
+        };
+
+        struct NoopDispatcher;
+        impl SubAgentDispatcher for NoopDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                _ctx: DispatchContext<'a>,
+                _invocation: TaskInvocation,
+                _entry_kind: TaskEntryKind,
+            ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                Box::pin(async move { Err(TaskFailure::FeatureDisabled) })
+            }
+        }
+
+        struct DenyAsker;
+        impl PermissionAsker for DenyAsker {
+            fn ask<'a>(
+                &'a self,
+                _request: PermissionAskRequest<'a>,
+            ) -> BoxFuture<'a, PermissionReply> {
+                Box::pin(async move { PermissionReply::Once })
+            }
+        }
+
+        async fn runtime_with_max_parallel(
+            max_parallel: usize,
+            temp: &TempDir,
+        ) -> SubAgentToolLoopRuntime {
+            let conn = Database::connect("sqlite::memory:").await.unwrap();
+            SubAgentToolLoopRuntime {
+                dispatcher: Arc::new(NoopDispatcher),
+                parent_thread_id: "thread".to_string(),
+                parent_session_id: "session".to_string(),
+                parent_agent: AgentExecutionSpec::default(),
+                parent_ruleset: Vec::new(),
+                parent_model_binding: ModelBinding {
+                    provider_id: "fake".to_string(),
+                    model_id: "default".to_string(),
+                    variant: None,
+                },
+                permission_service: Arc::new(PermissionService::with_asker(DenyAsker)),
+                session_store: SessionJsonlStore::new(temp.path().join("jsonl")),
+                provider_factory: Arc::new(ProviderFactory),
+                provider_build_options: ProviderBuildOptions::default(),
+                provider_build_options_resolver: None,
+                tool_registry: ToolRegistry::with_working_dir(temp.path().to_path_buf()),
+                runtime_context: None,
+                usage_recorder: Arc::new(UsageRecorder::new(conn)),
+                context_frame_loader: Arc::new(ContextFrameLoader::default()),
+                abort_token: AbortToken::new(),
+                depth: 0,
+                compaction_model: None,
+                hook_runner: None,
+                max_parallel,
+            }
+        }
+
+        fn task_call(id: &str) -> ToolCall {
+            ToolCall {
+                id: id.to_string(),
+                name: "task".to_string(),
+                function: Function {
+                    name: "task".to_string(),
+                    arguments: json!({
+                        "description": "d",
+                        "prompt": "p",
+                        "subagent_type": "explore"
+                    }),
+                },
+            }
+        }
+
+        fn read_call(id: &str) -> ToolCall {
+            ToolCall {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                function: Function {
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "x" }),
+                },
+            }
+        }
+
+        /// True only for a homogeneous batch of >= 2 `task` calls with
+        /// `max_parallel >= 2` and no hooks.
+        #[tokio::test]
+        async fn gate_true_for_homogeneous_task_batch_with_capacity() {
+            let temp = TempDir::new().unwrap();
+            let cfg = ToolLoopConfig {
+                subagent_runtime: Some(runtime_with_max_parallel(2, &temp).await),
+                ..Default::default()
+            };
+            assert!(should_dispatch_task_calls_in_parallel(
+                &[task_call("a"), task_call("b")],
+                &cfg
+            ));
+        }
+
+        /// `max_parallel == 1` (the CP-S2-4-gated production value) keeps the
+        /// sequential path — the gate is false, so flag-off is byte-identical.
+        #[tokio::test]
+        async fn gate_false_when_capacity_is_one() {
+            let temp = TempDir::new().unwrap();
+            let cfg = ToolLoopConfig {
+                subagent_runtime: Some(runtime_with_max_parallel(1, &temp).await),
+                ..Default::default()
+            };
+            assert!(!should_dispatch_task_calls_in_parallel(
+                &[task_call("a"), task_call("b")],
+                &cfg
+            ));
+        }
+
+        /// Mixed task/non-task turns, single-task turns, hooked sessions, and
+        /// runtime-less configs all fall back to the sequential loop.
+        #[tokio::test]
+        async fn gate_false_for_mixed_single_hooked_or_no_runtime() {
+            let temp = TempDir::new().unwrap();
+
+            let cfg = ToolLoopConfig {
+                subagent_runtime: Some(runtime_with_max_parallel(2, &temp).await),
+                ..Default::default()
+            };
+            // Mixed batch (a non-task call present).
+            assert!(!should_dispatch_task_calls_in_parallel(
+                &[task_call("a"), read_call("b")],
+                &cfg
+            ));
+            // A single task call is not a batch.
+            assert!(!should_dispatch_task_calls_in_parallel(
+                &[task_call("a")],
+                &cfg
+            ));
+
+            // Hooks configured → sequential (the no-hook gate).
+            let hooked = ToolLoopConfig {
+                subagent_runtime: Some(runtime_with_max_parallel(2, &temp).await),
+                hook_runner: Some(Arc::new(HookRunner::new(
+                    HookConfig { hooks: vec![] },
+                    temp.path().to_path_buf(),
+                ))),
+                ..Default::default()
+            };
+            assert!(!should_dispatch_task_calls_in_parallel(
+                &[task_call("a"), task_call("b")],
+                &hooked
+            ));
+
+            // No sub-agent runtime → sequential.
+            assert!(!should_dispatch_task_calls_in_parallel(
+                &[task_call("a"), task_call("b")],
+                &ToolLoopConfig::default()
+            ));
+        }
     }
 
     #[test]

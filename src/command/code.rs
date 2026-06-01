@@ -3972,6 +3972,14 @@ async fn build_subagent_runtime_for_session(
         // PostToolUse hook surface as the parent. Sub-agents
         // cannot disable or supersede the parent's runner.
         hook_runner,
+        // CEX-S2-14 tool-loop parallel dispatch: the configured
+        // `code.sub_agents.max_parallel` is plumbed but forced to 1 by the
+        // CP-S2-4 gate (`cex_s2_12_subagent_concurrency_cap`), so production
+        // stays strictly sequential until the parallel path is validated.
+        // A `1` makes the tool loop's parallel branch inert (it needs `>= 2`),
+        // keeping behaviour byte-identical to the pre-parallel path.
+        max_parallel: cex_s2_12_subagent_concurrency_cap(agents_config.sub_agents.max_parallel)
+            as usize,
     })
 }
 

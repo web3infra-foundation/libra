@@ -1644,6 +1644,12 @@ pub struct SubAgentToolLoopRuntime {
     /// the project level (no `.libra/hooks.json`); the child
     /// then runs without hook dispatch, matching the parent.
     pub hook_runner: Option<Arc<crate::internal::ai::hooks::HookRunner>>,
+    /// CEX-S2-14: max number of `task` calls the parent tool loop dispatches
+    /// concurrently when a single assistant turn emits several. `1` (the
+    /// production value while the CP-S2-4 cap is in force) keeps dispatch
+    /// strictly sequential — the tool loop's parallel branch only activates at
+    /// `>= 2`, so a `1` here is byte-identical to the pre-parallel behaviour.
+    pub max_parallel: usize,
 }
 
 impl std::fmt::Debug for SubAgentToolLoopRuntime {
