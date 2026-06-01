@@ -616,17 +616,14 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026052301_source_call_log_down.sql"
             )),
         },
-        // Phase 4 completion: the formal final `Decision` artifact table,
-        // closing the ValidationReport -> RiskScoreBreakdown ->
-        // DecisionProposal -> Decision chain. Mirrors `ai_decision_proposal`
-        // (per-thread latest pointer). See docs/improvement/agent.md
-        // Implementation Phase 4.
+        // v0.17.906 notes: adds the `notes` table mapping (notes_ref, object)
+        // pairs to blob hashes. DDL is idempotent (CREATE TABLE IF NOT EXISTS).
         Migration {
             version: 2026053101,
-            name: "ai_final_decision",
-            up: include_str!("../../../sql/migrations/2026053101_ai_final_decision.sql"),
+            name: "notes",
+            up: include_str!("../../../sql/migrations/2026053101_notes.sql"),
             down: Some(include_str!(
-                "../../../sql/migrations/2026053101_ai_final_decision_down.sql"
+                "../../../sql/migrations/2026053101_notes_down.sql"
             )),
         },
     ]

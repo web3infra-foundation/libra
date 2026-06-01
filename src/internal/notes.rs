@@ -14,6 +14,21 @@ use crate::{internal::db::get_db_conn_instance, utils::util};
 /// Default notes ref namespace.
 pub const DEFAULT_NOTES_REF: &str = "refs/notes/commits";
 
+/// Normalize a user-supplied notes ref. Short names (e.g. `review`) are
+/// expanded to `refs/notes/<name>` for Git compatibility; refs that already
+/// start with `refs/notes/` pass through unchanged. Any other fully-qualified
+/// ref (e.g. `refs/heads/main`) is rejected.
+pub fn normalize_notes_ref(raw: &str) -> Result<String, NotesError> {
+    if raw.starts_with("refs/notes/") {
+        return Ok(raw.to_string());
+    }
+    // Short name: no path separator — expand to refs/notes/<name>.
+    if !raw.contains('/') {
+        return Ok(format!("refs/notes/{raw}"));
+    }
+    Err(NotesError::InvalidNotesRef(raw.to_string()))
+}
+
 /// Validates that a notes ref starts with `refs/notes/`.
 pub fn validate_notes_ref(notes_ref: &str) -> Result<(), NotesError> {
     if notes_ref.starts_with("refs/notes/") {

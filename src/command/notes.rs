@@ -87,6 +87,8 @@ pub enum NotesOutput {
         #[serde(rename = "ref")]
         notes_ref: String,
         notes: Vec<NotesListEntry>,
+        #[serde(skip)]
+        object_scoped: bool,
     },
     #[serde(rename = "show")]
     Show {
@@ -133,8 +135,8 @@ pub async fn execute_safe(
     output: &OutputConfig,
     argv: &[String],
 ) -> CliResult<()> {
-    let notes_ref = &args.ref_;
-    notes::validate_notes_ref(notes_ref).map_err(|e| CliError::from(NotesCliError::from(e)))?;
+    let notes_ref = &notes::normalize_notes_ref(&args.ref_)
+        .map_err(|e| CliError::from(NotesCliError::from(e)))?;
 
     let subcommand = args
         .subcommand
@@ -176,6 +178,7 @@ pub async fn execute_safe(
                         annotated_object: e.annotated_object,
                     })
                     .collect(),
+                object_scoped: object.is_some(),
             };
             render_output(&out, output)?;
         }
@@ -324,14 +327,17 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
         NotesOutput::List {
             notes_ref: _,
             notes,
+            object_scoped,
         } => {
             for entry in notes {
                 match &entry.note_hash {
+                    Some(hash) if *object_scoped => println!("{}", short_display_hash(hash)),
                     Some(hash) => println!(
                         "{} {}",
                         short_display_hash(hash),
                         short_display_hash(&entry.annotated_object)
                     ),
+                    None if *object_scoped => println!("(none)"),
                     None => println!("(none) {}", short_display_hash(&entry.annotated_object)),
                 }
             }

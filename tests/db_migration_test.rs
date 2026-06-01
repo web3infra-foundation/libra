@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101
+            2026053101,
         ]
     );
     assert_eq!(
@@ -61,7 +61,7 @@ fn builtin_migrations_register_current_schema_migrations() {
             "approved_permission",
             "agent_usage_stats_agent_name",
             "source_call_log",
-            "ai_final_decision",
+            "notes",
         ]
     );
 
@@ -1041,7 +1041,7 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101
+            2026053101,
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
