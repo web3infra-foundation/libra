@@ -140,8 +140,7 @@ mod tests {
             requested_permissions: Vec::new(),
             install_warnings: Vec::new(),
         };
-        let value: serde_json::Value =
-            serde_json::to_value(&manifest).expect("serialize to value");
+        let value: serde_json::Value = serde_json::to_value(&manifest).expect("serialize to value");
         assert_eq!(value["requested_permissions"], serde_json::json!([]));
         assert_eq!(value["install_warnings"], serde_json::json!([]));
         assert_eq!(value["bundled"]["skills"], serde_json::json!([]));
