@@ -82,17 +82,20 @@ async fn fixture_unknown_exit_one_fails_closed() {
     );
 }
 
-// ---- Fixture 5: exit 2 (not the legacy block code) → fail-closed block ---
+// ---- Fixture 5: exit 2 (documented deny code) → block with reason -------
 
 #[tokio::test]
-async fn fixture_exit_two_fails_closed() {
-    // The legacy runner's explicit-block code is 129, so a 2 is "unknown" and
-    // must fail closed rather than silently allow.
-    let action = run("exit 2", 5000).await;
-    assert!(
-        action.is_blocked(),
-        "exit 2 must not silently allow; fail closed, got: {action:?}",
-    );
+async fn fixture_exit_two_blocks_with_reason() {
+    // Exit 2 is the documented S2-INV-13 deny code (agent.md Step 2.2): it
+    // blocks the tool call and surfaces the hook's stdout as the reason.
+    let action = run("echo 'policy denied'; exit 2", 5000).await;
+    assert!(action.is_blocked(), "exit 2 must block, got: {action:?}",);
+    if let HookAction::Block(reason) = &action {
+        assert!(
+            reason.contains("policy denied"),
+            "exit 2 must carry the hook stdout reason: {reason}",
+        );
+    }
 }
 
 // ---- Fixture 6: large exit code (> 3) → fail-closed block ----------------
