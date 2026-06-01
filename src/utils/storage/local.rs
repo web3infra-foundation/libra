@@ -49,6 +49,7 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
+    /// Create a local object store rooted at `base_path`.
     pub fn new(base_path: PathBuf) -> Self {
         fs::create_dir_all(&base_path).unwrap_or_else(|err| {
             panic!(
@@ -154,6 +155,7 @@ impl LocalStorage {
 
     // --- Pack related methods ---
 
+    /// List readable pack files from the pack directory without following symlinks.
     fn list_all_packs(&self) -> Vec<PathBuf> {
         match fs::symlink_metadata(&self.base_path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -244,6 +246,7 @@ impl LocalStorage {
         packs
     }
 
+    /// List usable pack index files, rebuilding missing or outdated indexes conservatively.
     fn list_all_idx(&self) -> Vec<PathBuf> {
         let packs = self.list_all_packs();
         let mut idxs = Vec::new();
@@ -279,6 +282,16 @@ impl LocalStorage {
             };
 
             if needs_rebuild {
+                if idx_metadata
+                    .as_ref()
+                    .is_some_and(Self::pack_index_has_multiple_links)
+                {
+                    tracing::warn!(
+                        idx = %idx.display(),
+                        "skipping hardlinked pack index to avoid rewriting outside the object database"
+                    );
+                    continue;
+                }
                 let (Some(pack_str), Some(idx_str)) = (pack.to_str(), idx.to_str()) else {
                     tracing::warn!(
                         pack = %pack.display(),
@@ -307,6 +320,21 @@ impl LocalStorage {
         idxs
     }
 
+    /// Return whether the index metadata has more than one filesystem link.
+    #[cfg(unix)]
+    fn pack_index_has_multiple_links(metadata: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+
+        metadata.nlink() > 1
+    }
+
+    /// Return whether the index metadata has more than one filesystem link.
+    #[cfg(not(unix))]
+    fn pack_index_has_multiple_links(_metadata: &fs::Metadata) -> bool {
+        false
+    }
+
+    /// Read the pack-index format version from an opened index file.
     fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
         let mut header = [0u8; 4];
         file.read_exact(&mut header)?;
@@ -327,11 +355,13 @@ impl LocalStorage {
         }
     }
 
+    /// Open an index file and read its pack-index format version.
     fn read_idx_version_path(idx_file: &Path) -> Result<IdxVersion, io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
         Self::read_idx_version(&mut idx_file)
     }
 
+    /// Read an index file's fanout table together with its format version.
     fn read_idx_fanout(idx_file: &Path) -> Result<(IdxVersion, [u32; 256]), io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
         let version = Self::read_idx_version(&mut idx_file)?;
@@ -349,6 +379,7 @@ impl LocalStorage {
         Ok((version, fanout))
     }
 
+    /// Return the pack offset for `obj_id` by searching one pack index.
     fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
         let (version, fanout) = Self::read_idx_fanout(idx_file)?;
         let mut idx_file = fs::File::open(idx_file)?;
@@ -414,6 +445,7 @@ impl LocalStorage {
         }
     }
 
+    /// Read and inflate one packed object at the given pack-file offset.
     fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
         let file_name = pack_file
             .file_name()
@@ -493,6 +525,7 @@ impl LocalStorage {
         Ok(full_obj)
     }
 
+    /// Search all available pack indexes for an object and return its data.
     fn get_from_pack(
         &self,
         obj_id: &ObjectHash,
@@ -507,6 +540,7 @@ impl LocalStorage {
         Ok(None)
     }
 
+    /// Read one object from the pack paired with `idx_file`.
     fn read_pack_by_idx(
         idx_file: &Path,
         obj_id: &ObjectHash,
@@ -525,6 +559,7 @@ impl LocalStorage {
 
 #[async_trait]
 impl Storage for LocalStorage {
+    /// Load an object from loose storage or from available pack files.
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
         let self_clone = self.clone();
         let hash = *hash;
@@ -551,6 +586,7 @@ impl Storage for LocalStorage {
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
     }
 
+    /// Write an object as a loose object file.
     async fn put(
         &self,
         hash: &ObjectHash,
@@ -588,6 +624,7 @@ impl Storage for LocalStorage {
         .map_err(|e| GitError::IOError(io::Error::other(e)))?
     }
 
+    /// Return whether an object exists in loose storage or a readable pack.
     async fn exist(&self, hash: &ObjectHash) -> bool {
         let self_clone = self.clone();
         let hash = *hash;
@@ -619,6 +656,7 @@ impl Storage for LocalStorage {
         .unwrap_or(false)
     }
 
+    /// Search loose and packed objects by hexadecimal hash prefix.
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
         let self_clone = self.clone();
         let prefix = prefix.to_string();
@@ -759,6 +797,8 @@ mod tests {
     //! `Result<_, GitError>` migration — each corruption shape that used to
     //! panic is now a `GitError::InvalidObjectInfo` with a descriptive detail.
 
+    use tempfile::tempdir;
+
     use super::*;
 
     /// Build a valid loose-object header for `(type, payload)`.
@@ -835,5 +875,24 @@ mod tests {
             matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
             "unexpected err: {err:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pack_index_has_multiple_links_detects_hardlinks() {
+        let dir = tempdir().unwrap();
+        let idx = dir.path().join("pack-test.idx");
+        let link = dir.path().join("linked.idx");
+        fs::write(&idx, b"idx").unwrap();
+
+        assert!(!LocalStorage::pack_index_has_multiple_links(
+            &fs::symlink_metadata(&idx).unwrap()
+        ));
+
+        fs::hard_link(&idx, &link).unwrap();
+
+        assert!(LocalStorage::pack_index_has_multiple_links(
+            &fs::symlink_metadata(&idx).unwrap()
+        ));
     }
 }
