@@ -165,6 +165,54 @@ async fn test_mcp_integration_list_resources() {
     assert!(resources.iter().any(|r| r.uri == "libra://history/latest"));
 }
 
+/// Scenario (CEX-S2-16): the `libra://agents/runs` resource is advertised by
+/// `list_resources_impl` and `read_resource_impl` returns a well-formed (empty)
+/// run list, while an id-targeting agent URI returns a structured not-found
+/// (sub-agent run persistence is not yet enabled). Pins the routing contract.
+#[tokio::test]
+async fn test_mcp_agents_resources_route() {
+    let temp_dir = tempdir().unwrap();
+    let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        temp_dir.path().to_path_buf(),
+        db_conn,
+    ));
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+
+    // Advertised in the resource list.
+    let resources = server.list_resources_impl().await.unwrap();
+    assert!(
+        resources.iter().any(|r| r.uri == "libra://agents/runs"),
+        "the agent runs resource must be advertised",
+    );
+
+    // The list view returns a well-formed empty body.
+    let contents = server
+        .read_resource_impl("libra://agents/runs")
+        .await
+        .expect("agents/runs must read");
+    let text = match &contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let body: serde_json::Value = serde_json::from_str(&text).expect("valid JSON body");
+    assert_eq!(body["runs"], serde_json::json!([]));
+
+    // An id-targeting URI is recognised but has no persisted record yet, so it
+    // returns a structured not-found rather than a generic "Resource not found".
+    let err = server
+        .read_resource_impl("libra://agents/runs/does-not-exist")
+        .await
+        .expect_err("unknown run id must be a not-found");
+    assert!(
+        err.message.contains("does-not-exist"),
+        "not-found error should name the missing run: {}",
+        err.message,
+    );
+}
+
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.
 /// Steps: `create_task_impl` → parse the returned ID out of the success message →
 /// `read_resource_impl(libra://object/<id>)` → `list_tasks` and confirm the new ID
