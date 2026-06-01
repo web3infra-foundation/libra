@@ -69,6 +69,7 @@ pub mod hook_dispatch;
 pub mod merge_metrics;
 pub mod merge_pipeline;
 pub mod parallel;
+pub mod parallel_executor;
 pub mod patch_capture;
 pub mod patchset;
 pub mod permission;
@@ -280,6 +281,7 @@ pub use parallel::{
     ParallelRunSnapshot, ParallelRunState, ParallelSchedulerSnapshot, ParallelSchedulerState,
     ParallelTaskRequest,
 };
+pub use parallel_executor::{ParallelTask, run_parallel};
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
 pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
