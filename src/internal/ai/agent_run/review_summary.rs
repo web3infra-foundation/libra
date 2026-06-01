@@ -12,7 +12,7 @@
 //! CEX-S2-13-frozen schema. Rendering the summary into a TUI / MCP view is a
 //! separate concern; this function only produces the text.
 
-use super::decision::{Conflict, MergeDecisionPayloadV0, RiskLevel, RiskScore};
+use super::decision::{Conflict, MergeCandidate, MergeDecisionPayloadV0, RiskLevel, RiskScore};
 
 /// The non-payload counts the reviewer needs alongside the decision payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,6 +21,20 @@ pub struct MergeReviewCounts {
     pub patchset_count: usize,
     /// Number of sub-agent runs that produced them.
     pub agent_run_count: usize,
+}
+
+impl MergeReviewCounts {
+    /// Derive the counts directly from a [`MergeCandidate`] so the rendered
+    /// summary's "N patch set(s) from M sub-agent run(s)" line can never desync
+    /// from the candidate it describes (the same hand-derive hazard
+    /// [`MergeDecision::for_candidate`](super::decision::MergeDecision::for_candidate)
+    /// removes for the decision event).
+    pub fn from_candidate(candidate: &MergeCandidate) -> Self {
+        Self {
+            patchset_count: candidate.patchset_ids.len(),
+            agent_run_count: candidate.agent_run_ids.len(),
+        }
+    }
 }
 
 /// Render the reviewer-facing summary for a merge candidate.
@@ -216,6 +230,27 @@ mod tests {
         assert!(
             summary.contains("Test evidence: 3 record(s)"),
             "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn counts_from_candidate_match_candidate_vectors() {
+        use crate::internal::ai::agent_run::{AgentPatchSetId, AgentRunId, MergeCandidateId};
+
+        let candidate = MergeCandidate::new(
+            MergeCandidateId::new(),
+            vec![AgentPatchSetId::new(), AgentPatchSetId::new()],
+            vec![AgentRunId::new(), AgentRunId::new(), AgentRunId::new()],
+        );
+        let counts = MergeReviewCounts::from_candidate(&candidate);
+        assert_eq!(counts.patchset_count, 2);
+        assert_eq!(counts.agent_run_count, 3);
+
+        // And the derived counts render the expected Changes line.
+        let summary = render_merge_review_summary(&MergeDecisionPayloadV0::default(), &counts);
+        assert!(
+            summary.contains("Changes: 2 patch set(s) from 3 sub-agent run(s)"),
+            "got: {summary}",
         );
     }
 
