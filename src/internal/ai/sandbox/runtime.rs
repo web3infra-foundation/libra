@@ -246,8 +246,12 @@ impl ExecEnv {
         let mut command = Command::new(program);
         command.args(args);
         let canonical_cwd = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        if std::env::current_dir().is_err() {
+            let _ = std::env::set_current_dir(&canonical_cwd);
+        }
         command.current_dir(canonical_cwd);
         command.envs(self.env);
+        command.env_remove("PWD");
         if self.new_session {
             configure_new_session(&mut command);
         }
@@ -1096,6 +1100,8 @@ fn macos_dir_params() -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::{super::NetworkAccess, *};
 
     #[test]
@@ -2060,6 +2066,85 @@ mod tests {
         assert!(!spec.env.contains_key(HOME_ENV_VAR));
         assert!(!spec.env.contains_key(CARGO_HOME_ENV_VAR));
         assert!(!spec.env.contains_key(LIBRA_LOG_FILE_ENV_VAR));
+    }
+
+    #[test]
+    fn exec_env_shell_spawn_removes_ambient_pwd_override() {
+        let stable_cwd = tempfile::tempdir().expect("stable cwd");
+        let _pwd = crate::utils::test::ScopedEnvVar::set("PWD", "/tmp/stale-pwd-from-parent");
+        let spec = CommandSpec::shell(
+            "printf '%s' \"$PWD\"",
+            stable_cwd.path().to_path_buf(),
+            Some(1_000),
+            SandboxPermissions::UseDefault,
+            None,
+        );
+
+        let (command, _timeout_ms) = SandboxManager::new()
+            .transform(SandboxTransformRequest {
+                spec,
+                policy: None,
+                sandbox_policy_cwd: stable_cwd.path(),
+                linux_sandbox_exe: None,
+                use_linux_sandbox_bwrap: false,
+                enforcement: SandboxEnforcement::BestEffort,
+                deny_read_paths: &[],
+                seccomp_policy_path: None,
+            })
+            .expect("unsandboxed shell command should transform")
+            .into_command()
+            .expect("shell command should build");
+
+        let debug = format!("{:?}", command.as_std());
+        assert!(
+            debug.contains("PWD"),
+            "debug command should show env map: {debug}"
+        );
+        assert!(
+            debug.contains("env -u PWD")
+                || debug.contains("PWD\": None")
+                || debug.contains("PWD: None"),
+            "spawned command must remove inherited PWD instead of trusting an ambient path: {debug}",
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn exec_env_shell_spawn_repairs_deleted_process_cwd() {
+        let outer = tempfile::tempdir().expect("outer tempdir");
+        let deleted_cwd = outer.path().join("deleted-cwd");
+        std::fs::create_dir(&deleted_cwd).expect("create deleted cwd");
+        let stable_cwd = tempfile::tempdir().expect("stable cwd");
+        let _cwd = crate::utils::test::ChangeDirGuard::new(&deleted_cwd);
+        std::fs::remove_dir_all(&deleted_cwd).expect("delete ambient cwd");
+
+        let spec = CommandSpec::shell(
+            "echo ok",
+            stable_cwd.path().to_path_buf(),
+            Some(1_000),
+            SandboxPermissions::UseDefault,
+            None,
+        );
+
+        let (_command, _timeout_ms) = SandboxManager::new()
+            .transform(SandboxTransformRequest {
+                spec,
+                policy: None,
+                sandbox_policy_cwd: stable_cwd.path(),
+                linux_sandbox_exe: None,
+                use_linux_sandbox_bwrap: false,
+                enforcement: SandboxEnforcement::BestEffort,
+                deny_read_paths: &[],
+                seccomp_policy_path: None,
+            })
+            .expect("unsandboxed shell command should transform")
+            .into_command()
+            .expect("shell command should build even when process cwd was deleted");
+
+        assert_eq!(
+            std::env::current_dir().expect("process cwd should be repaired"),
+            stable_cwd.path().canonicalize().expect("stable cwd exists")
+        );
     }
 
     #[test]
