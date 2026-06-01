@@ -86,6 +86,27 @@ pub struct MergeCandidate {
     pub review_evidence: Vec<EvidenceId>,
 }
 
+/// Why a [`MergeCandidate::try_accept`] was rejected. Surfaced so Layer 1 / the
+/// reviewer UI explains exactly why a candidate could not be accepted.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AcceptError {
+    /// The candidate is not awaiting review — it was already accepted /
+    /// rejected / marked conflicting, so accepting it now would be a
+    /// double-transition.
+    #[error("merge candidate is not awaiting review (current state: {current:?})")]
+    NotPending {
+        /// The candidate's current review state.
+        current: ReviewState,
+    },
+    /// The candidate's decision payload carries unresolved conflicts; per
+    /// S2-INV-07 a conflicted candidate must never be accepted / auto-applied.
+    #[error("merge candidate has {conflict_count} unresolved conflict(s) and cannot be accepted")]
+    HasConflicts {
+        /// Number of conflicts blocking acceptance.
+        conflict_count: usize,
+    },
+}
+
 impl MergeCandidate {
     /// Convenience constructor that respects S2-INV-07 default.
     pub fn new(
@@ -102,6 +123,37 @@ impl MergeCandidate {
             review_state: ReviewState::NeedsHumanReview,
             review_evidence: Vec::new(),
         }
+    }
+
+    /// Attempt to move the candidate to [`ReviewState::Accepted`] after a human
+    /// (or, later, a flag-gated auto-merge) signs off.
+    ///
+    /// Enforces the S2-INV-07 safety invariant at the type boundary so no caller
+    /// can apply a sub-agent patch set to the main worktree while it is
+    /// conflicted or not yet under review:
+    ///
+    /// - the candidate must currently be in [`ReviewState::NeedsHumanReview`]
+    ///   (otherwise [`AcceptError::NotPending`]);
+    /// - the decision `payload.conflict_list` must be empty (otherwise
+    ///   [`AcceptError::HasConflicts`]) — a conflicted candidate is never
+    ///   auto-applied (agent.md Step 2.5 验收 (2)).
+    ///
+    /// On success the `review_state` becomes `Accepted`. On error the state is
+    /// left unchanged. Pure state transition — no I/O, no patch application
+    /// (applying the accepted patch to the worktree is a separate runtime step).
+    pub fn try_accept(&mut self, payload: &MergeDecisionPayloadV0) -> Result<(), AcceptError> {
+        if self.review_state != ReviewState::NeedsHumanReview {
+            return Err(AcceptError::NotPending {
+                current: self.review_state,
+            });
+        }
+        if !payload.conflict_list.is_empty() {
+            return Err(AcceptError::HasConflicts {
+                conflict_count: payload.conflict_list.len(),
+            });
+        }
+        self.review_state = ReviewState::Accepted;
+        Ok(())
     }
 }
 
@@ -176,6 +228,62 @@ mod tests {
         assert!(
             candidate.review_evidence.is_empty(),
             "review_evidence is the CEX-S2-13 empty placeholder; CEX-S2-15 fills it",
+        );
+    }
+
+    fn conflict() -> Conflict {
+        Conflict {
+            kind: "both_modified".to_string(),
+            path: "src/a.rs".to_string(),
+            detail: None,
+        }
+    }
+
+    /// **S2-INV-07**: a clean candidate awaiting review can be accepted, and the
+    /// state transitions to `Accepted`.
+    #[test]
+    fn try_accept_succeeds_for_clean_pending_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0::default();
+        assert_eq!(candidate.try_accept(&payload), Ok(()));
+        assert_eq!(candidate.review_state, ReviewState::Accepted);
+    }
+
+    /// **S2-INV-07 safety**: a candidate whose payload carries conflicts MUST
+    /// NOT be acceptable; the state is left unchanged so a conflicted patch can
+    /// never reach the main worktree.
+    #[test]
+    fn try_accept_rejects_conflicted_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0 {
+            conflict_list: vec![conflict(), conflict()],
+            ..MergeDecisionPayloadV0::default()
+        };
+        assert_eq!(
+            candidate.try_accept(&payload),
+            Err(AcceptError::HasConflicts { conflict_count: 2 }),
+        );
+        assert_eq!(
+            candidate.review_state,
+            ReviewState::NeedsHumanReview,
+            "a rejected accept must leave the candidate awaiting review",
+        );
+    }
+
+    /// Accepting a candidate that is not pending (already accepted) is a
+    /// double-transition and is rejected with the current state.
+    #[test]
+    fn try_accept_rejects_non_pending_candidate() {
+        let mut candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let payload = MergeDecisionPayloadV0::default();
+        candidate
+            .try_accept(&payload)
+            .expect("first accept succeeds");
+        assert_eq!(
+            candidate.try_accept(&payload),
+            Err(AcceptError::NotPending {
+                current: ReviewState::Accepted,
+            }),
         );
     }
 

@@ -252,7 +252,8 @@ pub use budget::{AgentBudget, BudgetDimension};
 pub use conflict::{HunkRange, PatchFileEdit, PatchTouch, detect_conflicts};
 pub use context_pack::AgentContextPack;
 pub use decision::{
-    Conflict, MergeCandidate, MergeDecision, MergeDecisionPayloadV0, ReviewState, RiskScore,
+    AcceptError, Conflict, MergeCandidate, MergeDecision, MergeDecisionPayloadV0, ReviewState,
+    RiskScore,
 };
 pub use event::{
     AgentRunEvent, AgentRunEventEnvelope, CancellationReason, FailureReason, HookFailureReason,
