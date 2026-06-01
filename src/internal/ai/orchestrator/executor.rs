@@ -2636,6 +2636,7 @@ fn runtime_context_for_task(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
+        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -2661,6 +2662,7 @@ fn runtime_context_for_gate_task(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
+        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -2687,6 +2689,7 @@ fn runtime_context_for_reviewer(
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
         approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         file_history: inherited_runtime.and_then(|ctx| ctx.file_history.clone()),
+        agent_run_id: inherited_runtime.and_then(|ctx| ctx.agent_run_id.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
     }
 }

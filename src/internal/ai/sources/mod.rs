@@ -377,6 +377,10 @@ pub struct SourceCallRecord {
     pub tool_name: String,
     pub registered_tool_name: String,
     pub tool_call_id: String,
+    /// Owning sub-agent run id, when the call came from a sub-agent's tool loop
+    /// (CEX-S2-14 trace chain). `None` for main-session source calls. Read from
+    /// the invocation's `ToolRuntimeContext::agent_run_id`.
+    pub agent_run_id: Option<String>,
     pub credential_ref: Option<String>,
     pub latency_ms: Option<u128>,
     pub input_bytes: usize,
@@ -436,6 +440,7 @@ impl SourceCallLog {
                         in_memory_copy.registered_tool_name.clone(),
                     ),
                     tool_call_id: sea_orm::ActiveValue::Set(in_memory_copy.tool_call_id.clone()),
+                    agent_run_id: sea_orm::ActiveValue::Set(in_memory_copy.agent_run_id.clone()),
                     credential_ref: sea_orm::ActiveValue::Set(
                         in_memory_copy.credential_ref.clone(),
                     ),
@@ -633,6 +638,13 @@ impl ToolHandler for SourceToolHandler {
             tool_name: context.tool_name,
             registered_tool_name: context.registered_tool_name,
             tool_call_id: context.tool_call_id,
+            // CEX-S2-14 trace chain: attribute the source call to the owning
+            // sub-agent run (same `runtime_context` the approval read below
+            // uses); `None` for the main-session path.
+            agent_run_id: invocation
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.agent_run_id.clone()),
             credential_ref: context.credential_ref,
             latency_ms: Some(elapsed),
             input_bytes,
@@ -960,6 +972,7 @@ mod tests {
             tool_name: "git_log".to_string(),
             registered_tool_name: "git_log".to_string(),
             tool_call_id: "call_abc".to_string(),
+            agent_run_id: Some("run-trace-1".to_string()),
             credential_ref: None,
             latency_ms: Some(42),
             input_bytes: 100,
@@ -1007,6 +1020,9 @@ mod tests {
         assert_eq!(row.tool_name, "git_log");
         assert_eq!(row.registered_tool_name, "git_log");
         assert_eq!(row.tool_call_id, "call_abc");
+        // CEX-S2-14: the new agent_run_id column persists + round-trips (also
+        // proves the 2026060201 migration applied on the fresh DB above).
+        assert_eq!(row.agent_run_id.as_deref(), Some("run-trace-1"));
         assert_eq!(row.credential_ref, None);
         assert_eq!(row.latency_ms, Some(42));
         assert_eq!(row.input_bytes, 100);
@@ -1030,6 +1046,7 @@ mod tests {
             tool_name: "forecast".to_string(),
             registered_tool_name: "forecast".to_string(),
             tool_call_id: "call_xyz".to_string(),
+            agent_run_id: None,
             credential_ref: Some("vault:weather-api-key".to_string()),
             latency_ms: None,
             input_bytes: 0,

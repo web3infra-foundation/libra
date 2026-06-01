@@ -1209,10 +1209,18 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 .workspace_registry
                 .as_ref()
                 .unwrap_or(request.ctx.tool_registry);
+            // Tag the child's inherited runtime context with its run id so the
+            // child's Source-Pool calls attribute their `source_call_log` rows
+            // to this run (CEX-S2-14 trace chain). Only stamps when a context
+            // was inherited — the no-context path stays `None` (unchanged).
             let child_runtime_context = request
                 .workspace_runtime_context
                 .clone()
-                .or_else(|| request.ctx.runtime_context.clone());
+                .or_else(|| request.ctx.runtime_context.clone())
+                .map(|mut ctx| {
+                    ctx.agent_run_id = Some(request.agent_run_id.0.to_string());
+                    ctx
+                });
             let child_store = request
                 .ctx
                 .session_store

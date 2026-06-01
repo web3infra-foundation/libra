@@ -3447,6 +3447,8 @@ fn default_tui_runtime_context(
         }),
         file_history: None,
         max_output_bytes: None,
+        // Main-session TUI context — not a sub-agent run.
+        agent_run_id: None,
     }
 }
 

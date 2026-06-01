@@ -34,6 +34,10 @@ pub struct Model {
     /// Caller's tool call id (typically the LLM-supplied
     /// `tool_call_xyz` token). Indexed for cross-row lookup.
     pub tool_call_id: String,
+    /// Owning sub-agent run id (CEX-S2-14 trace chain) when the call came from a
+    /// sub-agent's tool loop; NULL for main-session source calls. Indexed for
+    /// the `thread → agent_run_id → tool_call_id → source_call` trace query.
+    pub agent_run_id: Option<String>,
     /// Optional vault/env reference for the credential used.
     pub credential_ref: Option<String>,
     /// Round-trip latency in milliseconds. None when the call
