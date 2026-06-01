@@ -5264,20 +5264,43 @@ where
     /// Request cancellation of a single sub-agent run by id, leaving the main
     /// session running (CEX-S2-16 `/agent cancel <id>`).
     ///
-    /// When no sub-agent runtime is active there is nothing to cancel; otherwise
-    /// the parent session's abort token is fired so an in-flight child loop
-    /// stops at its next cancellation checkpoint. Per-run targeting (cancelling
-    /// one of several concurrent runs) lands with the run registry; until then a
-    /// single active run is cancelled and the id is echoed for the audit trail.
+    /// The id is validated against the persisted run snapshots so the abort
+    /// fires only for a genuinely in-flight run: a terminal or unknown id is
+    /// reported without touching the abort token (so a stale / mistyped id can
+    /// no longer cancel the wrong work). With the CEX-S2-12 concurrency cap of
+    /// 1 there is at most one in-flight child, so aborting it cancels exactly
+    /// the targeted run while the main session keeps running; true multi-run
+    /// targeting arrives with the S2-14 run registry.
     fn cancel_agent_run(&self, run_id: &str) -> String {
-        match self.config.subagent_runtime.as_ref() {
-            None => format!(
+        use super::agent_pane::{AgentRunCancelTarget, classify_cancel_target, status_label};
+        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
+
+        let Some(runtime) = self.config.subagent_runtime.as_ref() else {
+            return format!(
                 "No sub-agent runtime is active, so run `{run_id}` cannot be cancelled. \
                  Enable `code.multi_agent.enabled = true` in `.libra/agents.toml` first."
-            ),
-            Some(runtime) => {
+            );
+        };
+
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join("sessions");
+        let runs = AgentRunEventStore::new(sessions_root)
+            .list_all_snapshots()
+            .unwrap_or_default();
+
+        match classify_cancel_target(run_id, &runs) {
+            AgentRunCancelTarget::InFlight => {
                 runtime.abort_token.cancel();
                 format!("Requested cancellation of sub-agent run `{run_id}`.")
+            }
+            AgentRunCancelTarget::AlreadyTerminal(status) => format!(
+                "Sub-agent run `{run_id}` already finished ({}); nothing to cancel.",
+                status_label(status),
+            ),
+            AgentRunCancelTarget::NotFound => {
+                format!("No sub-agent run matches `{run_id}`; run `/agents` to list current runs.")
             }
         }
     }

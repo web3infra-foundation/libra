@@ -181,13 +181,48 @@ fn format_elapsed_ms(ms: u64) -> String {
 /// Stable lower-case label for a run status (the `{:?}` Debug form is not a
 /// display contract). Exhaustive so a new `AgentRunStatus` variant is a compile
 /// error here rather than a silent `"unknown"`.
-fn status_label(status: AgentRunStatus) -> &'static str {
+pub fn status_label(status: AgentRunStatus) -> &'static str {
     match status {
         AgentRunStatus::Queued => "queued",
         AgentRunStatus::Running => "running",
         AgentRunStatus::Blocked => "blocked",
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
+    }
+}
+
+/// Classification of a `/agent cancel <id>` target against the persisted run
+/// snapshots, so the command only fires an abort for a genuinely in-flight run
+/// and reports accurately otherwise (CEX-S2-16 验收 (2)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentRunCancelTarget {
+    /// The id matches a run still in flight (`Queued` / `Running` / `Blocked`):
+    /// cancellation should fire.
+    InFlight,
+    /// The id matches a run that already reached a terminal state — there is
+    /// nothing to cancel.
+    AlreadyTerminal(AgentRunStatus),
+    /// No persisted run matches the id (unparseable id or unknown run).
+    NotFound,
+}
+
+/// Classify a `/agent cancel <id>` request against the persisted run snapshots.
+/// `run_id` is the raw user-supplied string; a malformed UUID resolves to
+/// [`AgentRunCancelTarget::NotFound`] rather than firing a blind abort. Pure —
+/// a lookup over `runs`, no I/O.
+///
+/// With the CEX-S2-12 concurrency cap of 1 there is at most one in-flight run,
+/// so an `InFlight` classification uniquely identifies the run the parent abort
+/// token will stop; true multi-run targeting arrives with the S2-14 registry.
+pub fn classify_cancel_target(run_id: &str, runs: &[AgentRun]) -> AgentRunCancelTarget {
+    let Ok(uuid) = uuid::Uuid::parse_str(run_id.trim()) else {
+        return AgentRunCancelTarget::NotFound;
+    };
+    let target = AgentRunId(uuid);
+    match runs.iter().find(|run| run.id == target) {
+        Some(run) if run.status.is_terminal() => AgentRunCancelTarget::AlreadyTerminal(run.status),
+        Some(_) => AgentRunCancelTarget::InFlight,
+        None => AgentRunCancelTarget::NotFound,
     }
 }
 
@@ -379,6 +414,39 @@ mod tests {
         assert!(
             out.contains("tokens") && out.contains('-'),
             "no-usage rows show dashes in the token/cost columns: {out}",
+        );
+    }
+
+    #[test]
+    fn classify_cancel_target_distinguishes_in_flight_terminal_and_unknown() {
+        let in_flight = run(80, AgentRunStatus::Running);
+        let done = run(81, AgentRunStatus::Completed);
+        let runs = vec![in_flight.clone(), done.clone()];
+
+        // An in-flight run is cancellable.
+        assert_eq!(
+            classify_cancel_target(&in_flight.id.0.to_string(), &runs),
+            AgentRunCancelTarget::InFlight,
+        );
+        // A terminal run reports its state and is not cancelled.
+        assert_eq!(
+            classify_cancel_target(&done.id.0.to_string(), &runs),
+            AgentRunCancelTarget::AlreadyTerminal(AgentRunStatus::Completed),
+        );
+        // An unknown but valid uuid, and a malformed id, are both NotFound — no
+        // blind abort fires for a garbage id.
+        assert_eq!(
+            classify_cancel_target(&Uuid::from_u128(0xdead).to_string(), &runs),
+            AgentRunCancelTarget::NotFound,
+        );
+        assert_eq!(
+            classify_cancel_target("not-a-uuid", &runs),
+            AgentRunCancelTarget::NotFound,
+        );
+        // Surrounding whitespace is tolerated.
+        assert_eq!(
+            classify_cancel_target(&format!("  {}  ", in_flight.id.0), &runs),
+            AgentRunCancelTarget::InFlight,
         );
     }
 
