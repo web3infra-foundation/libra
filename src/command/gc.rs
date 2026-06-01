@@ -249,6 +249,29 @@ impl Drop for GcLockGuard {
     }
 }
 
+/// Held while a forced GC run replaces a stale `.libra/gc.lock`.
+struct GcReplaceLockGuard {
+    /// Path to the replacement mutex file.
+    path: PathBuf,
+    /// Random owner token written to the replacement mutex.
+    token: String,
+    /// Open handle keeping the create-new mutex file alive for this process.
+    _file: fs::File,
+}
+
+impl Drop for GcReplaceLockGuard {
+    /// Remove the replacement mutex only if this guard still owns it.
+    fn drop(&mut self) {
+        if read_gc_lock_token(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|token| token == self.token)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Run `gc` with default human-output configuration.
 pub async fn execute(args: GcArgs) -> Result<(), String> {
     execute_safe(args, &OutputConfig::default())
@@ -373,6 +396,7 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
             })
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && force => {
+            let _replace_lock = acquire_gc_replace_lock(&path)?;
             verify_gc_lock_is_stale(&path)?;
             fs::remove_file(&path).map_err(|error| {
                 CliError::fatal(format!(
@@ -416,6 +440,37 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
         ))
         .with_stable_code(StableErrorCode::IoWriteFailed)),
     }
+}
+
+/// Acquire the short-lived mutex used while replacing a stale GC lock.
+fn acquire_gc_replace_lock(lock_path: &Path) -> CliResult<GcReplaceLockGuard> {
+    let path = lock_path.with_file_name("gc.lock.replace");
+    let token = generate_gc_lock_token()?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return CliError::conflict(format!(
+                    "gc lock replacement is already in progress; lock file '{}' exists",
+                    path.display()
+                ))
+                .with_hint("wait for the current --force lock replacement to finish.");
+            }
+            CliError::fatal(format!(
+                "failed to create gc replacement lock '{}': {}",
+                path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    write_gc_lock_owner(&mut file, &token)?;
+    Ok(GcReplaceLockGuard {
+        path,
+        token,
+        _file: file,
+    })
 }
 
 /// Generate an ownership token for the current GC lock file.
@@ -2883,6 +2938,31 @@ mod tests {
                 .unwrap()
                 .contains("token=replacement")
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers `--force` serializing stale-lock replacement with a short-lived mutex.
+    async fn acquire_gc_lock_force_rejects_concurrent_replacement() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, format!("pid={}\n", non_running_pid())).unwrap();
+        let replace_lock = acquire_gc_replace_lock(&lock_path).unwrap();
+
+        let error = match acquire_gc_lock(true) {
+            Ok(_) => panic!("concurrent replacement should not proceed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert!(lock_path.exists());
+        drop(replace_lock);
+        assert!(!lock_path.with_file_name("gc.lock.replace").exists());
     }
 
     #[tokio::test]
