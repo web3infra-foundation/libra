@@ -1259,6 +1259,21 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 // [workspace_root]); otherwise it is the inherited
                 // parent context verbatim.
                 runtime_context: child_runtime_context,
+                // CEX-S2-14 验收 (5) trace chain: record the child's provider
+                // calls into `agent_usage_stats` attributed to this sub-agent
+                // run (`agent_run_id`) + profile (`agent_name`), joining
+                // `thread_id → agent_run_id` so per-agent cost/usage is
+                // queryable. Before this the child loop left both `None`, so
+                // sub-agent usage never reached the table (the parent recorded
+                // only its own calls).
+                usage_recorder: Some(request.ctx.usage_recorder.clone()),
+                usage_context: Some(child_usage_context(
+                    request.agent_run_id,
+                    request.ctx.parent_thread_id,
+                    &request.sub_spec.name,
+                    &provider_id,
+                    &model_id,
+                )),
                 ..ToolLoopConfig::default()
             };
 
@@ -1364,6 +1379,32 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 usage: observer.usage,
             })
         })
+    }
+}
+
+/// Build the [`UsageContext`] for a sub-agent child tool loop so its provider
+/// calls land in `agent_usage_stats` attributed to the run (CEX-S2-14 验收 (5)
+/// trace chain). `session_id` = the child run id (matching the child session's
+/// `state.id` in [`build_child_session_state`]), `thread_id` = the parent
+/// thread, and `agent_run_id` / `agent_name` carry the per-agent attribution
+/// the single-agent path leaves `None`.
+fn child_usage_context(
+    agent_run_id: AgentRunId,
+    parent_thread_id: &str,
+    agent_name: &str,
+    provider_id: &str,
+    model_id: &str,
+) -> crate::internal::ai::usage::UsageContext {
+    crate::internal::ai::usage::UsageContext {
+        session_id: Some(agent_run_id.0.to_string()),
+        thread_id: Some(parent_thread_id.to_string()),
+        agent_run_id: Some(agent_run_id.0.to_string()),
+        run_id: None,
+        provider: provider_id.to_string(),
+        model: model_id.to_string(),
+        request_kind: "completion".to_string(),
+        intent: None,
+        agent_name: Some(agent_name.to_string()),
     }
 }
 
@@ -1631,6 +1672,38 @@ impl SubAgentToolLoopRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CEX-S2-14 验收 (5): a sub-agent child loop's usage context attributes its
+    /// rows to the run (`agent_run_id`) and profile (`agent_name`) and joins the
+    /// parent thread, so `agent_usage_stats` can relate `thread_id → agent_run_id`
+    /// (the single-agent path leaves those `None`). `session_id` mirrors the
+    /// child session id (the run id) so usage and the JSONL transcript align.
+    #[test]
+    fn child_usage_context_attributes_run_thread_and_agent() {
+        let run_id = AgentRunId(uuid::Uuid::from_u128(0xc0ffee));
+        let ctx = child_usage_context(
+            run_id,
+            "parent-thread-1",
+            "explorer",
+            "deepseek",
+            "deepseek-chat",
+        );
+        assert_eq!(
+            ctx.agent_run_id.as_deref(),
+            Some(run_id.0.to_string().as_str())
+        );
+        assert_eq!(
+            ctx.session_id.as_deref(),
+            Some(run_id.0.to_string().as_str())
+        );
+        assert_eq!(ctx.thread_id.as_deref(), Some("parent-thread-1"));
+        assert_eq!(ctx.agent_name.as_deref(), Some("explorer"));
+        assert_eq!(ctx.provider, "deepseek");
+        assert_eq!(ctx.model, "deepseek-chat");
+        // `run_id` (the orchestrator object run, not the agent run) stays unset —
+        // the sub-agent path keys on `agent_run_id`.
+        assert_eq!(ctx.run_id, None);
+    }
 
     /// Scenario: `ChannelPermissionAsker` (v0.17.787) forwards every
     /// ask to its consumer channel and awaits the reply. With a
