@@ -270,10 +270,52 @@ impl LibraMcpServer {
         }
 
         if let Some(request) = super::agents_resource::AgentResourceRequest::parse(uri) {
-            return self.read_agent_resource(uri, request);
+            return self.read_agent_resource(uri, request).await;
         }
 
         Err(ErrorData::resource_not_found("Resource not found", None))
+    }
+
+    /// Best-effort count of persisted Source Pool / MCP / OpenAPI calls
+    /// attributed to `run_id`, for the budget view's `source_call_count`
+    /// (CEX-S2-16). The per-run attribution landed with the v0.17.1254 trace
+    /// link (`source_call_log.agent_run_id`). Resolves the repo's `libra.db`
+    /// from `working_dir` exactly as the dispatcher does and queries
+    /// `source_call_log`; any failure (no working dir, unresolved path, a
+    /// connection or query error) yields 0 so the budget view never fails on a
+    /// telemetry-layer issue — the same soft posture as session bootstrap.
+    async fn read_run_source_call_count(&self, run_id: &str) -> u32 {
+        let Some(working_dir) = self.working_dir.as_ref() else {
+            return 0;
+        };
+        let db_path = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join(crate::utils::util::DATABASE);
+        let Some(db_path) = db_path.to_str() else {
+            return 0;
+        };
+        let conn = match crate::internal::db::establish_connection(db_path).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    run_id,
+                    "agent budget: source-call count DB connect failed; reporting 0",
+                );
+                return 0;
+            }
+        };
+        match crate::internal::model::source_call_log::count_for_run(&conn, run_id).await {
+            Ok(count) => count.min(u64::from(u32::MAX)) as u32,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    run_id,
+                    "agent budget: source-call count query failed; reporting 0",
+                );
+                0
+            }
+        }
     }
 
     /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
@@ -287,7 +329,7 @@ impl LibraMcpServer {
     /// server yet (they need patch-set persistence), so they return a structured
     /// not-found. With no working dir (an in-memory server) there is nothing to
     /// read: the list view is empty.
-    fn read_agent_resource(
+    async fn read_agent_resource(
         &self,
         uri: &str,
         request: super::agents_resource::AgentResourceRequest,
@@ -406,9 +448,16 @@ impl LibraMcpServer {
                     // The run carries no configured per-run budget caps, so the
                     // default (unlimited) `AgentBudget` is reported — the usage
                     // totals are real; nothing is "exceeded". `source_call_count`
-                    // is not yet attributed per run (trace-id work), reported 0.
+                    // is now attributed per run via the v0.17.1254 trace link
+                    // (`source_call_log.agent_run_id`); count this run's rows.
                     Some(usage) => {
-                        let body = render_run_budget(run_id, &AgentBudget::default(), &usage, 0);
+                        let source_call_count = self.read_run_source_call_count(run_id).await;
+                        let body = render_run_budget(
+                            run_id,
+                            &AgentBudget::default(),
+                            &usage,
+                            source_call_count,
+                        );
                         Ok(vec![ResourceContents::text(body.to_string(), uri)])
                     }
                     None => Err(ErrorData::resource_not_found(

@@ -296,6 +296,45 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_run_usage(thread_id, run_id, &usage)
         .expect("persist run usage");
 
+    // Persist source-call telemetry into the repo DB the budget view reads
+    // (the v0.17.1254 trace link): two calls attributed to this run plus one
+    // main-session call (NULL run) that must NOT be counted. The DB lives at the
+    // same `<storage_root>/libra.db` the dispatcher and budget view resolve.
+    {
+        use libra::internal::{db::create_database, model::source_call_log::ActiveModel};
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+
+        let db_path = libra::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join(libra::utils::util::DATABASE);
+        let conn = create_database(db_path.to_str().expect("utf-8 db path"))
+            .await
+            .expect("bootstrap repo db");
+        for (i, attributed) in [true, true, false].into_iter().enumerate() {
+            ActiveModel {
+                id: Set(format!("c-{i}")),
+                session_id: Set("s".to_string()),
+                source_slug: Set("mcp:git".to_string()),
+                tool_name: Set("status".to_string()),
+                registered_tool_name: Set("status".to_string()),
+                tool_call_id: Set(format!("tc-{i}")),
+                agent_run_id: Set(attributed.then(|| run_id.0.to_string())),
+                credential_ref: Set(None),
+                latency_ms: Set(None),
+                input_bytes: Set(0),
+                output_bytes: Set(0),
+                cost_estimate_micros: Set(None),
+                approval_decision: Set(None),
+                state_namespace: Set("mcp:git".to_string()),
+                success: Set(1),
+                created_at: Set("2026-06-02T00:00:00Z".to_string()),
+            }
+            .insert(&conn)
+            .await
+            .expect("insert source call row");
+        }
+    }
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -385,6 +424,12 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
     assert_eq!(budget_body["agent_run_id"], run_id.0.to_string());
     assert_eq!(budget_body["usage"]["tool_call_count"], 3);
     assert_eq!(budget_body["usage"]["total_tokens"], 180);
+    // The two source calls attributed to this run surface; the NULL-run call
+    // does not (CEX-S2-16 `source_call_count`, v0.17.1254 trace link).
+    assert_eq!(
+        budget_body["usage"]["source_call_count"], 2,
+        "the budget view must report this run's real source-call count: {budget_body}",
+    );
     assert_eq!(
         budget_body["exceeded_dimensions"],
         serde_json::json!([]),

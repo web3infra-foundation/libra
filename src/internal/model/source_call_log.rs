@@ -104,6 +104,26 @@ pub async fn count_by_agent_run<C: ConnectionTrait>(
     Ok(counts)
 }
 
+/// Count persisted source calls for a single sub-agent run (CEX-S2-16 MCP
+/// `libra://agents/runs/{id}/budget` `source_call_count`). `agent_run_id` is the
+/// `AgentRunId.0.to_string()` the trace chain wrote (v0.17.1254). Returns 0 when
+/// no rows match. Read-only.
+pub async fn count_for_run<C: ConnectionTrait>(conn: &C, agent_run_id: &str) -> Result<u64, DbErr> {
+    let backend = conn.get_database_backend();
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT COUNT(*) FROM source_call_log WHERE agent_run_id = ?",
+            [sea_orm::Value::from(agent_run_id.to_string())],
+        ))
+        .await?;
+    match row {
+        // SQLite COUNT(*) returns an i64; clamp defensively before the cast.
+        Some(row) => Ok(row.try_get_by_index::<i64>(0)?.max(0) as u64),
+        None => Ok(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
@@ -161,5 +181,23 @@ mod tests {
         run_builtin_migrations(&conn).await.expect("migrations");
         let counts = count_by_agent_run(&conn).await.expect("count");
         assert!(counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn count_for_run_counts_only_the_targeted_run() {
+        let conn = Database::connect("sqlite::memory:").await.expect("db");
+        run_builtin_migrations(&conn).await.expect("migrations");
+
+        for (i, run) in [Some("run-A"), Some("run-A"), Some("run-B"), None]
+            .into_iter()
+            .enumerate()
+        {
+            row(i, run).insert(&conn).await.expect("insert");
+        }
+
+        assert_eq!(count_for_run(&conn, "run-A").await.expect("count"), 2);
+        assert_eq!(count_for_run(&conn, "run-B").await.expect("count"), 1);
+        // An unknown run id counts zero, never errors.
+        assert_eq!(count_for_run(&conn, "run-Z").await.expect("count"), 0);
     }
 }
