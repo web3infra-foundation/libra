@@ -37,7 +37,7 @@ loose reachable objects.
 | `--no-prune` | | Disable pruning and only inspect reachability and pack hygiene | Off |
 | `--aggressive` | | Accepted for Git compatibility; Libra does not repack or delta-compress yet | Off |
 | `--auto` | | Accepted for Git compatibility; Libra still runs one deterministic local pass | Off |
-| `--force` | | Replace an existing `gc.lock` after verifying it is stale | Off |
+| `--force` | | Replace an existing `gc.lock` only when it contains a valid PID that is no longer running | Off |
 | `--json` | | Emit a structured JSON envelope | Off |
 | `--machine` | | Emit the same envelope as one compact JSON line | Off |
 
@@ -116,6 +116,10 @@ The implementation is intentionally narrower than `git gc`: it does not perform
 full repacking, bitmap generation, commit-graph maintenance, reflog expiration,
 or cruft-pack creation.
 
+`.libra/gc.lock` serializes concurrent `libra gc` runs. It is not a repository-wide
+write lock: commands that write new objects or update refs do not currently acquire
+this lock, so `--prune=now` should be used when no other writer is active.
+
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
 | Keep reachable objects | Supported | Supported | N/A |
@@ -123,7 +127,7 @@ or cruft-pack creation.
 | Dry run | `-n` / `--dry-run` | `--dry-run` | N/A |
 | Disable pruning | `--no-prune` | `--no-prune` | N/A |
 | Pack verification | Reuses `verify-pack` for valid pack/index pairs | Repack/verify as part of maintenance | N/A |
-| GC lock | `.libra/gc.lock` for concurrent `gc` runs | Supported | N/A |
+| GC lock | `.libra/gc.lock` for concurrent `gc` runs only | Supported | N/A |
 | Repack valid objects | Unsupported | Supported | N/A |
 | Cruft packs | Unsupported | Supported | N/A |
 | Reflog expiration | Unsupported | Supported | N/A |
