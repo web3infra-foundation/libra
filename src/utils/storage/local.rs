@@ -2,6 +2,8 @@
 //! This module implements the `Storage` trait for a local filesystem backend. It supports both loose objects and packed objects, allowing for efficient storage and retrieval of Git objects on disk.
 //! The `LocalStorage` struct provides methods to read and write Git objects, as well as to search for objects by prefix. It handles the Git object storage format, including zlib compression for loose objects
 //! and the pack file format for packed objects. The implementation also includes caching mechanisms for pack objects to improve performance when accessing packed data.
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs, io,
     io::{Read, Seek, Write},
@@ -96,13 +98,26 @@ impl LocalStorage {
     /// Checks if a loose object exists by looking for its file. This is a quick check before looking into packs.
     fn exist_loosely(&self, obj_id: &ObjectHash) -> bool {
         let path = self.get_obj_path(obj_id);
-        Path::exists(&path)
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false)
     }
 
     /// Reads the raw compressed data of a loose object from the filesystem. This is used when we know the object exists as a loose object.
     fn read_raw_data(&self, obj_id: &ObjectHash) -> Result<Vec<u8>, io::Error> {
         let path = self.get_obj_path(obj_id);
-        let mut file = fs::File::open(path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("loose object '{}' is not a regular file", path.display()),
+            ));
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        let mut file = options.open(&path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
         Ok(buffer)
@@ -336,16 +351,16 @@ impl LocalStorage {
         idxs
     }
 
-    /// Return whether the index metadata has more than one filesystem link.
     #[cfg(unix)]
+    /// Return whether the index metadata has more than one filesystem link.
     fn pack_index_has_multiple_links(metadata: &fs::Metadata) -> bool {
         use std::os::unix::fs::MetadataExt as _;
 
         metadata.nlink() > 1
     }
 
-    /// Return whether the index metadata has more than one filesystem link.
     #[cfg(not(unix))]
+    /// Return whether the index metadata has more than one filesystem link.
     fn pack_index_has_multiple_links(_metadata: &fs::Metadata) -> bool {
         false
     }
@@ -649,8 +664,7 @@ impl Storage for LocalStorage {
             if let Some(kind) = self_clone.hash_kind {
                 set_hash_kind(kind);
             }
-            let path = self_clone.get_obj_path(&hash);
-            if Path::exists(&path) {
+            if self_clone.exist_loosely(&hash) {
                 return true;
             }
             match self_clone.get_from_pack(&hash) {
@@ -825,6 +839,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers parsing a well-formed loose-object header.
     fn parse_header_accepts_well_formed_header() {
         let data = header_bytes("blob", b"hello world");
         let (kind, size, end) = LocalStorage::parse_header(&data).expect("valid header parses");
@@ -834,6 +849,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers rejecting loose-object headers without a NUL terminator.
     fn parse_header_rejects_missing_terminator() {
         let err = LocalStorage::parse_header(b"blob 4abcd")
             .expect_err("missing NUL terminator should fail");
@@ -844,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers rejecting loose-object headers without a size segment.
     fn parse_header_rejects_missing_size_segment() {
         let mut data = b"blob\0".to_vec();
         data.extend_from_slice(b"payload");
@@ -855,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers rejecting loose-object headers with a non-numeric size.
     fn parse_header_rejects_non_numeric_size() {
         let mut data = b"blob abc\0".to_vec();
         data.extend_from_slice(b"xyz");
@@ -866,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers rejecting loose-object headers whose size does not match payload length.
     fn parse_header_rejects_size_mismatch() {
         // Header claims size 100 but only 5 payload bytes follow.
         let mut data = b"blob 100\0".to_vec();
@@ -883,6 +902,7 @@ mod tests {
     /// minimal way to exercise the path: the position-of-\0 check passes
     /// (terminator at offset 3) and the slice [0..3] is then invalid UTF-8.
     #[test]
+    /// Covers rejecting loose-object headers with non-UTF-8 bytes.
     fn parse_header_rejects_non_utf8_header_bytes() {
         // 3 invalid-UTF-8 bytes followed by NUL terminator and a 0-length payload.
         let data = [0xFFu8, 0xFFu8, 0xFFu8, b'\0'];
@@ -895,6 +915,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    /// Covers hardlink detection for existing pack indexes.
     fn pack_index_has_multiple_links_detects_hardlinks() {
         let dir = tempdir().unwrap();
         let idx = dir.path().join("pack-test.idx");
@@ -912,7 +933,33 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    #[cfg(unix)]
+    /// Covers loose-object symlinks being ignored by reads and existence checks.
+    async fn get_rejects_symlink_loose_objects() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let objects = dir.path().join("objects");
+        let storage = LocalStorage::open_existing(objects.clone());
+        let hash = ObjectHash::from_str(&"a".repeat(get_hash_kind().size() * 2)).unwrap();
+        let object_path = storage.get_obj_path(&hash);
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        let external = dir.path().join("external-object");
+        fs::write(&external, b"blob 4\0test").unwrap();
+        symlink(&external, &object_path).unwrap();
+
+        assert!(!storage.exist_loosely(&hash));
+        assert!(!storage.exist(&hash).await);
+        let raw_error = storage.read_raw_data(&hash).unwrap_err();
+        assert_eq!(raw_error.kind(), io::ErrorKind::InvalidData);
+
+        let load_error = storage.get(&hash).await.unwrap_err();
+        assert!(matches!(load_error, GitError::ObjectNotFound(_)));
+    }
+
     #[test]
+    /// Covers read-only local storage not rebuilding missing pack indexes.
     fn open_existing_does_not_build_missing_pack_indexes() {
         let dir = tempdir().unwrap();
         let objects = dir.path().join("objects");
