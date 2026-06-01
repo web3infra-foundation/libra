@@ -163,10 +163,10 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 **任务：**
 
 - [x] CI 已有 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web lint`、`pnpm --dir web build` 专门 job；`web/pnpm-workspace.yaml` 允许 `msw`、`sharp`、`unrs-resolver` build scripts，避免 pnpm 11 `ERR_PNPM_IGNORED_BUILDS`。
-- [x] 继续检查 `web/out/` 与 source 变更同步；CI 的 Web build job 在 `pnpm --dir web build` 后运行 `scripts/check_web_out_clean.sh`，同时检查 tracked diff 与 untracked `web/out` 文件。
+- [x] 继续检查 `web/out/` 与 source 变更同步；CI 的 compat-web-check job 在 `pnpm --dir web build` 后内联运行 `git status --porcelain -- web/out`（原 `scripts/check_web_out_clean.sh` 已移除），同时覆盖 tracked diff 与 untracked `web/out` 文件。
 - [x] 增加 browser smoke：`browser_static_app_loads_and_submit_updates_snapshot` 打开 `http://127.0.0.1:<port>`，断言页面不含旧 mock thread 内容，发送 browser message 后 snapshot 更新。
 - [x] `docs/commands/code.md` 增加 Code UI snapshot 稳定字段表、thread list envelope、error code 表、`--browser-control` 矩阵。
-- [x] [`docs/automation/local-tui-control.md`](../automation/local-tui-control.md) 与 `src/internal/ai/web/mod.rs` endpoint matrix 用 grep/脚本保持一致；`compat_matrix_alignment::docs_consistency_script_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `scripts/check_docs_consistency.sh` 覆盖全部端点。
+- [x] `docs/commands/code-control.md` 与 `src/internal/ai/web/mod.rs` endpoint matrix 保持一致；`compat_matrix_alignment::docs_consistency_covers_code_ui_router_matrix` 会从 Rust router 提取 `/api/code/*` 路由并要求 `docs/commands/code-control.md` 覆盖全部端点（原 `scripts/check_docs_consistency.sh` 已移除，检查逻辑内联进该 Rust 测试）。
 
 **验收命令：**
 

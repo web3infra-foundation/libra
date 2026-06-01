@@ -14,9 +14,9 @@
 - Default tests: `cargo test --all` (deterministic L1; credential/live layers skip when env is absent).
 - Single integration target: `cargo test --test <target> -- --test-threads=1`. Prefer `<target>::<test_fn>` when naming tests in PRs/issues.
 - CLI smoke: `cargo run -- <cmd>`.
-- Web embed check: `pnpm --dir web install --frozen-lockfile && pnpm --dir web lint && pnpm --dir web build && bash scripts/check_web_out_clean.sh`.
+- Web embed check: `pnpm --dir web install --frozen-lockfile && pnpm --dir web lint && pnpm --dir web build`, then assert no static-export drift with `git status --porcelain -- web/out` (must be empty; the compat-web-check CI job inlines this check).
 - Worker checks from `worker/`: `pnpm lint`, `pnpm test`, `pnpm test:miniflare`, `pnpm build`; e2e uses `pnpm e2e:serve` on `127.0.0.1:3127` plus `pnpm e2e`.
-- CI-required consistency scripts: `bash scripts/check_compat_matrix.sh`, `bash scripts/check_docs_consistency.sh`, `bash scripts/check_integration_plan_consistency.sh`.
+- CI-required consistency checks (de-scripted — there is no `scripts/` dir): run `cargo test --test compat_matrix_alignment`, which covers both the `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` drift check and the `docs/commands/code-control.md` ↔ Code UI router coverage check; `web/out` drift is the inline `git status --porcelain -- web/out` in the compat-web-check job. An integration-plan consistency check is still aspirational (see `docs/development/integration-test-plan.md` BASELINE_GAP-INTEG-008).
 
 ## Build and generated-output quirks
 - `build.rs` runs `pnpm install --frozen-lockfile` and `pnpm run build` in `web/` unless `LIBRA_SKIP_WEB_BUILD=1`; skipped builds create a stub `web/out/index.html`.
@@ -38,7 +38,7 @@
 - New or changed command: update `src/cli.rs`, the matching `src/command/<name>.rs`, `COMPATIBILITY.md`, command docs under `docs/commands/`, tests under `tests/command/`, and `tests/INDEX.md`.
 - Every visible command/help surface must render examples (`pub const <CMD>_EXAMPLES` wired through clap `after_help`) and every `docs/commands/<name>.md` page needs `## Examples` or `## Common Commands`.
 - New stable error codes in `src/utils/error.rs` must be documented in `docs/error-codes.md`; `libra help error-codes` includes that doc at compile time.
-- If changing compatibility semantics, run `bash scripts/check_compat_matrix.sh` and update declined/intentional notes under `docs/improvement/compatibility/` when relevant.
+- If changing compatibility semantics, run `cargo test --test compat_matrix_alignment` and update declined/intentional notes under `docs/improvement/compatibility/` when relevant.
 - If changing SQL, update bootstrap/migrations under `sql/`; `sql/publish/` is the Worker D1 schema and is independent from `.libra/libra.db` runtime schema.
 
 ## Code conventions that are enforced here

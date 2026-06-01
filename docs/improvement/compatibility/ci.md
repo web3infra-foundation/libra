@@ -14,7 +14,7 @@ C2（Audit P1）
 - [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) 继续承担发布产物构建，不属于 C2 required-checks 重命名范围。
 - [`Cargo.toml`](../../../Cargo.toml) 中已存在 feature gate：`test-network` / `test-live-ai` / `test-live-cloud` / `test-provider`，分别对应网络、真实 LLM、真实云资源和本地 deterministic provider。
 - [`tests/compat/`](../../../tests/compat/) 已存在，并通过 `Cargo.toml` 的 `[[test]]` 条目接入 `checkout_alias_help` / `bisect_subcommand_surface` / `worktree_delete_dir` 等跨命令兼容性回归。
-- [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 与 [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) 已把 `COMPATIBILITY.md` 顶层命令表和 `src/cli.rs::Commands` 的漂移检测接入本地测试与 CI。
+- [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) 已把 `COMPATIBILITY.md` 顶层命令表和 `src/cli.rs::Commands` 的漂移检测接入本地测试与 CI。该检测为**自包含 Rust**（不再依赖已移除的 `scripts/check_compat_matrix.sh`）；compat-offline-core job 以 `cargo test --test compat_matrix_alignment` 运行，且随 `cargo test --all` 一并执行。
 
 ### 基于当前代码的 Review 结论
 - C2 的代码侧命名和 job 拆分已落地；当前 remaining action 是平台侧 branch-protection required-checks 切换，仍必须由维护者在 GitHub UI 中执行。
@@ -33,7 +33,7 @@ C2（Audit P1）
   - `compat-network-remotes`
 - 把 codeql.yml 的 matrix job 名规范为 `security-codeql-actions` / `security-codeql-rust`，避免同一 workflow 内 matrix check 名称重复。
 - 维护 `tests/compat/` 目录，作为 C2 / C4 / C5 跨命令兼容性回归的集结点。
-- 新增 `scripts/check_compat_matrix.sh` 和 `tests/compat/matrix_alignment.rs`，把 `COMPATIBILITY.md` 与 `src/cli.rs::Commands` 的顶层命令覆盖关系变成 fail-fast gate。
+- 新增 `tests/compat/matrix_alignment.rs`，把 `COMPATIBILITY.md` 与 `src/cli.rs::Commands` 的顶层命令覆盖关系变成 fail-fast gate（漂移检测逻辑内联在该 Rust 测试中，无外部脚本依赖）。
 - 在 [governance.md](governance.md) 给出 required-checks 切换 checklist，由维护者在 GitHub UI 执行。
 
 **非目标：**
@@ -159,9 +159,9 @@ tests/compat/
 | [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) | 修改 | 现有质量门重命名为 `compat-*`；普通测试与 network/live 测试拆清 |
 | [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) | 修改 | matrix job 重命名为 `security-codeql-actions` / `security-codeql-rust` |
 | [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) | 新建 | `compat-live-ai` / `compat-live-cloud` nightly + manual gates；缺少 secrets 时 no-op skip |
-| [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) | 新建 | `src/cli.rs::Commands` ↔ `COMPATIBILITY.md` 顶层命令漂移检测 |
+| `scripts/check_compat_matrix.sh` | 已移除 | 原 `src/cli.rs::Commands` ↔ `COMPATIBILITY.md` 漂移检测脚本；逻辑已内联到 `matrix_alignment.rs`，仓库不再有 `scripts/` 目录 |
 | [`tests/compat/README.md`](../../../tests/compat/README.md) | 新建 | 目录用途说明 + 文件命名约定 |
-| [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) | 新建 | 通过 Cargo test 运行矩阵漂移检测脚本 |
+| [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) | 新建/承接 | 自包含的矩阵漂移检测（取代已移除的 `check_compat_matrix.sh`），通过 Cargo test 运行 |
 | [`Cargo.toml`](../../../Cargo.toml) | 修改 | 注册 `compat_matrix_alignment` 集成测试 |
 | [`docs/improvement/compatibility/governance.md`](governance.md) | 追加 | required-checks 切换 checklist 小节 |
 
@@ -172,7 +172,7 @@ tests/compat/
 - [x] [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 CodeQL matrix 使用 `security-codeql-${{ matrix.language }}`，即 `security-codeql-actions` / `security-codeql-rust`。
 - [x] `compat-clippy` 使用 `cargo clippy --all-targets --all-features -- -D warnings`。
 - [x] [`tests/compat/README.md`](../../../tests/compat/README.md) 已说明该目录由 `compat-offline-core` 覆盖，并列出现有兼容性测试文件。
-- [x] [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast。
+- [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast（自包含 Rust，取代已移除的 `scripts/check_compat_matrix.sh`）。
 - [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 已通过 Cargo `[[test]]` 接入 `cargo test --all`。
 - [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
 - [x] [`.github/workflows/live-compat.yml`](../../../.github/workflows/live-compat.yml) 已提供 `compat-live-ai` / `compat-live-cloud` 非 required L3 gate，支持 nightly 和 manual dispatch，缺少 secret 时输出 warning 并 skip。

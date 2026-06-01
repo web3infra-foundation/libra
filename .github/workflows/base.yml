@@ -101,7 +101,13 @@ jobs:
         run: pnpm --dir web build
 
       - name: Check web/out static export drift
-        run: bash scripts/check_web_out_clean.sh
+        run: |
+          drift="$(git status --porcelain -- web/out)"
+          if [ -n "$drift" ]; then
+            echo "::error::web/out static export drift detected; rebuild and commit web/out/" >&2
+            printf '%s\n' "$drift" >&2
+            exit 1
+          fi
 
   redundancy:
     name: compat-redundancy
@@ -189,7 +195,9 @@ jobs:
           rg --version
 
       - name: Check compatibility matrix drift
-        run: bash scripts/check_compat_matrix.sh
+        # De-scripted: the COMPATIBILITY.md ↔ src/cli.rs::Commands drift check now
+        # lives in tests/compat/matrix_alignment.rs (also runs in `cargo test --all`).
+        run: cargo test --test compat_matrix_alignment
 
       - name: Run tests (L1 + L2 + L3)
         env:
