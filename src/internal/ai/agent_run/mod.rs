@@ -69,6 +69,7 @@ pub mod merge_pipeline;
 pub mod parallel;
 pub mod patchset;
 pub mod permission;
+pub mod review_summary;
 pub mod risk_score;
 pub mod run;
 pub mod task;
@@ -272,6 +273,7 @@ pub use parallel::{
 };
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
+pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
 pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
