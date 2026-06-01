@@ -33,7 +33,7 @@ batch document.
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
-| mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |
+| mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
 | clean | supported | |
@@ -64,7 +64,7 @@ batch document.
 | blame | supported | |
 | revert | supported | |
 | remote | supported | |
-| hash-object | partial | Blob hashing for files and `--stdin`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
+| hash-object | partial | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
 | config | supported | vault-backed |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
@@ -77,7 +77,7 @@ batch document.
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
 | gc | partial | Prunes unreachable loose objects and stale pack sidecars; full Git-style repack/delta compression/cruft packs/reflog expiry are not implemented |
-| verify-pack | partial | validates one `.idx` file against a matching `.pack`; Git's multi-index form and `-s` / `--stat-only` are not exposed |
+| verify-pack | partial | validates `.idx` files against matching `.pack` files; multi-index and Git's `-s` / `--stat-only` are supported; `--pack` is a Libra-only explicit pack path |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |

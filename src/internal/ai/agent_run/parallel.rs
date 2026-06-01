@@ -28,6 +28,25 @@ impl ParallelAdmissionConfig {
             max_parallel: max_parallel.max(1),
         }
     }
+
+    /// Resolve the effective admission config for the sub-agent scheduler,
+    /// encoding the CEX-S2-12 → CEX-S2-14 concurrency policy in one place.
+    ///
+    /// CEX-S2-12 ("single sub-agent behind flag") forces the dispatcher to a
+    /// single concurrent run regardless of the configured `max_parallel`; only
+    /// once CEX-S2-14 unlocks controlled parallel execution does the configured
+    /// value take effect. `enforce_single = true` is the CEX-S2-12 phase (cap to
+    /// 1); `false` is the CEX-S2-14 phase (honour `configured_max_parallel`,
+    /// floored at 1). Takes a plain count rather than the config type so this
+    /// module stays free of an `agent::profile` dependency.
+    pub fn for_sub_agents(configured_max_parallel: u32, enforce_single: bool) -> Self {
+        let effective = if enforce_single {
+            1
+        } else {
+            configured_max_parallel.max(1) as usize
+        };
+        Self::new(effective)
+    }
 }
 
 impl Default for ParallelAdmissionConfig {

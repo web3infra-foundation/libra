@@ -187,6 +187,7 @@ impl LibraMcpServer {
         Ok(vec![
             RawResource::new("libra://history/latest", "Latest History Head").no_annotation(),
             RawResource::new("libra://context/active", "Active Context").no_annotation(),
+            RawResource::new("libra://agents/runs", "Sub-agent Runs").no_annotation(),
         ])
     }
 
@@ -268,7 +269,43 @@ impl LibraMcpServer {
             }
         }
 
+        if let Some(request) = super::agents_resource::AgentResourceRequest::parse(uri) {
+            return self.read_agent_resource(uri, request);
+        }
+
         Err(ErrorData::resource_not_found("Resource not found", None))
+    }
+
+    /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
+    /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
+    ///
+    /// Sub-agent `AgentRun` / `MergeCandidate` records are not yet persisted
+    /// through this server's storage (that path lands with the run-persistence
+    /// wiring), so the list view returns an empty—but well-formed—body and the
+    /// id-targeting views return a structured not-found rather than a bare
+    /// error. The pure renderers in `agents_resource` activate unchanged once a
+    /// record source is supplied.
+    fn read_agent_resource(
+        &self,
+        uri: &str,
+        request: super::agents_resource::AgentResourceRequest,
+    ) -> Result<Vec<ResourceContents>, ErrorData> {
+        use super::agents_resource::{AgentResourceRequest, render_run_list};
+
+        match request {
+            AgentResourceRequest::RunList => {
+                let body = render_run_list(&[]);
+                Ok(vec![ResourceContents::text(body.to_string(), uri)])
+            }
+            other => Err(ErrorData::resource_not_found(
+                format!(
+                    "No persisted sub-agent run for `{}` (sub-agent run persistence is not yet \
+                     enabled)",
+                    other.run_id().unwrap_or("<merge-candidate>"),
+                ),
+                None,
+            )),
+        }
     }
 
     /// Build the `libra://context/active` resource by finding the latest

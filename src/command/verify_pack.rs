@@ -55,17 +55,18 @@ impl Drop for HashKindRestoreGuard {
 const VERIFY_PACK_EXAMPLES: &str = "\
 EXAMPLES:
     libra verify-pack objects/pack/pack-abc123.idx                   Verify an index against its sibling .pack
+    libra verify-pack pack-a.idx pack-b.idx                          Verify multiple indexes in one invocation
     libra verify-pack --pack pack.pack pack.idx                      Verify with an explicit pack path
     libra verify-pack -v pack-abc123.idx                             Print every indexed object hash and offset
+    libra verify-pack -s pack-abc123.idx                             Print pack statistics only
     libra verify-pack pack-abc123.idx --json                         Structured JSON output for agents";
 
-/// Command-line options for `libra verify-pack`.
 #[derive(Parser, Debug)]
 #[command(after_help = VERIFY_PACK_EXAMPLES)]
 pub struct VerifyPackArgs {
-    /// Pack index file to verify
-    #[arg(value_name = "IDX_FILE")]
-    pub idx_file: PathBuf,
+    /// Pack index files to verify
+    #[arg(value_name = "IDX_FILE", num_args = 1..)]
+    pub idx_files: Vec<PathBuf>,
 
     /// Pack file to verify against. Defaults to IDX_FILE with `.pack` extension.
     #[arg(long, value_name = "PACK_FILE")]
@@ -74,6 +75,10 @@ pub struct VerifyPackArgs {
     /// Print every indexed object hash and offset
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Show pack statistics only
+    #[arg(short = 's', long = "stat-only")]
+    pub stat_only: bool,
 }
 
 /// Full verification result used by human and JSON renderers.
@@ -93,9 +98,19 @@ struct VerifyPackOutput {
     index_hash: String,
     /// Whether the pack/index pair passed validation.
     verified: bool,
+    /// Pack statistics emitted in stat-only mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stats: Option<VerifyPackStatsOutput>,
     /// Per-object details emitted in verbose mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     objects: Vec<VerifyPackObjectOutput>,
+}
+
+/// Batch verification result for multiple pack indexes.
+#[derive(Debug, Clone, Serialize)]
+struct VerifyPackBatchOutput {
+    /// Per-pack verification results.
+    packs: Vec<VerifyPackOutput>,
 }
 
 /// Verbose verification details for one packed object.
@@ -114,6 +129,24 @@ struct VerifyPackObjectOutput {
     /// Optional CRC32 stored by version 2 pack indexes.
     #[serde(skip_serializing_if = "Option::is_none")]
     crc32: Option<u32>,
+}
+
+/// Pack statistics reported by stat-only mode.
+#[derive(Debug, Clone, Serialize)]
+struct VerifyPackStatsOutput {
+    /// Number of packed objects that are stored without delta chains.
+    non_delta_objects: usize,
+    /// Counts grouped by delta chain length.
+    chain_lengths: Vec<VerifyPackChainLengthOutput>,
+}
+
+/// Count of objects sharing one delta chain length.
+#[derive(Debug, Clone, Serialize)]
+struct VerifyPackChainLengthOutput {
+    /// Delta chain length.
+    chain_length: usize,
+    /// Number of objects at this chain length.
+    objects: usize,
 }
 
 /// Parsed representation of a pack index file.
@@ -160,6 +193,8 @@ struct DecodedPackEntry {
     object_type: ObjectType,
     /// Uncompressed object size.
     size: usize,
+    /// Delta chain length.
+    chain_len: usize,
 }
 
 /// Run `verify-pack` with default human-output configuration.
@@ -179,8 +214,8 @@ pub async fn execute(args: VerifyPackArgs) -> Result<(), String> {
 /// Returns structured CLI errors for unreadable files and repository-corruption
 /// errors for malformed indexes, malformed packs, or index/pack mismatches.
 pub async fn execute_safe(args: VerifyPackArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = verify_pack(&args)?;
-    render_verify_pack_output(&result, args.verbose, output)
+    let results = verify_packs(&args)?;
+    render_verify_pack_outputs(&results, args.verbose, args.stat_only, output)
 }
 
 /// Minimal pack/index verification summary reused by maintenance commands.
@@ -212,23 +247,44 @@ pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult
 }
 
 /// Verify command arguments and build the full verification output.
-fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
-    let idx_file = args.idx_file.clone();
-    let pack_file = args
-        .pack
-        .clone()
+fn verify_packs(args: &VerifyPackArgs) -> CliResult<Vec<VerifyPackOutput>> {
+    if args.pack.is_some() && args.idx_files.len() != 1 {
+        return Err(
+            CliError::fatal("--pack can only be used when verifying one pack index")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "omit --pack for multi-index verification so each .idx uses its sibling .pack",
+                ),
+        );
+    }
+
+    args.idx_files
+        .iter()
+        .map(|idx_file| verify_pack(idx_file, args.pack.as_deref(), args.verbose, args.stat_only))
+        .collect()
+}
+
+/// Verify one pack index against its matching pack file.
+fn verify_pack(
+    idx_file: &Path,
+    explicit_pack_file: Option<&Path>,
+    verbose: bool,
+    stat_only: bool,
+) -> CliResult<VerifyPackOutput> {
+    let pack_file = explicit_pack_file
+        .map(Path::to_path_buf)
         .unwrap_or_else(|| idx_file.with_extension("pack"));
 
-    let idx_bytes = read_file(&idx_file, "pack index")?;
+    let idx_bytes = read_file(idx_file, "pack index")?;
     let _hash_guard = infer_idx_v2_hash_kind(&idx_bytes)
-        .map_err(|detail| invalid_index(&idx_file, detail))?
+        .map_err(|detail| invalid_index(idx_file, detail))?
         .map(HashKindRestoreGuard::switch_to);
-    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?;
+    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
     let decoded = decode_pack(&pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
-        .map_err(|detail| verification_failed(&idx_file, &pack_file, detail))?;
+        .map_err(|detail| verification_failed(idx_file, &pack_file, detail))?;
 
-    let objects = if args.verbose {
+    let objects = if verbose && !stat_only {
         let size_in_pack_by_hash = pack_entry_sizes(&parsed, decoded.pack_len)?;
         parsed
             .entries
@@ -261,15 +317,17 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
     } else {
         Vec::new()
     };
+    let stats = stat_only.then(|| verify_pack_stats(&decoded));
 
     Ok(VerifyPackOutput {
-        idx_file: path_string(&idx_file),
+        idx_file: path_string(idx_file),
         pack_file: path_string(&pack_file),
         index_version: parsed.version,
         object_count: parsed.entries.len(),
         pack_hash: parsed.pack_hash.to_string(),
         index_hash: bytes_to_hex(&parsed.index_hash),
         verified: true,
+        stats,
         objects,
     })
 }
@@ -664,6 +722,7 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
                     index,
                     object_type: entry.inner.obj_type,
                     size: entry.inner.data.len(),
+                    chain_len: entry.inner.chain_len,
                 })
                 .map_err(|error| error.to_string());
             if let Ok(mut guard) = entries_clone.lock() {
@@ -707,6 +766,30 @@ fn decode_pack(pack_file: &Path) -> CliResult<DecodedPack> {
         pack_len,
         entries: decoded_entries,
     })
+}
+
+/// Build object and delta-chain counts for stat-only output.
+fn verify_pack_stats(decoded: &DecodedPack) -> VerifyPackStatsOutput {
+    let mut non_delta_objects = 0usize;
+    let mut chain_lengths = BTreeMap::new();
+    for entry in decoded.entries.values() {
+        if entry.chain_len == 0 {
+            non_delta_objects += 1;
+        } else {
+            *chain_lengths.entry(entry.chain_len).or_insert(0usize) += 1;
+        }
+    }
+
+    VerifyPackStatsOutput {
+        non_delta_objects,
+        chain_lengths: chain_lengths
+            .into_iter()
+            .map(|(chain_length, objects)| VerifyPackChainLengthOutput {
+                chain_length,
+                objects,
+            })
+            .collect(),
+    }
 }
 
 /// Insert a decoded pack entry while rejecting duplicate object IDs.
@@ -803,16 +886,38 @@ fn validate_index_against_pack(index: &ParsedIndex, pack: &DecodedPack) -> Resul
     Ok(())
 }
 
-/// Render verification results as human output or JSON.
+/// Render one verification result as human output or JSON.
 fn render_verify_pack_output(
     result: &VerifyPackOutput,
     verbose: bool,
+    stat_only: bool,
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("verify-pack", result, output);
     }
     if output.quiet {
+        return Ok(());
+    }
+
+    if stat_only {
+        let stats = result.stats.as_ref().ok_or_else(|| {
+            CliError::fatal("verify-pack statistics are missing from stat-only output")
+                .with_stable_code(StableErrorCode::InternalInvariant)
+        })?;
+        println!(
+            "non delta: {} {}",
+            stats.non_delta_objects,
+            object_count_label(stats.non_delta_objects)
+        );
+        for chain in &stats.chain_lengths {
+            println!(
+                "chain length = {}: {} {}",
+                chain.chain_length,
+                chain.objects,
+                object_count_label(chain.objects)
+            );
+        }
         return Ok(());
     }
 
@@ -826,6 +931,37 @@ fn render_verify_pack_output(
     }
     println!("{}: ok", result.idx_file);
     Ok(())
+}
+
+/// Render one or more verification results.
+fn render_verify_pack_outputs(
+    results: &[VerifyPackOutput],
+    verbose: bool,
+    stat_only: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        if let [result] = results {
+            return emit_json_data("verify-pack", result, output);
+        }
+        return emit_json_data(
+            "verify-pack",
+            &VerifyPackBatchOutput {
+                packs: results.to_vec(),
+            },
+            output,
+        );
+    }
+
+    for result in results {
+        render_verify_pack_output(result, verbose, stat_only, output)?;
+    }
+    Ok(())
+}
+
+/// Return the singular or plural label for an object count.
+fn object_count_label(count: usize) -> &'static str {
+    if count == 1 { "object" } else { "objects" }
 }
 
 /// Read a file and convert failures into stable CLI I/O errors.
@@ -909,6 +1045,7 @@ mod tests {
             },
             object_type: ObjectType::Blob,
             size: 5,
+            chain_len: 0,
         }
     }
 

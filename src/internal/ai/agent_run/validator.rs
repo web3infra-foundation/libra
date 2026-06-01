@@ -13,7 +13,7 @@
 //! validation failure back to the originating `AgentTask` — touch
 //! `orchestrator::verifier` and land separately.
 
-use super::{AgentEvidence, EvidenceId};
+use super::{AgentEvidence, AgentPatchSet, AgentRun, AgentTaskId, EvidenceId};
 
 /// Collect the ids of every `distillable = true` evidence record, in input
 /// order, ready to fill `MergeDecisionPayloadV0::distillable_evidence_ids`
@@ -31,6 +31,27 @@ pub fn collect_distillable_evidence_ids(evidence: &[AgentEvidence]) -> Vec<Evide
         .filter(|item| item.distillable)
         .map(|item| item.id)
         .collect()
+}
+
+/// Resolve the [`AgentTaskId`] that a failing `patchset` should route back to
+/// (CEX-S2-15 验收 (3): "validation fail 可路由回具体 `AgentTask`").
+///
+/// When validation rejects a sub-agent patch set, Layer 1 must send the failure
+/// back to the *specific* task that produced it — not the whole candidate — so
+/// the right sub-agent can revise. The link is two hops:
+/// `AgentPatchSet.agent_run_id` → the matching [`AgentRun`] → its `task_id`.
+///
+/// Returns `None` when no run in `runs` owns the patch set (a dangling patch set
+/// whose run was never recorded); the caller surfaces that as an internal
+/// inconsistency rather than silently dropping the failure. Pure — a lookup over
+/// the supplied runs with no I/O.
+pub fn resolve_task_for_patchset(
+    patchset: &AgentPatchSet,
+    runs: &[AgentRun],
+) -> Option<AgentTaskId> {
+    runs.iter()
+        .find(|run| run.id == patchset.agent_run_id)
+        .map(|run| run.task_id)
 }
 
 #[cfg(test)]
@@ -119,5 +140,66 @@ mod tests {
         };
 
         assert_eq!(merge_decision_distillable_evidence(&decision), collected);
+    }
+
+    use super::super::{AgentPatchSetId, AgentRunStatus, AgentTaskId};
+
+    fn run(run_id: AgentRunId, task_id: AgentTaskId) -> AgentRun {
+        AgentRun {
+            id: run_id,
+            task_id,
+            thread_id: uuid::Uuid::new_v4(),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            transcript_path: "t.jsonl".to_string(),
+            workspace_path: None,
+            status: AgentRunStatus::Failed,
+        }
+    }
+
+    fn patchset(agent_run_id: AgentRunId) -> AgentPatchSet {
+        AgentPatchSet {
+            id: AgentPatchSetId::new(),
+            agent_run_id,
+            patchset_id: uuid::Uuid::new_v4(),
+            workspace_scope_constrained: false,
+        }
+    }
+
+    /// CEX-S2-15 验收 (3): a failing patch set routes back to the task of the
+    /// run that produced it — the specific task, not the whole candidate.
+    #[test]
+    fn resolve_task_routes_failure_to_originating_task() {
+        let run_a = AgentRunId::new();
+        let task_a = AgentTaskId::new();
+        let run_b = AgentRunId::new();
+        let task_b = AgentTaskId::new();
+        let runs = vec![run(run_a, task_a), run(run_b, task_b)];
+
+        // A patch set owned by run_b resolves to task_b, not task_a.
+        assert_eq!(
+            resolve_task_for_patchset(&patchset(run_b), &runs),
+            Some(task_b),
+        );
+        assert_eq!(
+            resolve_task_for_patchset(&patchset(run_a), &runs),
+            Some(task_a),
+        );
+    }
+
+    /// A patch set whose owning run is absent resolves to `None` (dangling) — the
+    /// caller surfaces the inconsistency rather than mis-routing.
+    #[test]
+    fn resolve_task_returns_none_for_unknown_run() {
+        let runs = vec![run(AgentRunId::new(), AgentTaskId::new())];
+        assert_eq!(
+            resolve_task_for_patchset(&patchset(AgentRunId::new()), &runs),
+            None,
+        );
+        // Empty run set is also None, never a panic.
+        assert_eq!(
+            resolve_task_for_patchset(&patchset(AgentRunId::new()), &[]),
+            None,
+        );
     }
 }

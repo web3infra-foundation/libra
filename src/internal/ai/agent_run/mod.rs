@@ -65,12 +65,17 @@ pub mod event;
 pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
+pub mod hook_dispatch;
+pub mod merge_metrics;
+pub mod merge_pipeline;
 pub mod parallel;
 pub mod patchset;
 pub mod permission;
+pub mod review_summary;
 pub mod risk_score;
 pub mod run;
 pub mod task;
+pub mod trace;
 pub mod validator;
 pub mod workspace_sizing;
 pub mod workspace_strategy;
@@ -250,7 +255,8 @@ pub use budget::{AgentBudget, BudgetDimension};
 pub use conflict::{HunkRange, PatchFileEdit, PatchTouch, detect_conflicts};
 pub use context_pack::AgentContextPack;
 pub use decision::{
-    Conflict, MergeCandidate, MergeDecision, MergeDecisionPayloadV0, ReviewState, RiskScore,
+    AcceptError, Conflict, MergeCandidate, MergeDecision, MergeDecisionPayloadV0, ReviewState,
+    RiskScore,
 };
 pub use event::{
     AgentRunEvent, AgentRunEventEnvelope, CancellationReason, FailureReason, HookFailureReason,
@@ -261,6 +267,13 @@ pub use evidence::{AgentEvidence, AgentType};
 pub use evidence_query::{
     EvidenceFilter, evidence_query_by_scope, evidence_stream, merge_decision_distillable_evidence,
 };
+pub use hook_dispatch::{
+    HookOutcome, PreToolUseDecision, classify_post_tool_use, classify_pre_tool_use,
+};
+pub use merge_metrics::{MergeMetrics, MergeOutcomeCounts};
+pub use merge_pipeline::{
+    MergeDecisionSignals, build_merge_decision_payload, build_payload_from_patches,
+};
 pub use parallel::{
     ParallelAdmissionConfig, ParallelAdmissionDecision, ParallelPromotions, ParallelQueueReason,
     ParallelRunSnapshot, ParallelRunState, ParallelSchedulerSnapshot, ParallelSchedulerState,
@@ -268,10 +281,12 @@ pub use parallel::{
 };
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
+pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
 pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
-pub use validator::collect_distillable_evidence_ids;
+pub use trace::ToolCallTraceId;
+pub use validator::{collect_distillable_evidence_ids, resolve_task_for_patchset};
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
     WriteScopeViolation, check_write_in_scope, record_materialization, resolve_full_copy_fallback,
