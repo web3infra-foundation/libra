@@ -24,9 +24,11 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    AgentRunId,
+    AgentRunId, MergeCandidateId,
     context_pack::AgentContextPack,
+    decision::MergeCandidate,
     event::{AgentRunEvent, AgentRunEventEnvelope, RunUsage},
+    patchset::AgentPatchSet,
     permission::AgentPermissionProfile,
     run::AgentRun,
 };
@@ -379,6 +381,105 @@ impl AgentRunEventStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Resolve the per-run **patch-set** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.patchset.json`. A sibling of
+    /// the run snapshot holding the [`AgentPatchSet`] reference for the run's
+    /// captured workspace diff (CEX-S2-15/16), which a [`MergeCandidate`]
+    /// aggregates for the MCP `libra://agents/merge-candidates/{id}` resource.
+    pub fn patchset_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.patchset.json", run_id.0))
+    }
+
+    /// Persist a run's `AgentPatchSet` reference (write-once at run completion).
+    pub fn write_run_patchset(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        patchset: &AgentPatchSet,
+    ) -> io::Result<()> {
+        let path = self.patchset_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(patchset).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted `AgentPatchSet`. Missing is `Ok(None)`; corrupt is
+    /// an error.
+    pub fn read_run_patchset(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentPatchSet>> {
+        let path = self.patchset_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve a **merge-candidate** path
+    /// `.libra/sessions/{thread_id}/agents/{candidate_id}.candidate.json`. Keyed
+    /// by candidate id (not run id) since a candidate may aggregate several runs.
+    pub fn merge_candidate_path(&self, thread_id: Uuid, candidate_id: MergeCandidateId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.candidate.json", candidate_id.0))
+    }
+
+    /// Persist a [`MergeCandidate`] under a thread.
+    pub fn write_merge_candidate(
+        &self,
+        thread_id: Uuid,
+        candidate: &MergeCandidate,
+    ) -> io::Result<()> {
+        let path = self.merge_candidate_path(thread_id, candidate.id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(candidate).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Find a persisted [`MergeCandidate`] by id across **all** threads (the MCP
+    /// `merge-candidates/{id}` resource is not thread-scoped). `Ok(None)` when no
+    /// thread holds it; a present-but-corrupt record surfaces as an error.
+    pub fn find_merge_candidate(
+        &self,
+        candidate_id: MergeCandidateId,
+    ) -> io::Result<Option<MergeCandidate>> {
+        let entries = match fs::read_dir(&self.sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let Some(thread_id) = entry?
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            let path = self.merge_candidate_path(thread_id, candidate_id);
+            match fs::read_to_string(&path) {
+                Ok(json) => {
+                    return serde_json::from_str(&json)
+                        .map(Some)
+                        .map_err(io::Error::other);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -838,6 +939,59 @@ mod tests {
             store
                 .read_run_usage(Uuid::new_v4(), AgentRunId::new())
                 .expect("missing usage reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's `AgentPatchSet` round-trips through its sibling, and a
+    /// `MergeCandidate` aggregating it round-trips + is findable by id across
+    /// threads (the MCP merge-candidates resource path).
+    #[test]
+    fn write_then_read_patchset_and_find_merge_candidate() {
+        use crate::internal::ai::agent_run::{
+            AgentPatchSetId, MergeCandidateId, decision::MergeCandidate,
+        };
+
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let patchset = AgentPatchSet {
+            id: AgentPatchSetId::new(),
+            agent_run_id: run_id,
+            patchset_id: Uuid::new_v4(),
+            workspace_scope_constrained: false,
+        };
+
+        store
+            .write_run_patchset(thread_id, run_id, &patchset)
+            .expect("write patchset");
+        let back = store
+            .read_run_patchset(thread_id, run_id)
+            .expect("read patchset")
+            .expect("patchset must be present");
+        assert_eq!(back.id, patchset.id);
+        assert_eq!(back.agent_run_id, run_id);
+
+        let candidate = MergeCandidate::from_patchsets(
+            MergeCandidateId::new(),
+            std::slice::from_ref(&patchset),
+        );
+        let candidate_id = candidate.id;
+        store
+            .write_merge_candidate(thread_id, &candidate)
+            .expect("write candidate");
+
+        let found = store
+            .find_merge_candidate(candidate_id)
+            .expect("find candidate")
+            .expect("candidate must be found across threads");
+        assert_eq!(found.id, candidate_id);
+        assert!(found.patchset_ids.contains(&patchset.id));
+
+        assert!(
+            store
+                .find_merge_candidate(MergeCandidateId::new())
+                .expect("missing candidate reads Ok(None)")
                 .is_none(),
         );
     }
