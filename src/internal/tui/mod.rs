@@ -34,6 +34,8 @@
 //! Only a handful of items are re-exported; everything else is module-private
 //! so the public surface stays small and refactoring-friendly.
 
+// Typed parser for the `/agent` run-control subcommand family.
+mod agent_command;
 // Pure projection of AgentRun snapshots into ordered agent-pane rows.
 mod agent_pane;
 // Top-level event loop and exit handling.
