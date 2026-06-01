@@ -254,6 +254,48 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_snapshot(thread_id, &run)
         .expect("persist run snapshot");
 
+    // Also persist the run's permission profile, served by the permissions view.
+    use libra::internal::ai::agent_run::permission::{AgentPermissionProfile, ApprovalRouting};
+    let mut allowed = std::collections::BTreeSet::new();
+    allowed.insert("read_file".to_string());
+    let profile = AgentPermissionProfile {
+        allowed_tools: allowed,
+        denied_tools: std::collections::BTreeSet::new(),
+        allowed_source_slugs: std::collections::BTreeSet::new(),
+        approval_routing: ApprovalRouting::Layer1Human,
+        may_spawn_sub_agents: false,
+    };
+    store
+        .write_run_permissions(thread_id, run_id, &profile)
+        .expect("persist run permission profile");
+
+    // And the run's context pack, served by the context view.
+    use libra::internal::ai::agent_run::context_pack::AgentContextPack;
+    let context_pack = AgentContextPack {
+        task_id: AgentTaskId::new(),
+        goal: "summarise the repo".to_string(),
+        read_scope: Vec::new(),
+        write_scope: Vec::new(),
+        source_intent_id: None,
+    };
+    store
+        .write_run_context_pack(thread_id, run_id, &context_pack)
+        .expect("persist run context pack");
+
+    // And the run's terminal usage, served by the budget view.
+    use libra::internal::ai::agent_run::RunUsage;
+    let usage = RunUsage {
+        prompt_tokens: 120,
+        completion_tokens: 60,
+        wall_clock_ms: 4_200,
+        tool_call_count: 3,
+        cost_estimate_micro_dollars: 1_500,
+        ..RunUsage::default()
+    };
+    store
+        .write_run_usage(thread_id, run_id, &usage)
+        .expect("persist run usage");
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -290,6 +332,64 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::from_str(&detail_text).expect("valid JSON body");
     assert_eq!(detail_body["id"], run_id.0.to_string());
     assert_eq!(detail_body["model"], "deepseek-chat");
+
+    // The permissions view resolves the run's thread via its snapshot and
+    // serves the persisted profile.
+    let perms_uri = format!("libra://agents/runs/{}/permissions", run_id.0);
+    let perms = server
+        .read_resource_impl(&perms_uri)
+        .await
+        .expect("agents/runs/{id}/permissions must read the persisted profile");
+    let perms_text = match &perms[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let perms_body: serde_json::Value = serde_json::from_str(&perms_text).expect("valid JSON body");
+    assert_eq!(perms_body["agent_run_id"], run_id.0.to_string());
+    assert!(
+        perms_body["allowed_tools"]
+            .as_array()
+            .expect("allowed_tools array")
+            .iter()
+            .any(|tool| tool == "read_file"),
+        "the persisted profile's allowed tool must surface: {perms_body}",
+    );
+
+    // The context view serves the persisted context pack.
+    let context_uri = format!("libra://agents/runs/{}/context", run_id.0);
+    let context = server
+        .read_resource_impl(&context_uri)
+        .await
+        .expect("agents/runs/{id}/context must read the persisted pack");
+    let context_text = match &context[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let context_body: serde_json::Value =
+        serde_json::from_str(&context_text).expect("valid JSON body");
+    assert_eq!(context_body["agent_run_id"], run_id.0.to_string());
+    assert_eq!(context_body["goal"], "summarise the repo");
+
+    // The budget view serves the persisted usage against the (unlimited) budget.
+    let budget_uri = format!("libra://agents/runs/{}/budget", run_id.0);
+    let budget = server
+        .read_resource_impl(&budget_uri)
+        .await
+        .expect("agents/runs/{id}/budget must read the persisted usage");
+    let budget_text = match &budget[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let budget_body: serde_json::Value =
+        serde_json::from_str(&budget_text).expect("valid JSON body");
+    assert_eq!(budget_body["agent_run_id"], run_id.0.to_string());
+    assert_eq!(budget_body["usage"]["tool_call_count"], 3);
+    assert_eq!(budget_body["usage"]["total_tokens"], 180);
+    assert_eq!(
+        budget_body["exceeded_dimensions"],
+        serde_json::json!([]),
+        "an unlimited default budget exceeds nothing",
+    );
 }
 
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.

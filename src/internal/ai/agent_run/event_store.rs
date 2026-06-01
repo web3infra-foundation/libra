@@ -25,7 +25,9 @@ use uuid::Uuid;
 
 use super::{
     AgentRunId,
-    event::{AgentRunEvent, AgentRunEventEnvelope},
+    context_pack::AgentContextPack,
+    event::{AgentRunEvent, AgentRunEventEnvelope, RunUsage},
+    permission::AgentPermissionProfile,
     run::AgentRun,
 };
 
@@ -248,6 +250,135 @@ impl AgentRunEventStore {
         }
         runs.sort_by_key(|run| run.id.0);
         Ok(runs)
+    }
+
+    /// Resolve the per-run **permission profile** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.permissions.json`. A sibling
+    /// of the run snapshot, holding the run's static [`AgentPermissionProfile`]
+    /// (it does not change over the run's life) for the MCP
+    /// `libra://agents/runs/{id}/permissions` resource.
+    pub fn permissions_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.permissions.json", run_id.0))
+    }
+
+    /// Persist a run's permission profile (write-once; the profile is fixed at
+    /// dispatch). Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_permissions(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        profile: &AgentPermissionProfile,
+    ) -> io::Result<()> {
+        let path = self.permissions_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(profile).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted permission profile. A missing profile is
+    /// `Ok(None)`; a present-but-corrupt profile surfaces as an error.
+    pub fn read_run_permissions(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentPermissionProfile>> {
+        let path = self.permissions_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **context pack** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.context.json`. A sibling of
+    /// the run snapshot holding the run's static [`AgentContextPack`] (goal /
+    /// read+write scope / source intent) for the MCP
+    /// `libra://agents/runs/{id}/context` resource.
+    pub fn context_pack_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.context.json", run_id.0))
+    }
+
+    /// Persist a run's context pack (write-once; the pack is fixed at dispatch).
+    /// Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        pack: &AgentContextPack,
+    ) -> io::Result<()> {
+        let path = self.context_pack_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(pack).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted context pack. A missing pack is `Ok(None)`; a
+    /// present-but-corrupt pack surfaces as an error.
+    pub fn read_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentContextPack>> {
+        let path = self.context_pack_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **usage** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.usage.json`. A sibling of
+    /// the run snapshot holding the run's terminal [`RunUsage`] (tokens / tool
+    /// calls / wall-clock / cost) for the MCP `libra://agents/runs/{id}/budget`
+    /// resource.
+    pub fn usage_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.usage.json", run_id.0))
+    }
+
+    /// Persist a run's terminal usage totals (write-once at the run's terminal
+    /// transition). Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        usage: &RunUsage,
+    ) -> io::Result<()> {
+        let path = self.usage_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(usage).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted usage totals. A missing record is `Ok(None)`; a
+    /// present-but-corrupt record surfaces as an error.
+    pub fn read_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<RunUsage>> {
+        let path = self.usage_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -601,6 +732,114 @@ mod tests {
         );
         assert_eq!(runs[0].id, run_a.id, "sorted by run id across threads");
         assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// A run's permission profile round-trips through its sibling
+    /// `*.permissions.json` record; a missing profile reads as `None`.
+    #[test]
+    fn write_then_read_run_permissions_round_trips() {
+        use std::collections::BTreeSet;
+
+        use crate::internal::ai::agent_run::permission::{AgentPermissionProfile, ApprovalRouting};
+
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let mut allowed = BTreeSet::new();
+        allowed.insert("read_file".to_string());
+        let profile = AgentPermissionProfile {
+            allowed_tools: allowed,
+            denied_tools: BTreeSet::new(),
+            allowed_source_slugs: BTreeSet::new(),
+            approval_routing: ApprovalRouting::Layer1Human,
+            may_spawn_sub_agents: false,
+        };
+
+        store
+            .write_run_permissions(thread_id, run_id, &profile)
+            .expect("write permissions");
+        let back = store
+            .read_run_permissions(thread_id, run_id)
+            .expect("read permissions")
+            .expect("profile must be present");
+        assert!(back.allowed_tools.contains("read_file"));
+        assert!(!back.may_spawn_sub_agents);
+
+        assert!(
+            store
+                .read_run_permissions(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing profile reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's context pack round-trips through its sibling `*.context.json`
+    /// record; a missing pack reads as `None`.
+    #[test]
+    fn write_then_read_run_context_pack_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let pack = AgentContextPack {
+            task_id: AgentTaskId::new(),
+            goal: "summarise the module".to_string(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            source_intent_id: None,
+        };
+
+        store
+            .write_run_context_pack(thread_id, run_id, &pack)
+            .expect("write context pack");
+        let back = store
+            .read_run_context_pack(thread_id, run_id)
+            .expect("read context pack")
+            .expect("pack must be present");
+        assert_eq!(back.task_id, pack.task_id);
+        assert_eq!(back.goal, "summarise the module");
+        assert!(back.read_scope.is_empty() && back.write_scope.is_empty());
+
+        assert!(
+            store
+                .read_run_context_pack(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing pack reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's terminal usage round-trips through its sibling `*.usage.json`
+    /// record; a missing record reads as `None`.
+    #[test]
+    fn write_then_read_run_usage_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let usage = RunUsage {
+            prompt_tokens: 120,
+            completion_tokens: 60,
+            wall_clock_ms: 4_200,
+            tool_call_count: 3,
+            cost_estimate_micro_dollars: 1_500,
+            ..RunUsage::default()
+        };
+
+        store
+            .write_run_usage(thread_id, run_id, &usage)
+            .expect("write usage");
+        let back = store
+            .read_run_usage(thread_id, run_id)
+            .expect("read usage")
+            .expect("usage must be present");
+        assert_eq!(back.prompt_tokens, 120);
+        assert_eq!(back.tool_call_count, 3);
+        assert_eq!(back.wall_clock_ms, 4_200);
+
+        assert!(
+            store
+                .read_run_usage(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing usage reads Ok(None)")
+                .is_none(),
+        );
     }
 
     /// A missing sessions root lists as empty (no runs ever persisted).
