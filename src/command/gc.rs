@@ -1107,21 +1107,6 @@ async fn table_exists<C: ConnectionTrait>(db: &C, table: &str) -> CliResult<bool
     Ok(row.is_some())
 }
 
-/// Add a hash to a root set when a nullable database value is present.
-fn insert_optional_root(
-    roots: &mut HashSet<ObjectHash>,
-    raw: Option<String>,
-    source: &str,
-) -> CliResult<()> {
-    if let Some(value) = raw {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() && !is_null_oid(trimmed) {
-            roots.insert(parse_stored_hash(trimmed, source)?);
-        }
-    }
-    Ok(())
-}
-
 /// Add a required hash to a root set, rejecting empty or null placeholders.
 fn insert_required_root(
     roots: &mut HashSet<ObjectHash>,
@@ -1136,6 +1121,18 @@ fn insert_required_root(
         );
     }
     roots.insert(parse_stored_hash(trimmed, source)?);
+    Ok(())
+}
+
+/// Add an optional hash that must be valid when the field is present.
+fn insert_present_root(
+    roots: &mut HashSet<ObjectHash>,
+    raw: Option<String>,
+    source: &str,
+) -> CliResult<()> {
+    if let Some(value) = raw {
+        insert_required_root(roots, value, source)?;
+    }
     Ok(())
 }
 
@@ -1170,7 +1167,7 @@ fn optional_root_text(row: &QueryResult, index: usize, source: &str) -> CliResul
 async fn rebase_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<ObjectHash>> {
     let mut roots = HashSet::new();
     if !table_exists(db, "rebase_state").await? {
-        return Ok(roots);
+        return legacy_rebase_state_roots();
     }
     let rows = db
         .query_all(Statement::from_string(
@@ -1203,12 +1200,66 @@ async fn rebase_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
         let done = required_root_text(&row, 4, "rebase_state.done")?;
         insert_line_roots(&mut roots, &todo, "rebase_state.todo")?;
         insert_line_roots(&mut roots, &done, "rebase_state.done")?;
-        insert_optional_root(
+        insert_present_root(
             &mut roots,
             optional_root_text(&row, 5, "rebase_state.stopped_sha")?,
             "rebase_state.stopped_sha",
         )?;
     }
+    roots.extend(legacy_rebase_state_roots()?);
+    Ok(roots)
+}
+
+/// Load root object IDs from the legacy `.libra/rebase-merge` directory.
+fn legacy_rebase_state_roots() -> CliResult<HashSet<ObjectHash>> {
+    let mut roots = HashSet::new();
+    let dir = util::storage_path().join("rebase-merge");
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(CliError::fatal(format!(
+                "legacy rebase state '{}' is not a regular directory",
+                dir.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(roots),
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect legacy rebase state '{}': {}",
+                dir.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
+    }
+
+    insert_required_root(
+        &mut roots,
+        read_required_metadata_file(&dir.join("onto"), "legacy rebase onto")?,
+        "legacy rebase onto",
+    )?;
+    insert_required_root(
+        &mut roots,
+        read_required_metadata_file(&dir.join("orig-head"), "legacy rebase orig-head")?,
+        "legacy rebase orig-head",
+    )?;
+    insert_required_root(
+        &mut roots,
+        read_required_metadata_file(&dir.join("current-head"), "legacy rebase current-head")?,
+        "legacy rebase current-head",
+    )?;
+    if let Some(todo) = read_optional_metadata_file(&dir.join("todo"), "legacy rebase todo")? {
+        insert_line_roots(&mut roots, &todo, "legacy rebase todo")?;
+    }
+    if let Some(done) = read_optional_metadata_file(&dir.join("done"), "legacy rebase done")? {
+        insert_line_roots(&mut roots, &done, "legacy rebase done")?;
+    }
+    insert_present_root(
+        &mut roots,
+        read_optional_metadata_file(&dir.join("stopped-sha"), "legacy rebase stopped-sha")?,
+        "legacy rebase stopped-sha",
+    )?;
     Ok(roots)
 }
 
@@ -1234,7 +1285,7 @@ async fn bisect_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
             required_root_text(&row, 0, "bisect_state.orig_head")?,
             "bisect_state.orig_head",
         )?;
-        insert_optional_root(
+        insert_present_root(
             &mut roots,
             optional_root_text(&row, 1, "bisect_state.bad")?,
             "bisect_state.bad",
@@ -1245,7 +1296,7 @@ async fn bisect_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
         if let Some(skipped) = skipped_json {
             insert_optional_json_roots(&mut roots, &skipped, "bisect_state.skipped")?;
         }
-        insert_optional_root(
+        insert_present_root(
             &mut roots,
             optional_root_text(&row, 3, "bisect_state.current")?,
             "bisect_state.current",
@@ -1313,9 +1364,9 @@ fn merge_state_roots() -> CliResult<HashSet<ObjectHash>> {
         ))
         .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
-    insert_optional_root(&mut roots, state.orig_head, "merge-state.orig_head")?;
-    insert_optional_root(&mut roots, state.target, "merge-state.target")?;
-    insert_optional_root(&mut roots, state.base, "merge-state.base")?;
+    insert_present_root(&mut roots, state.orig_head, "merge-state.orig_head")?;
+    insert_present_root(&mut roots, state.target, "merge-state.target")?;
+    insert_present_root(&mut roots, state.base, "merge-state.base")?;
     Ok(roots)
 }
 
@@ -1442,7 +1493,7 @@ async fn agent_checkpoint_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
     for row in rows {
-        insert_optional_root(
+        insert_present_root(
             &mut roots,
             optional_root_text(&row, 0, "agent_checkpoint.parent_commit")?,
             "agent_checkpoint.parent_commit",
@@ -1472,24 +1523,53 @@ fn stash_roots() -> CliResult<HashSet<ObjectHash>> {
     let storage_path = util::storage_path();
     let stash_ref = storage_path.join("refs/stash");
     if let Some(content) = read_optional_metadata_file(&stash_ref, "stash reference")? {
-        let raw = content.trim();
-        if !raw.is_empty() {
-            roots.insert(parse_stored_hash(raw, "stash reference")?);
-        }
+        insert_required_root(&mut roots, content, "stash reference")?;
     }
 
     let stash_log = storage_path.join("logs/refs/stash");
     if let Some(content) = read_optional_metadata_file(&stash_log, "stash reflog")? {
-        for line in content.lines() {
-            let mut fields = line.split_whitespace();
-            for raw in [fields.next(), fields.next()].into_iter().flatten() {
-                if !is_null_oid(raw) {
-                    roots.insert(parse_stored_hash(raw, "stash reflog")?);
-                }
+        if content.trim().is_empty() {
+            return Err(CliError::fatal("stash reflog is empty")
+                .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        for (line_index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                return Err(CliError::fatal(format!(
+                    "corrupted stash reflog entry at line {}: empty entry",
+                    line_index + 1
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt));
             }
+            let mut fields = line.split_whitespace();
+            let old_oid = fields.next().ok_or_else(|| {
+                CliError::fatal(format!(
+                    "corrupted stash reflog entry at line {}: missing old object id",
+                    line_index + 1
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            let new_oid = fields.next().ok_or_else(|| {
+                CliError::fatal(format!(
+                    "corrupted stash reflog entry at line {}: missing stash commit hash",
+                    line_index + 1
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+            if !is_null_oid(old_oid) {
+                roots.insert(parse_stored_hash(old_oid, "stash reflog old oid")?);
+            }
+            insert_required_root(&mut roots, new_oid.to_string(), "stash reflog new oid")?;
         }
     }
     Ok(roots)
+}
+
+/// Read a required repository metadata file as UTF-8 text.
+fn read_required_metadata_file(path: &Path, label: &str) -> CliResult<String> {
+    read_optional_metadata_file(path, label)?.ok_or_else(|| {
+        CliError::fatal(format!("required {label} '{}' is missing", path.display()))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
 }
 
 /// Read an optional repository metadata file, treating absence as empty data.
@@ -3589,6 +3669,24 @@ mod tests {
     }
 
     #[test]
+    /// Covers present optional roots rejecting empty or null placeholders.
+    fn insert_present_root_rejects_empty_or_null_oid() {
+        let mut roots = HashSet::new();
+        insert_present_root(&mut roots, None, "rebase_state.stopped_sha").unwrap();
+
+        let empty =
+            insert_present_root(&mut roots, Some("".to_string()), "rebase_state.stopped_sha")
+                .unwrap_err();
+        assert_eq!(empty.stable_code(), StableErrorCode::RepoCorrupt);
+
+        let zero = "0".repeat(get_hash_kind().size() * 2);
+        let null =
+            insert_present_root(&mut roots, Some(zero), "rebase_state.stopped_sha").unwrap_err();
+        assert_eq!(null.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(roots.is_empty());
+    }
+
+    #[test]
     /// Covers required JSON root lists rejecting missing content.
     fn insert_required_json_roots_rejects_empty_string() {
         let mut roots = HashSet::new();
@@ -3775,6 +3873,100 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers legacy rebase-merge state being protected without migration.
+    async fn rebase_state_roots_include_legacy_rebase_merge_files() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE IF EXISTS rebase_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        let onto = test_hash(26);
+        let orig_head = test_hash(27);
+        let current_head = test_hash(28);
+        let todo = test_hash(29);
+        let done = test_hash(36);
+        let stopped = test_hash(37);
+        let legacy_dir = util::storage_path().join("rebase-merge");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("onto"), onto.to_string()).unwrap();
+        fs::write(legacy_dir.join("orig-head"), orig_head.to_string()).unwrap();
+        fs::write(legacy_dir.join("current-head"), current_head.to_string()).unwrap();
+        fs::write(legacy_dir.join("todo"), format!("{todo}\n")).unwrap();
+        fs::write(legacy_dir.join("done"), format!("{done}\n")).unwrap();
+        fs::write(legacy_dir.join("stopped-sha"), stopped.to_string()).unwrap();
+
+        let roots = rebase_state_roots(&db).await.unwrap();
+
+        for hash in [onto, orig_head, current_head, todo, done, stopped] {
+            assert!(roots.contains(&hash));
+        }
+        assert!(legacy_dir.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers legacy rebase roots being unioned with database state rows.
+    async fn rebase_state_roots_union_database_and_legacy_state() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        let db_root = test_hash(46);
+        let legacy_root = test_hash(47);
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS rebase_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                head_name TEXT NOT NULL,
+                onto TEXT NOT NULL,
+                orig_head TEXT NOT NULL,
+                current_head TEXT NOT NULL,
+                todo TEXT NOT NULL,
+                done TEXT NOT NULL,
+                stopped_sha TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM rebase_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO rebase_state
+                (head_name, onto, orig_head, current_head, todo, done, stopped_sha)
+             VALUES ('main', ?, ?, ?, '', '', NULL)",
+            [
+                db_root.to_string().into(),
+                test_hash(48).to_string().into(),
+                test_hash(49).to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+        let legacy_dir = util::storage_path().join("rebase-merge");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("onto"), legacy_root.to_string()).unwrap();
+        fs::write(legacy_dir.join("orig-head"), test_hash(60).to_string()).unwrap();
+        fs::write(legacy_dir.join("current-head"), test_hash(61).to_string()).unwrap();
+
+        let roots = rebase_state_roots(&db).await.unwrap();
+
+        assert!(roots.contains(&db_root));
+        assert!(roots.contains(&legacy_root));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     /// Covers fail-closed decoding for malformed rebase state roots.
     async fn rebase_state_roots_rejects_malformed_columns() {
         let repo = tempdir().unwrap();
@@ -3807,8 +3999,8 @@ mod tests {
                 (onto, orig_head, current_head, todo, done, stopped_sha)
              VALUES (?, ?, NULL, '', '', NULL)",
             [
-                test_hash(26).to_string().into(),
-                test_hash(27).to_string().into(),
+                test_hash(38).to_string().into(),
+                test_hash(39).to_string().into(),
             ],
         ))
         .await
@@ -3970,6 +4162,32 @@ mod tests {
 
         assert!(roots.contains(&orig_head));
         assert_eq!(roots.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers present merge-state fields rejecting empty object IDs.
+    async fn merge_state_roots_rejects_empty_present_fields() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        fs::write(
+            util::storage_path().join("merge-state.json"),
+            serde_json::json!({
+                "head_name": "main",
+                "orig_head": test_hash(44).to_string(),
+                "target": "",
+                "base": test_hash(45).to_string(),
+                "conflicted_paths": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = merge_state_roots().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("merge-state.target"));
     }
 
     #[tokio::test]
@@ -4288,6 +4506,40 @@ mod tests {
 
         assert!(roots.contains(&old_hash));
         assert!(roots.contains(&new_hash));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers empty file-backed stash references failing closed.
+    async fn stash_roots_rejects_empty_file_backed_ref() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let stash_ref = util::storage_path().join("refs/stash");
+        fs::create_dir_all(stash_ref.parent().unwrap()).unwrap();
+        fs::write(&stash_ref, " \n").unwrap();
+
+        let error = stash_roots().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("stash reference"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers malformed stash reflog entries failing closed.
+    async fn stash_roots_rejects_reflog_without_new_oid() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let stash_log = util::storage_path().join("logs/refs/stash");
+        fs::create_dir_all(stash_log.parent().unwrap()).unwrap();
+        fs::write(&stash_log, format!("{}\n", test_hash(12))).unwrap();
+
+        let error = stash_roots().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("missing stash commit hash"));
     }
 
     #[tokio::test]
