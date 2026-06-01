@@ -12,6 +12,7 @@ pub mod checksum;
 pub mod diff;
 pub mod manifest;
 pub mod registry;
+pub mod store;
 
 pub use checksum::{
     ChecksumError, checksum_changed, compute_package_checksum, verify_against_manifest,
@@ -22,3 +23,4 @@ pub use registry::{
     ActiveCapabilities, ActiveCapabilitiesDelta, InstalledPackage, active_capabilities,
     may_auto_enable,
 };
+pub use store::InstalledPackageStore;
