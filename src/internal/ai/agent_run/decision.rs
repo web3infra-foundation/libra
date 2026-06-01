@@ -202,6 +202,28 @@ pub struct MergeDecision {
     pub payload: MergeDecisionPayloadV0,
 }
 
+impl MergeDecision {
+    /// Build the `Decision[E]` event recording the verdict applied to a
+    /// reviewed `candidate` (agent.md Step 2.5 验收 (4): "final decision 写入
+    /// `Decision[E]`").
+    ///
+    /// Derives the aggregate id fields — `merge_candidate_id` and
+    /// `agent_run_ids` — and `resulting_state` directly from `candidate` so the
+    /// event can never desync from the candidate it decides (the exact failure
+    /// the CEX-S2-10 (2) "`merge_candidate_id + agent_run_ids`" aggregate-id rule
+    /// exists to prevent). A fresh [`DecisionId`] is allocated for the event.
+    /// Pure — no I/O; persisting the event is the caller's job.
+    pub fn for_candidate(candidate: &MergeCandidate, payload: MergeDecisionPayloadV0) -> Self {
+        Self {
+            id: DecisionId::new(),
+            merge_candidate_id: candidate.id,
+            agent_run_ids: candidate.agent_run_ids.clone(),
+            resulting_state: candidate.review_state,
+            payload,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +307,45 @@ mod tests {
                 current: ReviewState::Accepted,
             }),
         );
+    }
+
+    /// `for_candidate` derives the aggregate id fields and resulting state from
+    /// the candidate verbatim — the event can never desync from the candidate
+    /// it decides (CEX-S2-10 (2) aggregate-id rule).
+    #[test]
+    fn for_candidate_derives_aggregate_ids_and_state() {
+        let mut candidate = MergeCandidate::new(
+            MergeCandidateId::new(),
+            vec![AgentPatchSetId::new()],
+            vec![AgentRunId::new(), AgentRunId::new()],
+        );
+        candidate
+            .try_accept(&MergeDecisionPayloadV0::default())
+            .expect("accept");
+
+        let payload = MergeDecisionPayloadV0 {
+            test_evidence: vec![EvidenceId::new()],
+            ..MergeDecisionPayloadV0::default()
+        };
+        let decision = MergeDecision::for_candidate(&candidate, payload.clone());
+
+        assert_eq!(decision.merge_candidate_id, candidate.id);
+        assert_eq!(decision.agent_run_ids, candidate.agent_run_ids);
+        assert_eq!(decision.resulting_state, ReviewState::Accepted);
+        assert_eq!(
+            decision.payload.test_evidence, payload.test_evidence,
+            "the supplied payload is threaded through unchanged",
+        );
+    }
+
+    /// Two decisions built for the same candidate get distinct `DecisionId`s —
+    /// the event id is freshly allocated, not derived from the candidate.
+    #[test]
+    fn for_candidate_allocates_a_fresh_decision_id() {
+        let candidate = MergeCandidate::new(MergeCandidateId::new(), vec![], vec![]);
+        let a = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
+        let b = MergeDecision::for_candidate(&candidate, MergeDecisionPayloadV0::default());
+        assert_ne!(a.id, b.id, "each decision event needs its own id");
     }
 
     /// The constructor threads the supplied ids through verbatim — the
