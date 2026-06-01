@@ -20,7 +20,7 @@
 //! `post_tool_review_required` via [`super::event::PostToolReason`] and are the
 //! runner's concern.
 
-use super::event::HookFailureReason;
+use super::event::{HookFailureReason, PostToolReason};
 
 /// What the runner observed when it ran a PreToolUse hook. The classifier maps
 /// each of these to a [`PreToolUseDecision`].
@@ -100,6 +100,32 @@ pub fn classify_pre_tool_use(outcome: &HookOutcome) -> PreToolUseDecision {
         HookOutcome::SpawnEacces => PreToolUseDecision::DenyFailClosed {
             reason: HookFailureReason::SpawnEacces,
         },
+    }
+}
+
+/// Classify a **PostToolUse** [`HookOutcome`] into the
+/// [`PostToolReason`](super::event::PostToolReason) recorded on an
+/// `AgentRunEvent::PostToolReviewRequired`, or `None` when the hook passed
+/// (exit `0`).
+///
+/// PostToolUse runs *after* dispatch, so a non-zero / abnormal outcome can no
+/// longer block the tool result — it routes the result to Layer 1 review
+/// instead (Step 2.2: "dispatch 已发生；只能写 `post_tool_review_required`").
+/// Exit `2` / `3` become the PostToolUse-only `hook_deny` / `hook_needs_human`
+/// reasons; everything else mirrors the same fail-closed reasons as the
+/// PreToolUse path. The `blocked_by_hook_failure` event is **never** produced in
+/// this phase, per the doc's naming rule.
+pub fn classify_post_tool_use(outcome: &HookOutcome) -> Option<PostToolReason> {
+    match *outcome {
+        HookOutcome::Exited { code: 0 } => None,
+        HookOutcome::Exited { code: 2 } => Some(PostToolReason::HookDeny),
+        HookOutcome::Exited { code: 3 } => Some(PostToolReason::HookNeedsHuman),
+        HookOutcome::Exited { code } => Some(PostToolReason::UnknownExitCode { exit_code: code }),
+        HookOutcome::Panicked => Some(PostToolReason::Panic),
+        HookOutcome::TimedOut => Some(PostToolReason::Timeout),
+        HookOutcome::KilledBySignal { signo } => Some(PostToolReason::KilledBySignal { signo }),
+        HookOutcome::SpawnEnoent => Some(PostToolReason::SpawnEnoent),
+        HookOutcome::SpawnEacces => Some(PostToolReason::SpawnEacces),
     }
 }
 
@@ -201,5 +227,62 @@ mod tests {
             vec![0],
             "exactly and only exit code 0 may permit dispatch",
         );
+    }
+
+    /// PostToolUse exit 0 passes (no review); exit 2 / 3 become the
+    /// PostToolUse-only deny / needs-human reasons — never a dispatch block,
+    /// since dispatch already happened.
+    #[test]
+    fn post_tool_use_pass_and_documented_codes() {
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::Exited { code: 0 }),
+            None
+        );
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::Exited { code: 2 }),
+            Some(PostToolReason::HookDeny),
+        );
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::Exited { code: 3 }),
+            Some(PostToolReason::HookNeedsHuman),
+        );
+    }
+
+    /// PostToolUse abnormal outcomes mirror the PreToolUse fail-closed reasons
+    /// (but as `PostToolReason`, routing to review rather than blocking).
+    #[test]
+    fn post_tool_use_abnormal_outcomes_route_to_review() {
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::Exited { code: 1 }),
+            Some(PostToolReason::UnknownExitCode { exit_code: 1 }),
+        );
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::Panicked),
+            Some(PostToolReason::Panic),
+        );
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::TimedOut),
+            Some(PostToolReason::Timeout),
+        );
+        assert_eq!(
+            classify_post_tool_use(&HookOutcome::KilledBySignal { signo: 9 }),
+            Some(PostToolReason::KilledBySignal { signo: 9 }),
+        );
+    }
+
+    /// The two phases agree on which codes are "clean": exit 0 is the only
+    /// outcome that both permits PreToolUse dispatch AND needs no PostToolUse
+    /// review. Every other outcome blocks Pre and routes Post.
+    #[test]
+    fn phases_agree_on_clean_outcomes() {
+        for code in -2..=6 {
+            let outcome = HookOutcome::Exited { code };
+            let pre_clean = classify_pre_tool_use(&outcome).permits_dispatch();
+            let post_clean = classify_post_tool_use(&outcome).is_none();
+            assert_eq!(
+                pre_clean, post_clean,
+                "Pre and Post must agree on whether exit {code} is clean",
+            );
+        }
     }
 }
