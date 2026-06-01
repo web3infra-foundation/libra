@@ -282,7 +282,7 @@ pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
 pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
-pub use validator::collect_distillable_evidence_ids;
+pub use validator::{collect_distillable_evidence_ids, resolve_task_for_patchset};
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
     WriteScopeViolation, check_write_in_scope, record_materialization, resolve_full_copy_fallback,
