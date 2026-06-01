@@ -65,6 +65,7 @@ pub mod event;
 pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
+pub mod merge_pipeline;
 pub mod parallel;
 pub mod patchset;
 pub mod permission;
@@ -260,6 +261,9 @@ pub use event::{
 pub use evidence::{AgentEvidence, AgentType};
 pub use evidence_query::{
     EvidenceFilter, evidence_query_by_scope, evidence_stream, merge_decision_distillable_evidence,
+};
+pub use merge_pipeline::{
+    MergeDecisionSignals, build_merge_decision_payload, build_payload_from_patches,
 };
 pub use parallel::{
     ParallelAdmissionConfig, ParallelAdmissionDecision, ParallelPromotions, ParallelQueueReason,

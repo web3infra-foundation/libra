@@ -1,271 +1,214 @@
-//! Merge pipeline composition for sub-agent patch sets (CEX-S2-13 / CEX-S2-15).
+//! Merge-decision payload assembly for sub-agent patch sets (CEX-S2-15).
 //!
-//! [`detect_conflicts`] (CEX-S2-13), [`RiskScoreSignals::score`] (CEX-S2-15) and
-//! [`DecisionProposal`] (CEX-S2-13/15) are independent, pure building blocks.
-//! This module composes them into a single deterministic entry point,
-//! [`evaluate_merge`], so the human-gated merge step always follows one
-//! consistent path regardless of caller.
+//! [`detect_conflicts`](super::conflict::detect_conflicts) (CEX-S2-13) and
+//! [`compute_merge_risk_score`](super::risk_score::compute_merge_risk_score)
+//! (CEX-S2-15) are independent pure building blocks; [`decision`](super::decision)
+//! freezes the [`MergeDecisionPayloadV0`] *shape* (CEX-S2-13 ownership). This
+//! module composes them into a single deterministic step that the CEX-S2-15
+//! ValidatorEngine uses to **fill** the payload (`None` / empty → populated)
+//! before Layer 1 writes the `MergeDecision`.
 //!
-//! The key invariant this composition enforces is that the conflict-derived risk
-//! signals (`has_conflicts` / `conflicted_files`) are **derived from the conflict
-//! report**, never supplied independently. This eliminates the class of bugs
-//! where a caller's hand-built [`RiskScoreSignals`] disagrees with the actual
-//! [`ConflictReport`] (e.g. reporting `has_conflicts = false` while conflicts
-//! exist, which would let a conflicting patch slip past the gate).
+//! The key invariant this composition enforces is that
+//! [`MergeRiskInputs::conflict_count`](super::risk_score::MergeRiskInputs) is
+//! **derived from the detected conflict list**, never supplied independently —
+//! so the risk score can never disagree with `conflict_list` (e.g. claim zero
+//! conflicts while `conflict_list` is non-empty, which would understate merge
+//! risk to a human reviewer).
 //!
-//! Like its constituents, `evaluate_merge` performs no I/O and always yields the
-//! same output for the same inputs. See `docs/improvement/agent.md` Step 2.4/2.5.
+//! Like its constituents this performs no I/O and is a pure function of its
+//! inputs. See `docs/improvement/agent.md` Step 2.5 (CEX-S2-15).
 
-use std::collections::BTreeSet;
+use super::{
+    EvidenceId,
+    conflict::{PatchTouch, detect_conflicts},
+    decision::{Conflict, MergeDecisionPayloadV0},
+    risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score},
+};
 
-use serde::{Deserialize, Serialize};
-
-use super::decision::{DecisionProposal, MergeRecommendation};
-use super::merge_conflict::{ChangeSet, ConflictReport, detect_conflicts};
-use super::risk_score::{RiskScore, RiskScoreSignals};
-
-/// The caller-supplied signals that are **not** derivable from conflict
-/// detection. Conflict-related signals (`has_conflicts` / `conflicted_files`)
-/// are computed inside [`evaluate_merge`] from the [`ConflictReport`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MergeEvaluationInput {
-    /// Number of files touched by the sub-agent patch set.
-    pub files_changed: usize,
-    /// Total added + removed line count across the patch set.
-    pub lines_changed: usize,
-    /// Whether validation (tests / clippy / fmt) passed for the run.
-    pub validation_passed: bool,
-    /// Whether the run touched protected paths (e.g. CI config, secrets).
-    pub touched_protected_paths: bool,
+/// The signals required to assemble a [`MergeDecisionPayloadV0`] that are **not**
+/// derivable from the conflict list. `conflict_count` is intentionally absent:
+/// it is always derived from the detected conflicts inside
+/// [`build_merge_decision_payload`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MergeDecisionSignals {
+    /// Number of sub-agents whose patches the candidate aggregates.
+    pub sub_agent_count: u32,
+    /// Sub-agent runs that ended in a non-success terminal state.
+    pub failed_run_count: u32,
+    /// Patches whose scope the validator could not verify.
+    pub unverified_patch_scope: u32,
+    /// Per-dimension `budget_exceeded` hit counts across the runs.
+    pub budget_exceeded: BudgetExceededCounts,
+    /// Validator test-evidence ids gathered for this candidate.
+    pub test_evidence: Vec<EvidenceId>,
+    /// Evidence ids the sub-agent flagged `distillable = true` (collected via
+    /// [`collect_distillable_evidence_ids`](super::validator::collect_distillable_evidence_ids)).
+    pub distillable_evidence_ids: Vec<EvidenceId>,
 }
 
-/// The composed outcome of the merge pipeline for a single sub-agent run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MergeEvaluation {
-    /// The conflict-detection result against the main worktree.
-    pub conflicts: ConflictReport,
-    /// The computed risk score.
-    pub risk: RiskScore,
-    /// The pending decision proposal awaiting the human gate.
-    pub proposal: DecisionProposal,
-}
-
-/// Run the full merge evaluation pipeline for one sub-agent run.
+/// Assemble a [`MergeDecisionPayloadV0`] from an already-detected conflict list
+/// and the remaining merge signals.
 ///
-/// Composes conflict detection, risk scoring, recommendation derivation and
-/// proposal construction into a single deterministic step. The returned
-/// [`DecisionProposal`] is always in the pending human-gate state — no merge is
-/// performed and no I/O occurs.
-///
-/// # Arguments
-/// * `run_id` - identifier of the sub-agent run.
-/// * `sub_agent` - the sub-agent's change set.
-/// * `main` - the current main-worktree change set to merge against.
-/// * `input` - caller-supplied non-conflict risk signals.
-///
-/// # Returns
-/// A [`MergeEvaluation`] bundling the conflict report, risk score and a pending
-/// [`DecisionProposal`], all consistent with one another.
-pub fn evaluate_merge(
-    run_id: impl Into<String>,
-    sub_agent: &ChangeSet,
-    main: &ChangeSet,
-    input: &MergeEvaluationInput,
-) -> MergeEvaluation {
-    let conflicts = detect_conflicts(sub_agent, main);
-
-    // Conflict-derived signals come from the report, never the caller. Count
-    // distinct conflicting paths so the signal stays correct even if a future
-    // detector reports more than one conflict kind per path.
-    let conflicted_files = conflicts
-        .conflicts
-        .iter()
-        .map(|c| c.path.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let has_conflicts = conflicted_files > 0;
-
-    let signals = RiskScoreSignals {
-        files_changed: input.files_changed,
-        lines_changed: input.lines_changed,
-        has_conflicts,
-        conflicted_files,
-        validation_passed: input.validation_passed,
-        touched_protected_paths: input.touched_protected_paths,
+/// Derives `conflict_count` from `conflicts.len()` (saturating into `u32`),
+/// computes the [`RiskScore`](super::decision::RiskScore) via
+/// [`compute_merge_risk_score`], and threads the conflict list and evidence ids
+/// into the payload. The candidate's review state remains the caller's concern
+/// (it defaults to `NeedsHumanReview` per S2-INV-07); this function only fills
+/// the decision payload and performs no I/O.
+pub fn build_merge_decision_payload(
+    conflicts: Vec<Conflict>,
+    signals: MergeDecisionSignals,
+) -> MergeDecisionPayloadV0 {
+    let risk_inputs = MergeRiskInputs {
+        sub_agent_count: signals.sub_agent_count,
+        // Derived, never caller-supplied: keeps the risk score consistent with
+        // the conflict list. Saturate rather than truncate on the (pathological)
+        // overflow of usize → u32.
+        conflict_count: u32::try_from(conflicts.len()).unwrap_or(u32::MAX),
+        failed_run_count: signals.failed_run_count,
+        unverified_patch_scope: signals.unverified_patch_scope,
+        budget_exceeded: signals.budget_exceeded,
     };
-    let risk = signals.score();
-    let recommendation = MergeRecommendation::from_risk(&risk, has_conflicts);
-    let proposal = DecisionProposal::new(run_id, recommendation, risk.clone());
+    let risk = compute_merge_risk_score(&risk_inputs);
 
-    MergeEvaluation {
-        conflicts,
-        risk,
-        proposal,
+    MergeDecisionPayloadV0 {
+        risk_score: Some(risk),
+        conflict_list: conflicts,
+        test_evidence: signals.test_evidence,
+        distillable_evidence_ids: signals.distillable_evidence_ids,
     }
+}
+
+/// Detect conflicts among `patches` and assemble the merge-decision payload in
+/// one step.
+///
+/// Thin composition over [`detect_conflicts`] + [`build_merge_decision_payload`]
+/// so the ValidatorEngine never has to thread the conflict list by hand (which
+/// is exactly how the derived-`conflict_count` invariant gets bypassed).
+pub fn build_payload_from_patches(
+    patches: &[PatchTouch],
+    signals: MergeDecisionSignals,
+) -> MergeDecisionPayloadV0 {
+    build_merge_decision_payload(detect_conflicts(patches), signals)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::agent_run::decision::HumanGateState;
-    use crate::internal::ai::agent_run::merge_conflict::{ChangeKind, ConflictKind, FileChange};
-    use crate::internal::ai::agent_run::risk_score::RiskTier;
+    use crate::internal::ai::agent_run::decision::RiskLevel;
 
-    fn change(path: &str, kind: ChangeKind, hash: Option<&str>) -> FileChange {
-        FileChange {
+    fn conflict(path: &str) -> Conflict {
+        Conflict {
+            kind: "both_modified".to_string(),
             path: path.to_string(),
-            kind,
-            content_hash: hash.map(|h| h.to_string()),
-        }
-    }
-
-    fn clean_input() -> MergeEvaluationInput {
-        MergeEvaluationInput {
-            files_changed: 1,
-            lines_changed: 10,
-            validation_passed: true,
-            touched_protected_paths: false,
+            detail: None,
         }
     }
 
     #[test]
-    fn clean_low_risk_run_recommends_merge() {
-        let sub = ChangeSet {
-            changes: vec![change("src/a.rs", ChangeKind::Modified, Some("h1"))],
-        };
-        let main = ChangeSet::default();
-
-        let eval = evaluate_merge("run-1", &sub, &main, &clean_input());
-
-        assert!(eval.conflicts.is_clean());
-        assert_eq!(eval.risk.tier, RiskTier::Low);
-        assert_eq!(
-            eval.proposal.recommendation,
-            MergeRecommendation::Merge,
-            "low-risk clean run should recommend merge"
+    fn no_conflicts_benign_signals_is_low_risk() {
+        let payload = build_merge_decision_payload(
+            Vec::new(),
+            MergeDecisionSignals {
+                sub_agent_count: 1,
+                ..Default::default()
+            },
         );
-        assert_eq!(eval.proposal.gate, HumanGateState::Pending);
-        assert_eq!(eval.proposal.run_id, "run-1");
-        // The proposal's risk must equal the evaluation's risk (no drift).
-        assert_eq!(eval.proposal.risk, eval.risk);
+        assert!(payload.conflict_list.is_empty());
+        let risk = payload.risk_score.expect("risk score is always filled");
+        assert_eq!(risk.level, RiskLevel::Low);
+        assert!(risk.factors.is_empty());
     }
 
     #[test]
-    fn conflicts_force_hold_regardless_of_low_change_size() {
-        // Both sides modify the same file -> BothModified conflict.
-        let sub = ChangeSet {
-            changes: vec![change("src/a.rs", ChangeKind::Modified, Some("sub"))],
-        };
-        let main = ChangeSet {
-            changes: vec![change("src/a.rs", ChangeKind::Modified, Some("main"))],
-        };
-
-        let eval = evaluate_merge("run-2", &sub, &main, &clean_input());
-
-        assert!(!eval.conflicts.is_clean());
-        assert_eq!(eval.conflicts.conflicts.len(), 1);
-        assert_eq!(eval.conflicts.conflicts[0].kind, ConflictKind::BothModified);
-        // Conflict signals are derived from the report even though the input
-        // carried no conflict fields.
-        assert!(eval.risk.total >= 25, "conflict must add risk points");
-        assert_eq!(
-            eval.proposal.recommendation,
-            MergeRecommendation::Hold,
-            "any conflict must force Hold"
+    fn conflict_count_is_derived_from_the_list_not_signals() {
+        // Two conflicts, and `MergeDecisionSignals` carries no conflict field:
+        // the risk score must still reflect both, proving derivation.
+        let payload = build_merge_decision_payload(
+            vec![conflict("a.rs"), conflict("b.rs")],
+            MergeDecisionSignals {
+                sub_agent_count: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(payload.conflict_list.len(), 2);
+        let risk = payload.risk_score.expect("risk score is always filled");
+        // 2 conflicts * weight 3 = 6 >= HIGH threshold (4).
+        assert_eq!(risk.level, RiskLevel::High);
+        assert!(
+            risk.factors
+                .iter()
+                .any(|(k, v)| k == "conflict_count" && v == "2"),
+            "derived conflict_count must surface as a risk factor: {:?}",
+            risk.factors,
         );
     }
 
     #[test]
-    fn conflict_signals_are_derived_not_caller_supplied() {
-        // Two distinct conflicting paths -> conflicted_files == 2.
-        let sub = ChangeSet {
-            changes: vec![
-                change("a.rs", ChangeKind::Modified, Some("s1")),
-                change("b.rs", ChangeKind::Modified, Some("s2")),
-                change("c.rs", ChangeKind::Modified, Some("s3")),
-            ],
-        };
-        let main = ChangeSet {
-            changes: vec![
-                change("a.rs", ChangeKind::Modified, Some("m1")),
-                change("b.rs", ChangeKind::Modified, Some("m2")),
-                // c.rs only on the sub side -> no conflict.
-            ],
-        };
-
-        let eval = evaluate_merge("run-3", &sub, &main, &clean_input());
-
-        assert_eq!(eval.conflicts.conflicts.len(), 2);
-        // 3 files changed (input), but 2 conflicting -> risk reflects both:
-        // base 25 + 2*3 conflict points present.
-        assert!(eval.risk.total >= 25 + 6);
-        assert_eq!(eval.proposal.recommendation, MergeRecommendation::Hold);
+    fn single_conflict_escalates_to_medium() {
+        let payload = build_merge_decision_payload(
+            vec![conflict("a.rs")],
+            MergeDecisionSignals {
+                sub_agent_count: 1,
+                ..Default::default()
+            },
+        );
+        let risk = payload.risk_score.expect("risk score is always filled");
+        // 1 conflict * weight 3 = 3 >= MEDIUM threshold (2), < HIGH (4).
+        assert_eq!(risk.level, RiskLevel::Medium);
     }
 
     #[test]
-    fn validation_failure_without_conflict_requires_review() {
-        let sub = ChangeSet {
-            changes: vec![change("src/a.rs", ChangeKind::Modified, Some("h1"))],
-        };
-        let main = ChangeSet::default();
-        let input = MergeEvaluationInput {
-            files_changed: 2,
-            lines_changed: 40,
-            validation_passed: false,
-            touched_protected_paths: false,
-        };
+    fn evidence_ids_are_threaded_through() {
+        let test_ev = vec![EvidenceId::new(), EvidenceId::new()];
+        let distill = vec![EvidenceId::new()];
+        let payload = build_merge_decision_payload(
+            Vec::new(),
+            MergeDecisionSignals {
+                sub_agent_count: 1,
+                test_evidence: test_ev.clone(),
+                distillable_evidence_ids: distill.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(payload.test_evidence, test_ev);
+        assert_eq!(payload.distillable_evidence_ids, distill);
+    }
 
-        let eval = evaluate_merge("run-4", &sub, &main, &input);
-
-        assert!(eval.conflicts.is_clean());
-        // 2*2 (files) + 40/20 (lines) + 25 (validation fail) = 31 -> Medium.
-        assert_eq!(eval.risk.tier, RiskTier::Medium);
+    #[test]
+    fn from_patches_with_no_patches_yields_no_conflicts() {
+        // Composition over detect_conflicts: an empty patch set has no
+        // conflicts, so the payload is clean and low-risk.
+        let payload = build_payload_from_patches(
+            &[],
+            MergeDecisionSignals {
+                sub_agent_count: 1,
+                ..Default::default()
+            },
+        );
+        assert!(payload.conflict_list.is_empty());
         assert_eq!(
-            eval.proposal.recommendation,
-            MergeRecommendation::ReviewRequired
+            payload
+                .risk_score
+                .expect("risk score is always filled")
+                .level,
+            RiskLevel::Low,
         );
     }
 
     #[test]
-    fn add_add_same_content_is_not_a_conflict() {
-        let sub = ChangeSet {
-            changes: vec![change("new.rs", ChangeKind::Added, Some("same"))],
-        };
-        let main = ChangeSet {
-            changes: vec![change("new.rs", ChangeKind::Added, Some("same"))],
-        };
-
-        let eval = evaluate_merge("run-5", &sub, &main, &clean_input());
-
-        assert!(eval.conflicts.is_clean());
-        assert_eq!(eval.proposal.recommendation, MergeRecommendation::Merge);
-    }
-
-    #[test]
-    fn evaluation_round_trips_through_json() {
-        let sub = ChangeSet {
-            changes: vec![change("src/a.rs", ChangeKind::Modified, Some("h1"))],
-        };
-        let main = ChangeSet::default();
-        let eval = evaluate_merge("run-6", &sub, &main, &clean_input());
-
-        let json = serde_json::to_string(&eval).expect("serialize");
-        let back: MergeEvaluation = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(eval, back);
-    }
-
-    #[test]
-    fn input_rejects_unknown_fields() {
-        let json = r#"{
-            "files_changed": 1,
-            "lines_changed": 10,
-            "validation_passed": true,
-            "touched_protected_paths": false,
-            "surprise": 1
-        }"#;
-        let parsed: Result<MergeEvaluationInput, _> = serde_json::from_str(json);
-        assert!(parsed.is_err(), "deny_unknown_fields must reject extras");
+    fn payload_round_trips_through_json() {
+        let payload = build_merge_decision_payload(
+            vec![conflict("a.rs")],
+            MergeDecisionSignals {
+                sub_agent_count: 2,
+                failed_run_count: 1,
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let back: MergeDecisionPayloadV0 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.conflict_list.len(), 1);
+        assert!(back.risk_score.is_some());
     }
 }
