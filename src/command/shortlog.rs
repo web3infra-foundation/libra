@@ -97,11 +97,18 @@ pub struct ShortlogArgs {
 
     /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
     #[clap(long = "until", value_name = "DATE")]
-    
     pub until: Option<String>,
     /// Show only the top N authors
     #[clap(long = "top", value_name = "N")]
     pub top: Option<usize>,
+
+    /// Show only authors with at least N commits
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse the output order
+    #[clap(long = "reverse")]
+    pub reverse: bool,
 
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
@@ -251,6 +258,14 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
         authors.sort_by_key(|stats| (std::cmp::Reverse(stats.count), stats.name.to_lowercase()));
     } else {
         authors.sort_by_key(|stats| stats.name.to_lowercase());
+    }
+
+    if let Some(min_count) = args.min_count {
+        authors.retain(|stats| stats.count >= min_count);
+    }
+
+    if args.reverse {
+        authors.reverse();
     }
 
     if let Some(top) = args.top {
@@ -448,6 +463,31 @@ mod tests {
         let err = write_shortlog_line(&mut writer, format_args!("alice")).unwrap_err();
         assert_eq!(err.stable_code(), StableErrorCode::IoWriteFailed);
         assert!(err.message().contains("shortlog output error"));
+    }
+
+    #[test]
+    fn test_parse_top_arg() {
+        let args = ShortlogArgs::parse_from([
+            "shortlog",
+            "--top",
+            "3",
+        ]);
+
+        assert_eq!(args.top, Some(3));
+    } 
+
+    #[test]
+    fn test_parse_min_count_arg() {
+        let args = ShortlogArgs::parse_from(["shortlog", "--min-count", "5"]);
+
+        assert_eq!(args.min_count, Some(5));
+    }
+
+    #[test]
+    fn test_parse_reverse_arg() {
+        let args = ShortlogArgs::parse_from(["shortlog", "--reverse"]);
+
+        assert!(args.reverse);
     }
 
     #[tokio::test]
