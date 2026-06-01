@@ -213,6 +213,85 @@ async fn test_mcp_agents_resources_route() {
     );
 }
 
+/// Scenario (CEX-S2-16): once the dispatcher has persisted an `AgentRun`
+/// snapshot under the working dir's sessions root, the MCP `libra://agents/runs`
+/// list surfaces it and `libra://agents/runs/{id}` returns its detail. Pins the
+/// read path (server resolves the same sessions root the dispatcher writes to)
+/// end-to-end against a real on-disk snapshot.
+#[tokio::test]
+async fn test_mcp_agents_runs_lists_persisted_snapshots() {
+    use libra::internal::ai::agent_run::{
+        AgentRun, AgentRunId, AgentRunStatus, AgentTaskId, event_store::AgentRunEventStore,
+    };
+
+    let temp_dir = tempdir().unwrap();
+    let working_dir = temp_dir.path().to_path_buf();
+    let storage = Arc::new(LocalStorage::new(working_dir.join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        working_dir.clone(),
+        db_conn,
+    ));
+
+    // Persist a snapshot where the MCP reader resolves the sessions root:
+    // `<working_dir>/.libra/sessions` (the `resolve_storage_root` fallback).
+    let sessions_root = working_dir.join(".libra").join("sessions");
+    let store = AgentRunEventStore::new(&sessions_root);
+    let thread_id = uuid::Uuid::new_v4();
+    let run_id = AgentRunId::new();
+    let run = AgentRun {
+        id: run_id,
+        task_id: AgentTaskId::new(),
+        thread_id,
+        provider: "deepseek".to_string(),
+        model: "deepseek-chat".to_string(),
+        transcript_path: format!("agents/{}.jsonl", run_id.0),
+        workspace_path: None,
+        status: AgentRunStatus::Completed,
+    };
+    store
+        .write_snapshot(thread_id, &run)
+        .expect("persist run snapshot");
+
+    let server =
+        LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
+
+    // The list view now surfaces the persisted run.
+    let contents = server
+        .read_resource_impl("libra://agents/runs")
+        .await
+        .expect("agents/runs must read");
+    let text = match &contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let body: serde_json::Value = serde_json::from_str(&text).expect("valid JSON body");
+    let runs = body["runs"].as_array().expect("runs must be an array");
+    assert_eq!(runs.len(), 1, "the persisted run must appear in the list");
+    assert_eq!(runs[0]["id"], run_id.0.to_string());
+    assert_eq!(runs[0]["provider"], "deepseek");
+    assert_eq!(
+        runs[0]["status"],
+        serde_json::to_value(AgentRunStatus::Completed).unwrap(),
+    );
+
+    // The detail view resolves the same run by id.
+    let detail_uri = format!("libra://agents/runs/{}", run_id.0);
+    let detail = server
+        .read_resource_impl(&detail_uri)
+        .await
+        .expect("agents/runs/{id} must read the persisted run");
+    let detail_text = match &detail[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let detail_body: serde_json::Value =
+        serde_json::from_str(&detail_text).expect("valid JSON body");
+    assert_eq!(detail_body["id"], run_id.0.to_string());
+    assert_eq!(detail_body["model"], "deepseek-chat");
+}
+
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.
 /// Steps: `create_task_impl` → parse the returned ID out of the success message →
 /// `read_resource_impl(libra://object/<id>)` → `list_tasks` and confirm the new ID

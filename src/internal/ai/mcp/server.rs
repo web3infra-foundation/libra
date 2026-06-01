@@ -279,28 +279,65 @@ impl LibraMcpServer {
     /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
     /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
     ///
-    /// Sub-agent `AgentRun` / `MergeCandidate` records are not yet persisted
-    /// through this server's storage (that path lands with the run-persistence
-    /// wiring), so the list view returns an empty—but well-formed—body and the
-    /// id-targeting views return a structured not-found rather than a bare
-    /// error. The pure renderers in `agents_resource` activate unchanged once a
-    /// record source is supplied.
+    /// The run **list** and **detail** views read the `AgentRun` snapshots the
+    /// sub-agent dispatcher persists under `<storage_root>/sessions` (CEX-S2-16
+    /// run persistence). The remaining id-targeting views (permissions / budget
+    /// / context) and merge candidates have no persisted record through this
+    /// server yet, so they return a structured not-found. With no working dir
+    /// (an in-memory server) there is nothing to read: the list view is empty.
     fn read_agent_resource(
         &self,
         uri: &str,
         request: super::agents_resource::AgentResourceRequest,
     ) -> Result<Vec<ResourceContents>, ErrorData> {
-        use super::agents_resource::{AgentResourceRequest, render_run_list};
+        use super::agents_resource::{AgentResourceRequest, render_run_detail, render_run_list};
+        use crate::internal::ai::agent_run::{AgentRunId, event_store::AgentRunEventStore};
+
+        // Resolve the sessions root exactly as the dispatcher does
+        // (`resolve_storage_root` = shared `try_get_storage_path` with the
+        // `<working_dir>/.libra` fallback, then `join("sessions")`) so the read
+        // path matches the write path. Without a working dir there is no
+        // persistence to read.
+        let snapshots = match self.working_dir.as_ref() {
+            Some(working_dir) => {
+                let sessions_root =
+                    crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+                        .unwrap_or_else(|_| working_dir.join(".libra"))
+                        .join("sessions");
+                AgentRunEventStore::new(sessions_root)
+                    .list_all_snapshots()
+                    .map_err(|err| {
+                        ErrorData::internal_error(
+                            format!("failed to read sub-agent run snapshots: {err}"),
+                            None,
+                        )
+                    })?
+            }
+            None => Vec::new(),
+        };
 
         match request {
             AgentResourceRequest::RunList => {
-                let body = render_run_list(&[]);
+                let body = render_run_list(&snapshots);
                 Ok(vec![ResourceContents::text(body.to_string(), uri)])
+            }
+            AgentResourceRequest::RunDetail { ref run_id } => {
+                let target = uuid::Uuid::parse_str(run_id).ok().map(AgentRunId::from);
+                match target.and_then(|id| snapshots.iter().find(|run| run.id == id)) {
+                    Some(run) => {
+                        let body = render_run_detail(run);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted sub-agent run for `{run_id}`"),
+                        None,
+                    )),
+                }
             }
             other => Err(ErrorData::resource_not_found(
                 format!(
-                    "No persisted sub-agent run for `{}` (sub-agent run persistence is not yet \
-                     enabled)",
+                    "Sub-agent run resource `{}` has no persisted record through this server yet \
+                     (run permissions / budget / context and merge candidates are not persisted)",
                     other.run_id().unwrap_or("<merge-candidate>"),
                 ),
                 None,

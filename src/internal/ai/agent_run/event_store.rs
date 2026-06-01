@@ -217,6 +217,38 @@ impl AgentRunEventStore {
         runs.sort_by_key(|run| run.id.0);
         Ok(runs)
     }
+
+    /// List every persisted run snapshot across **all** threads under the
+    /// sessions root, sorted by run id. The MCP `libra://agents/runs` list view
+    /// is not scoped to one thread, so it aggregates every `{thread_id}/agents/
+    /// *.run.json` snapshot. A missing sessions root yields an empty vec;
+    /// top-level entries whose name is not a UUID (non-thread directories) are
+    /// skipped, and a corrupt snapshot fails the listing.
+    pub fn list_all_snapshots(&self) -> io::Result<Vec<AgentRun>> {
+        let entries = match fs::read_dir(&self.sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut runs = Vec::new();
+        for entry in entries {
+            let thread_dir = entry?.path();
+            // Each top-level entry is a `{thread_id}` directory; parse its name
+            // as a UUID so `list_snapshots` can resolve its `agents/` subdir.
+            // Non-UUID entries (other session state) are skipped.
+            let Some(thread_id) = thread_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            runs.extend(self.list_snapshots(thread_id)?);
+        }
+        runs.sort_by_key(|run| run.id.0);
+        Ok(runs)
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
@@ -532,6 +564,56 @@ mod tests {
         );
         assert_eq!(runs[0].id, run_a.id, "sorted by run id: u128(1) first");
         assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// `list_all_snapshots` aggregates snapshots across every thread under the
+    /// sessions root (the MCP run-list view is not thread-scoped), sorted by run
+    /// id, and skips non-UUID top-level entries.
+    #[test]
+    fn list_all_snapshots_aggregates_across_threads() {
+        let (temp, store) = store();
+        let thread_a = Uuid::new_v4();
+        let thread_b = Uuid::new_v4();
+        let run_a = sample_run(
+            AgentRunId::from(Uuid::from_u128(1)),
+            AgentRunStatus::Running,
+        );
+        let run_b = sample_run(
+            AgentRunId::from(Uuid::from_u128(2)),
+            AgentRunStatus::Completed,
+        );
+        store.write_snapshot(thread_a, &run_a).expect("write a");
+        store.write_snapshot(thread_b, &run_b).expect("write b");
+        // A non-UUID sibling directory under the sessions root must be ignored.
+        std::fs::create_dir_all(
+            temp.path()
+                .join(".libra")
+                .join("sessions")
+                .join("not-a-thread"),
+        )
+        .expect("mk non-thread dir");
+
+        let runs = store.list_all_snapshots().expect("list all snapshots");
+        assert_eq!(
+            runs.len(),
+            2,
+            "both threads' snapshots, skipping non-thread dirs"
+        );
+        assert_eq!(runs[0].id, run_a.id, "sorted by run id across threads");
+        assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// A missing sessions root lists as empty (no runs ever persisted).
+    #[test]
+    fn list_all_snapshots_missing_root_yields_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentRunEventStore::new(temp.path().join("nonexistent-sessions"));
+        assert!(
+            store
+                .list_all_snapshots()
+                .expect("missing root → empty")
+                .is_empty()
+        );
     }
 
     /// A missing `agents/` directory (no runs ever persisted) lists as empty.
