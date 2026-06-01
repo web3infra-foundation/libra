@@ -635,29 +635,51 @@ impl ServerHandler for LibraMcpServer {
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
         self.authorize_or_error(McpOperation::ListResourceTemplates)
             .await?;
-        Ok(ListResourceTemplatesResult::with_all_items(vec![
-            ResourceTemplate::new(
-                RawResourceTemplate {
-                    uri_template: "libra://object/{object_id}".to_string(),
-                    name: "Get AI Object by ID".to_string(),
-                    description: None,
-                    mime_type: None,
-                    title: None,
-                    icons: None,
-                },
-                None,
-            ),
-            ResourceTemplate::new(
-                RawResourceTemplate {
-                    uri_template: "libra://objects/{object_type}".to_string(),
-                    name: "List AI Objects by Type".to_string(),
-                    description: None,
-                    mime_type: None,
-                    title: None,
-                    icons: None,
-                },
-                None,
-            ),
-        ]))
+        Ok(ListResourceTemplatesResult::with_all_items(
+            ai_resource_templates(),
+        ))
     }
+}
+
+/// The MCP resource *templates* (parameterized URIs) this server advertises via
+/// `resources/templates/list`: the two AI-object templates plus the four
+/// readable agent-run detail views (CEX-S2-16, `docs/improvement/agent.md:1631`
+/// "6 个新 URI 模板"). The non-parameterized `libra://agents/runs` list URI is a
+/// concrete resource (advertised by `list_resources_impl`), not a template, and
+/// `merge-candidates/{id}` is omitted until its records are persisted — a
+/// template is only advertised for resources this server can actually serve.
+///
+/// Extracted as a free function so it is unit-testable without fabricating a
+/// `RequestContext` for the trait method.
+pub(crate) fn ai_resource_templates() -> Vec<ResourceTemplate> {
+    let template = |uri: &str, name: &str| {
+        ResourceTemplate::new(
+            RawResourceTemplate {
+                uri_template: uri.to_string(),
+                name: name.to_string(),
+                description: None,
+                mime_type: None,
+                title: None,
+                icons: None,
+            },
+            None,
+        )
+    };
+    vec![
+        template("libra://object/{object_id}", "Get AI Object by ID"),
+        template("libra://objects/{object_type}", "List AI Objects by Type"),
+        template("libra://agents/runs/{id}", "Get sub-agent run detail"),
+        template(
+            "libra://agents/runs/{id}/permissions",
+            "Get sub-agent run permission profile",
+        ),
+        template(
+            "libra://agents/runs/{id}/budget",
+            "Get sub-agent run budget and usage",
+        ),
+        template(
+            "libra://agents/runs/{id}/context",
+            "Get sub-agent run context pack",
+        ),
+    ]
 }
