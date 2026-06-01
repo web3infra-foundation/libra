@@ -52,6 +52,11 @@ fn multi_agent_config_defaults_are_conservative() {
         !config.allow_full_copy,
         "full-copy workspace fallback must be opt-in",
     );
+    assert_eq!(
+        config.source_concurrency_limit, 0,
+        "CEX-S2-14 per-slug source throttle must default to 0 (disabled) so \
+         flag-off source-call behaviour is unbounded as before",
+    );
 }
 
 /// An `AgentsConfig` parsed from empty TOML — the canonical fresh-install
@@ -63,6 +68,22 @@ fn empty_config_is_fully_flag_off() {
     assert!(!config.sub_agents.enabled);
     assert!(!config.sub_agents.auto_merge.enabled);
     assert!(!config.multi_agent.enabled);
+    // The throttle is absent from empty TOML → defaults to disabled.
+    assert_eq!(config.multi_agent.source_concurrency_limit, 0);
+}
+
+/// CEX-S2-14: an explicit `source_concurrency_limit` in `[multi_agent]` is
+/// parsed (and accepted under `deny_unknown_fields`), so the bootstrap can
+/// activate per-slug source throttling from `agents.toml`.
+#[test]
+fn multi_agent_source_concurrency_limit_parses_from_toml() {
+    let toml = r#"
+[multi_agent]
+enabled = true
+source_concurrency_limit = 4
+"#;
+    let config: AgentsConfig = toml::from_str(toml).expect("config parses");
+    assert_eq!(config.multi_agent.source_concurrency_limit, 4);
 }
 
 /// Explicitly setting `enabled = false` round-trips to a disabled config —
