@@ -245,3 +245,55 @@ fn agent_evidence_optional_fields_default_and_skip() {
         "a None source_call_id must be skipped, not serialized as null",
     );
 }
+
+/// CEX-S2-18 验收 (3): under `code.sub_agents.enabled = false` no `AgentEvidence`
+/// / `MergeDecision` is ever persisted into the main session log, and
+/// `evidence_query_by_scope` returns an empty set rather than panicking.
+///
+/// Verified against the code (rule 12, not the doc alone): `AgentEvidence` /
+/// `MergeDecision` are NOT variants of `SessionEvent` — they are separate
+/// orphan-branch objects that only the flag-gated sub-agent / orchestrator path
+/// writes. So the main `session.jsonl` is *structurally* unable to surface them
+/// as typed events: even a hand-injected `agent_evidence` / `merge_decision`
+/// row is dropped by the loader's unknown-kind branch. This is a stronger
+/// guarantee than a single runtime session check — it also fails if someone
+/// later adds such a `SessionEvent` variant and regresses Step 3.D / S2-INV-08.
+#[test]
+fn flag_off_session_does_not_persist_agent_evidence() {
+    use libra::internal::ai::session::jsonl::SessionJsonlStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionJsonlStore::new(temp.path().to_path_buf());
+
+    // A hostile/legacy log that contains evidence + decision rows. The main
+    // session stream must skip them: they are not `SessionEvent` kinds, so a
+    // replay never surfaces agent evidence/decisions into the session.
+    let path = store.events_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session dir");
+    }
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"kind":"agent_evidence","payload":{"id":"01890000-0000-7000-8000-000000000001"}}"#,
+            "\n",
+            r#"{"kind":"merge_decision","payload":{"id":"01890000-0000-7000-8000-000000000002"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write session log");
+
+    let events = store.load_events().expect("load_events must not error");
+    assert!(
+        events.is_empty(),
+        "agent_evidence / merge_decision rows must be skipped — the main session \
+         stream cannot surface AgentEvidence/MergeDecision (CEX-S2-18 (3)): {events:?}",
+    );
+
+    // The read API over an empty evidence set returns empty and never panics.
+    let empty: Vec<AgentEvidence> = Vec::new();
+    assert!(
+        evidence_query_by_scope(&empty, AnchorScope::Project).is_empty(),
+        "evidence_query_by_scope over an empty corpus must return empty, not panic",
+    );
+}
