@@ -10,6 +10,7 @@
 
 pub mod add;
 pub mod agent;
+pub mod archive;
 pub mod automation;
 pub mod bisect;
 pub mod blame;

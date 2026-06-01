@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
-  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, archive, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -350,6 +350,8 @@ enum Commands {
     HashObject(command::hash_object::HashObjectArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
+    #[command(about = "Create an archive of files from a named tree")]
+    Archive(command::archive::ArchiveArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -1290,6 +1292,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::VerifyPack(cmd_args) => {
             command::verify_pack::execute_safe(cmd_args, &output).await?
         }
+        Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
