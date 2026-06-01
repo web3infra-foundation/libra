@@ -20,6 +20,7 @@ use git_internal::{
         types::ObjectType,
     },
 };
+use ring::rand::{SecureRandom, SystemRandom};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
 use serde::Serialize;
 
@@ -227,6 +228,8 @@ struct PackGroup {
 struct GcLockGuard {
     /// Path to the lock file that should be removed on drop.
     path: PathBuf,
+    /// Random owner token written to the lock file for safe cleanup.
+    token: String,
     /// Open handle keeping the create-new lock file alive for this process.
     _file: fs::File,
     /// Whether `--force` removed an existing lock before acquisition.
@@ -236,7 +239,13 @@ struct GcLockGuard {
 impl Drop for GcLockGuard {
     /// Remove the repository-local lock file when the guard leaves scope.
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if read_gc_lock_token(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|token| token == self.token)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -347,18 +356,18 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
 
 /// Acquire the repository-local GC lock.
 fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
-    use std::io::Write as _;
-
     let path = util::storage_path().join("gc.lock");
+    let token = generate_gc_lock_token()?;
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
     {
         Ok(mut file) => {
-            let _ = writeln!(file, "pid={}", std::process::id());
+            write_gc_lock_owner(&mut file, &token)?;
             Ok(GcLockGuard {
                 path,
+                token,
                 _file: file,
                 forced: false,
             })
@@ -385,9 +394,10 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
                     ))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
                 })?;
-            let _ = writeln!(file, "pid={}", std::process::id());
+            write_gc_lock_owner(&mut file, &token)?;
             Ok(GcLockGuard {
                 path,
+                token,
                 _file: file,
                 forced: true,
             })
@@ -408,29 +418,87 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
     }
 }
 
+/// Generate an ownership token for the current GC lock file.
+fn generate_gc_lock_token() -> CliResult<String> {
+    let mut bytes = [0u8; 16];
+    SystemRandom::new().fill(&mut bytes).map_err(|_| {
+        CliError::fatal("failed to generate gc lock token")
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+    })?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Write the current process owner data into a newly created lock file.
+fn write_gc_lock_owner(file: &mut fs::File, token: &str) -> CliResult<()> {
+    use std::io::Write as _;
+
+    writeln!(file, "pid={}", std::process::id())
+        .and_then(|_| writeln!(file, "token={token}"))
+        .map_err(|error| {
+            CliError::fatal(format!(
+                "failed to write gc lock owner: {}",
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })
+}
+
 /// Verify that an existing lock does not belong to a running process.
 fn verify_gc_lock_is_stale(path: &Path) -> CliResult<()> {
-    let Some(pid) = read_gc_lock_pid(path)? else {
+    #[cfg(not(unix))]
+    {
         return Err(CliError::conflict(format!(
-            "gc lock '{}' does not contain a valid pid and cannot be verified as stale",
+            "gc lock '{}' cannot be verified as stale on this platform",
             path.display()
         ))
         .with_hint(
             "remove the lock manually only after verifying that no gc process is running.",
         ));
-    };
-    if process_is_running(pid) {
-        return Err(CliError::conflict(format!(
-            "gc is already running with pid {pid}; lock file '{}' is not stale",
-            path.display()
-        ))
-        .with_hint("wait for the running gc to finish before retrying."));
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        let Some(pid) = read_gc_lock_pid(path)? else {
+            return Err(CliError::conflict(format!(
+                "gc lock '{}' does not contain a valid pid and cannot be verified as stale",
+                path.display()
+            ))
+            .with_hint(
+                "remove the lock manually only after verifying that no gc process is running.",
+            ));
+        };
+        if process_is_running(pid) {
+            return Err(CliError::conflict(format!(
+                "gc is already running with pid {pid}; lock file '{}' is not stale",
+                path.display()
+            ))
+            .with_hint("wait for the running gc to finish before retrying."));
+        }
+        Ok(())
+    }
 }
 
 /// Read the `pid=<number>` owner recorded in a GC lock file.
 fn read_gc_lock_pid(path: &Path) -> CliResult<Option<u32>> {
+    Ok(read_gc_lock_content(path)?
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pid="))
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 0))
+}
+
+/// Read the `token=<hex>` owner recorded in a GC lock file.
+fn read_gc_lock_token(path: &Path) -> CliResult<Option<String>> {
+    Ok(read_gc_lock_content(path)?.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("token=")
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ToOwned::to_owned)
+    }))
+}
+
+/// Read a small regular GC lock file after rejecting unsafe metadata.
+fn read_gc_lock_content(path: &Path) -> CliResult<String> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         CliError::fatal(format!(
             "failed to inspect gc lock '{}': {}",
@@ -464,19 +532,14 @@ fn read_gc_lock_pid(path: &Path) -> CliResult<Option<u32>> {
             "remove the lock manually only after verifying that no gc process is running.",
         ));
     }
-    let content = fs::read_to_string(path).map_err(|error| {
+    fs::read_to_string(path).map_err(|error| {
         CliError::fatal(format!(
             "failed to read gc lock '{}': {}",
             path.display(),
             format_io_error(&error)
         ))
         .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
-    Ok(content
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("pid="))
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|pid| *pid > 0))
+    })
 }
 
 /// Return whether `pid` appears to identify a live process.
@@ -684,7 +747,11 @@ fn ensure_repository_storage_metadata() -> CliResult<()> {
                 ))
                 .with_stable_code(StableErrorCode::RepoCorrupt));
             }
-            Ok(metadata) if metadata.file_type().is_dir() => return Ok(()),
+            Ok(metadata)
+                if metadata.file_type().is_dir() && is_valid_repository_storage_dir(&storage) =>
+            {
+                return Ok(());
+            }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -700,6 +767,18 @@ fn ensure_repository_storage_metadata() -> CliResult<()> {
             return Ok(());
         }
     }
+}
+
+/// Return whether a raw `.libra` candidate matches repository discovery markers.
+fn is_valid_repository_storage_dir(storage: &Path) -> bool {
+    if storage.join(util::DATABASE).exists() {
+        return true;
+    }
+    ["objects", "info/exclude", "hooks"]
+        .iter()
+        .filter(|marker| storage.join(marker).exists())
+        .count()
+        >= 2
 }
 
 /// Ensure the object database root is a real directory before traversal.
@@ -2714,6 +2793,27 @@ mod tests {
         assert!(error.render().contains("symlink repository metadata"));
     }
 
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers invalid nested `.libra` directories not hiding parent symlink metadata.
+    fn ensure_repository_storage_metadata_skips_invalid_libra_before_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        fs::write(external.path().join(util::DATABASE), b"").unwrap();
+        symlink(external.path(), repo.path().join(util::ROOT_DIR)).unwrap();
+        let sub = repo.path().join("sub");
+        fs::create_dir_all(sub.join(util::ROOT_DIR)).unwrap();
+        let _guard = test::ChangeDirGuard::new(&sub);
+
+        let error = ensure_repository_storage_metadata().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("symlink repository metadata"));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     /// Covers compatibility warnings for accepted Git flags.
@@ -2756,6 +2856,33 @@ mod tests {
         );
         drop(lock);
         assert!(!util::storage_path().join("gc.lock").exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers a stale guard not removing a replacement lock owned by another run.
+    async fn gc_lock_drop_keeps_replacement_lock_with_different_token() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock = acquire_gc_lock(false).unwrap();
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(
+            &lock_path,
+            format!("pid={}\ntoken=replacement\n", non_running_pid()),
+        )
+        .unwrap();
+
+        drop(lock);
+
+        assert!(lock_path.exists());
+        assert!(
+            fs::read_to_string(&lock_path)
+                .unwrap()
+                .contains("token=replacement")
+        );
     }
 
     #[tokio::test]
