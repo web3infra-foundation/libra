@@ -118,7 +118,9 @@ or cruft-pack creation.
 
 `.libra/gc.lock` serializes concurrent `libra gc` runs. It is not a repository-wide
 write lock: commands that write new objects or update refs do not currently acquire
-this lock, so `--prune=now` should be used when no other writer is active.
+this lock, so `--prune=now` should be used when no other writer is active. `--force`
+only replaces a stale lock when Libra can verify that the recorded PID is no longer
+running.
 
 | Feature | Libra | Git | jj |
 |---------|-------|-----|----|
