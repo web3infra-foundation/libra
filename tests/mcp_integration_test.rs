@@ -254,6 +254,21 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_snapshot(thread_id, &run)
         .expect("persist run snapshot");
 
+    // Also persist the run's permission profile, served by the permissions view.
+    use libra::internal::ai::agent_run::permission::{AgentPermissionProfile, ApprovalRouting};
+    let mut allowed = std::collections::BTreeSet::new();
+    allowed.insert("read_file".to_string());
+    let profile = AgentPermissionProfile {
+        allowed_tools: allowed,
+        denied_tools: std::collections::BTreeSet::new(),
+        allowed_source_slugs: std::collections::BTreeSet::new(),
+        approval_routing: ApprovalRouting::Layer1Human,
+        may_spawn_sub_agents: false,
+    };
+    store
+        .write_run_permissions(thread_id, run_id, &profile)
+        .expect("persist run permission profile");
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -290,6 +305,28 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::from_str(&detail_text).expect("valid JSON body");
     assert_eq!(detail_body["id"], run_id.0.to_string());
     assert_eq!(detail_body["model"], "deepseek-chat");
+
+    // The permissions view resolves the run's thread via its snapshot and
+    // serves the persisted profile.
+    let perms_uri = format!("libra://agents/runs/{}/permissions", run_id.0);
+    let perms = server
+        .read_resource_impl(&perms_uri)
+        .await
+        .expect("agents/runs/{id}/permissions must read the persisted profile");
+    let perms_text = match &perms[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let perms_body: serde_json::Value = serde_json::from_str(&perms_text).expect("valid JSON body");
+    assert_eq!(perms_body["agent_run_id"], run_id.0.to_string());
+    assert!(
+        perms_body["allowed_tools"]
+            .as_array()
+            .expect("allowed_tools array")
+            .iter()
+            .any(|tool| tool == "read_file"),
+        "the persisted profile's allowed tool must surface: {perms_body}",
+    );
 }
 
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.

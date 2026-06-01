@@ -572,6 +572,25 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             });
             persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, AgentRunStatus::Running);
 
+            // CEX-S2-16: persist the run's static permission profile (a sibling
+            // of the snapshot) once, so the MCP `runs/{id}/permissions` resource
+            // can serve it. The profile is fixed at dispatch, so it is written
+            // here rather than rewritten on each transition. Best-effort.
+            if let Some(snapshot) = run_snapshot.as_ref() {
+                let profile = sub_spec.permission.to_permission_profile();
+                if let Err(err) =
+                    snapshot
+                        .store
+                        .write_run_permissions(snapshot.thread_id, agent_run_id, &profile)
+                {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun permission profile",
+                    );
+                }
+            }
+
             // Bind the task id to the run id so future call sites
             // that grep the JSONL stream can correlate the dispatch
             // back to its `Spawned` event. Both the P3.4 child runner

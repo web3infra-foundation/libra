@@ -279,41 +279,48 @@ impl LibraMcpServer {
     /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
     /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
     ///
-    /// The run **list** and **detail** views read the `AgentRun` snapshots the
-    /// sub-agent dispatcher persists under `<storage_root>/sessions` (CEX-S2-16
-    /// run persistence). The remaining id-targeting views (permissions / budget
-    /// / context) and merge candidates have no persisted record through this
-    /// server yet, so they return a structured not-found. With no working dir
-    /// (an in-memory server) there is nothing to read: the list view is empty.
+    /// The run **list**, **detail**, and **permissions** views read the records
+    /// the sub-agent dispatcher persists under `<storage_root>/sessions` (the
+    /// `AgentRun` snapshot and its sibling permission profile, CEX-S2-16 run
+    /// persistence). The remaining id-targeting views (budget / context) and
+    /// merge candidates have no persisted record through this server yet, so
+    /// they return a structured not-found. With no working dir (an in-memory
+    /// server) there is nothing to read: the list view is empty.
     fn read_agent_resource(
         &self,
         uri: &str,
         request: super::agents_resource::AgentResourceRequest,
     ) -> Result<Vec<ResourceContents>, ErrorData> {
-        use super::agents_resource::{AgentResourceRequest, render_run_detail, render_run_list};
+        use super::agents_resource::{
+            AgentResourceRequest, render_run_detail, render_run_list, render_run_permissions,
+        };
         use crate::internal::ai::agent_run::{AgentRunId, event_store::AgentRunEventStore};
 
-        // Resolve the sessions root exactly as the dispatcher does
-        // (`resolve_storage_root` = shared `try_get_storage_path` with the
-        // `<working_dir>/.libra` fallback, then `join("sessions")`) so the read
-        // path matches the write path. Without a working dir there is no
-        // persistence to read.
-        let snapshots = match self.working_dir.as_ref() {
-            Some(working_dir) => {
-                let sessions_root =
-                    crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
-                        .unwrap_or_else(|_| working_dir.join(".libra"))
-                        .join("sessions");
-                AgentRunEventStore::new(sessions_root)
-                    .list_all_snapshots()
-                    .map_err(|err| {
-                        ErrorData::internal_error(
-                            format!("failed to read sub-agent run snapshots: {err}"),
-                            None,
-                        )
-                    })?
-            }
+        // Build the snapshot/permissions store rooted at the same sessions root
+        // the dispatcher writes to (`resolve_storage_root` = shared
+        // `try_get_storage_path` with the `<working_dir>/.libra` fallback, then
+        // `join("sessions")`), so the read path matches the write path. `None`
+        // when there is no working dir (an in-memory server) — nothing to read.
+        let store = self.working_dir.as_ref().map(|working_dir| {
+            let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+                .unwrap_or_else(|_| working_dir.join(".libra"))
+                .join("sessions");
+            AgentRunEventStore::new(sessions_root)
+        });
+        let snapshots = match store.as_ref() {
+            Some(store) => store.list_all_snapshots().map_err(|err| {
+                ErrorData::internal_error(
+                    format!("failed to read sub-agent run snapshots: {err}"),
+                    None,
+                )
+            })?,
             None => Vec::new(),
+        };
+        let find_run = |run_id: &str| {
+            uuid::Uuid::parse_str(run_id)
+                .ok()
+                .map(AgentRunId::from)
+                .and_then(|id| snapshots.iter().find(|run| run.id == id))
         };
 
         match request {
@@ -321,15 +328,37 @@ impl LibraMcpServer {
                 let body = render_run_list(&snapshots);
                 Ok(vec![ResourceContents::text(body.to_string(), uri)])
             }
-            AgentResourceRequest::RunDetail { ref run_id } => {
-                let target = uuid::Uuid::parse_str(run_id).ok().map(AgentRunId::from);
-                match target.and_then(|id| snapshots.iter().find(|run| run.id == id)) {
-                    Some(run) => {
-                        let body = render_run_detail(run);
+            AgentResourceRequest::RunDetail { ref run_id } => match find_run(run_id) {
+                Some(run) => {
+                    let body = render_run_detail(run);
+                    Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                }
+                None => Err(ErrorData::resource_not_found(
+                    format!("No persisted sub-agent run for `{run_id}`"),
+                    None,
+                )),
+            },
+            AgentResourceRequest::RunPermissions { ref run_id } => {
+                // Resolve the run's thread via its snapshot, then read the
+                // sibling permission profile the dispatcher persisted.
+                let profile = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => store
+                        .read_run_permissions(run.thread_id, run.id)
+                        .map_err(|err| {
+                        ErrorData::internal_error(
+                            format!("failed to read run permission profile: {err}"),
+                            None,
+                        )
+                    })?,
+                    _ => None,
+                };
+                match profile {
+                    Some(profile) => {
+                        let body = render_run_permissions(run_id, &profile);
                         Ok(vec![ResourceContents::text(body.to_string(), uri)])
                     }
                     None => Err(ErrorData::resource_not_found(
-                        format!("No persisted sub-agent run for `{run_id}`"),
+                        format!("No persisted permission profile for run `{run_id}`"),
                         None,
                     )),
                 }
@@ -337,7 +366,7 @@ impl LibraMcpServer {
             other => Err(ErrorData::resource_not_found(
                 format!(
                     "Sub-agent run resource `{}` has no persisted record through this server yet \
-                     (run permissions / budget / context and merge candidates are not persisted)",
+                     (run budget / context and merge candidates are not persisted)",
                     other.run_id().unwrap_or("<merge-candidate>"),
                 ),
                 None,
