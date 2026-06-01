@@ -71,8 +71,8 @@ use super::sub_agent::{
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
     agent_run::{
-        AgentRun, AgentRunEvent, AgentRunEventEnvelope, AgentRunId, AgentRunStatus, AgentTaskId,
-        event_store::AgentRunEventStore,
+        AgentContextPack, AgentRun, AgentRunEvent, AgentRunEventEnvelope, AgentRunId,
+        AgentRunStatus, AgentTaskId, event_store::AgentRunEventStore,
     },
     completion::CompletionUsageSummary,
     permission::{
@@ -587,6 +587,31 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                         error = %err,
                         agent_run_id = %agent_run_id.0,
                         "failed to persist AgentRun permission profile",
+                    );
+                }
+
+                // CEX-S2-16: persist the run's static context pack (sibling of
+                // the snapshot) for the MCP `runs/{id}/context` resource. The
+                // goal is the invocation's task description; the run carries no
+                // explicit path scope or source intent (its writes are confined
+                // to the isolated workspace), so those fields are genuinely
+                // empty rather than fabricated. Best-effort.
+                let context_pack = AgentContextPack {
+                    task_id: snapshot.task_id,
+                    goal: invocation.description.clone(),
+                    read_scope: Vec::new(),
+                    write_scope: Vec::new(),
+                    source_intent_id: None,
+                };
+                if let Err(err) = snapshot.store.write_run_context_pack(
+                    snapshot.thread_id,
+                    agent_run_id,
+                    &context_pack,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun context pack",
                     );
                 }
             }

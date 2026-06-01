@@ -279,11 +279,12 @@ impl LibraMcpServer {
     /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
     /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
     ///
-    /// The run **list**, **detail**, and **permissions** views read the records
-    /// the sub-agent dispatcher persists under `<storage_root>/sessions` (the
-    /// `AgentRun` snapshot and its sibling permission profile, CEX-S2-16 run
-    /// persistence). The remaining id-targeting views (budget / context) and
-    /// merge candidates have no persisted record through this server yet, so
+    /// The run **list**, **detail**, **permissions**, and **context** views read
+    /// the records the sub-agent dispatcher persists under
+    /// `<storage_root>/sessions` (the `AgentRun` snapshot and its sibling
+    /// permission profile + context pack, CEX-S2-16 run persistence). The
+    /// remaining id-targeting view (budget — which needs per-run usage telemetry)
+    /// and merge candidates have no persisted record through this server yet, so
     /// they return a structured not-found. With no working dir (an in-memory
     /// server) there is nothing to read: the list view is empty.
     fn read_agent_resource(
@@ -292,7 +293,8 @@ impl LibraMcpServer {
         request: super::agents_resource::AgentResourceRequest,
     ) -> Result<Vec<ResourceContents>, ErrorData> {
         use super::agents_resource::{
-            AgentResourceRequest, render_run_detail, render_run_list, render_run_permissions,
+            AgentResourceRequest, render_run_context, render_run_detail, render_run_list,
+            render_run_permissions,
         };
         use crate::internal::ai::agent_run::{AgentRunId, event_store::AgentRunEventStore};
 
@@ -363,10 +365,33 @@ impl LibraMcpServer {
                     )),
                 }
             }
+            AgentResourceRequest::RunContext { ref run_id } => {
+                let pack = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => store
+                        .read_run_context_pack(run.thread_id, run.id)
+                        .map_err(|err| {
+                            ErrorData::internal_error(
+                                format!("failed to read run context pack: {err}"),
+                                None,
+                            )
+                        })?,
+                    _ => None,
+                };
+                match pack {
+                    Some(pack) => {
+                        let body = render_run_context(run_id, &pack);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted context pack for run `{run_id}`"),
+                        None,
+                    )),
+                }
+            }
             other => Err(ErrorData::resource_not_found(
                 format!(
                     "Sub-agent run resource `{}` has no persisted record through this server yet \
-                     (run budget / context and merge candidates are not persisted)",
+                     (run budget and merge candidates are not persisted)",
                     other.run_id().unwrap_or("<merge-candidate>"),
                 ),
                 None,

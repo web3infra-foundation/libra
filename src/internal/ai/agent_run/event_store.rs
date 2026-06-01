@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use super::{
     AgentRunId,
+    context_pack::AgentContextPack,
     event::{AgentRunEvent, AgentRunEventEnvelope},
     permission::AgentPermissionProfile,
     run::AgentRun,
@@ -285,6 +286,49 @@ impl AgentRunEventStore {
         run_id: AgentRunId,
     ) -> io::Result<Option<AgentPermissionProfile>> {
         let path = self.permissions_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **context pack** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.context.json`. A sibling of
+    /// the run snapshot holding the run's static [`AgentContextPack`] (goal /
+    /// read+write scope / source intent) for the MCP
+    /// `libra://agents/runs/{id}/context` resource.
+    pub fn context_pack_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.context.json", run_id.0))
+    }
+
+    /// Persist a run's context pack (write-once; the pack is fixed at dispatch).
+    /// Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        pack: &AgentContextPack,
+    ) -> io::Result<()> {
+        let path = self.context_pack_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(pack).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted context pack. A missing pack is `Ok(None)`; a
+    /// present-but-corrupt pack surfaces as an error.
+    pub fn read_run_context_pack(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentContextPack>> {
+        let path = self.context_pack_path(thread_id, run_id);
         match fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json)
                 .map(Some)
@@ -682,6 +726,40 @@ mod tests {
             store
                 .read_run_permissions(Uuid::new_v4(), AgentRunId::new())
                 .expect("missing profile reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's context pack round-trips through its sibling `*.context.json`
+    /// record; a missing pack reads as `None`.
+    #[test]
+    fn write_then_read_run_context_pack_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let pack = AgentContextPack {
+            task_id: AgentTaskId::new(),
+            goal: "summarise the module".to_string(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            source_intent_id: None,
+        };
+
+        store
+            .write_run_context_pack(thread_id, run_id, &pack)
+            .expect("write context pack");
+        let back = store
+            .read_run_context_pack(thread_id, run_id)
+            .expect("read context pack")
+            .expect("pack must be present");
+        assert_eq!(back.task_id, pack.task_id);
+        assert_eq!(back.goal, "summarise the module");
+        assert!(back.read_scope.is_empty() && back.write_scope.is_empty());
+
+        assert!(
+            store
+                .read_run_context_pack(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing pack reads Ok(None)")
                 .is_none(),
         );
     }

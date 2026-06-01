@@ -269,6 +269,19 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_run_permissions(thread_id, run_id, &profile)
         .expect("persist run permission profile");
 
+    // And the run's context pack, served by the context view.
+    use libra::internal::ai::agent_run::context_pack::AgentContextPack;
+    let context_pack = AgentContextPack {
+        task_id: AgentTaskId::new(),
+        goal: "summarise the repo".to_string(),
+        read_scope: Vec::new(),
+        write_scope: Vec::new(),
+        source_intent_id: None,
+    };
+    store
+        .write_run_context_pack(thread_id, run_id, &context_pack)
+        .expect("persist run context pack");
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -327,6 +340,21 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
             .any(|tool| tool == "read_file"),
         "the persisted profile's allowed tool must surface: {perms_body}",
     );
+
+    // The context view serves the persisted context pack.
+    let context_uri = format!("libra://agents/runs/{}/context", run_id.0);
+    let context = server
+        .read_resource_impl(&context_uri)
+        .await
+        .expect("agents/runs/{id}/context must read the persisted pack");
+    let context_text = match &context[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let context_body: serde_json::Value =
+        serde_json::from_str(&context_text).expect("valid JSON body");
+    assert_eq!(context_body["agent_run_id"], run_id.0.to_string());
+    assert_eq!(context_body["goal"], "summarise the repo");
 }
 
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.
