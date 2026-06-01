@@ -215,6 +215,65 @@ fn verify_pack_accepts_multiple_index_paths() {
 
 #[test]
 #[serial]
+fn verify_pack_stat_only_reports_non_delta_count() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            "-s",
+            idx_path.to_str().expect("idx path UTF-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "verify-pack -s should succeed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "non delta: 19 objects\n"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_stat_only_takes_precedence_over_verbose() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1");
+    let idx_path = build_index(repo.path(), &pack_path, "2");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            "-v",
+            "-s",
+            idx_path.to_str().expect("idx path UTF-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "verify-pack -v -s should succeed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "non delta: 19 objects\n"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
 fn verify_pack_json_multiple_indexes_reports_packs_array() {
     let repo = tempfile::tempdir().expect("create repo");
     init_repo_via_cli(repo.path());

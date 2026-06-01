@@ -76,7 +76,7 @@ batch document.
 | hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
 | fsck | supported | |
-| verify-pack | partial | validates `.idx` files against matching `.pack` files; Git's `-s` / `--stat-only` is not exposed |
+| verify-pack | partial | validates `.idx` files against matching `.pack` files; multi-index and Git's `-s` / `--stat-only` are supported; `--pack` is a Libra-only explicit pack path |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore`; detached HEAD and patch modes still partial |
 | bisect | partial | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/improvement/compatibility/declined.md#d6-bisect-replay](docs/improvement/compatibility/declined.md#d6-bisect-replay)) / `terms` (see [docs/improvement/compatibility/declined.md#d7-bisect-terms](docs/improvement/compatibility/declined.md#d7-bisect-terms)) deferred |
