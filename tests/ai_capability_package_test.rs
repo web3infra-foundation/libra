@@ -129,6 +129,66 @@ async fn package_install_list_diff_uninstall_lifecycle() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn package_install_auto_enables_non_mutating_but_defers_mutating() {
+    let repo = tempfile::tempdir().unwrap();
+    setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+    let output = OutputConfig::default();
+    let store = InstalledPackageStore::new(repo.path().join(".libra"));
+
+    // A skills-only package grants no mutating capability → auto-enabled even
+    // though the user did not pass --enable (CEX-S2-17 验收 3).
+    let safe_dir = repo.path().join("safe");
+    write_package(&safe_dir, "acme.skillpack", "explore body", false);
+    package::execute_safe(
+        PackageCmds::Install {
+            path: safe_dir,
+            yes: false,
+            enable: false,
+        },
+        &output,
+    )
+    .await
+    .expect("install skills-only");
+    let safe = store
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.manifest.package_id.0 == "acme.skillpack")
+        .expect("recorded");
+    assert!(
+        safe.enabled,
+        "a non-mutating package auto-enables on install"
+    );
+
+    // A package bundling a mutating source stays default-deny disabled when the
+    // user accepts (--yes) but does not pass --enable.
+    let mutating_dir = repo.path().join("mutating");
+    write_package(&mutating_dir, "acme.toolkit", "explore body", true);
+    package::execute_safe(
+        PackageCmds::Install {
+            path: mutating_dir,
+            yes: true,
+            enable: false,
+        },
+        &output,
+    )
+    .await
+    .expect("install mutating");
+    let mutating = store
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.manifest.package_id.0 == "acme.toolkit")
+        .expect("recorded");
+    assert!(
+        !mutating.enabled,
+        "a mutating package stays default-deny disabled without --enable",
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn package_install_rejects_tampered_content() {
     let repo = tempfile::tempdir().unwrap();
     setup_with_new_libra_in(repo.path()).await;

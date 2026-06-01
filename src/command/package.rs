@@ -18,7 +18,7 @@ use clap::Subcommand;
 use crate::{
     internal::ai::capability_package::{
         CapabilityDiff, InstalledPackage, InstalledPackageStore, active_capabilities,
-        load_package_dir, prepare_install,
+        load_package_dir, may_auto_enable, prepare_install,
     },
     utils::{
         error::{CliError, CliResult},
@@ -227,16 +227,26 @@ fn run_install(
         return Ok(());
     }
 
+    // CEX-S2-17 验收 (3): only a *mutating* capability (a source or sub-agent)
+    // is default-deny and needs an explicit `--enable`. A skills/commands-only
+    // package grants no mutating capability, so it auto-enables on install.
+    let auto = may_auto_enable(&decision.package.manifest);
+    let enabled = enable || auto;
+
     let mut package = decision.package;
-    package.enabled = enable;
+    package.enabled = enabled;
     let replaced = store
         .upsert(package)
         .map_err(|err| CliError::fatal(format!("failed to record installed package: {err}")))?;
 
-    let state = if enable {
-        "enabled"
+    let state = if enabled {
+        if enable {
+            "enabled"
+        } else {
+            "auto-enabled (no mutating capability)"
+        }
     } else {
-        "installed (disabled — enable with `libra package install … --enable`)"
+        "installed (disabled — re-run with --enable to activate its mutating capabilities)"
     };
     let action = if replaced { "Updated" } else { "Recorded" };
     println!("{action} capability package `{id}`: {state}.");
