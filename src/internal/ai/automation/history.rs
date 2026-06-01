@@ -1,7 +1,3 @@
-//! Automation run history persistence using SeaORM.
-//!
-//! 使用 SeaORM 的自动化运行历史持久化。
-
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 
 use crate::internal::ai::automation::events::{

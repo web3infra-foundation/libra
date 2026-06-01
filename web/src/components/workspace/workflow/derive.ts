@@ -1,10 +1,10 @@
 /**
  * Derive workflow-pane view-models from the live `CodeUiSessionSnapshot`.
  *
- * The workflow view-model stays derived from the live snapshot so the
- * Workflow / Summary / Diff tabs never fall back to mock fixtures. The
- * remaining expansion points are noted inline where the snapshot contract is
- * still intentionally narrower than the eventual UI.
+ * Phase 1 ships a low-fidelity mapping: enough so the Workflow / Summary /
+ * Diff tabs render real data without leaking the mock module into the
+ * production path. Phase 4 expands the mapping with full plan-step status
+ * lattice, capability gating, and per-tool detail rendering.
  */
 
 import type {
@@ -73,8 +73,6 @@ function deriveCanonicalPlans(plans: CodeUiPlanSnapshot[]): [Plan, Plan] {
 function planFromSnapshot(snapshot: CodeUiPlanSnapshot): Plan {
   return {
     id: snapshot.id,
-    title: snapshot.title,
-    summary: snapshot.summary,
     steps: snapshot.steps.map(stepFromSnapshot),
   };
 }

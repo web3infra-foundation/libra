@@ -1,7 +1,5 @@
 //! Tool calling infrastructure for AI agents.
 //!
-//! AI 代理的工具调用基础设施。
-//!
 //! AI user story: this module gives an agent a bounded, auditable interface for
 //! reading project context, proposing plans, editing files, running checks, and
 //! recording workflow provenance without bypassing Libra's sandbox and approval

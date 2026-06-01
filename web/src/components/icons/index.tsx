@@ -243,14 +243,6 @@ export const IconDiff = (p: IconProps) => (
   </Icon>
 );
 
-/** Circular refresh icon used for thread/status refresh actions. */
-export const IconRefresh = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M20 12a8 8 0 1 1-2.3-5.7" />
-    <path d="M20 4v6h-6" />
-  </Icon>
-);
-
 /** Terminal frame icon used for the embedded shell tab. */
 export const IconTerm = (p: IconProps) => (
   <Icon {...p}>

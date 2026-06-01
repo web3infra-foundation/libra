@@ -1,8 +1,6 @@
 //! Canonical IntentSpec data model shared by drafting, validation, persistence, and
 //! orchestration.
 //!
-//! 草稿、验证、持久化和编排共享的规范 IntentSpec 数据模型。
-//!
 //! Boundary: structs here are serialization contracts, so defaults must remain
 //! backward compatible with existing JSON fixtures and stored intent objects. Tests in
 //! `tests/intent_flow_test.rs` and `tests/ai_validation_decision_flow_test.rs` exercise

@@ -1,7 +1,3 @@
-//! Automation event types for tracking rule trigger and execution results.
-//!
-//! 用于跟踪规则触发和执行结果的自动化事件类型。
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

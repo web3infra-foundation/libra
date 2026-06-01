@@ -1,7 +1,5 @@
 //! Incremental publish upload planning.
 //!
-//! 增量发布上传规划。
-//!
 //! Full `publish sync` writes are still staged elsewhere, but this
 //! module owns the idempotency decision for publish artefacts: upload
 //! when a key is new or its digest changed; skip when the stored digest

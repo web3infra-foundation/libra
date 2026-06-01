@@ -38,7 +38,7 @@ EXAMPLES:
         --url $(jq -r .url .libra/code/control.json) \\
         --token-file .libra/code/control.token
                                                   Wire from the discovery file emitted by 'libra code --control write'
-    echo '{\"jsonrpc\":\"2.0\",\"method\":\"attach\",\"params\":{\"clientId\":\"my-script\"},\"id\":1}' | \\
+    echo '{\"jsonrpc\":\"2.0\",\"method\":\"controller.attach\",\"params\":{\"clientId\":\"my-script\"},\"id\":1}' | \\
         libra code-control --stdio --url http://127.0.0.1:3000 --token-file ./control.token
                                                   Send a single attach request through the shim";
 
@@ -126,6 +126,15 @@ struct TaskDispatchParams {
     agent: String,
     prompt: String,
     controller_token: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsListParams {
+    #[serde(default)]
+    limit: Option<Value>,
+    #[serde(default)]
+    offset: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +263,17 @@ async fn dispatch_json_rpc_request(
     let result = match method {
         "session.get" => send_get(client, base_url, "/api/code/session").await,
         "diagnostics.get" => send_get(client, base_url, "/api/code/diagnostics").await,
+        "threads.list" => {
+            let params = match parse_optional_params::<ThreadsListParams>(request.params) {
+                Ok(params) => params,
+                Err(error) => return DispatchResult::Error(error),
+            };
+            let query = match thread_list_query_params(params) {
+                Ok(query) => query,
+                Err(error) => return DispatchResult::Error(error),
+            };
+            send_get_with_query(client, base_url, "/api/code/threads", query).await
+        }
         "controller.attach" => {
             let params = match parse_params::<AttachParams>(request.params) {
                 Ok(params) => params,
@@ -424,12 +444,76 @@ fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, JsonRpc
     })
 }
 
+fn parse_optional_params<T: Default + DeserializeOwned>(
+    params: Option<Value>,
+) -> Result<T, JsonRpcErrorObject> {
+    match params {
+        Some(params) => serde_json::from_value(params).map_err(|error| JsonRpcErrorObject {
+            code: -32602,
+            message: format!("Invalid params: {error}"),
+            data: None,
+        }),
+        None => Ok(T::default()),
+    }
+}
+
+fn thread_list_query_params(
+    params: ThreadsListParams,
+) -> Result<Vec<(&'static str, String)>, JsonRpcErrorObject> {
+    let mut query = Vec::new();
+    if let Some(value) = optional_query_value("limit", params.limit)? {
+        query.push(("limit", value));
+    }
+    if let Some(value) = optional_query_value("offset", params.offset)? {
+        query.push(("offset", value));
+    }
+    Ok(query)
+}
+
+fn optional_query_value(
+    name: &str,
+    value: Option<Value>,
+) -> Result<Option<String>, JsonRpcErrorObject> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(number) => Ok(Some(number.to_string())),
+        Value::String(text) => Ok(Some(text)),
+        _ => Err(JsonRpcErrorObject {
+            code: -32602,
+            message: format!("Invalid params: {name} must be a string or number"),
+            data: None,
+        }),
+    }
+}
+
 async fn send_get(
     client: &Client,
     base_url: &Url,
     endpoint: &str,
 ) -> Result<Value, JsonRpcErrorObject> {
     let url = endpoint_url(base_url, endpoint)?;
+    let response = client.get(url).send().await.map_err(transport_error)?;
+    response_json_or_error(response).await
+}
+
+async fn send_get_with_query(
+    client: &Client,
+    base_url: &Url,
+    endpoint: &str,
+    query: Vec<(&'static str, String)>,
+) -> Result<Value, JsonRpcErrorObject> {
+    let mut url = endpoint_url(base_url, endpoint)?;
+    if !query.is_empty() {
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                query_pairs.append_pair(key, &value);
+            }
+        }
+    }
     let response = client.get(url).send().await.map_err(transport_error)?;
     response_json_or_error(response).await
 }
@@ -666,11 +750,11 @@ fn write_json_value(value: &Value) -> CliResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
     use axum::{
         Json, Router,
-        extract::State,
+        extract::{Query, State},
         http::HeaderMap,
         routing::{get, post},
     };
@@ -696,6 +780,86 @@ mod tests {
         assert_eq!(output[0]["method"], "events.notification");
         assert_eq!(output[0]["params"]["event"], "session_updated");
         assert_eq!(output[0]["params"]["data"]["seq"], 1);
+    }
+
+    #[tokio::test]
+    async fn json_rpc_dispatch_maps_threads_list_to_http() {
+        #[derive(Default)]
+        struct MockState {
+            calls: Mutex<Vec<Value>>,
+        }
+
+        async fn threads(
+            State(state): State<Arc<MockState>>,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> Json<Value> {
+            state
+                .calls
+                .lock()
+                .await
+                .push(json!({ "path": "threads", "query": query }));
+            Json(json!({
+                "items": [
+                    {
+                        "id": "thread-1",
+                        "title": "Investigate",
+                        "archived": false,
+                        "currentIntentId": null,
+                        "createdAt": "2026-04-30T00:00:00Z",
+                        "updatedAt": "2026-04-30T00:01:00Z"
+                    }
+                ]
+            }))
+        }
+
+        let state = Arc::new(MockState::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/api/code/threads", get(threads))
+            .with_state(state.clone());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        let base_url = Url::parse(&format!("http://{addr}")).unwrap();
+        let client = Client::new();
+
+        let response = dispatch_json_rpc_request(
+            &client,
+            &base_url,
+            "process-token",
+            JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                method: Some("threads.list".to_string()),
+                params: Some(json!({ "limit": 2, "offset": "4" })),
+                id: Some(json!(1)),
+            },
+        )
+        .await;
+
+        match response {
+            DispatchResult::Response(response) => {
+                assert_eq!(response.result.unwrap()["items"][0]["id"], "thread-1");
+            }
+            DispatchResult::Error(error) => {
+                panic!("threads.list returned error: {}", error.message)
+            }
+            DispatchResult::NotificationOnly | DispatchResult::Subscribe { .. } => {
+                panic!("threads.list must return a JSON-RPC response")
+            }
+        }
+        let calls = state.calls.lock().await.clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["query"]["limit"], "2");
+        assert_eq!(calls[0]["query"]["offset"], "4");
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
     }
 
     #[tokio::test]

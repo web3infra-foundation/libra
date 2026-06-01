@@ -5,9 +5,16 @@
 //! [`HookInput`] JSON payload to stdin, and translates the resulting exit code into
 //! a [`HookAction`]:
 //! - `0` - allow.
-//! - `129` - block (PreToolUse only); the rejection reason is read from stdout,
-//!   falling back to `"Blocked by hook"`.
-//! - Any other exit code - error, logged at `warn` level but never blocks.
+//! - `2` or `129` - block (PreToolUse only); the rejection reason is read from
+//!   stdout, falling back to `"Blocked by hook"`. `2` is the documented
+//!   S2-INV-13 deny code (`docs/improvement/agent.md` Step 2.2, matching the
+//!   Claude Code hook convention); `129` is the historical libra code, kept for
+//!   backward compatibility.
+//! - Any other exit code / timeout / spawn failure - a hook *failure*. For
+//!   `PreToolUse` this is **fail-closed**: the tool call is blocked (a guard
+//!   hook that crashes or hangs must never become an implicit allow, per
+//!   S2-INV-13). For `PostToolUse` / session events (which cannot block) the
+//!   failure is logged at `warn` level.
 //!
 //! Hooks are isolated per invocation: the runner uses `kill_on_drop(true)` so a
 //! hook that overruns its `timeout_ms` is terminated together with the pending
@@ -67,14 +74,17 @@ impl HookRunner {
     /// chain and the runner returns the corresponding [`HookAction::Block`].
     ///
     /// Boundary conditions:
-    /// - Hook errors and timeouts are logged but do **not** block. This is a
-    ///   conscious safety/availability trade-off — a misconfigured hook should
-    ///   not strand the user.
+    /// - Hook errors and timeouts **fail closed**: a PreToolUse hook that cannot
+    ///   be evaluated cleanly (unknown exit code, timeout, panic, spawn failure)
+    ///   blocks the tool call. The security boundary always errs toward denial
+    ///   (S2-INV-13) — a crashed or hung guard hook must never become an
+    ///   implicit allow.
     /// - When no hooks match, `HookAction::Allow` is returned without spawning a
     ///   subshell.
     ///
     /// See: `tests::test_pre_tool_use_block`,
-    /// `tests::test_pre_tool_use_no_matching_hooks`.
+    /// `tests::test_pre_tool_use_no_matching_hooks`,
+    /// `tests::test_pre_tool_use_timeout_fails_closed`.
     pub async fn run_pre_tool_use(
         &self,
         tool_name: &str,
@@ -99,9 +109,23 @@ impl HookRunner {
                 HookResult::Allow => continue,
                 HookResult::Block(reason) => return HookAction::Block(reason),
                 HookResult::Error(err) => {
-                    tracing::warn!("PreToolUse hook '{}' failed: {}", hook.description, err);
-                    // Errors in hooks don't block by default
-                    continue;
+                    // Fail-closed: a PreToolUse hook that fails to run cleanly
+                    // (unknown exit code, timeout, panic, spawn failure) must
+                    // BLOCK the tool call, not silently allow it. The security
+                    // boundary always errs toward denial — a crashed or hung
+                    // guard hook must never become an implicit allow. This is
+                    // the S2-INV-13 "安全边界永远偏向拒绝" rule
+                    // (`docs/improvement/agent.md` Step 2.2 exit-code table).
+                    tracing::warn!(
+                        "PreToolUse hook '{}' failed: {}; blocking (fail-closed)",
+                        hook.description,
+                        err,
+                    );
+                    return HookAction::Block(format!(
+                        "PreToolUse hook '{}' could not be evaluated and was blocked \
+                         (fail-closed): {err}",
+                        hook.description,
+                    ));
                 }
             }
         }
@@ -227,8 +251,13 @@ impl HookRunner {
 
                 match exit_code {
                     0 => HookResult::Allow,
-                    129 => {
-                        // Exit code 129 = block (PreToolUse only)
+                    // Explicit block. Exit `2` is the documented deny code in the
+                    // S2-INV-13 authoritative table (`docs/improvement/agent.md`
+                    // Step 2.2) — and matches the Claude Code hook convention;
+                    // `129` is the historical libra code, kept for backward
+                    // compatibility. Both carry the hook's stdout as the
+                    // human-readable rejection reason.
+                    2 | 129 => {
                         let reason = if let Ok(output) = serde_json::from_str::<HookOutput>(&stdout)
                         {
                             output
@@ -330,10 +359,12 @@ mod tests {
         assert_eq!(action, HookAction::Allow);
     }
 
-    // Scenario: a hook that exceeds its timeout is killed and treated as Allow,
-    // matching the "errors don't block" rule.
+    // Scenario: a PreToolUse hook that exceeds its timeout is killed and the
+    // tool call is BLOCKED (fail-closed). A guard hook that hangs must never
+    // become an implicit allow — the security boundary errs toward denial
+    // (S2-INV-13, agent.md Step 2.2 exit-code table).
     #[tokio::test]
-    async fn test_pre_tool_use_timeout() {
+    async fn test_pre_tool_use_timeout_fails_closed() {
         let (runner, _tmp) = make_runner(vec![HookDefinition {
             event: HookEvent::PreToolUse,
             matcher: "*".to_string(),
@@ -346,8 +377,51 @@ mod tests {
         let action = runner
             .run_pre_tool_use("read_file", serde_json::json!({}))
             .await;
-        // Timeout results in error, which doesn't block
-        assert_eq!(action, HookAction::Allow);
+        // Timeout is a hook failure → fail-closed block.
+        assert!(
+            action.is_blocked(),
+            "a timed-out PreToolUse hook must fail closed (block), got: {action:?}",
+        );
+    }
+
+    // Scenario: a PreToolUse hook that exits with an unrecognised code (not
+    // 0/2/129) is a failure and BLOCKS fail-closed, rather than silently
+    // allowing the tool call.
+    #[tokio::test]
+    async fn test_pre_tool_use_unknown_exit_fails_closed() {
+        let (runner, _tmp) = make_runner(vec![make_hook(HookEvent::PreToolUse, "*", "exit 1")]);
+
+        let action = runner
+            .run_pre_tool_use("read_file", serde_json::json!({}))
+            .await;
+        assert!(
+            action.is_blocked(),
+            "an unknown-exit-code PreToolUse hook must fail closed, got: {action:?}",
+        );
+    }
+
+    // Scenario: exit 2 — the documented S2-INV-13 deny code — blocks the tool
+    // call AND surfaces the hook's stdout as the rejection reason (not a generic
+    // fail-closed error). This is the convention a hook author following
+    // agent.md Step 2.2 (or the Claude Code hook docs) writes against.
+    #[tokio::test]
+    async fn test_pre_tool_use_exit_two_blocks_with_reason() {
+        let (runner, _tmp) = make_runner(vec![make_hook(
+            HookEvent::PreToolUse,
+            "shell",
+            r#"echo "policy: no rm -rf"; exit 2"#,
+        )]);
+
+        let action = runner
+            .run_pre_tool_use("shell", serde_json::json!({"command": "rm -rf /"}))
+            .await;
+        assert!(action.is_blocked(), "exit 2 must block");
+        if let HookAction::Block(reason) = action {
+            assert!(
+                reason.contains("policy: no rm -rf"),
+                "exit 2 must carry the hook's stdout as the reason, got: {reason}",
+            );
+        }
     }
 
     // Scenario: hooks whose `enabled` flag is false are skipped without spawning.

@@ -1,7 +1,5 @@
 //! Cloud backup command for synchronizing repository data to Cloudflare D1 and R2.
 //!
-//! 云备份命令，用于将存储库数据同步到 Cloudflare D1 和 R2。
-//!
 //! This module provides subcommands for:
 //! - `libra cloud sync` - Sync local DB to D1, objects to R2
 //! - `libra cloud restore` - Restore from D1/R2

@@ -1,7 +1,5 @@
 //! Source Pool abstractions for external and local capability providers.
 //!
-//! 外部和本地功能提供商的源池抽象。
-//!
 //! CEX-14 introduces a source layer above individual tools. A source owns a
 //! manifest, trust tier, and session-scoped execution view; tool handlers are
 //! generated from that view so legacy MCP tools and future source-prefixed

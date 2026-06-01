@@ -1,7 +1,5 @@
 //! Animated welcome splash for `libra code`.
 //!
-//! `libra code` 的动画欢迎画面。
-//!
 //! Renders the giant block-letter `LIBRA CODE` logo plus a small info panel
 //! (provider, model, cwd, ready hint) inside a centered canvas. The logo
 //! letters are coloured by sampling a gradient that drifts over time, giving a

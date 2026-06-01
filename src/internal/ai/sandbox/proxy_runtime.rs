@@ -1,7 +1,5 @@
 //! Runtime HTTP proxy for `NetworkAccess::Allowlist`.
 //!
-//! `NetworkAccess::Allowlist` 的运行时 HTTP 代理。
-//!
 //! The policy layer decides whether a destination is allowed. This module owns
 //! the short-lived local transport used by sandboxed commands: clients connect
 //! to a loopback HTTP proxy, the proxy evaluates CONNECT / Host targets against

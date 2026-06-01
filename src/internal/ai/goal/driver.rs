@@ -1,7 +1,5 @@
 //! Goal-supervised tool-loop driver — OC-Phase 6 P6.3 wiring between
 //! the pure-decision [`super::supervisor::GoalSupervisor::step`] and
-//!
-//! 目标监督工具循环驱动程序 — OC-Phase 6 P6.3 在纯决策 [`super::supervisor::GoalSupervisor::step`] 和实际工具执行之间的连接。
 //! the standard
 //! [`crate::internal::ai::agent::runtime::run_tool_loop_with_history_and_observer`]
 //! entry point.

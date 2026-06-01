@@ -16,8 +16,6 @@ export type PlanStep = {
 
 export type Plan = {
   id: string;
-  title?: string;
-  summary?: string;
   steps: PlanStep[];
 };
 
@@ -77,13 +75,7 @@ export type DetailState =
   | { kind: "intent"; data: IntentDoc }
   | {
       kind: "plan-step";
-      data: {
-        step: PlanStep;
-        planKind: "execution" | "test";
-        planId: string;
-        planTitle?: string;
-        planSummary?: string;
-      };
+      data: { step: PlanStep; planKind: "execution" | "test"; planId: string };
     }
   | { kind: "task"; data: WorkflowTask }
   | { kind: "run"; data: ExecutionRun }

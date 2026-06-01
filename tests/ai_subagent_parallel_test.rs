@@ -224,3 +224,57 @@ fn queued_runs_promote_in_spawn_order_when_slots_open() {
     let second_promotions = state.finish(second_id);
     assert_eq!(second_promotions.spawned, vec![third_id]);
 }
+
+/// CEX-S2-12 → CEX-S2-14 concurrency policy: `for_sub_agents` caps to a single
+/// concurrent run while CEX-S2-12 enforces "single sub-agent behind flag", and
+/// honours the configured `max_parallel` once CEX-S2-14 unlocks it.
+#[test]
+fn for_sub_agents_encodes_cex_s2_12_single_run_cap() {
+    // CEX-S2-12 phase: configured value is ignored, forced to 1.
+    let capped = ParallelAdmissionConfig::for_sub_agents(4, true);
+    assert_eq!(capped.max_parallel, 1, "S2-12 must cap concurrency to 1");
+
+    // CEX-S2-14 phase: configured value takes effect.
+    let unlocked = ParallelAdmissionConfig::for_sub_agents(4, false);
+    assert_eq!(unlocked.max_parallel, 4);
+
+    // Floors at 1 even when the configured value is 0.
+    assert_eq!(
+        ParallelAdmissionConfig::for_sub_agents(0, false).max_parallel,
+        1,
+    );
+}
+
+/// End-to-end: a scheduler built with the CEX-S2-12 single-run cap serialises
+/// disjoint-scope tasks (only one runs at a time) even though they never
+/// conflict on file scope.
+#[test]
+fn s2_12_capped_scheduler_runs_one_disjoint_task_at_a_time() {
+    let mut state = ParallelSchedulerState::new(ParallelAdmissionConfig::for_sub_agents(8, true));
+
+    let first =
+        ParallelTaskRequest::new(AgentTaskId::new(), AgentRunId::new(), ["src/a".to_string()]);
+    let second =
+        ParallelTaskRequest::new(AgentTaskId::new(), AgentRunId::new(), ["src/b".to_string()]);
+    let second_id = second.agent_run_id;
+
+    assert!(matches!(
+        state.admit(first),
+        ParallelAdmissionDecision::SpawnNow { .. }
+    ));
+    // Disjoint scope, but the S2-12 cap of 1 forces it to queue.
+    assert!(matches!(
+        state.admit(second),
+        ParallelAdmissionDecision::Queued {
+            reason: ParallelQueueReason::MaxParallelReached,
+            ..
+        }
+    ));
+    assert_eq!(state.running_count(), 1);
+    assert_eq!(state.queued_count(), 1);
+    assert_eq!(state.snapshot().max_parallel, 1);
+
+    // It promotes once the first finishes.
+    let promotions = state.finish(state.running_run_ids()[0]);
+    assert_eq!(promotions.spawned, vec![second_id]);
+}

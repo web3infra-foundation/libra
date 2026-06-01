@@ -1,7 +1,5 @@
 //! TUI-mode `CodeUiCommandAdapter` bridge.
 //!
-//! TUI 模式 `CodeUiCommandAdapter` 网桥。
-//!
 //! This module implements the [`CodeUiCommandAdapter`] trait for the default Libra
 //! TUI. HTTP write requests from automation clients are translated into
 //! [`TuiControlCommand`] messages and sent over an unbounded channel to the App

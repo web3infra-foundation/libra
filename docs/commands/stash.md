@@ -118,8 +118,6 @@ libra stash show --name-only
 
 Create a new branch from a stash entry, apply the stash on it, then drop the entry. Useful when a stash applies cleanly only on a branch that no longer exists, or when you want to resume the stashed work as a normal branch.
 
-`stash branch` refuses to run when the current working tree has staged, unstaged, or untracked changes, so unrelated local edits are not overwritten by the branch checkout and stash apply.
-
 | Argument | Description |
 |----------|-------------|
 | `<branch>` | Name of the new branch to create. Required. |
@@ -376,8 +374,7 @@ Note: jj does not have a stash command. Its change-based model allows creating a
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-REPO-003` | No initial commit, or dirty worktree blocks `stash branch` |
+| `LBR-REPO-003` | No initial commit |
 | `LBR-CLI-002` | Invalid stash reference syntax |
 | `LBR-CLI-003` | Stash does not exist |
 | `LBR-CONFLICT-001` | Merge conflict during stash apply |
-| `LBR-CONFLICT-002` | Target branch already exists |

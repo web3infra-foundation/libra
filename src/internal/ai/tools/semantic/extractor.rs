@@ -1,7 +1,3 @@
-//! Semantic code extractor for symbol-aware search using tree-sitter.
-//!
-//! 使用 tree-sitter 进行符号感知搜索的语义代码提取器。
-
 use std::{collections::HashMap, error::Error, fmt, ops::Range};
 
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};

@@ -1,7 +1,5 @@
 //! Main chat widget for displaying conversation history.
 //!
-//! 用于显示对话历史的主聊天小部件。
-//!
 //! Renders the scrollable chat area with history cells.
 
 use std::{

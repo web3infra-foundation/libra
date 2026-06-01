@@ -1,6 +1,4 @@
-//! SeaORM entity for the `schema_versions` table managed by migration runner.
-//!
-//! 由迁移运行程序管理的 `schema_versions` 表的 SeaORM 实体。
+//! SeaORM entity for the `schema_versions` table managed by
 //! [`crate::internal::db::migration::MigrationRunner`].
 //!
 //! One row per applied migration. Rows are inserted by

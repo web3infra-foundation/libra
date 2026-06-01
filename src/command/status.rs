@@ -1,6 +1,4 @@
 //! Implements status reporting with ignore policy support, computing staged/unstaged/untracked sets and printing concise summaries.
-//!
-//! 实现支持忽略策略的状态报告，计算暂存/未暂存/未跟踪的集合并打印简洁的摘要。
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -421,8 +419,6 @@ pub async fn collect_status_json_envelope_for_api(
     }))
 }
 
-/// Fire-and-forget entry point for the status command.
-/// Delegates to execute_to and prints any error to stderr.
 pub async fn execute(args: StatusArgs) {
     if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
         err.print_stderr();
@@ -432,13 +428,6 @@ pub async fn execute(args: StatusArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. JSON mode propagates status-computation failures as
 /// structured CLI errors; text mode uses the same structured error contract.
-///
-/// 状态命令的快速执行入口。
-/// 委托给 execute_to 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
-/// JSON 模式将状态计算失败作为结构化 CLI 错误传播；
-/// 文本模式使用相同的结构化错误契约。
 pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
@@ -462,9 +451,6 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
 
 /// Legacy entry point that writes status to the given writer.
 /// Used by the old `execute()` path and tests.
-///
-/// 将状态写入给定写入器的旧版入口点。
-/// 由旧的 `execute()` 路径和测试使用。
 pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

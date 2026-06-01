@@ -1,6 +1,4 @@
 //! Pull command combining fetch with merge or rebase depending on options, handling fast-forward checks and remote tracking setup.
-//!
-//! 拉取命令，根据选项将获取与合并或变基相结合，处理快速前进检查和远程跟踪设置。
 
 use std::io::Write;
 
@@ -188,8 +186,6 @@ struct ResolvedPullTarget {
     remote_config: RemoteConfig,
 }
 
-/// Fire-and-forget entry point for the pull command.
-/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: PullArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -208,21 +204,6 @@ pub async fn execute(args: PullArgs) {
 /// # Errors
 /// Returns [`CliError`] when the pull target cannot be resolved, fetch fails,
 /// histories cannot be merged safely, or refs/worktree updates fail.
-///
-/// 拉取命令的快速执行入口。
-/// 委托给 execute_safe 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
-///
-/// # 副作用
-/// - 为当前分支或 CLI 参数解析远程/上游目标。
-/// - 获取远程对象并更新远程跟踪参考。
-/// - 合并成功时快速前进当前分支和工作树。
-/// - 呈现拉取摘要输出。
-///
-/// # 错误
-/// 当无法解析拉取目标、获取失败、历史无法安全合并或
-/// 参考/工作树更新失败时返回 [`CliError`]。
 pub async fn execute_safe(args: PullArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_pull(args, output).await.map_err(CliError::from)?;
     render_pull_output(&result, output)

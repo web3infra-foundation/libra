@@ -1,6 +1,4 @@
 //! SeaORM model for reference rows storing branch, tag, or HEAD names with target commits and optional remotes.
-//!
-//! 用于存储分支、标记或 HEAD 名称以及目标提交和可选远程的参考行的 SeaORM 模型。
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};

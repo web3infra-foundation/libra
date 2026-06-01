@@ -65,7 +65,7 @@ C1（Audit P0）
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | --force / --dry-run / --quiet not exposed |
-| mv | partial | sparse-checkout flag unsupported; --skip-errors not exposed |
+| mv | partial | sparse-checkout flag unsupported |
 | restore | supported | |
 | status | supported | |
 | clean | supported | |

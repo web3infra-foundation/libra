@@ -1,6 +1,4 @@
 //! SeaORM entity for the selected execution/test plan pair.
-//!
-//! 选定的执行/测试计划对的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

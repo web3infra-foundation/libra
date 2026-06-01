@@ -1,7 +1,5 @@
 //! Config command for reading and writing settings across scopes.
 //!
-//! 配置命令，用于在不同范围内读取和写入设置。
-//!
 //! Supports subcommand style (`libra config set/get/list/unset/import/path`)
 //! and Git-compatible flag style (`--get`, `--list`, etc.).
 

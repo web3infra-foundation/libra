@@ -92,16 +92,11 @@ export function PlanCard({
   return (
     <Card
       badge={phaseBadge}
-      title={plan.title?.trim() || title}
+      title={title}
       subtitle={`${subtitle} · ${plan.steps.length} steps`}
       icon={icon}
       tone={active ? "active" : gated ? "muted" : "default"}
     >
-      {plan.summary?.trim() && (
-        <div className="mb-2.5 text-[12px] leading-[1.5] text-ink-2">
-          {plan.summary.trim()}
-        </div>
-      )}
       {gated && (
         <div className="mono mb-2.5 flex items-center gap-1.5 rounded-md bg-paper-2 px-2 py-1.5 text-[11px] text-ink-3">
           <IconClock size={11} /> Stage barrier — runs after execution DAG settles
@@ -122,13 +117,7 @@ export function PlanCard({
               onClick={() =>
                 onOpen({
                   kind: "plan-step",
-                  data: {
-                    step,
-                    planKind,
-                    planId: plan.id,
-                    planTitle: plan.title,
-                    planSummary: plan.summary,
-                  },
+                  data: { step, planKind, planId: plan.id },
                 })
               }
             />

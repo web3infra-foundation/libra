@@ -1,6 +1,4 @@
 //! Helpers to read or write compressed git objects on disk, returning raw payloads and computing their object hashes.
-//!
-//! 在磁盘上读取或写入压缩 git 对象的助手，返回原始有效负载并计算其对象哈希。
 
 use std::{
     fs,

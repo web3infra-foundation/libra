@@ -1,7 +1,5 @@
 //! Execution policy helpers for orchestrated AI runs.
 //!
-//! 编排 AI 运行的执行策略助手。
-//!
 //! Boundary: this module computes allowed paths, commands, and workspace constraints;
 //! concrete process execution and object persistence live in sibling modules. ACL and
 //! hardening tests cover traversal, cargo-lock companion, and denied command cases.

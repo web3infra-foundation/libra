@@ -1,7 +1,5 @@
 //! Terminal UI for the `libra code` interactive console.
 //!
-//! `libra code` 交互式控制台的终端用户界面。
-//!
 //! This module is the root of the ratatui-based TUI that hosts an interactive
 //! agent session. The runtime is an event loop: terminal events from
 //! [`terminal::Tui`] feed into [`app::App`], which mutates state held by
@@ -36,6 +34,10 @@
 //! Only a handful of items are re-exported; everything else is module-private
 //! so the public surface stays small and refactoring-friendly.
 
+// Typed parser for the `/agent` run-control subcommand family.
+mod agent_command;
+// Pure projection of AgentRun snapshots into ordered agent-pane rows.
+mod agent_pane;
 // Top-level event loop and exit handling.
 mod app;
 // Typed bus carrying events between agent and UI.
@@ -72,6 +74,7 @@ mod theme;
 mod welcome_shader;
 
 // Curated public surface: only types that callers outside the module need.
+pub use agent_pane::{AgentRunRow, agent_pane_rows};
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use code_ui_adapter::TuiCodeUiAdapter;

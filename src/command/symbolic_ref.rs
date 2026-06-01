@@ -1,6 +1,4 @@
 //! Implements `symbolic-ref` for reading and updating Libra's symbolic HEAD.
-//!
-//! 实现 `symbolic-ref` 以读取和更新 Libra 的符号 HEAD。
 
 use std::io::Write;
 

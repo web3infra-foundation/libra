@@ -1,6 +1,4 @@
 //! Extension traits for Tree/Commit/Blob to load from storage, expand items recursively with modes, save blobs, and support LFS-backed files.
-//!
-//! 树/提交/blob 的扩展特性，用于从存储加载、递归扩展项带有模式、保存 blob 并支持 LFS 支持的文件。
 
 use std::{
     fs,

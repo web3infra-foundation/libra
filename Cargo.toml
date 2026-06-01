@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1181"
+version = "0.17.1216"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -165,6 +165,10 @@ path = "tests/compat/stash_subcommand_surface.rs"
 [[test]]
 name = "compat_bisect_subcommand_surface"
 path = "tests/compat/bisect_subcommand_surface.rs"
+
+[[test]]
+name = "compat_pull_strategy_flags_surface"
+path = "tests/compat/pull_strategy_flags_surface.rs"
 
 [[test]]
 name = "compat_worktree_delete_dir"

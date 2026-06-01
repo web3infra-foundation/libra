@@ -1,7 +1,5 @@
 //! `AgentEvidence[E]` event — wraps the persistent `Evidence` snapshot with
 //! sub-agent provenance fields required by S2-INV-12 (raw fact chain) and
-//!
-//! `AgentEvidence[E]` 事件 — 将持久化 `Evidence` 快照与 S2-INV-12 所需的子代理来源字段（原始事实链）包装在一起。
 //! Step 2.8 evidence query.
 //!
 //! # R-A4 disambiguation note

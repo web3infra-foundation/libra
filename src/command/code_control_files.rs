@@ -1,7 +1,5 @@
 //! Local TUI automation control file lifecycle.
 //!
-//! 本地 TUI 自动化控制文件生命周期。
-//!
 //! `libra code --control write` uses three files under the repository storage
 //! root by default:
 //!

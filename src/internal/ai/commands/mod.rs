@@ -1,7 +1,5 @@
 //! Slash command system.
 //!
-//! 斜杠命令系统。
-//!
 //! Commands are `/name arguments` patterns intercepted from user input.
 //! Each command is defined in a markdown file with YAML frontmatter specifying
 //! its name, description, optional agent, and a template body with `$ARGUMENTS`

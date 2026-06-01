@@ -1,6 +1,4 @@
 //! `AgentRun[S]` snapshot: one sub-agent execution attempt for an `AgentTask`.
-//!
-//! `AgentRun[S]` 快照：一个 `AgentTask` 的一次子代理执行尝试。
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

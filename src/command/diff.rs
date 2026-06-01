@@ -1,6 +1,4 @@
 //! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
-//!
-//! 提供差异命令逻辑，比较提交、索引和工作树，支持算法选择、路径规范过滤和可选文件输出。
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -191,20 +189,12 @@ impl From<DiffError> for CliError {
     }
 }
 
-/// Fire-and-forget entry point for the diff command.
-/// Delegates to execute_safe and prints any error to stderr.
 pub async fn execute(args: DiffArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing errors and exiting.
-///
-/// 差异命令的快速执行入口。
-/// 委托给 execute_safe 并将任何错误打印到 stderr。
-///
-/// 返回结构化 [`CliResult`] 而不是打印错误并退出的安全入口点。
 pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()> {
     if util::require_repo().is_err() {
         return Err(CliError::from(DiffError::NotInRepo));

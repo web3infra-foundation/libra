@@ -1,8 +1,6 @@
 //! On-the-fly seccomp BPF compilation from the bundled
 //! `template/seccomp-default.json` policy.
 //!
-//! 从捆绑的 `template/seccomp-default.json` 策略动态编译 seccomp BPF。
-//!
 //! `docs/improvement/sandbox.md` §G6 commits Libra to a default
 //! seccomp posture: when `LIBRA_SECCOMP_POLICY` is unset and
 //! `~/.libra/seccomp.bpf` is absent, the runtime should be able to

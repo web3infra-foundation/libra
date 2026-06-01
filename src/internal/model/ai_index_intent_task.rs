@@ -1,6 +1,4 @@
 //! SeaORM entity for the intent -> task reverse index.
-//!
-//! 意图 -> 任务反向索引的 SeaORM 实体。
 
 use sea_orm::entity::prelude::*;
 

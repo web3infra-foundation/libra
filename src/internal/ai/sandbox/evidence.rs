@@ -1,7 +1,5 @@
 //! Sandbox structured-event sink — OC-Phase 7 P2 Evidence wiring.
 //!
-//! 沙箱结构化事件接收器 — OC-Phase 7 P2 证据连接。
-//!
 //! Per `docs/improvement/sandbox.md` lines 142-144, 162, 348, and 373:
 //! sandbox rejection events, cleanup failures, dangerous writable
 //! roots, and (future) enforcement / network denials must surface as

@@ -1,7 +1,5 @@
 //! Implementation of `cat-file` command for inspecting Git and AI workflow objects.
 //!
-//! `cat-file` 命令的实现，用于检查 Git 和 AI 工作流对象。
-//!
 //! This is a low-level debugging tool analogous to `git cat-file`, extended to also
 //! inspect AI process objects (Intent, Task, Run, Plan, PatchSet, Evidence, etc.)
 //! stored on the `libra/intent` orphan branch.
@@ -257,9 +255,6 @@ fn cat_file_exit_error(error: CliError) -> ! {
     std::process::exit(error.exit_code())
 }
 
-/// Execute the cat-file command for inspecting objects.
-///
-/// 执行 cat-file 命令以检查对象。
 pub async fn execute(args: CatFileArgs) {
     // ── AI modes (no positional object arg required) ────────────────────
     if args.ai_list_types {

@@ -1,6 +1,4 @@
 //! Tag operations that resolve target objects, build annotated or lightweight tags, persist refs in the database, and write tag objects to storage.
-//!
-//! 标记操作，解析目标对象、构建注释或轻量级标记、在数据库中持久化引用和将标记对象写入存储。
 
 use std::{io, str::FromStr};
 
