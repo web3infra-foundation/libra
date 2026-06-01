@@ -184,6 +184,68 @@ fn verify_pack_accepts_absolute_index_path_outside_repository() {
 
 #[test]
 #[serial]
+fn verify_pack_accepts_multiple_index_paths() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir_v1, pack_path_v1) = copy_pack_to_temp("small-sha1");
+    let (_pack_dir_v2, pack_path_v2) = copy_pack_to_temp("small-sha1");
+    let idx_path_v1 = build_index(repo.path(), &pack_path_v1, "1");
+    let idx_path_v2 = build_index(repo.path(), &pack_path_v2, "2");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            idx_path_v1.to_str().expect("v1 idx path UTF-8"),
+            idx_path_v2.to_str().expect("v2 idx path UTF-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "verify-pack should accept multiple index paths");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{}: ok", idx_path_v1.display())),
+        "human output should confirm first index: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}: ok", idx_path_v2.display())),
+        "human output should confirm second index: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn verify_pack_json_multiple_indexes_reports_packs_array() {
+    let repo = tempfile::tempdir().expect("create repo");
+    init_repo_via_cli(repo.path());
+    let (_pack_dir_v1, pack_path_v1) = copy_pack_to_temp("small-sha1");
+    let (_pack_dir_v2, pack_path_v2) = copy_pack_to_temp("small-sha1");
+    let idx_path_v1 = build_index(repo.path(), &pack_path_v1, "1");
+    let idx_path_v2 = build_index(repo.path(), &pack_path_v2, "2");
+
+    let output = run_libra_command(
+        &[
+            "verify-pack",
+            idx_path_v1.to_str().expect("v1 idx path UTF-8"),
+            idx_path_v2.to_str().expect("v2 idx path UTF-8"),
+            "--json",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "verify-pack --json should accept multiple indexes");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "verify-pack");
+    let packs = json["data"]["packs"]
+        .as_array()
+        .expect("multi-index JSON should report packs array");
+    assert_eq!(packs.len(), 2);
+    assert_eq!(packs[0]["verified"], true);
+    assert_eq!(packs[1]["verified"], true);
+}
+
+#[test]
+#[serial]
 fn verify_pack_accepts_sha256_index_path_outside_repository() {
     let repo = tempfile::tempdir().expect("create repo");
     init_sha256_repo_via_cli(repo.path());

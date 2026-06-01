@@ -33,6 +33,7 @@ const FANOUT_LEN: usize = 256 * 4;
 const VERIFY_PACK_EXAMPLES: &str = "\
 EXAMPLES:
     libra verify-pack objects/pack/pack-abc123.idx                   Verify an index against its sibling .pack
+    libra verify-pack pack-a.idx pack-b.idx                          Verify multiple indexes in one invocation
     libra verify-pack --pack pack.pack pack.idx                      Verify with an explicit pack path
     libra verify-pack -v pack-abc123.idx                             Print every indexed object hash and offset
     libra verify-pack pack-abc123.idx --json                         Structured JSON output for agents";
@@ -40,9 +41,9 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = VERIFY_PACK_EXAMPLES)]
 pub struct VerifyPackArgs {
-    /// Pack index file to verify
-    #[arg(value_name = "IDX_FILE")]
-    pub idx_file: PathBuf,
+    /// Pack index files to verify
+    #[arg(value_name = "IDX_FILE", num_args = 1..)]
+    pub idx_files: Vec<PathBuf>,
 
     /// Pack file to verify against. Defaults to IDX_FILE with `.pack` extension.
     #[arg(long, value_name = "PACK_FILE")]
@@ -64,6 +65,11 @@ struct VerifyPackOutput {
     verified: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     objects: Vec<VerifyPackObjectOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifyPackBatchOutput {
+    packs: Vec<VerifyPackOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,29 +128,48 @@ pub async fn execute(args: VerifyPackArgs) -> Result<(), String> {
 /// Returns structured CLI errors for unreadable files and repository-corruption
 /// errors for malformed indexes, malformed packs, or index/pack mismatches.
 pub async fn execute_safe(args: VerifyPackArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = verify_pack(&args)?;
-    render_verify_pack_output(&result, args.verbose, output)
+    let results = verify_packs(&args)?;
+    render_verify_pack_outputs(&results, args.verbose, output)
 }
 
-fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
-    let idx_file = args.idx_file.clone();
-    let pack_file = args
-        .pack
-        .clone()
+fn verify_packs(args: &VerifyPackArgs) -> CliResult<Vec<VerifyPackOutput>> {
+    if args.pack.is_some() && args.idx_files.len() != 1 {
+        return Err(
+            CliError::fatal("--pack can only be used when verifying one pack index")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "omit --pack for multi-index verification so each .idx uses its sibling .pack",
+                ),
+        );
+    }
+
+    args.idx_files
+        .iter()
+        .map(|idx_file| verify_pack(idx_file, args.pack.as_deref(), args.verbose))
+        .collect()
+}
+
+fn verify_pack(
+    idx_file: &Path,
+    explicit_pack_file: Option<&Path>,
+    verbose: bool,
+) -> CliResult<VerifyPackOutput> {
+    let pack_file = explicit_pack_file
+        .map(Path::to_path_buf)
         .unwrap_or_else(|| idx_file.with_extension("pack"));
 
-    let idx_bytes = read_file(&idx_file, "pack index")?;
+    let idx_bytes = read_file(idx_file, "pack index")?;
     if let Some(hash_kind) =
-        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?
+        infer_idx_v2_hash_kind(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?
     {
         set_hash_kind(hash_kind);
     }
-    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(&idx_file, detail))?;
+    let parsed = parse_index(&idx_bytes).map_err(|detail| invalid_index(idx_file, detail))?;
     let decoded = decode_pack(&pack_file)?;
     validate_index_against_pack(&parsed, &decoded)
-        .map_err(|detail| verification_failed(&idx_file, &pack_file, detail))?;
+        .map_err(|detail| verification_failed(idx_file, &pack_file, detail))?;
 
-    let objects = if args.verbose {
+    let objects = if verbose {
         let size_in_pack_by_hash = pack_entry_sizes(&parsed, decoded.pack_len)?;
         parsed
             .entries
@@ -179,7 +204,7 @@ fn verify_pack(args: &VerifyPackArgs) -> CliResult<VerifyPackOutput> {
     };
 
     Ok(VerifyPackOutput {
-        idx_file: path_string(&idx_file),
+        idx_file: path_string(idx_file),
         pack_file: path_string(&pack_file),
         index_version: parsed.version,
         object_count: parsed.entries.len(),
@@ -726,6 +751,30 @@ fn render_verify_pack_output(
         }
     }
     println!("{}: ok", result.idx_file);
+    Ok(())
+}
+
+fn render_verify_pack_outputs(
+    results: &[VerifyPackOutput],
+    verbose: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        if let [result] = results {
+            return emit_json_data("verify-pack", result, output);
+        }
+        return emit_json_data(
+            "verify-pack",
+            &VerifyPackBatchOutput {
+                packs: results.to_vec(),
+            },
+            output,
+        );
+    }
+
+    for result in results {
+        render_verify_pack_output(result, verbose, output)?;
+    }
     Ok(())
 }
 
