@@ -8,10 +8,14 @@
 //! install/update capability [`diff`] computation also lives here; rendering it
 //! and driving the confirmation prompt are runtime concerns elsewhere.
 
+pub mod checksum;
 pub mod diff;
 pub mod manifest;
 pub mod registry;
 
+pub use checksum::{
+    ChecksumError, checksum_changed, compute_package_checksum, verify_against_manifest,
+};
 pub use diff::{CapabilityDiff, StringSetDelta};
 pub use manifest::{BundledCapabilities, CapabilityPackageManifest, ManifestValidationError};
 pub use registry::{
