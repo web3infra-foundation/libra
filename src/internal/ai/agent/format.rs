@@ -41,9 +41,14 @@ pub fn format_agents_table(config: &AgentsConfig) -> String {
 
     let mut out = String::new();
     out.push_str("Agents (declarative):\n");
+    // `tools` is the trailing column (variable width) so the previously
+    // hidden per-agent tool allow-list is visible without widening every
+    // other column. An empty list means "inherit the runtime default"
+    // (see `AgentConfigEntry::tools`), which the dispatcher reifies
+    // per-mode, so we render that case explicitly instead of a blank cell.
     let header = format!(
-        "  {:<14} {:<10} {:<48} {:<24} {:>5}",
-        "name", "mode", "model", "permission", "steps"
+        "  {:<14} {:<10} {:<48} {:<24} {:>5}  {}",
+        "name", "mode", "model", "permission", "steps", "tools"
     );
     out.push_str(&header);
     out.push('\n');
@@ -52,7 +57,7 @@ pub fn format_agents_table(config: &AgentsConfig) -> String {
     out.push('\n');
     for (name, agent) in &config.agents {
         out.push_str(&format!(
-            "  {:<14} {:<10} {:<48} {:<24} {:>5}\n",
+            "  {:<14} {:<10} {:<48} {:<24} {:>5}  {}\n",
             name,
             agent.mode,
             truncate(&agent.model, 48),
@@ -61,6 +66,7 @@ pub fn format_agents_table(config: &AgentsConfig) -> String {
                 .steps
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "—".to_string()),
+            format_tool_allowlist(&agent.tools),
         ));
     }
     out
@@ -227,6 +233,20 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let truncated: String = s.chars().take(max - 1).collect();
     format!("{truncated}…")
+}
+
+/// Render an agent's declared tool allow-list for the `/agents` table.
+/// An empty list is the documented "inherit runtime default" sentinel
+/// (`AgentConfigEntry::tools`), shown as `(inherit)` so the operator does
+/// not mistake it for "no tools". A non-empty list keeps the declared
+/// order (a TOML array is order-preserving and deterministic) and is
+/// truncated to the trailing column budget so a long allow-list cannot
+/// wrap the row.
+fn format_tool_allowlist(tools: &[String]) -> String {
+    if tools.is_empty() {
+        return "(inherit)".to_string();
+    }
+    truncate(&tools.join(", "), 40)
 }
 
 fn format_permission_summary(perm: &BTreeMap<String, PermissionPolicy>) -> String {
@@ -411,6 +431,52 @@ mod tests {
         assert!(out.contains("shell=ask, write=deny"));
         // Steps shown.
         assert!(out.contains("15"));
+    }
+
+    #[test]
+    fn agents_table_renders_declared_tool_allowlist_and_inherit_sentinel() {
+        let cfg = config_with(vec![
+            // Empty tools list → documented inherit sentinel, not a blank cell.
+            ("inheritor", entry("openai/gpt-4o", "primary")),
+            (
+                "scoped",
+                AgentConfigEntry {
+                    model: "deepseek/deepseek-chat".to_string(),
+                    mode: "subagent".to_string(),
+                    tools: vec!["read_file".to_string(), "grep".to_string()],
+                    permission: BTreeMap::new(),
+                    steps: None,
+                },
+            ),
+        ]);
+        let out = format_agents_table(&cfg);
+        // New column header is present.
+        assert!(out.contains("tools"), "header must carry the tools column");
+        // Declared allow-list rendered in declared order.
+        assert!(out.contains("read_file, grep"));
+        // Empty list renders the inherit sentinel.
+        assert!(out.contains("(inherit)"));
+    }
+
+    #[test]
+    fn agents_table_truncates_long_tool_allowlist() {
+        // A long allow-list must be truncated so it cannot wrap the row.
+        let many: Vec<String> = (0..20).map(|i| format!("tool_{i:02}")).collect();
+        let cfg = config_with(vec![(
+            "wide",
+            AgentConfigEntry {
+                model: "openai/gpt-4o".to_string(),
+                mode: "subagent".to_string(),
+                tools: many,
+                permission: BTreeMap::new(),
+                steps: None,
+            },
+        )]);
+        let out = format_agents_table(&cfg);
+        assert!(
+            out.contains('…'),
+            "expected ellipsis in truncated tools cell"
+        );
     }
 
     #[test]
