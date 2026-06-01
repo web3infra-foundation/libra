@@ -5161,6 +5161,11 @@ where
                         &self.agents_config,
                     ))));
             }
+            BuiltinCommand::Agent => {
+                let message = self.format_agent_command_response(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+            }
             BuiltinCommand::Budget => {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(format_budget_status(
@@ -5215,6 +5220,41 @@ where
                 }
             }
             Err(err) => err.to_string(),
+        }
+    }
+
+    /// Render the response cell for an `/agent …` invocation (CEX-S2-16). The
+    /// parser lives in [`super::agent_command::parse_agent_subcommand`]; this
+    /// helper renders the typed result. `/agent list` points at the `/agents`
+    /// pane; `/agent cancel <id>` requests cancellation of a single run without
+    /// ending the main session.
+    fn format_agent_command_response(&mut self, args: &str) -> String {
+        use super::agent_command::{AgentSubcommand, parse_agent_subcommand};
+        match parse_agent_subcommand(args) {
+            Ok(AgentSubcommand::List) => format_agents_table(&self.agents_config),
+            Ok(AgentSubcommand::Cancel { run_id }) => self.cancel_agent_run(&run_id),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// Request cancellation of a single sub-agent run by id, leaving the main
+    /// session running (CEX-S2-16 `/agent cancel <id>`).
+    ///
+    /// When no sub-agent runtime is active there is nothing to cancel; otherwise
+    /// the parent session's abort token is fired so an in-flight child loop
+    /// stops at its next cancellation checkpoint. Per-run targeting (cancelling
+    /// one of several concurrent runs) lands with the run registry; until then a
+    /// single active run is cancelled and the id is echoed for the audit trail.
+    fn cancel_agent_run(&self, run_id: &str) -> String {
+        match self.config.subagent_runtime.as_ref() {
+            None => format!(
+                "No sub-agent runtime is active, so run `{run_id}` cannot be cancelled. \
+                 Enable `code.multi_agent.enabled = true` in `.libra/agents.toml` first."
+            ),
+            Some(runtime) => {
+                runtime.abort_token.cancel();
+                format!("Requested cancellation of sub-agent run `{run_id}`.")
+            }
         }
     }
 

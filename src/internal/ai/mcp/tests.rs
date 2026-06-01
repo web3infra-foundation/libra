@@ -109,7 +109,8 @@ impl McpAuthorizer for DenyAllAuthz {
 }
 
 /// `list_resources_impl` without an authz handler installed must continue
-/// to return its standard two-resource list (pre-Phase-5 behavior).
+/// to return its standard resource list: `libra://history/latest`,
+/// `libra://context/active`, and the CEX-S2-16 `libra://agents/runs`.
 #[tokio::test]
 async fn list_resources_impl_succeeds_without_authz() {
     let server = LibraMcpServer::new(None, None);
@@ -119,7 +120,8 @@ async fn list_resources_impl_succeeds_without_authz() {
         .await
         .expect("list_resources_impl must succeed when no authz handler is installed");
 
-    assert_eq!(resources.len(), 2);
+    assert_eq!(resources.len(), 3);
+    assert!(resources.iter().any(|r| r.uri == "libra://agents/runs"));
 }
 
 /// With a `DenyAllAuthz` installed via [`LibraMcpServer::set_authz`], the

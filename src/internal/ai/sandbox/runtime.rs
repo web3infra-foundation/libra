@@ -2111,6 +2111,15 @@ mod tests {
     #[test]
     #[serial]
     fn exec_env_shell_spawn_repairs_deleted_process_cwd() {
+        // Capture a durable cwd to restore at the end. The `ChangeDirGuard`
+        // below cannot restore it for us because the directory it guards is
+        // *deleted* mid-test (and the spawn-repair points the process cwd at a
+        // `TempDir` that drops when this test ends). Without an explicit restore
+        // to a durable directory, the process would be left with its cwd inside
+        // a since-deleted tempdir, breaking *every* later test that spawns a
+        // shell — exactly the cross-test pollution this guard prevents.
+        let durable_cwd = std::env::current_dir().expect("ambient cwd before the test");
+
         let outer = tempfile::tempdir().expect("outer tempdir");
         let deleted_cwd = outer.path().join("deleted-cwd");
         std::fs::create_dir(&deleted_cwd).expect("create deleted cwd");
@@ -2145,6 +2154,10 @@ mod tests {
             std::env::current_dir().expect("process cwd should be repaired"),
             stable_cwd.path().canonicalize().expect("stable cwd exists")
         );
+
+        // Restore the process cwd to a durable directory BEFORE `stable_cwd`
+        // (and the guard) drop, so no later test inherits a deleted cwd.
+        std::env::set_current_dir(&durable_cwd).expect("restore durable cwd");
     }
 
     #[test]

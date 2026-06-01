@@ -1720,6 +1720,46 @@ mod tests {
         assert!(late_child.is_cancelled());
     }
 
+    /// Scenario: a `cancel()` racing concurrent `child()` creations must leave
+    /// **no** child un-cancelled. This pins the double-checked registration in
+    /// [`AbortToken::child`] (check-before-push, re-check-after-push): a naive
+    /// single-check implementation could register a child on a token that is
+    /// cancelled between the check and the push, leaving an orphaned live child
+    /// after the parent's `cancel()` fan-out already ran — exactly the
+    /// abort-cancel race that would let a sub-agent keep running after the user
+    /// cancelled the session.
+    #[test]
+    fn abort_token_child_creation_races_cancel_without_orphans() {
+        // Repeat to exercise many interleavings of cancel vs. child().
+        for _ in 0..200 {
+            let root = AbortToken::new();
+            let mut handles = Vec::new();
+
+            // Several threads create children concurrently...
+            for _ in 0..8 {
+                let parent = root.clone();
+                handles.push(std::thread::spawn(move || parent.child()));
+            }
+            // ...while this thread cancels the root mid-flight.
+            root.cancel();
+
+            // Every child observed by a creator thread must end cancelled:
+            // either it was created after cancel (immediate), or it was
+            // registered and reached by the fan-out, or the post-push re-check
+            // caught it. None may be left live.
+            for handle in handles {
+                let child = handle.join().expect("child creation thread panicked");
+                assert!(
+                    child.is_cancelled(),
+                    "a child created while racing cancel() must not escape cancellation",
+                );
+            }
+
+            // And any child created strictly after cancel() is immediately cancelled.
+            assert!(root.child().is_cancelled());
+        }
+    }
+
     /// Scenario: async waiters are notified when a token is cancelled.
     /// The child-runner uses this to stop waiting for a provider call
     /// once the parent session has been cancelled.
