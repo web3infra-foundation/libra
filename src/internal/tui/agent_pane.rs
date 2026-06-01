@@ -119,8 +119,8 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
 
     let mut out = String::from("Agent runs:\n");
     let header = format!(
-        "  {:<36} {:<10} {:<12} {:<24} {:>10} {:>10}",
-        "run", "status", "provider", "model", "tokens", "cost"
+        "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10}",
+        "run", "status", "provider", "model", "elapsed", "tokens", "cost"
     );
     out.push_str(&header);
     out.push('\n');
@@ -128,19 +128,23 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
     out.push_str(&"-".repeat(header.len() - 2));
     out.push('\n');
     for row in rows {
-        let (tokens, cost) = match row.usage {
+        // `elapsed` / `tokens` / `cost` all derive from the joined per-run
+        // `RunUsage`; a run with no usage record renders `-` in all three.
+        let (elapsed, tokens, cost) = match row.usage {
             Some(usage) => (
+                format_elapsed_ms(usage.wall_clock_ms),
                 usage.total_tokens().to_string(),
                 format_micro_dollars(usage.cost_estimate_micro_dollars),
             ),
-            None => ("-".to_string(), "-".to_string()),
+            None => ("-".to_string(), "-".to_string(), "-".to_string()),
         };
         out.push_str(&format!(
-            "  {:<36} {:<10} {:<12} {:<24} {:>10} {:>10}\n",
+            "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10}\n",
             row.agent_run_id.0,
             status_label(row.status),
             truncate(&row.provider, 12),
             truncate(&row.model, 24),
+            elapsed,
             tokens,
             cost,
         ));
@@ -155,6 +159,23 @@ fn format_micro_dollars(micro_dollars: u64) -> String {
     let dollars = micro_dollars / 1_000_000;
     let frac = (micro_dollars % 1_000_000) / 100; // 4 decimal places (1e-4 dollars)
     format!("${dollars}.{frac:04}")
+}
+
+/// Format an elapsed wall-clock duration (milliseconds) compactly: `<1s` as
+/// `NNNms`, under a minute as `N.Ns`, otherwise `NmN.Ns`. Pure integer math so
+/// a pathological value never panics.
+fn format_elapsed_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    let tenths = (ms % 1_000) / 100;
+    let total_secs = ms / 1_000;
+    if total_secs < 60 {
+        return format!("{total_secs}.{tenths}s");
+    }
+    let minutes = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{minutes}m{secs}.{tenths}s")
 }
 
 /// Stable lower-case label for a run status (the `{:?}` Debug form is not a
@@ -367,5 +388,32 @@ mod tests {
         assert_eq!(format_micro_dollars(1_500), "$0.0015");
         assert_eq!(format_micro_dollars(1_000_000), "$1.0000");
         assert_eq!(format_micro_dollars(2_345_600), "$2.3456");
+    }
+
+    #[test]
+    fn elapsed_format_scales_ms_seconds_minutes() {
+        assert_eq!(format_elapsed_ms(0), "0ms");
+        assert_eq!(format_elapsed_ms(420), "420ms");
+        assert_eq!(format_elapsed_ms(4_200), "4.2s");
+        assert_eq!(format_elapsed_ms(59_900), "59.9s");
+        assert_eq!(format_elapsed_ms(63_400), "1m3.4s");
+    }
+
+    #[test]
+    fn format_pane_shows_elapsed_from_wall_clock() {
+        let runs = vec![run(70, AgentRunStatus::Completed)];
+        let out = format_agent_run_pane_with_usage(&runs, |_| {
+            Some(RunUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                wall_clock_ms: 4_200,
+                ..RunUsage::default()
+            })
+        });
+        assert!(out.contains("elapsed"), "elapsed header present: {out}");
+        assert!(
+            out.contains("4.2s"),
+            "wall-clock elapsed must render: {out}"
+        );
     }
 }
