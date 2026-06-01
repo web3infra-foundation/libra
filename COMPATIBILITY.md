@@ -58,7 +58,7 @@ batch document.
 | cherry-pick | supported | |
 | push | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentional (see [docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push](docs/improvement/compatibility/declined.md#d2-本地-file-remote-的-push)) |
 | fetch | supported | `--depth` public flag |
-| pull | partial | fetch + fast-forward/three-way merge supported; no `--ff-only` / `--rebase` / `--squash` strategy flags exposed |
+| pull | partial | fetch + fast-forward/three-way merge supported; `--ff-only` and `--rebase` (`-r`) strategy flags exposed; `--squash` deferred |
 | diff | supported | |
 | grep | supported | |
 | blame | supported | |
