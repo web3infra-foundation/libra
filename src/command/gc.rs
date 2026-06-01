@@ -51,6 +51,7 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 const SECONDS_PER_MONTH: u64 = 30 * SECONDS_PER_DAY;
 const SECONDS_PER_YEAR: u64 = 365 * SECONDS_PER_DAY;
+const GC_LOCK_READ_LIMIT: u64 = 4096;
 
 /// Command-line options for `libra gc`.
 #[derive(Parser, Debug)]
@@ -260,15 +261,19 @@ pub async fn execute(args: GcArgs) -> Result<(), String> {
 /// deletion attempts.
 pub async fn execute_safe(args: GcArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    ensure_repository_storage_metadata()?;
     let result = run_gc(&args).await?;
     render_gc_output(&result, output)
 }
 
 /// Execute the garbage-collection pass and return renderable statistics.
 async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
+    ensure_repository_storage_metadata()?;
     let lock = acquire_gc_lock(args.force)?;
     let policy = prune_policy(args)?;
-    let storage = ClientStorage::init(path::objects());
+    let objects_dir = path::objects();
+    ensure_real_object_directory(&objects_dir)?;
+    let storage = ClientStorage::init(objects_dir);
     let mut reachability = collect_reachability(&storage).await?;
     trace_reachable(&storage, &mut reachability);
     let skip_loose_prune = !args.dry_run && !reachability.warnings.is_empty();
@@ -359,6 +364,7 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
             })
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && force => {
+            verify_gc_lock_is_stale(&path)?;
             fs::remove_file(&path).map_err(|error| {
                 CliError::fatal(format!(
                     "failed to remove existing gc lock '{}': {}",
@@ -400,6 +406,93 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
         ))
         .with_stable_code(StableErrorCode::IoWriteFailed)),
     }
+}
+
+/// Verify that an existing lock does not belong to a running process.
+fn verify_gc_lock_is_stale(path: &Path) -> CliResult<()> {
+    let Some(pid) = read_gc_lock_pid(path)? else {
+        return Err(CliError::conflict(format!(
+            "gc lock '{}' does not contain a valid pid and cannot be verified as stale",
+            path.display()
+        ))
+        .with_hint(
+            "remove the lock manually only after verifying that no gc process is running.",
+        ));
+    };
+    if process_is_running(pid) {
+        return Err(CliError::conflict(format!(
+            "gc is already running with pid {pid}; lock file '{}' is not stale",
+            path.display()
+        ))
+        .with_hint("wait for the running gc to finish before retrying."));
+    }
+    Ok(())
+}
+
+/// Read the `pid=<number>` owner recorded in a GC lock file.
+fn read_gc_lock_pid(path: &Path) -> CliResult<Option<u32>> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to inspect gc lock '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(CliError::conflict(format!(
+            "gc lock '{}' is a symbolic link and cannot be verified as stale",
+            path.display()
+        ))
+        .with_hint("replace symbolic links with a regular gc.lock file before using --force."));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(CliError::conflict(format!(
+            "gc lock '{}' is not a regular file and cannot be verified as stale",
+            path.display()
+        ))
+        .with_hint(
+            "remove the lock manually only after verifying that no gc process is running.",
+        ));
+    }
+    if metadata.len() > GC_LOCK_READ_LIMIT {
+        return Err(CliError::conflict(format!(
+            "gc lock '{}' is too large to verify safely",
+            path.display()
+        ))
+        .with_hint(
+            "remove the lock manually only after verifying that no gc process is running.",
+        ));
+    }
+    let content = fs::read_to_string(path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read gc lock '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pid="))
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 0))
+}
+
+/// Return whether `pid` appears to identify a live process.
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Return whether `pid` appears to identify a live process.
+#[cfg(not(unix))]
+fn process_is_running(_pid: u32) -> bool {
+    false
 }
 
 /// Render the garbage-collection result as human text or JSON.
@@ -576,6 +669,37 @@ async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability
         reachable: HashSet::new(),
         warnings: Vec::new(),
     })
+}
+
+/// Reject raw `.libra` symlinks before repository paths are canonicalized.
+fn ensure_repository_storage_metadata() -> CliResult<()> {
+    let mut current = util::cur_dir();
+    loop {
+        let storage = current.join(util::ROOT_DIR);
+        match fs::symlink_metadata(&storage) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CliError::fatal(format!(
+                    "refusing to use symlink repository metadata directory '{}'",
+                    storage.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt));
+            }
+            Ok(metadata) if metadata.file_type().is_dir() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CliError::fatal(format!(
+                    "failed to inspect repository metadata '{}': {}",
+                    storage.display(),
+                    format_io_error(&error)
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed));
+            }
+        }
+        if !current.pop() {
+            return Ok(());
+        }
+    }
 }
 
 /// Ensure the object database root is a real directory before traversal.
@@ -1613,6 +1737,13 @@ mod tests {
             .expect("hash bytes should match active hash kind")
     }
 
+    /// Return a PID value that does not appear to identify a live process.
+    fn non_running_pid() -> u32 {
+        (900_000..910_000)
+            .find(|pid| !process_is_running(*pid))
+            .expect("test host should have at least one unused pid in this high range")
+    }
+
     /// Build a stable test signature.
     fn signature() -> Signature {
         Signature {
@@ -2541,6 +2672,50 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers object-directory validation happening before storage initialization.
+    async fn run_gc_reports_invalid_object_directory_without_panic() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let objects = path::objects();
+        fs::remove_dir_all(&objects).unwrap();
+        fs::write(&objects, b"not a directory").unwrap();
+
+        let error = run_gc(&GcArgs {
+            dry_run: false,
+            prune: "now".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("is not a directory"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers rejecting a raw `.libra` symlink before canonicalized paths hide it.
+    fn ensure_repository_storage_metadata_rejects_libra_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        symlink(external.path(), repo.path().join(util::ROOT_DIR)).unwrap();
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let error = ensure_repository_storage_metadata().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("symlink repository metadata"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     /// Covers compatibility warnings for accepted Git flags.
     async fn run_gc_warns_for_compatibility_flags() {
         let repo = tempdir().unwrap();
@@ -2591,11 +2766,104 @@ mod tests {
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
         let lock_path = util::storage_path().join("gc.lock");
-        fs::write(&lock_path, "stale").unwrap();
+        fs::write(&lock_path, format!("pid={}\n", non_running_pid())).unwrap();
 
         let lock = acquire_gc_lock(true).unwrap();
 
         assert!(lock.forced);
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers `--force` refusing to replace a lock owned by a live process.
+    async fn acquire_gc_lock_force_rejects_live_pid() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, format!("pid={}\n", std::process::id())).unwrap();
+
+        let error = match acquire_gc_lock(true) {
+            Ok(_) => panic!("live lock should not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers malformed lock files being treated as unverifiable for `--force`.
+    async fn acquire_gc_lock_force_rejects_malformed_lock() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, "stale").unwrap();
+
+        let error = match acquire_gc_lock(true) {
+            Ok(_) => panic!("malformed lock should not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers `--force` refusing to inspect symlink lock files.
+    async fn acquire_gc_lock_force_rejects_symlink_lock() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let target = repo.path().join("outside.lock");
+        fs::write(&target, format!("pid={}\n", non_running_pid())).unwrap();
+        let lock_path = util::storage_path().join("gc.lock");
+        symlink(&target, &lock_path).unwrap();
+
+        let error = match acquire_gc_lock(true) {
+            Ok(_) => panic!("symlink lock should not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        assert!(target.exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers `--force` refusing oversized lock files without reading them fully.
+    async fn acquire_gc_lock_force_rejects_oversized_lock() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, vec![b'x'; (GC_LOCK_READ_LIMIT + 1) as usize]).unwrap();
+
+        let error = match acquire_gc_lock(true) {
+            Ok(_) => panic!("oversized lock should not be replaced"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
         assert!(lock_path.exists());
     }
 
