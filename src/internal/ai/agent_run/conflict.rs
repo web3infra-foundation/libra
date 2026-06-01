@@ -12,7 +12,8 @@
 //!    file (`same_symbol`).
 //! 3. **Non-mergeable file cross-edit** — two patches both edit the same file
 //!    of a class that does not auto-merge (lockfiles, dependency manifests,
-//!    tests), regardless of hunk overlap (`non_mergeable_cross_edit`).
+//!    tests, CI/pipeline config), regardless of hunk overlap
+//!    (`non_mergeable_cross_edit`).
 //!
 //! The function is **pure**. The future ValidatorEngine normalises each
 //! git-internal `PatchSet` — `diffy` hunks plus a tree-sitter symbol scan of the
@@ -139,9 +140,36 @@ fn non_mergeable_class(path: &str) -> Option<&'static str> {
         Some("manifest")
     } else if is_test_path(path, basename) {
         Some("test")
+    } else if is_ci_config(path, basename) {
+        // CI / pipeline config: concurrent edits routinely collide on the same
+        // workflow steps (Step 2.5 narrative "测试/配置/lockfile 交叉修改").
+        Some("config")
     } else {
         None
     }
+}
+
+/// CI / pipeline configuration whose concurrent edits routinely collide. Matched
+/// by the well-known basenames and the `.github/workflows/` directory; kept
+/// conservative so ordinary app config (e.g. an arbitrary `config.toml`) is not
+/// swept in.
+fn is_ci_config(path: &str, basename: &str) -> bool {
+    let in_github_workflows = path
+        .split(['/', '\\'])
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w[0] == ".github" && w[1] == "workflows");
+    in_github_workflows
+        || matches!(
+            basename,
+            ".gitlab-ci.yml"
+                | ".gitlab-ci.yaml"
+                | ".travis.yml"
+                | "azure-pipelines.yml"
+                | "Jenkinsfile"
+                | ".circleci"
+        )
+        || path.contains(".circleci/")
 }
 
 /// Generated dependency lockfiles — these never merge cleanly.
@@ -336,9 +364,24 @@ mod tests {
         assert_eq!(non_mergeable_class("web/x.test.jsx"), Some("test"));
         assert_eq!(non_mergeable_class("web/x.spec.jsx"), Some("test"));
         assert_eq!(non_mergeable_class("a/__tests__/x.ts"), Some("test"));
+        // CI / pipeline config (Step 2.5 narrative "配置...交叉修改").
+        assert_eq!(
+            non_mergeable_class(".github/workflows/ci.yml"),
+            Some("config"),
+        );
+        assert_eq!(
+            non_mergeable_class("repo/.github/workflows/release.yaml"),
+            Some("config"),
+        );
+        assert_eq!(non_mergeable_class(".gitlab-ci.yml"), Some("config"));
+        assert_eq!(non_mergeable_class("Jenkinsfile"), Some("config"));
+        assert_eq!(non_mergeable_class(".circleci/config.yml"), Some("config"));
         assert_eq!(non_mergeable_class("src/testing.rs"), None);
         assert_eq!(non_mergeable_class("src/internal/foo.rs"), None);
         assert_eq!(non_mergeable_class("README.md"), None);
+        // Ordinary app config is NOT swept in — only CI/pipeline config.
+        assert_eq!(non_mergeable_class("src/config.toml"), None);
+        assert_eq!(non_mergeable_class("settings.yaml"), None);
     }
 
     /// Conflicts are aggregated across every patch pair, deterministically.

@@ -1,149 +1,58 @@
 # AGENTS.md
 
-## Review guidelines
+## What this repo is
+- `libra` is a single Rust 2024 crate: a Git-compatible, AI-agent-native VCS. It uses `.libra/libra.db` for config/HEAD/refs/AI runtime tables and `.libra/vault.db` for secrets; do not assume a `.git/` layout.
+- The real entry flow is `src/main.rs` (tracing + 32 MiB CLI thread) -> `src/cli.rs::{parse,parse_async}` -> `src/command/*::execute_safe`. `src/lib.rs::{exec,exec_async}` are the embedding API.
+- `src/cli.rs` owns clap grammar, schema preflight, global hash-kind pinning from `core.objectformat`, output mode resolution, and dispatch. Touch it when adding/changing public CLI surfaces.
+- Major boundaries: `src/command/` subcommands; `src/internal/ai/` agent/runtime/provider/tool/session/MCP/orchestrator stack; `src/internal/protocol/` Git/HTTP/SSH/LFS clients; `src/internal/publish/` Rust publish pipeline; `src/utils/` storage/path/error/output/test helpers.
+- `web/` is a Next.js static export embedded into the Rust binary; `worker/` is the OpenNext/Cloudflare Worker for read-only `libra publish` hosting.
 
-Review pull requests with a high-recall, production-risk mindset.
+## Commands agents commonly guess wrong
+- Format: `cargo +nightly fmt --all` (`rustfmt.toml` uses unstable features and Std/External/Crate import grouping). Check-only: `cargo +nightly fmt --all --check`.
+- Lint gate: `LIBRA_SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features -- -D warnings`.
+- Fast compile: `LIBRA_SKIP_WEB_BUILD=1 cargo check` or `LIBRA_SKIP_WEB_BUILD=1 cargo build`.
+- Default tests: `cargo test --all` (deterministic L1; credential/live layers skip when env is absent).
+- Single integration target: `cargo test --test <target> -- --test-threads=1`. Prefer `<target>::<test_fn>` when naming tests in PRs/issues.
+- CLI smoke: `cargo run -- <cmd>`.
+- Web embed check: `pnpm --dir web install --frozen-lockfile && pnpm --dir web lint && pnpm --dir web build && bash scripts/check_web_out_clean.sh`.
+- Worker checks from `worker/`: `pnpm lint`, `pnpm test`, `pnpm test:miniflare`, `pnpm build`; e2e uses `pnpm e2e:serve` on `127.0.0.1:3127` plus `pnpm e2e`.
+- CI-required consistency scripts: `bash scripts/check_compat_matrix.sh`, `bash scripts/check_docs_consistency.sh`, `bash scripts/check_integration_plan_consistency.sh`.
 
-Prioritize finding issues that could plausibly cause:
-- security exposure
-- incorrect behavior
-- silent failure
-- data corruption or data loss
-- backward incompatibility
-- production instability
-- missing validation or missing tests around changed behavior
-- incomplete documentation for externally visible changes
+## Build and generated-output quirks
+- `build.rs` runs `pnpm install --frozen-lockfile` and `pnpm run build` in `web/` unless `LIBRA_SKIP_WEB_BUILD=1`; skipped builds create a stub `web/out/index.html`.
+- CI uses Node 22 and pnpm 11.1.0 for `web/`. `build.rs` may add `NODE_OPTIONS=--experimental-sqlite` for Node 22/23.
+- `compat-web-check` is the only base CI job that must not skip the web build; TUI automation scenarios also set `LIBRA_SKIP_WEB_BUILD=0` because they need the real embedded Next.js app.
+- The publish Worker scaffold produced by `libra publish init` makes `worker/wrangler.jsonc` user-owned except LIBRA-MANAGED bindings (`LIBRA_PUBLISH_DB`, `LIBRA_PUBLISH_BUCKET`, `ASSETS`). Never put Cloudflare tokens in wrangler config; use `.dev.vars` or dashboard/wrangler secrets.
 
-Do not optimize for fewer comments.
-If an issue is plausible, user-impacting, and actionable, raise it.
+## Tests and feature gates
+- `tests/INDEX.md` is the authoritative list of every integration `--test` target. Add/update its row when adding, renaming, or removing a top-level integration target.
+- Files under `tests/compat/` are not auto-discovered by Cargo; every compat guard needs a `Cargo.toml [[test]]` entry and a row in `tests/compat/README.md`.
+- TUI/PTY automation needs all three: `--features test-provider`, `LIBRA_ENABLE_TEST_PROVIDER=1`, and `--test-threads=1`. CI runs at least `code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, and `code_ui_remote_sse_matrix` this way.
+- Network smoke: `cargo test --features test-network --test network_remotes_test -- --test-threads=1`.
+- Live AI: `cargo test --features test-live-ai --test ai_agent_test --test ai_chat_agent_test -- --test-threads=1 --nocapture` with `DEEPSEEK_API_KEY`; live cloud uses `--features test-live-cloud` plus `LIBRA_D1_*` and `LIBRA_STORAGE_*` credentials.
+- `.env.test` lines must keep `export`; otherwise `source .env.test` sets shell-local vars and cargo child processes silently skip L2/L3 tests.
+- Use `tempfile::tempdir()` plus `utils::test::ChangeDirGuard`; CLI-level tests should use helpers in `tests/command/mod.rs` so `HOME`, `XDG_CONFIG_HOME`, `LIBRA_CONFIG_GLOBAL_DB`, `LANG`, and `LC_ALL` are isolated.
+- Mark tests `#[serial]` if they mutate process cwd, global env, shared ports, config DBs, or other global state.
 
-Focus areas:
+## Public-surface change checklist
+- New or changed command: update `src/cli.rs`, the matching `src/command/<name>.rs`, `COMPATIBILITY.md`, command docs under `docs/commands/`, tests under `tests/command/`, and `tests/INDEX.md`.
+- Every visible command/help surface must render examples (`pub const <CMD>_EXAMPLES` wired through clap `after_help`) and every `docs/commands/<name>.md` page needs `## Examples` or `## Common Commands`.
+- New stable error codes in `src/utils/error.rs` must be documented in `docs/error-codes.md`; `libra help error-codes` includes that doc at compile time.
+- If changing compatibility semantics, run `bash scripts/check_compat_matrix.sh` and update declined/intentional notes under `docs/improvement/compatibility/` when relevant.
+- If changing SQL, update bootstrap/migrations under `sql/`; `sql/publish/` is the Worker D1 schema and is independent from `.libra/libra.db` runtime schema.
 
-- Code quality: readability, maintainability, error handling, edge cases, control flow clarity, and failure modes.
-- Security: vulnerabilities, unsafe defaults, input validation/sanitization, secrets exposure, auth/authz regressions, injection risks, SSRF/path traversal/deserialization/crypto misuse where relevant.
-- Performance: hot-path regressions, N+1 queries, unbounded work, excessive allocations, blocking I/O, memory/resource leaks, missing pagination/batching/caching where impact is likely.
-- Testing: missing coverage for changed behavior, weak assertions, missing regression tests, missing edge-case coverage, flaky test risk.
-- Documentation: missing or stale code comments, README updates, migration notes, config/env var docs, API/SDK/schema docs, changelog or release notes for externally visible behavior.
+## Code conventions that are enforced here
+- Do not add `unwrap()` or `expect()` in production `src/**` paths. Existing compat guards scan broadly; tests may use them, and truly infallible production cases need a short `// INVARIANT:` comment.
+- User-facing errors must be actionable: include what failed, the affected path/ref/object/resource, and a fix hint when known. Prefer `anyhow::Context` for CLI flows and `thiserror` for domain/library errors.
+- Command modules should expose clap args and structured `execute_safe`-style handlers; document externally visible side effects and error mapping on command entry points.
+- Database helpers that accept an existing connection follow the `_with_conn` naming pattern to preserve transaction safety.
+- For AI provider work, keep provider-specific code under `src/internal/ai/providers/<provider>/` and satisfy common contracts in `completion/`; fake/deterministic provider paths are for tests.
 
-## Review output
+## Review bias to preserve
+- Review with high recall for security, data loss/corruption, auth/tenancy, migrations, external APIs, concurrency, retries/idempotency, hot-path performance, and missing tests/docs for changed behavior.
+- Treat production `unwrap()`/`expect()`, silent failure paths, unsafe secret/PII logging, missing validation at trust boundaries, and unbounded network/loop/retry/resource behavior as material findings.
+- `worktree remove` intentionally does not delete directories by default; `lfs` intentionally uses `.libra_attributes`; `submodule`/`subtree` are intentionally out of scope. Check `COMPATIBILITY.md` before assuming Git parity.
 
-- Use inline comments for specific issues tied to changed files.
-- Use a top-level summary for cross-cutting risks, overall assessment, and praise.
-- Order findings by severity, then user impact, then ease of verification.
-- For each finding, explain:
-  - what is wrong
-  - why it matters
-  - the realistic impact
-  - the minimal fix or direction
-- Prefer one clear finding per issue. Avoid combining unrelated concerns.
-- Avoid style-only nitpicks unless they create maintainability or correctness risk.
-- If no material issues are found, say so briefly and note any residual risk or untested area.
-
-## Severity policy
-
-Treat the following as P0/P1 when applicable:
-
-### P0
-- vulnerabilities enabling unauthorized access, data exfiltration, remote code execution, privilege escalation, or destructive data loss
-- changes likely to cause major outage, irreversible corruption, or widespread security exposure
-
-### P1
-- missing or weakened authentication, authorization, tenancy, or permission checks
-- untrusted input reaching dangerous sinks without adequate validation or sanitization
-- silent exception swallowing, hidden failure paths, or incorrect fallback behavior
-- correctness bugs in business logic, state transitions, retries, idempotency, concurrency, or transaction handling
-- backward-incompatible API, schema, contract, or migration changes without explicit handling
-- performance regressions likely to affect latency, throughput, reliability, or infrastructure cost in production
-- missing tests for changed behavior, bug fixes, edge cases, or critical failure paths
-- missing README, migration, configuration, or API documentation for externally visible changes
-- unsafe logging of secrets, tokens, PII, or sensitive internal details
-- resource lifecycle issues: leaked handles, unreleased locks, missing timeouts, unbounded retries, or unbounded memory growth
-- use of `unwrap()` or `expect()` in production code (library/command modules, including startup/initialization) — must be replaced with proper error handling (`?`, `anyhow::Context`, `thiserror`) that produces user-friendly error messages. Acceptable only in tests and obviously infallible logic with a `// INVARIANT:` comment; flag all other occurrences
-
-## Trigger rules
-
-When deciding whether to raise a finding, err toward reporting if:
-- the change affects auth, permissions, payments, data writes, migrations, caching, concurrency, retries, or external APIs
-- the PR changes public behavior but tests or docs were not updated
-- error handling changed and failure behavior is not explicitly tested
-- a query, loop, or network call is added in a potentially hot path
-- defaults changed in a way that could affect security or production behavior
-- a fix depends on assumptions not enforced in code
-- any new or modified code introduces `unwrap()`, `expect()`, or `panic!()` outside of tests or obviously infallible logic — flag the instance and suggest a `Result`-based alternative with a contextual, user-friendly error message
-
-Do not dismiss an issue only because:
-- the diff is small
-- the code “probably works”
-- the risk depends on a realistic edge case
-- the fix would be easy to add later
-
-## Commenting style
-
-- Inline comments: concrete file-specific defects or risks.
-- Top-level summary: overall risk, recurring themes, and praise.
-- Be direct and specific.
-- Prefer actionable recommendations over generic advice.
-
-## Project Structure & Module Organization
-- `src/` holds the Rust crate (edition 2024). CLI entry `src/main.rs`, library root `src/lib.rs`, CLI definition/dispatch in `src/cli.rs`, shared helpers in `src/common_utils.rs`, `src/git_protocol.rs`, `src/lfs_structs.rs`.
-- `src/command/` contains every `libra <subcommand>` (60+ modules: `init`, `clone`, `add`, `commit`, `push`, `pull`, `fetch`, `status`, `log`, `show`, `diff`, `blame`, `branch`, `tag`, `switch`, `checkout`, `merge`, `rebase`, `cherry_pick`, `reset`, `restore`, `mv`, `clean`, `stash`, `revert`, `reflog`, `config`, `remote`, `worktree`, `worktree-fuse`, `cloud`, `lfs`, `open`, `bisect`, `cat_file`, `describe`, `grep`, `graph`, `hooks`, `index_pack`, `ls_remote`, `publish`, `rev_list`, `rev_parse`, `sandbox`, `shortlog`, `show_ref`, `symbolic_ref`, `automation`, `code`, `code_control`, `code_control_files`, `web_assets`, `usage`, `db`, `lfs_schema`, …) plus `src/command/agent/` for `libra agent …` subcommands.
-- `src/internal/` holds core logic: AI stack in `internal/ai/` (`agent/`, `agent_run/`, `providers/`, `tools/`, `completion/`, `mcp/`, `session/`, `prompt/`, `commands/`, `hooks/`, `intentspec/`, `orchestrator/`, `goal/`, `skills/`, `sandbox/`, `runtime/`, `usage/`, `history.rs`, `libra_vcs.rs`, …); TUI in `internal/tui/`; Sea-ORM models in `internal/model/`; network clients in `internal/protocol/` (`git_client`, `https_client`, `ssh_client`, `lfs_client`, `local_client`); publish pipeline in `internal/publish/`; plus `branch.rs`, `tag.rs`, `config.rs`, `head.rs`, `reflog.rs`, `db.rs`, `db/migration.rs`, `vault.rs`, `log/`.
-- `src/utils/` covers shared utilities: `client_storage.rs` (tiered local + S3/R2 + LRU), `d1_client.rs`, `path*.rs`, `object*.rs`, `tree.rs`, `ignore.rs`, `lfs.rs`, `fuse.rs`, `convert.rs`, `error.rs`, `output.rs`, `pager.rs`, `text.rs`, `worktree.rs`, `storage/`, `storage_ext.rs`, `test.rs` (`ChangeDirGuard`, `setup_with_new_libra_in`).
-- `tests/` holds integration targets at the top level plus `tests/command/` for per-subcommand suites. `tests/INDEX.md` is the authoritative one-line index of every cargo `--test` target, grouped by Wave (1 command/compat, 2 Code UI & local automation, 3 network, 4 live AI, 5 live cloud, 6 perf smoke); keep it in sync when adding/renaming a test target. Shared helpers in `tests/command/mod.rs`, `tests/helpers/`, `tests/harness/`; fixtures in `tests/data/`, `tests/fixtures/`; `tests/objects/` for object-level tests; `tests/compat/` for compat-surface guards.
-- `web/` is the Next.js static export bundled into `WebAssets` by `build.rs` (skipped when `LIBRA_SKIP_WEB_BUILD=1`); `worker/` holds the Cloudflare Worker (D1 + R2) backing `libra publish` and cloud backup.
-- Community docs in `docs/` (incl. `docs/development/integration-test-plan.md`, `docs/improvement/*.md` for per-area gap-analysis); SQLite bootstrap `sql/sqlite_20260309_init.sql` + `sql/sqlite_20260415_ai_runtime_contract.sql`; runtime migrations in `sql/migrations/`; publish-pipeline schema in `sql/publish/`; hooks/templates in `template/`; release/install assets in `install.sh`, `scripts/`.
-
-## Build, Test, and Development Commands
-- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features -- -D warnings` keep formatting and linting aligned (`rustfmt.toml` sets `group_imports = "StdExternalCrate"` and `imports_granularity = "Crate"`). **CI enforces `-D warnings`; all clippy warnings must be resolved before committing.**
-- `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo). Set `LIBRA_SKIP_WEB_BUILD=1` to skip the Next.js export inside `build.rs` during iteration.
-- `cargo test --all` runs the default L1 suite. Filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; mark `#[serial]` if they mutate shared state.
-- Feature-gated layers (see `tests/INDEX.md` waves; CI `compat-offline-core` covers L1 by default, `compat-network-remotes` runs L2):
-  - `--features test-network` for Wave 3 (`network_remotes_test`) — no secrets needed.
-  - `--features test-live-ai` for Wave 4 (real LLM APIs; needs `DEEPSEEK_API_KEY` etc.).
-  - `--features test-live-cloud` for Wave 5 (real D1/R2; needs `LIBRA_D1_*`/`LIBRA_STORAGE_*`).
-  - `--features test-provider` plus `LIBRA_ENABLE_TEST_PROVIDER=1` to activate the deterministic provider used by `code_ui_scenarios`, `harness_self_test`, `code_codex_default_tui_test`, `code_ui_remote_lease_matrix`, `code_ui_remote_sse_matrix` (run with `--test-threads=1`).
-  - `--features worktree-fuse` for Unix FUSE-backed worktree commands.
-  - `--features subagent-scaffold` for the gated CEX-S2-10 schema scaffold (see `docs/improvement/agent.md`).
-
-## Coding Style & Naming Conventions
-- Rust 2024; 4-space indent; snake_case for modules/functions, PascalCase for types, SCREAMING_SNAKE for consts.
-- Imports are grouped Std/External/Crate per `rustfmt.toml`; avoid wildcard imports except in tests.
-- Prefer `anyhow::Result` for CLI flows and `thiserror` for library errors; keep args parsed via `clap` in `src/command/*`.
-- **Avoid `unwrap()` / `expect()`** in production code (including startup/initialization). They are acceptable only in tests and obviously infallible logic (with a `// INVARIANT:` comment). All other code must return `Result` and propagate errors with `?` plus contextual, user-friendly messages.
-- **User-friendly errors**: All errors surfaced to the user must be human-readable and actionable — wrap internal errors with context explaining what went wrong, which resource was affected, and how to fix it.
-- Add short comments only when control flow is non-obvious (e.g., async handling, SQLite migrations).
-
-## Testing Guidelines
-- Favor integration coverage in `tests/command/` (per-subcommand suites) and the top-level `tests/*.rs` targets (AI/runtime/Code-UI/publish/etc.) to mirror real Git and agent workflows; use `tempfile::tempdir()` and `utils::test::ChangeDirGuard` to isolate state.
-- `tests/INDEX.md` is the authoritative test index — when adding/renaming a `--test` target, add or update its one-line row (target | wave | purpose | relevant src). Reference specific cases in PRs as `<target>::<test_fn>`.
-- Keep fixtures small and local under `tests/data/` or `tests/fixtures/`; re-use helpers in `tests/command/mod.rs`, `tests/helpers/`, and `tests/harness/` instead of shelling out directly.
-- Mark tests `#[serial]` (via `serial_test`) if they mutate shared state; keep async tests on Tokio (`#[tokio::test]`, or `flavor = "multi_thread"` when needed). PTY/TUI scenarios under `tests/harness/` plus the `code_ui_*` and `harness_self_test` targets require `--features test-provider` with `LIBRA_ENABLE_TEST_PROVIDER=1` and `--test-threads=1`.
-- Pair new commands/options with at least one end-to-end test plus a focused unit test where logic is easily isolated. For new error variants, add a Display-pin test (see the `test(...): pin Display for …` commits) so user-facing messages stay stable.
-
-## Commit & Pull Request Guidelines
-- History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
-- Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all`, plus any relevant `--features test-*` runs); include repro steps or sample CLI output when touching user-visible behavior.
-- Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
-
-## Workspace Notes
-- This repository is managed as a `libra` workspace and is intentionally used through `libra` commands rather than raw `git`.
-- Prefer this command flow for changes: `libra status` -> inspect diff -> `libra add` -> `libra commit -a -s -m "<scope>: ..."` -> `libra push origin <branch>`.
-- When a user requests version operations or release copy steps, follow the `libra` command workflow instead of `git` commands.
-
-## Aggressive review bias
-
-Prefer false-positive-tolerant review over false-negative-tolerant review for:
-- security-sensitive code
-- data mutations
-- migrations
-- public API changes
-- reliability-critical paths
-
-If uncertain between “mention in summary” and “raise as finding”,
-raise as a finding when the issue could plausibly reach production.
-
-Treat undocumented assumptions as risk.
-Treat untested fixes as incomplete.
-Treat externally visible behavior changes without docs as P1 by default.
-Flag `unwrap()` / `expect()` in production code (outside tests and obviously infallible logic) as a P1 finding — startup/initialization is a production path and is NOT exempt. Suggest replacing with `?` + contextual, user-friendly error message via `anyhow::Context` or a domain-specific `thiserror` variant. If used in an obviously infallible scope, ensure a brief `// INVARIANT:` comment explains why the value can never be `None`/`Err`.
+## Instruction-file precedence
+- Root `AGENTS.md` is the primary OpenCode/agent guidance. `.codex/AGENTS.md` should stay a thin pointer here; it currently contains stale copied fragments, so prefer updating this file first.
+- `CLAUDE.md` is detailed and mostly current. `.github/copilot-instructions.md` is stale about architecture (mentions non-existent `engine/`, `delta/`, `transport/` top-level crates); trust Cargo/source over that file.
