@@ -82,6 +82,66 @@ pub struct CapabilityPackageManifest {
     pub install_warnings: Vec<String>,
 }
 
+/// Why a [`CapabilityPackageManifest`] failed integrity validation. Surfaced to
+/// the user verbatim by the installer so a malformed third-party manifest is
+/// rejected with an actionable reason rather than silently trusted.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ManifestValidationError {
+    /// A required identity field was empty / whitespace-only.
+    #[error("capability package manifest field `{field}` must not be empty")]
+    EmptyField {
+        /// The offending field name (`package_id` / `version` / `publisher`).
+        field: &'static str,
+    },
+    /// The `checksum` is not a 64-character lowercase hex SHA-256 digest.
+    #[error(
+        "capability package checksum must be a 64-character lowercase hex SHA-256 digest, got {got:?}"
+    )]
+    InvalidChecksum {
+        /// The digest as supplied.
+        got: String,
+    },
+}
+
+impl CapabilityPackageManifest {
+    /// Validate the manifest's integrity fields before it is trusted.
+    ///
+    /// Checks that `package_id`, `version` and `publisher` are non-empty and
+    /// that `checksum` is a 64-character lowercase-hex SHA-256 digest. Pure —
+    /// performs no I/O and does **not** recompute the digest over package
+    /// contents (that is the installer's job, against the on-disk files); this
+    /// only rejects a structurally malformed digest field.
+    pub fn validate(&self) -> Result<(), ManifestValidationError> {
+        if self.package_id.0.trim().is_empty() {
+            return Err(ManifestValidationError::EmptyField {
+                field: "package_id",
+            });
+        }
+        if self.version.trim().is_empty() {
+            return Err(ManifestValidationError::EmptyField { field: "version" });
+        }
+        if self.publisher.trim().is_empty() {
+            return Err(ManifestValidationError::EmptyField { field: "publisher" });
+        }
+        if !is_sha256_hex(&self.checksum.0) {
+            return Err(ManifestValidationError::InvalidChecksum {
+                got: self.checksum.0.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// `true` for exactly a 64-character lowercase hex SHA-256 digest. Uppercase
+/// hex is rejected so the stored form stays canonical (matching the `Sha256`
+/// newtype contract that it is the lowercase hex string).
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +252,65 @@ mod tests {
         ] {
             assert!(!non_empty.is_empty(), "{non_empty:?} should be non-empty");
         }
+    }
+
+    #[test]
+    fn valid_manifest_passes_validation() {
+        assert!(full_manifest().validate().is_ok());
+    }
+
+    #[test]
+    fn empty_identity_fields_are_rejected() {
+        for (mutate, field) in [
+            (
+                Box::new(|m: &mut CapabilityPackageManifest| m.package_id.0 = "  ".to_string())
+                    as Box<dyn Fn(&mut CapabilityPackageManifest)>,
+                "package_id",
+            ),
+            (
+                Box::new(|m: &mut CapabilityPackageManifest| m.version = String::new()),
+                "version",
+            ),
+            (
+                Box::new(|m: &mut CapabilityPackageManifest| m.publisher = "\t".to_string()),
+                "publisher",
+            ),
+        ] {
+            let mut manifest = full_manifest();
+            mutate(&mut manifest);
+            assert_eq!(
+                manifest.validate(),
+                Err(ManifestValidationError::EmptyField { field }),
+                "empty `{field}` must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_checksum_is_rejected() {
+        for bad in [
+            "tooshort",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"A".repeat(64), // uppercase hex is not canonical
+            &"g".repeat(64), // non-hex character
+        ] {
+            let mut manifest = full_manifest();
+            manifest.checksum = Sha256(bad.to_string());
+            assert_eq!(
+                manifest.validate(),
+                Err(ManifestValidationError::InvalidChecksum {
+                    got: bad.to_string()
+                }),
+                "checksum {bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_lowercase_hex_checksum_is_accepted() {
+        let mut manifest = full_manifest();
+        manifest.checksum = Sha256("0123456789abcdef".repeat(4));
+        assert!(manifest.validate().is_ok());
     }
 }

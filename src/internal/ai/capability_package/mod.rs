@@ -12,4 +12,4 @@ pub mod diff;
 pub mod manifest;
 
 pub use diff::{CapabilityDiff, StringSetDelta};
-pub use manifest::{BundledCapabilities, CapabilityPackageManifest};
+pub use manifest::{BundledCapabilities, CapabilityPackageManifest, ManifestValidationError};
