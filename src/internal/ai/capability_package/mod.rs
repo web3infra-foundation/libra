@@ -14,4 +14,7 @@ pub mod registry;
 
 pub use diff::{CapabilityDiff, StringSetDelta};
 pub use manifest::{BundledCapabilities, CapabilityPackageManifest, ManifestValidationError};
-pub use registry::{ActiveCapabilities, InstalledPackage, active_capabilities, may_auto_enable};
+pub use registry::{
+    ActiveCapabilities, ActiveCapabilitiesDelta, InstalledPackage, active_capabilities,
+    may_auto_enable,
+};
