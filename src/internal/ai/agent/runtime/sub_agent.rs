@@ -1550,6 +1550,51 @@ pub trait SubAgentDispatcher: Send + Sync {
         invocation: TaskInvocation,
         entry_kind: TaskEntryKind,
     ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>>;
+
+    /// CEX-S2-14: dispatch a batch of `task` calls under controlled
+    /// parallelism, returning each result in input order. `max_parallel`
+    /// bounds concurrency; the implementation also serialises any pair of
+    /// tasks whose `write_scope`s overlap, so two sub-agents never co-edit
+    /// the same path. Each task carries its own fully-built
+    /// [`DispatchContext`] (its own `parent_message_id` / file-history
+    /// batch), exactly as the single [`dispatch`](Self::dispatch) path
+    /// requires.
+    ///
+    /// The default impl runs the batch **sequentially** — byte-equivalent
+    /// to awaiting [`dispatch`](Self::dispatch) once per task in order, with
+    /// `max_parallel` and `write_scope` ignored — so dispatchers that do not
+    /// implement controlled parallelism (test stubs, future backends) need
+    /// no change. [`DefaultSubAgentDispatcher`] overrides it with the
+    /// `ParallelSchedulerState`-driven executor.
+    ///
+    /// Exposing the batch entry on the trait — rather than only on the
+    /// concrete dispatcher — is what lets the parent tool loop, which holds
+    /// an `Arc<dyn SubAgentDispatcher>`, reach controlled parallelism once
+    /// the per-turn cap is unlocked (CP-S2-4). Until then the production cap
+    /// resolves to 1 and this path is byte-equivalent to the single path.
+    ///
+    /// [`DefaultSubAgentDispatcher`]: super::sub_agent_dispatcher::DefaultSubAgentDispatcher
+    fn dispatch_batch<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> BoxFuture<'a, Vec<Result<TaskResult, TaskFailure>>> {
+        // The default path is intentionally sequential; controlled
+        // parallelism is a `DefaultSubAgentDispatcher` capability.
+        let _ = max_parallel;
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(tasks.len());
+            for (ctx, invocation, entry_kind, _write_scope) in tasks {
+                results.push(self.dispatch(ctx, invocation, entry_kind).await);
+            }
+            results
+        })
+    }
 }
 
 /// Owned runtime bundle the parent tool loop uses to intercept the
@@ -2037,6 +2082,141 @@ mod tests {
         // assertion; this drop just keeps clippy from flagging an
         // unused binding.
         drop(dispatcher);
+    }
+
+    /// CEX-S2-14: a dispatcher that does NOT override `dispatch_batch`
+    /// inherits the trait's sequential default, which must await `dispatch`
+    /// once per task **in input order** and return one result per task in
+    /// that same order. This pins the fallback contract relied on by test
+    /// stubs and any future non-parallel backend.
+    #[tokio::test]
+    async fn dispatch_batch_default_impl_runs_each_task_sequentially_in_order() {
+        use std::sync::Mutex;
+
+        use crate::internal::ai::providers::{ProviderBuildOptions, ProviderFactory};
+
+        // A stub that records the subagent_type of every dispatched task and
+        // echoes it back as the failure name, so the result order is
+        // observable. It deliberately leaves `dispatch_batch` un-overridden.
+        struct RecordingSeqDispatcher {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl SubAgentDispatcher for RecordingSeqDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                _ctx: DispatchContext<'a>,
+                invocation: TaskInvocation,
+                _entry_kind: TaskEntryKind,
+            ) -> BoxFuture<'a, Result<TaskResult, TaskFailure>> {
+                let name = invocation.subagent_type.clone();
+                self.seen.lock().expect("seen lock").push(name.clone());
+                Box::pin(async move {
+                    Err(TaskFailure::UnknownSubagent {
+                        name,
+                        suggestions: vec![],
+                    })
+                })
+            }
+        }
+
+        // Materialise every reference a `DispatchContext` borrows, then a
+        // `make_ctx` closure mints a fresh context per task (each with its
+        // own message id + abort token), mirroring the real tool-loop caller.
+        let parent_spec = AgentExecutionSpec::default();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = ModelBinding::parse("anthropic/claude-3-5-sonnet-latest")
+            .expect("parent binding must parse");
+        let permission_service =
+            PermissionService::new(Arc::new(AskerThatNeverFires) as Arc<dyn PermissionAsker>);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SessionJsonlStore::new(temp.path().to_path_buf());
+        let provider_factory = ProviderFactory;
+        let parent_options = ProviderBuildOptions::default();
+        let tool_registry = crate::internal::ai::tools::ToolRegistry::with_working_dir(
+            std::path::PathBuf::from("/tmp"),
+        );
+        let conn = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory db");
+        let usage_recorder = crate::internal::ai::usage::UsageRecorder::new(conn);
+        let context_frame_loader = ContextFrameLoader::default();
+        let session_id: SessionId = "session-seq".to_string();
+
+        let make_ctx = || DispatchContext {
+            parent_thread_id: "thread-seq",
+            parent_session_id: &session_id,
+            parent_agent: &parent_spec,
+            parent_ruleset: &parent_ruleset,
+            parent_model_binding: &parent_binding,
+            parent_message_id: MessageId::from("msg"),
+            permission_service: &permission_service,
+            session_store: &store,
+            provider_factory: &provider_factory,
+            provider_build_options: &parent_options,
+            provider_build_options_resolver: None,
+            tool_registry: &tool_registry,
+            runtime_context: None,
+            usage_recorder: &usage_recorder,
+            context_frame_loader: &context_frame_loader,
+            abort_token: AbortToken::new(),
+            depth: 0,
+            compaction_model: None,
+            hook_runner: None,
+        };
+
+        let mk_inv = |name: &str| TaskInvocation {
+            description: format!("desc-{name}"),
+            prompt: format!("prompt-{name}"),
+            subagent_type: name.to_string(),
+            task_id: None,
+        };
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = RecordingSeqDispatcher { seen: seen.clone() };
+        // Reach the default through the trait object, as the tool loop will.
+        let dyn_dispatcher: &dyn SubAgentDispatcher = &dispatcher;
+
+        let results = dyn_dispatcher
+            .dispatch_batch(
+                vec![
+                    (
+                        make_ctx(),
+                        mk_inv("alpha"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        mk_inv("beta"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        mk_inv("gamma"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                4,
+            )
+            .await;
+
+        // The default impl dispatched each task exactly once, in input order.
+        assert_eq!(
+            seen.lock().expect("seen lock").as_slice(),
+            ["alpha", "beta", "gamma"],
+            "default dispatch_batch must await dispatch once per task in input order",
+        );
+        // Results come back one-per-task in the same order.
+        let result_names: Vec<&str> = results
+            .iter()
+            .map(|r| match r {
+                Err(TaskFailure::UnknownSubagent { name, .. }) => name.as_str(),
+                other => panic!("unexpected result variant: {other:?}"),
+            })
+            .collect();
+        assert_eq!(result_names, ["alpha", "beta", "gamma"]);
     }
 
     /// Scenario: a session whose JSONL has no `ContextFrame` events

@@ -1081,6 +1081,26 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             outcome
         })
     }
+
+    /// CEX-S2-14: controlled-parallelism batch entry — overrides the trait's
+    /// sequential default by delegating to the inherent
+    /// [`dispatch_parallel`](DefaultSubAgentDispatcher::dispatch_parallel)
+    /// executor. This is the seam that lets the parent tool loop reach
+    /// controlled concurrency through an `Arc<dyn SubAgentDispatcher>`; the
+    /// per-task `write_scope` serialisation and `max_parallel` cap are
+    /// honoured by `dispatch_parallel`'s `ParallelSchedulerState`.
+    fn dispatch_batch<'a>(
+        &'a self,
+        tasks: Vec<(
+            DispatchContext<'a>,
+            TaskInvocation,
+            TaskEntryKind,
+            Vec<String>,
+        )>,
+        max_parallel: usize,
+    ) -> BoxFuture<'a, Vec<Result<TaskResult, TaskFailure>>> {
+        Box::pin(self.dispatch_parallel(tasks, max_parallel))
+    }
 }
 
 /// Materialize an isolated workspace for a sub-agent run and return the
@@ -1744,6 +1764,88 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 2, "one result per input task");
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                matches!(result, Err(TaskFailure::FeatureDisabled)),
+                "task {i} must surface its own dispatch result, got {:?}",
+                result.as_ref().err(),
+            );
+        }
+    }
+
+    /// CEX-S2-14: the `SubAgentDispatcher::dispatch_batch` *trait* method —
+    /// the seam the parent tool loop reaches through `Arc<dyn ...>` — must be
+    /// callable from a trait object and route to `DefaultSubAgentDispatcher`'s
+    /// parallel override, returning one result per input task in order. This
+    /// is what makes controlled parallelism reachable from the tool loop
+    /// (which only ever holds an `Arc<dyn SubAgentDispatcher>`) once the cap
+    /// unlocks; the executor's concurrency semantics are covered separately by
+    /// `parallel_executor`'s unit tests.
+    #[tokio::test]
+    async fn dispatch_batch_trait_method_reachable_via_dyn_and_preserves_order() {
+        let (dispatcher, registry, usage, store) =
+            dispatcher_test_harness(MultiAgentConfig::default()).await;
+        registry.insert(explore_subagent());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-batch".to_string();
+        let parent_session: SessionId = "session-batch".to_string();
+
+        let make_ctx = || {
+            ctx(
+                &parent_thread,
+                &parent_session,
+                &parent,
+                &parent_ruleset,
+                &parent_binding,
+                &permission_service,
+                &store,
+                &provider_factory,
+                &usage,
+                &context_frame_loader,
+                0,
+            )
+        };
+
+        // Reach the batch entry through the trait object, exactly as the
+        // parent tool loop will (`runtime.dispatcher: Arc<dyn ...>`).
+        let dyn_dispatcher: &dyn SubAgentDispatcher = &dispatcher;
+        let results = dyn_dispatcher
+            .dispatch_batch(
+                vec![
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                    (
+                        make_ctx(),
+                        invocation("explore"),
+                        TaskEntryKind::LlmInitiated,
+                        Vec::new(),
+                    ),
+                ],
+                2,
+            )
+            .await;
+
+        assert_eq!(
+            results.len(),
+            3,
+            "one result per input task, in input order"
+        );
         for (i, result) in results.iter().enumerate() {
             assert!(
                 matches!(result, Err(TaskFailure::FeatureDisabled)),
