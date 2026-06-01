@@ -35,7 +35,7 @@ Command Groups:
   History Inspection      log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
-  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
+  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, package
   Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
 
 Help Topics:
@@ -405,6 +405,12 @@ enum Commands {
     Cloud(command::cloud::CloudArgs),
     #[command(about = "Manage read-only Cloudflare Worker publishing")]
     Publish(command::publish::PublishArgs),
+    #[command(
+        subcommand,
+        about = "Install / list / diff auditable capability packages",
+        after_help = command::package::PACKAGE_EXAMPLES
+    )]
+    Package(command::package::PackageCmds),
 
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
@@ -1186,6 +1192,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
+        Commands::Package(cmd) => command::package::execute_safe(cmd, &output).await?,
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,

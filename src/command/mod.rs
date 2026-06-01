@@ -43,6 +43,7 @@ pub mod ls_remote;
 pub mod merge;
 pub mod mv;
 pub mod open;
+pub mod package;
 pub mod publish;
 pub mod pull;
 pub mod push;
