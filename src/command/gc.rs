@@ -407,7 +407,7 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
         .open(&path)
     {
         Ok(mut file) => {
-            write_gc_lock_owner(&mut file, &token)?;
+            file = write_gc_lock_owner_or_cleanup(file, &path, &token)?;
             Ok(GcLockGuard {
                 path,
                 token,
@@ -438,7 +438,7 @@ fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
                     ))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
                 })?;
-            write_gc_lock_owner(&mut file, &token)?;
+            file = write_gc_lock_owner_or_cleanup(file, &path, &token)?;
             Ok(GcLockGuard {
                 path,
                 token,
@@ -485,12 +485,28 @@ fn acquire_gc_replace_lock(lock_path: &Path) -> CliResult<GcReplaceLockGuard> {
             ))
             .with_stable_code(StableErrorCode::IoWriteFailed)
         })?;
-    write_gc_lock_owner(&mut file, &token)?;
+    file = write_gc_lock_owner_or_cleanup(file, &path, &token)?;
     Ok(GcReplaceLockGuard {
         path,
         token,
         _file: file,
     })
+}
+
+/// Write owner data into a newly created lock file, deleting it on failure.
+fn write_gc_lock_owner_or_cleanup(
+    mut file: fs::File,
+    path: &Path,
+    token: &str,
+) -> CliResult<fs::File> {
+    match write_gc_lock_owner(&mut file, token) {
+        Ok(()) => Ok(file),
+        Err(error) => {
+            drop(file);
+            let _ = fs::remove_file(path);
+            Err(error)
+        }
+    }
 }
 
 /// Generate an ownership token for the current GC lock file.
@@ -3406,6 +3422,24 @@ mod tests {
 
         assert!(lock.forced);
         assert!(lock_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    /// Covers owner-write failures removing newly created lock files.
+    fn write_gc_lock_owner_or_cleanup_removes_partial_lock() {
+        let repo = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let lock_path = util::storage_path().join("gc.lock");
+        fs::write(&lock_path, b"").unwrap();
+        let file = fs::File::open(&lock_path).unwrap();
+
+        let error = write_gc_lock_owner_or_cleanup(file, &lock_path, "token").unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
+        assert!(!lock_path.exists());
     }
 
     #[tokio::test]
