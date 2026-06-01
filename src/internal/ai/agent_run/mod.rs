@@ -283,7 +283,9 @@ pub use parallel::{
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
 pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
-pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
+pub use risk_score::{
+    BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score, gather_merge_risk_inputs,
+};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
 pub use trace::ToolCallTraceId;
