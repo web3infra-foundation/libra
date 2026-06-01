@@ -30,7 +30,7 @@ LIBRA_SKIP_WEB_BUILD=1 cargo build --bin libra
 BINARY="$(pwd)/target/debug/libra"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/libra-integ-$RUN_ID.XXXXXX")"
-mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts}
+mkdir -p "$RUN_ROOT"/{home,xdg-config,xdg-cache,repos,fixtures,logs,artifacts,tmp}
 RUN_DIR="$RUN_ROOT/repos/cli.config-basic-kv"
 mkdir -p "$RUN_DIR"
 cd "$RUN_DIR"
@@ -123,19 +123,19 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 | Setup | init, clone, config | supported/partial | 优秀（参数矩阵全） | cli.init-*, cli.config-*, cli.clone-fetch-pull-local | clone 仅本地+Wave3 |
 | Working Tree | status, add, rm, mv, restore, clean, stash, lfs, worktree | supported/partial/int-diff | 优秀（本地确定性命令全） | cli.commit-status-log, cli.restore-reset-diff, cli.stash-bisect-worktree, cli.clean-rm-mv-lfs-basic | LFS 远端 lock API 不进默认 Wave |
 | History | log, shortlog, show, show-ref, ls-remote, diff, grep, blame, describe | supported | 优秀（inspection 全） | cli.commit-status-log, cli.object-readback, cli.grep-blame-describe-shortlog | 真实远端 refs 见 Wave3 |
-| Branching | commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert | supported/partial | 优秀（核心闭环全） | cli.branch-switch-checkout, cli.restore-reset-diff, cli.commit-status-log, cli.tag-basic, cli.merge-rebase-cherry-revert-smoke | merge/rebase 冲突续跑成功路径另列 gap |
-| Remote | remote, fetch, pull, push, open | supported/partial | 良好（本地 remote 全链路 + force-push + fetch --all + pull --rebase + `clone --depth` 本地 shallow，open 无副作用 smoke） | cli.clone-*, cli.push-local-remote, cli.open-smoke, cli.fetch-depth-local | `fetch --depth` 补充语义与 `pull --rebase` 真分叉冲突路径仍属深水区；真实远端 Wave3 |
+| Branching | commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert | supported/partial | 优秀（核心闭环全） | cli.branch-switch-checkout, cli.restore-reset-diff, cli.commit-status-log, cli.tag-basic, cli.merge-rebase-cherry-revert-smoke, cli.merge-conflict-continue, cli.rebase-conflict-continue | merge/rebase 冲突续跑成功路径已有独立场景 |
+| Remote | remote, fetch, pull, push, open | supported/partial | 良好（本地 Git clone/fetch/pull + 本地 file remote push 拒绝 + GitHub live push 闭环 + `clone --depth` 本地 shallow 实现目标，open 无副作用 smoke） | cli.clone-*, cli.push-local-file-remote-rejected, cli.open-smoke, cli.fetch-depth-local, live.github-create-push-clone-fetch | `fetch --depth` 补充语义与 `pull --rebase` 真分叉冲突路径仍属深水区；真实 push 语义只在 Wave3 |
 | Maintenance | db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, index-pack | supported/partial/int-diff | 良好（index-pack 除外） | cli.schema-*, cli.object-readback, cli.sha256-object-readback, cli.verify-pack-smoke, cli.stash-bisect-worktree, cli.reflog-symbolic-ref | index-pack 为隐藏内部命令，仅在 verify-pack 场景的 fixture 生成中作为辅助命令使用；sha256 端到端读写已独立覆盖 |
 | Cross-cutting | --json/--machine/--quiet/--color/--progress/--exit-code-on-warning | supported | 良好（独立场景集中断言全局 flag 语义；warning=9 仍按 gap 跟踪） | cli.cross-cutting-flags | 详见下方「跨命令标志」 |
 | AI/Cloud | code*, automation, cloud, publish, agent*, hooks | intentionally-different | 显式排除（见 2.2） | — | hooks 为兼容隐藏命令，由专属测试覆盖 |
 
-**剩余覆盖缺口（BASELINE_GAP-INTEG-005）**：本次计划已补齐 tag、merge/rebase/cherry-pick/revert、grep/blame/describe/shortlog、clean/rm/mv/lfs、本地 reflog/symbolic-ref、verify-pack 的独立场景 + 参数表；本轮改进又补齐 **force-push（`push --force`）**、**`push --mirror` smoke**、**`fetch --all`**、**`pull --rebase`**、**sha256 端到端对象读写（`cli.sha256-object-readback`）** 与 **全局 flag 集中断言（`cli.cross-cutting-flags`）**。仍需后续细化（按风险排序）：merge/rebase 冲突续跑成功路径、`pull --rebase` 真分叉路径、`fetch --depth` 补充语义（已在 `cli.fetch-depth-local` 覆盖本地路径 shallow，真实远端差异见 BASELINE_GAP-INTEG-009）、LFS 远端 lock API、隐藏 `index-pack` 的深度 fixture、以及 `open` 的 JSON 无副作用行为是否足够覆盖。注意 `push` 当前有 `--force`/`-f`、`--tags`、`--mirror`，但**无 `--force-with-lease`**；`fetch` 当前只有 `--all`/`--depth`、**无 `--prune`/`--tags`**——本矩阵只登记已存在的 flag，避免引用不存在的参数。新增命令到 `src/cli.rs` 时必须同步更新本矩阵并至少添加一个 `cli.<cmd>-smoke` 场景。
+**剩余覆盖缺口（BASELINE_GAP-INTEG-005）**：本次计划已补齐 tag、merge/rebase/cherry-pick/revert、merge/rebase 冲突续跑成功路径、grep/blame/describe/shortlog、clean/rm/mv/lfs、本地 reflog/symbolic-ref、verify-pack 的独立场景 + 参数表；本轮改进又补齐 **本地 file remote push 拒绝（`cli.push-local-file-remote-rejected`）**、**GitHub live push（`push --dry-run` / `push -u` / refspec / `--tags` / delete / `--force` / `--mirror`）**、**`fetch --all`**、**`pull --rebase`**、**sha256 端到端对象读写（`cli.sha256-object-readback`）** 与 **全局 flag 集中断言（`cli.cross-cutting-flags`）**。仍需后续细化（按风险排序）：`pull --rebase` 真分叉路径、`fetch --depth` 补充语义、LFS 远端 lock API、更多 pack corpus 的 `index-pack`/`verify-pack` 深度 fixture、以及 `open` 的 JSON 无副作用行为是否足够覆盖真实系统 open。`cli.fetch-depth-local` 已定义本地 Git fixture 的 `clone --depth` 目标断言；若当前实现返回 `LBR-REPO-002 object not found`，应作为 shallow clone 对象闭包缺陷处理。注意 `push` 当前有 `--force`/`-f`、`--tags`、`--mirror`，但**无 `--force-with-lease`**；`fetch` 当前只有 `--all`/`--depth`、**无 `--prune`/`--tags`**——本矩阵只登记已存在的 flag，避免引用不存在的参数。新增命令到 `src/cli.rs` 时必须同步更新本矩阵并至少添加一个 `cli.<cmd>-smoke` 场景。
 
 **跨命令标志（Cross-cutting）**：`--json`/`--machine`/`--quiet`/`--color`/`--progress`/`--exit-code-on-warning` 是全局 flag（定义在 `src/cli.rs` 的 `Cli` 根结构，对所有子命令生效）。本轮改进新增 `cli.cross-cutting-flags` 场景集中断言其语义（JSON envelope 形态、`--machine` 蕴含 ndjson+quiet+no-pager+color=never、`--quiet` 抑制 stdout、无 warning 时 `--exit-code-on-warning` 不改变退出码、`--color=never`/`NO_COLOR`），不再依赖各功能场景顺带覆盖。确定性 warning 触发源尚未固化，warning 时退出码 9 按 BASELINE_GAP-INTEG-009 跟踪，不能在默认 Wave 中硬断言。
 
 **故意差异回归防护（Intentional Differences Regression Guards）**：COMPATIBILITY.md 明确标注的 `intentionally-different` 行为必须有**正向断言**防止悄悄对齐 Git：
 - `worktree remove` 默认保留目录（不隐式数据丢失）——已在 `cli.stash-bisect-worktree` 断言 `test -d`。
-- `push` 拒绝本地文件 remote（仅支持 `git@` / `https` 等网络 remote）——应在 push 场景中显式 `! libra push /tmp/some/path main` 并断言错误包含 "local file remote" 或等价可观察语义。
+- `push` 拒绝本地文件 remote（仅支持 `git@` / `https` 等网络 remote）——已由 `cli.push-local-file-remote-rejected` 显式断言 `LBR-CLI-003` / "local file repositories is not supported"。
 - `symbolic-ref` 仅支持 HEAD（其他符号引用因 SQLite 存储被拒绝）。
 - 这些必须出现在对应场景的负向步骤或专用小节中；新增故意差异时必须同步矩阵备注 + 断言。
 
@@ -159,7 +159,7 @@ gh repo view "$REPO" --json nameWithOwner,sshUrl,url
 - `cli.reflog-symbolic-ref`、`cli.clean-rm-mv-lfs-basic`
 - `cli.cross-cutting-flags`（先前已强化错误 JSON）
 
-其余场景（config/*、init/* 变体、push-local-remote、clone 系列、schema、verify-pack、sha256、open、Wave 3 live.github-* 等）请对照本标准逐一补充相同模式的断言。目标：每个场景的“断言”部分最终都包含可直接在 `libra()` 下执行的 python/shell 检查，而非仅描述性文字。
+其余场景（config/*、init/* 变体、push-local-file-remote-rejected、clone 系列、schema、verify-pack、sha256、open、Wave 3 live.github-* 等）请对照本标准逐一补充相同模式的断言。目标：每个场景的“断言”部分最终都包含可直接在 `libra()` 下执行的 python/shell 检查，而非仅描述性文字。
 
 ---
 
@@ -2190,7 +2190,7 @@ cd "$RUN_DIR/worktree-tools-repo"
 断言：`mv` 同时更新工作区路径和 index 状态；`rm` 删除 tracked 文件并可提交；`clean -n` 不删除、`clean -f` 删除文件、`clean -fd` 删除目录、`clean -fX` 只删除 ignored 文件；`lfs track` 写入 `.libra_attributes`，无参数可列出 pattern；tracked 大文件提交后可由 `lfs ls-files` 三种格式观察；`lfs untrack` 移除 pattern；缺少 `-f/-n`、互斥 clean flag、缺失 rm/mv 源必须失败；`lfs lock` 在无远端 LFS 服务/认证时必须失败且不得泄露凭据。`lfs untrack` 对缺失 pattern 当前可能是幂等空删除，不作为负向断言。
 
 补充可执行断言：
-- `libra --json lfs ls-files` 返回 `ok:true`，且 `data.files[]` 可解析（即使为空）。
+- `libra --json lfs ls-files` 返回 `ok:true`；无 LFS tracked 文件时 `data.files` 可缺失（当前 `LfsOutput.files` 为空会被省略），有 tracked 文件时 `data.files[]` 必须可解析。
 - 验证 `.libra_attributes` 内容包含 `*.bin`（`grep` 或 `cat` 后 python 检查）。
 - `libra --json status --porcelain` 在 mv/rm 后可解析且显示正确 staged 状态。
 - 操作后 `libra fsck --connectivity-only` 通过。
@@ -2435,7 +2435,7 @@ libra --exit-code-on-warning status
 - 验证 `--progress json` 在 JSON 模式下输出 NDJSON progress 到 stderr。
 - 额外：`libra --json --exit-code-on-warning status` 在干净状态下退出码为 0；warning=9 组合行为只在 BASELINE_GAP-INTEG-009 的确定性 warning 源落地后启用。
 
-通过标准：全部场景退出码和断言通过，无未解释 skip/fail。`merge --continue` / `rebase --continue` 的冲突续跑成功路径、LFS 远端 lock API、真实浏览器/系统 open 行为不进入默认 Wave，必要时登记独立 follow-up。
+通过标准：全部场景退出码和断言通过，无未解释 skip/fail。`merge --continue` / `rebase --continue` 的冲突续跑成功路径由 `cli.merge-conflict-continue` / `cli.rebase-conflict-continue` 覆盖；LFS 远端 lock API、真实浏览器/系统 open 行为不进入默认 Wave，必要时登记独立 follow-up。
 
 ## 4.2 Wave 2：CLI 存储、schema 与本地协议场景（必跑）
 
@@ -2503,19 +2503,33 @@ cd not-a-repo
 
 ### `cli.clone-fetch-pull-local`
 
-目的：验证本地路径 remote 的 `clone`、`remote`、`ls-remote`、`fetch`、`pull` 行为，不访问公网。
+目的：验证本地路径 Git remote 的 `clone`、`remote`、`ls-remote`、`fetch`、`pull` 行为，不访问公网，并覆盖本地 Git 仓库互操作性。注意 `push` 当前故意拒绝本地 file remote，因此本场景通过隔离 `gitfix()` 直接推进 Git fixture，不使用 `libra push` 搭 fixture。
 
 最小步骤：
 
 ```bash
 SCENARIO="cli.clone-fetch-pull-local"
-REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/remote.git"
-SOURCE_DIR="$RUN_ROOT/repos/$SCENARIO/source"
+REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/git-source"
 CLONE_DIR="$RUN_ROOT/repos/$SCENARIO/clone"
-mkdir -p "$(dirname "$REMOTE_DIR")" "$(dirname "$SOURCE_DIR")"
+mkdir -p "$(dirname "$REMOTE_DIR")" "$(dirname "$CLONE_DIR")"
+SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+GIT_BIN="$(command -v git || true)"
+case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
+  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
+gitfix() {
+  env -i \
+    PATH="$SAFE_PATH" \
+    HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    TMPDIR="$RUN_ROOT/tmp" \
+    GIT_AUTHOR_NAME="Libra Fixture" GIT_AUTHOR_EMAIL="fixture@example.invalid" \
+    GIT_COMMITTER_NAME="Libra Fixture" GIT_COMMITTER_EMAIL="fixture@example.invalid" \
+    LANG=C LC_ALL=C \
+    git "$@"
+}
 libra() {
   env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    PATH="$SAFE_PATH" \
     USERPROFILE="$RUN_ROOT/home" \
     HOME="$RUN_ROOT/home" \
     XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
@@ -2527,31 +2541,32 @@ libra() {
     "$BINARY" "$@"
 }
 
-libra init --bare "$REMOTE_DIR"
-libra init "$SOURCE_DIR"
-cd "$SOURCE_DIR"
-libra config set user.name "Libra Remote Seed"
-libra config set user.email "remote-seed@example.invalid"
+mkdir -p "$REMOTE_DIR"
+cd "$REMOTE_DIR"
+gitfix init -b main
+gitfix config user.name "Libra Remote Seed"
+gitfix config user.email "remote-seed@example.invalid"
 printf 'first\n' > README.md
-libra add README.md
-libra commit -m "test: seed remote"
-libra remote add origin "$REMOTE_DIR"
-libra remote -v
-libra remote get-url origin
-libra push -u origin main
+gitfix add README.md
+gitfix commit -m "test: seed remote"
 
 libra ls-remote "$REMOTE_DIR"
 libra ls-remote --heads "$REMOTE_DIR" main
 libra clone "$REMOTE_DIR" "$CLONE_DIR"
 cd "$CLONE_DIR"
+libra remote -v
+libra remote get-url origin
+libra remote add mirror "$REMOTE_DIR"
+libra remote get-url mirror
+libra config set user.name "Libra Clone Local"
+libra config set user.email "clone-local@example.invalid"
 libra log --oneline
 grep 'first' README.md
 
-cd "$SOURCE_DIR"
+cd "$REMOTE_DIR"
 printf 'second\n' >> README.md
-libra add README.md
-libra commit -m "test: second remote commit"
-libra push origin main
+gitfix add README.md
+gitfix commit -m "test: second remote commit"
 
 cd "$CLONE_DIR"
 libra fetch origin main
@@ -2565,11 +2580,10 @@ grep 'second' README.md
 printf 'local only\n' > clone-local.txt
 libra add clone-local.txt
 libra commit -m "test: clone local commit"
-cd "$SOURCE_DIR"
+cd "$REMOTE_DIR"
 printf 'third\n' >> README.md
-libra add README.md
-libra commit -m "test: third remote commit"
-libra push origin main
+gitfix add README.md
+gitfix commit -m "test: third remote commit"
 cd "$CLONE_DIR"
 libra pull --rebase origin main
 grep 'third' README.md
@@ -2607,7 +2621,7 @@ libra --json pull --ff-only origin main >pull.json
 python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True; assert 'data' in d"
 ```
 
-断言：bare 本地 remote 可创建并作为 `origin` 使用；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`push -u` 后 `ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；source 新提交并 push 后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 bare 布局；`clone --single-branch -b main` 只检出指定分支；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
+断言：隔离 `gitfix()` 创建的本地 Git 仓库可作为 clone/fetch/pull remote；`remote add`、`remote -v`、`remote get-url` 能观察本地路径 URL；`ls-remote` 可看到 `refs/heads/main`；普通 clone 后文件和 log 可见；Git fixture 新提交后，clone 仓库通过 `fetch`、`fetch --all` 和 `pull --ff-only` 能看到新增提交；**`pull --rebase` 把 clone 端本地提交重放到 upstream 新提交之上——`README.md` 含 upstream 的 `third`，本地 `clone-local.txt` 仍在**；`clone --bare` 生成 Libra bare 布局（可观察到 `libra.db`）；`clone --single-branch -b main` 只检出指定分支；缺失 remote 或缺失 ref 必须非 0 退出且不创建半成品仓库或损坏当前 clone。
 
 补充可执行断言：
 - `libra --json clone "$REMOTE_DIR" clone-json` 成功后 `ok:true`，并验证 `libra --json log -n 1` 结构。
@@ -2618,7 +2632,7 @@ python3 -c "import json; d=json.load(open('pull.json')); assert d['ok'] is True;
 
 ### `cli.fetch-depth-local`
 
-目的：验证本地路径 remote 上 `clone --depth` 的 shallow 基本语义。
+目的：验证本地路径 Git source 上的 `clone --depth` shallow 基本语义。该场景不使用 `push`，因为当前 `push` 故意拒绝本地 file remote。当前实现若在本场景暴露 `LBR-REPO-002 object not found`，应记录为 shallow clone 对象闭包实现缺口，而不是把场景改回本地 push fixture。
 
 最小步骤：
 
@@ -2627,9 +2641,24 @@ SCENARIO="cli.fetch-depth-local"
 RUN_DIR="$RUN_ROOT/repos/$SCENARIO"
 mkdir -p "$RUN_DIR"
 cd "$RUN_DIR"
+SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+GIT_BIN="$(command -v git || true)"
+case ":$SAFE_PATH:" in *":$(dirname "${GIT_BIN:-/usr/bin/git}"):"*) ;; *)
+  [ -n "$GIT_BIN" ] && SAFE_PATH="$SAFE_PATH:$(dirname "$GIT_BIN")" ;; esac
+gitfix() {
+  env -i \
+    PATH="$SAFE_PATH" \
+    HOME="$RUN_ROOT/home" USERPROFILE="$RUN_ROOT/home" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    TMPDIR="$RUN_ROOT/tmp" \
+    GIT_AUTHOR_NAME="Libra Fixture" GIT_AUTHOR_EMAIL="fixture@example.invalid" \
+    GIT_COMMITTER_NAME="Libra Fixture" GIT_COMMITTER_EMAIL="fixture@example.invalid" \
+    LANG=C LC_ALL=C \
+    git "$@"
+}
 libra() {
   env -i \
-    PATH="${SAFE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    PATH="$SAFE_PATH" \
     USERPROFILE="$RUN_ROOT/home" \
     HOME="$RUN_ROOT/home" \
     XDG_CONFIG_HOME="$RUN_ROOT/xdg-config" \
@@ -2641,25 +2670,23 @@ libra() {
     "$BINARY" "$@"
 }
 
-REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/remote.git"
-mkdir -p "$REMOTE_DIR"
-libra init --bare "$REMOTE_DIR"
+REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/git-source"
+mkdir -p "$(dirname "$REMOTE_DIR")"
 
-libra init source
-cd source
-libra config set user.name "Libra Depth Test"
-libra config set user.email "depth@example.invalid"
+mkdir -p "$REMOTE_DIR"
+cd "$REMOTE_DIR"
+gitfix init -b main
+gitfix config user.name "Libra Depth Test"
+gitfix config user.email "depth@example.invalid"
 printf 'first\n' > a.txt
-libra add a.txt
-libra commit -m "test: first"
+gitfix add a.txt
+gitfix commit -m "test: first"
 printf 'second\n' > a.txt
-libra add a.txt
-libra commit -m "test: second"
+gitfix add a.txt
+gitfix commit -m "test: second"
 printf 'third\n' > a.txt
-libra add a.txt
-libra commit -m "test: third"
-libra remote add origin "$REMOTE_DIR"
-libra push -u origin main
+gitfix add a.txt
+gitfix commit -m "test: third"
 
 cd "$RUN_DIR"
 libra clone --depth 1 "$REMOTE_DIR" shallow-clone
@@ -2681,7 +2708,7 @@ cd "$RUN_DIR"
 ! libra clone --depth 0 "$REMOTE_DIR" "$RUN_ROOT/repos/$SCENARIO/bad-depth"
 ```
 
-断言：`clone --depth 1` 只获取最新提交，`log` 数量为 1，但工作区文件内容是最新的；`clone --depth 2` 获取 2 个提交；非法 depth（如 0）必须非 0 退出。本地路径 shallow 语义可作为基本功能验证，与真实远端的深度对等性差异另由 BASELINE_GAP-INTEG-009 跟踪。
+断言：`clone --depth 1` 只获取最新提交，`log` 数量为 1，但工作区文件内容是最新的；`clone --depth 2` 获取 2 个提交；非法 depth（如 0）必须非 0 退出。本地 Git fixture shallow 语义可作为基本功能验证，与真实远端的深度对等性差异另由 BASELINE_GAP-INTEG-009 跟踪。
 
 补充可执行断言：
 - `libra --json clone --depth 1 "$REMOTE_DIR" shallow1` 成功；进入 `shallow1` 后运行 `libra --json log -n 10 >log.json`，用 python 断言 `len(data.commits) == 1`。
@@ -2689,17 +2716,16 @@ cd "$RUN_DIR"
 - 非法 `--depth 0` 错误必须非 0。
 - shallow clone 后执行 `libra fsck --connectivity-only` 必须通过。
 
-### `cli.push-local-remote`
+### `cli.push-local-file-remote-rejected`
 
-目的：验证本地 remote 的 `push`、refspec、tag push、dry-run、upstream 设置、remote URL 管理和删除 ref 行为。
+目的：验证 `push` 对本地 file remote 的故意差异：本地路径 remote 可用于 `clone`/`fetch`/`pull` fixture，但 `push` 当前只支持网络 remote，必须拒绝本地 file remote。真实 push/refspec/tag/force/mirror 成功路径放到 Wave 3 GitHub 场景。
 
 最小步骤：
 
 ```bash
-SCENARIO="cli.push-local-remote"
+SCENARIO="cli.push-local-file-remote-rejected"
 REMOTE_DIR="$RUN_ROOT/fixtures/$SCENARIO/remote.git"
 WORK_DIR="$RUN_ROOT/repos/$SCENARIO/work"
-VERIFY_DIR="$RUN_ROOT/repos/$SCENARIO/verify"
 mkdir -p "$(dirname "$REMOTE_DIR")" "$(dirname "$WORK_DIR")"
 libra() {
   env -i \
@@ -2718,66 +2744,46 @@ libra() {
 libra init --bare "$REMOTE_DIR"
 libra init "$WORK_DIR"
 cd "$WORK_DIR"
-libra config set user.name "Libra Push Test"
-libra config set user.email "push@example.invalid"
+libra config set user.name "Libra Push Rejection Test"
+libra config set user.email "push-reject@example.invalid"
 printf 'push\n' > push.txt
 libra add push.txt
-libra commit -m "test: push base"
+libra commit -m "test: push rejection base"
 libra remote add origin "$REMOTE_DIR"
 libra remote set-url --push origin "$REMOTE_DIR"
 libra remote get-url --all origin
-libra push --dry-run origin main
-libra push -u origin main
-libra branch --show-current
 
-libra branch feature/push main
-libra switch feature/push
-printf 'feature\n' > feature.txt
-libra add feature.txt
-libra commit -m "test: push feature"
-libra push origin feature/push:feature/pushed
-libra tag v-push-smoke
-libra push --tags origin
-libra push origin :feature/pushed
-libra push --mirror --dry-run origin
-libra push --mirror origin
+expect_local_push_rejected() {
+  name="$1"
+  shift
+  set +e
+  libra --json=compact push "$@" >"$name.out" 2>"$name.err"
+  status=$?
+  set -e
+  test "$status" -ne 0
+  python3 - "$name.err" <<'PY'
+import json, sys
+raw = open(sys.argv[1]).read().strip()
+payload = json.loads(raw)
+assert payload["ok"] is False
+assert payload["error_code"] == "LBR-CLI-003"
+assert "local file" in payload["message"] or "local file repositories" in payload["message"]
+PY
+}
 
-# force-push：改写已推送的 main 历史后，普通 push 应被拒（非快进），--force 覆盖远端
-libra switch main
-printf 'amended\n' >> push.txt
-libra add push.txt
-libra commit --amend --no-edit
-FORCED_MAIN="$(libra rev-parse HEAD)"
-! libra push origin main
-libra push --force origin main
-
-libra clone "$REMOTE_DIR" "$VERIFY_DIR"
-cd "$VERIFY_DIR"
-libra show-ref --heads
-libra show-ref --tags
-test "$(libra rev-parse origin/main 2>/dev/null || libra rev-parse main)" = "$FORCED_MAIN"
+expect_local_push_rejected push-main origin main
+expect_local_push_rejected push-dry-run --dry-run origin main
+expect_local_push_rejected push-force --force origin main
+expect_local_push_rejected push-tags --tags origin
+expect_local_push_rejected push-mirror --mirror --dry-run origin
 ```
 
-负向步骤：
-
-```bash
-cd "$WORK_DIR"
-! libra push origin no-such-branch
-! libra push "$RUN_ROOT/fixtures/$SCENARIO/missing.git" main
-
-# Verify push JSON output format
-libra --json push origin main >push.json
-python3 -c "import json; d=json.load(open('push.json')); assert d['ok'] is True; assert 'data' in d"
-```
-
-断言：`push --dry-run` 不写远端但输出将要更新的 ref；`push -u origin main` 写入远端并设置当前分支 upstream；显式 refspec `feature/push:feature/pushed` 在远端创建目标分支；`push --tags` 推送本地 tag；删除 refspec `:feature/pushed` 删除远端分支；`push --mirror --dry-run` 可预览镜像同步、`push --mirror` 在本地 fixture remote 上成功；**改写 main 历史后普通 `push origin main` 因非快进被拒，`push --force origin main` 成功覆盖远端，clone 验证仓库的 main 指向 `FORCED_MAIN`**；clone 验证仓库能通过 `show-ref --heads` / `--tags` 观察到最终 refs；缺失本地分支或缺失 remote 必须失败且不影响已推送 refs。`push` 当前无 `--force-with-lease`，安全 force 语义属后续 gap（BASELINE_GAP-INTEG-005）。
+断言：本地 file remote 已存在且可作为 remote URL 存储；`push origin main`、`push --dry-run origin main`、`push --force origin main`、`push --tags origin`、`push --mirror --dry-run origin` 都必须非 0 退出；`--json=compact` 的 stderr 错误 envelope 必须包含 `ok:false`、`error_code == "LBR-CLI-003"` 和本地 file remote 不支持的可操作提示；失败不得写入 remote refs 或修改本地 HEAD。
 
 补充可执行断言：
-- `libra --json push --dry-run origin main` 成功（ok:true），且远端 ref 未实际变化（通过 clone 验证）。
-- `libra --json push --mirror --dry-run origin` 成功（ok:true），且远端 ref 未实际变化；随后真实 `push --mirror` 只作用于 `$REMOTE_DIR` fixture。
-- force push 成功后 `libra --json show-ref --heads` 验证新 tip。
-- 所有 push 操作后 `libra fsck` 在 source 和 verify 仓库均通过。
-- 负向 `libra push origin no-such-branch` 必须非 0，stderr 包含 ref 相关错误。
+- 每个本地 file remote push 失败后执行 `libra fsck --connectivity-only`，确认本地源仓库仍健康。
+- `libra --json remote get-url --all origin` 仍能返回本地路径，证明失败点是 push 传输策略而非 remote 配置丢失。
+- 若未来实现支持本地 file remote push，必须把本场景改成正向闭环，并同步更新 COMPATIBILITY.md / declined note。
 
 ### `cli.object-readback`
 
@@ -2992,20 +2998,21 @@ printf 'corrupt' >> "$RUN_ROOT/fixtures/$SCENARIO/corrupt.idx"
 | `clone <remote> <path>` | `cli.clone-fetch-pull-local` | 本地 remote 可 clone，文件和 log 可见 |
 | `clone --bare` | `cli.clone-fetch-pull-local` | bare clone 使用 bare 布局 |
 | `clone --single-branch -b <branch>` | `cli.clone-fetch-pull-local` | 指定分支被检出 |
-| `remote add` / `remote -v` / `remote get-url` | `cli.clone-fetch-pull-local`、`cli.push-local-remote` | remote URL 可写入、列出和读取 |
-| `remote set-url --push` | `cli.push-local-remote` | push URL 可设置并由 get-url 观察 |
+| `remote add` / `remote -v` / `remote get-url` | `cli.clone-fetch-pull-local`、`cli.push-local-file-remote-rejected` | remote URL 可写入、列出和读取 |
+| `remote set-url --push` | `cli.push-local-file-remote-rejected` | push URL 可设置并由 get-url 观察 |
 | `ls-remote` / `ls-remote --heads` | `cli.clone-fetch-pull-local` | 本地 remote refs 可查询 |
 | `fetch <remote> <refspec>` | `cli.clone-fetch-pull-local` | fetched ref/object 可由 show-ref 或 pull 观察 |
 | `fetch --all` | `cli.clone-fetch-pull-local` | 所有已配置 remote 被刷新 |
 | `pull --ff-only <remote> <refspec>` | `cli.clone-fetch-pull-local` | fast-forward 后工作区包含远端新增内容 |
 | `pull --rebase <remote> <refspec>` | `cli.clone-fetch-pull-local` | 本地提交重放到 upstream 新提交之上 |
-| `push --dry-run` | `cli.push-local-remote` | 预览更新但远端 ref 不变 |
-| `push -u <remote> <refspec>` | `cli.push-local-remote` | 写入远端并设置 upstream |
-| `push <src>:<dst>` | `cli.push-local-remote` | 指定目标 ref 被创建 |
-| `push --tags` | `cli.push-local-remote` | 本地 tag refs 推送到远端 |
-| `push --mirror` | `cli.push-local-remote` | 镜像同步在隔离本地 remote 上可预览并执行 |
-| `push --force <remote> <ref>` | `cli.push-local-remote` | 非快进改写被普通 push 拒绝、被 --force 覆盖 |
-| `push <remote> :<dst>` | `cli.push-local-remote` | 远端 ref 被删除 |
+| `push <local-path> ...` | `cli.push-local-file-remote-rejected` | 本地 file remote push 被拒绝并返回 LBR-CLI-003 |
+| `push --dry-run` | `live.github-create-push-clone-fetch` | 真实网络 remote 上预览更新但远端 ref 不变 |
+| `push -u <remote> <refspec>` | `live.github-create-push-clone-fetch` | 写入远端并设置 upstream |
+| `push <src>:<dst>` | `live.github-create-push-clone-fetch` | 指定目标 ref 被创建 |
+| `push --tags` | `live.github-create-push-clone-fetch` | 本地 tag refs 推送到远端 |
+| `push --mirror` | `live.github-create-push-clone-fetch` | 镜像同步只作用于临时 GitHub 仓库 |
+| `push --force <remote> <ref>` | `live.github-create-push-clone-fetch` | 非快进改写被普通 push 拒绝、被 --force 覆盖 |
+| `push <remote> :<dst>` | `live.github-create-push-clone-fetch` | 远端 ref 被删除 |
 | `rev-parse` / `rev-list` | `cli.object-readback` | revision 可解析且祖先列表可读 |
 | `show` / `show <rev>:<path>` | `cli.object-readback` | commit 元数据、统计和文件内容可读回 |
 | `show-ref` | `cli.object-readback`、`cli.clone-fetch-pull-local` | HEAD、heads、tags refs 可观察 |
@@ -3082,14 +3089,43 @@ printf 'github remote\n' > README.md
 libra add README.md
 libra commit -m "test: github integration"
 libra remote add origin "$REMOTE_URL"
+libra push --dry-run origin main
 libra push -u origin main
 
-gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha'
+REMOTE_MAIN_SHA="$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')"
+test "$REMOTE_MAIN_SHA" = "$(libra rev-parse HEAD)"
+
+libra branch feature/live main
+libra switch feature/live
+printf 'feature branch\n' > feature.txt
+libra add feature.txt
+libra commit -m "test: github feature branch"
+libra push origin feature/live:feature/pushed
+libra tag v-live-smoke
+libra push --tags origin
+gh api "repos/$REPO/git/ref/tags/v-live-smoke" --jq '.object.sha' >/dev/null
+libra push origin :feature/pushed
+libra push --mirror --dry-run origin
+libra push --mirror origin
+
+libra switch main
+printf 'forced rewrite\n' >> README.md
+libra add README.md
+libra commit --amend --no-edit
+FORCED_MAIN="$(libra rev-parse HEAD)"
+set +e
+libra push origin main >non-ff.out 2>non-ff.err
+NON_FF_STATUS=$?
+set -e
+test "$NON_FF_STATUS" -ne 0
+libra push --force origin main
+test "$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')" = "$FORCED_MAIN"
 
 cd "$RUN_ROOT/repos"
 libra clone "$REMOTE_URL" cloned
 cd cloned
 libra log --oneline
+grep 'forced rewrite' README.md
 
 cd "$RUN_ROOT/repos/source"
 printf 'second commit\n' >> README.md
@@ -3106,15 +3142,15 @@ grep 'second commit' README.md
 断言：
 
 1. `gh repo create` 创建的是当前账号名下的临时私有仓库，`gh repo view` 可查询到 `nameWithOwner`、`isPrivate`、`sshUrl`。
-2. `libra remote add`、`push -u origin main`、`clone`、`fetch`、`pull` 均退出码为 0。
-3. `gh api repos/<owner>/<repo>/git/ref/heads/main` 能看到被推送的 `main` ref。
-4. clone 后 `log --oneline` 能看到首次提交；pull 后工作区能看到第二次提交内容。
+2. `libra remote add`、`push --dry-run origin main`、`push -u origin main`、refspec push、tag push、delete refspec、`push --mirror --dry-run`、`push --mirror`、`push --force`、`clone`、`fetch`、`pull` 均退出码为 0。
+3. `gh api repos/<owner>/<repo>/git/ref/heads/main` 能看到被推送的 `main` ref，且 normal push 在非快进 rewrite 后必须失败、`push --force` 后远端 main 才更新到 `FORCED_MAIN`。
+4. clone 后 `log --oneline` 能看到首次/force 后提交；pull 后工作区能看到第二次提交内容。
 5. 日志不得包含 GitHub token、PAT、SSH 私钥、`gh auth token` 输出或带明文凭据的 URL。
 6. 场景结束后 `gh repo delete "$REPO" --yes` 成功；失败时报告 `cleanup_required` 并列出仓库名。
 
 补充可执行断言（Wave 3 最高价值）：
 - 关键步骤后执行 `libra --json log -n 1` 并验证 `ok:true`。
-- `gh api` 返回的 sha 与本地 `libra rev-parse HEAD` 一致（capture 比对）。
+- `gh api` 返回的 sha 与本地 `libra rev-parse HEAD` 一致（initial push 与 force push 后都 capture 比对）。
 - 整个运行使用完整隔离 `libra()`（含 TMPDIR + SAFE_PATH + LIBRA_TEST）。
 - 强制要求 `trap 'gh repo delete ... --yes' EXIT` 且 cleanup 状态明确记录。
 - 推荐验证 `libra --json show-ref --heads` 在 clone 后可解析。
@@ -3124,7 +3160,7 @@ grep 'second commit' README.md
 补充可执行断言（Wave 3 最高价值场景）：
 - 每个 `libra` 操作（init、push、clone、fetch、pull）均使用完整隔离 `libra()` wrapper（含 TMPDIR + SAFE_PATH）。
 - 关键步骤后执行 `libra --json log -n 1` 并验证 `ok:true` + 提交存在。
-- `gh api` 查询与 `libra show-ref` 结果必须一致（可通过 capture 比较）。
+- `gh api` 查询与 `libra show-ref` 结果必须一致（至少覆盖 main、tag、删除后的 feature ref、force push 后 main）。
 - 强制要求 trap + `gh repo delete --yes`，失败时明确记录 `cleanup_required`。
 - 整个 Wave 3 运行日志必须通过 §3.6 脱敏自检（无 token/PAT/私钥）。
 - 推荐在 runner 中捕获 `gh api` 返回的 sha 与本地 `libra rev-parse` 比对。
@@ -3227,7 +3263,7 @@ WAVE 1  CLI 核心版本管理
   ⚠ SKIP  cli.config-import-path-edit      env-skip: git 不在隔离 PATH
 WAVE 2  存储 / schema / 本地协议
   ✓ PASS  cli.clone-fetch-pull-local       24 cmds    2.3s
-  ✗ FAIL  cli.push-local-remote            09/22      0.9s
+  ✗ FAIL  live.github-create-push-clone-fetch 09/22   8.2s
 ──────────────────────────────────────────────────────────────────────────────
 合计  6 场景 ：3 pass   2 fail   1 skip          wave3 = not_run
 RUN_ROOT（已保留供复现）：/tmp/libra-integ-20260601T1530Z-48213.Ab12Cd
@@ -3241,10 +3277,10 @@ RUN_ROOT（已保留供复现）：/tmp/libra-integ-20260601T1530Z-48213.Ab12Cd
     stderr   ： error: the branch 'feature/renamed' is not fully merged
                 hint: use 'libra branch -D feature/renamed' to force delete
     复现     ： cd <cwd> && libra branch -d feature/renamed
-✗ cli.push-local-remote
+✗ live.github-create-push-clone-fetch
     失败命令 ： libra push --force origin main
     退出码   ： 128  （期望 0）
-    cwd      ： $RUN_ROOT/repos/cli.push-local-remote/work
+    cwd      ： $RUN_ROOT/repos/source
     stderr   ： fatal: unable to update remote ref refs/heads/main
     复现     ： cd <cwd> && libra push --force origin main
 ```
@@ -3339,7 +3375,7 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 ### BASELINE_GAP-INTEG-005：版本管理命令黑盒场景覆盖不完整
 
 - 现状：§2.3 矩阵已建立，并已为 tag、merge/rebase/cherry-pick/revert、grep/blame/describe/shortlog、clean/rm/mv/lfs、reflog/symbolic-ref、verify-pack 添加独立黑盒场景和参数表；`cli.cross-cutting-flags` 已覆盖成功 JSON envelope + 错误 JSON（`ok:false` + `LBR-*`）的基本形态。
-- 需要补充：继续细化未纳入默认闭环的深水区：merge/rebase 冲突续跑成功路径、LFS 远端 lock API、隐藏 `index-pack` 的深度 fixture、`open` JSON 无副作用行为是否足够代表真实 open；**故意差异的正向断言**（push 拒绝本地文件 remote、symbolic-ref 仅 HEAD 等）需在对应场景中显式存在并随矩阵更新。
+- 需要补充：继续细化未纳入默认闭环的深水区：`pull --rebase` 真分叉冲突路径、LFS 远端 lock API、更多 pack corpus 的 `index-pack`/`verify-pack` 深度 fixture、`open` JSON 无副作用行为是否足够代表真实 open；**故意差异的正向断言**（push 拒绝本地文件 remote、symbolic-ref 仅 HEAD 等）需在对应场景中显式存在并随矩阵更新。
 - 约束：任何新增场景必须是可在本机无密钥确定性复现的 `libra <cmd>` 黑盒；不得引入 live AI/cloud。
 - 跟踪：§2.3 矩阵 + 对应 Wave 场景 + PR Test Plan 清单。
 
@@ -3351,9 +3387,9 @@ runner 进程退出码：`0` = 无 `fail`（`skip`/`env-skip` 不算失败）；
 
 ### BASELINE_GAP-INTEG-009：深水区远端语义与全局 flag 边界
 
-- 现状：本轮已补 force-push、`fetch --all`、`pull --rebase`（无冲突重放）、sha256 端到端、全局 flag 集中断言、`clone --depth` 本地路径 shallow（`cli.fetch-depth-local`）。以下仍未纳入默认确定性闭环：
-  - **`fetch --depth` 补充语义 + 真实远端 shallow**：`cli.fetch-depth-local` 已覆盖本地路径 `clone --depth` 基本语义；`fetch --depth` 对已 shallow clone 的增量获取、以及 shallow 语义在真实 GitHub 远端上的对等性，仍建议在 Wave 3 验证。
-  - **`pull --rebase` 真分叉 + 冲突续跑**：当前只覆盖不同文件的无冲突重放；分叉冲突的 `--continue`/`--abort` 续跑属深水区（与 merge/rebase 冲突续跑同列）。
+- 现状：本轮已补 force-push、`fetch --all`、`pull --rebase`（无冲突重放）、sha256 端到端、全局 flag 集中断言，并定义了 `clone --depth` 本地 Git fixture 场景（`cli.fetch-depth-local`）。以下仍未纳入默认确定性闭环：
+  - **`fetch --depth` 补充语义 + 真实远端 shallow**：`cli.fetch-depth-local` 覆盖本地路径 `clone --depth` 目标语义；如果当前代码在该场景失败，应修 shallow clone 对象闭包，而不是改测试绕过。`fetch --depth` 对已 shallow clone 的增量获取、以及 shallow 语义在真实 GitHub 远端上的对等性，仍建议在 Wave 3 验证。
+  - **`pull --rebase` 真分叉 + 冲突续跑**：当前只覆盖不同文件的无冲突重放；普通 `merge`/`rebase` 冲突续跑已由 `cli.merge-conflict-continue` / `cli.rebase-conflict-continue` 覆盖，但 `pull --rebase` 驱动的远端分叉冲突仍属深水区。
   - **`push --force-with-lease`**：当前 `push` 已有 `--force`/`-f`、`--tags`、`--mirror`，但无 lease 安全 force；如未来新增需补场景。
   - **`--exit-code-on-warning` 退出码 9**：缺少确定性 warning 触发源，`cli.cross-cutting-flags` 暂不强行断言；需先识别一个无密钥、可复现的 warning 路径（或在 runner 中以受控方式注入）。
 - 约束：以上每项落地时必须是本机无密钥可复现的 `libra <cmd>` 黑盒；shallow/分叉冲突若依赖真实远端则归入 Wave 3。
