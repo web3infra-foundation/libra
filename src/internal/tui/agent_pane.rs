@@ -63,6 +63,65 @@ pub fn agent_pane_rows(runs: &[AgentRun]) -> Vec<AgentRunRow> {
     rows
 }
 
+/// Render the agent-run pane as a stable monospace table for the `/agent list`
+/// TUI surface (and any future `libra agent status` CLI). Rows are ordered by
+/// [`agent_pane_rows`] — in-flight runs first, then by id — so a pane rebuilt
+/// from persisted snapshots renders deterministically. An empty input yields a
+/// documented placeholder so the surface never shows a blank pane. Pure — no I/O.
+pub fn format_agent_run_pane(runs: &[AgentRun]) -> String {
+    let rows = agent_pane_rows(runs);
+    if rows.is_empty() {
+        return "No sub-agent runs recorded yet.".to_string();
+    }
+
+    let mut out = String::from("Agent runs:\n");
+    let header = format!(
+        "  {:<36} {:<10} {:<12} {:<28}",
+        "run", "status", "provider", "model"
+    );
+    out.push_str(&header);
+    out.push('\n');
+    out.push_str("  ");
+    out.push_str(&"-".repeat(header.len() - 2));
+    out.push('\n');
+    for row in &rows {
+        out.push_str(&format!(
+            "  {:<36} {:<10} {:<12} {:<28}\n",
+            row.agent_run_id.0,
+            status_label(row.status),
+            truncate(&row.provider, 12),
+            truncate(&row.model, 28),
+        ));
+    }
+    out
+}
+
+/// Stable lower-case label for a run status (the `{:?}` Debug form is not a
+/// display contract). Exhaustive so a new `AgentRunStatus` variant is a compile
+/// error here rather than a silent `"unknown"`.
+fn status_label(status: AgentRunStatus) -> &'static str {
+    match status {
+        AgentRunStatus::Queued => "queued",
+        AgentRunStatus::Running => "running",
+        AgentRunStatus::Blocked => "blocked",
+        AgentRunStatus::Completed => "completed",
+        AgentRunStatus::Failed => "failed",
+    }
+}
+
+/// Char-count (not byte) truncation so a multi-byte model slug cannot panic by
+/// slicing mid-codepoint; an over-long cell ends with `…`.
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    if max <= 1 {
+        return value.chars().take(max).collect();
+    }
+    let head: String = value.chars().take(max - 1).collect();
+    format!("{head}…")
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -130,6 +189,43 @@ mod tests {
                 .iter()
                 .all(|r| r.status.is_terminal()),
             "all rows from the first terminal row on must be terminal",
+        );
+    }
+
+    #[test]
+    fn format_pane_empty_yields_placeholder() {
+        let out = format_agent_run_pane(&[]);
+        assert!(out.contains("No sub-agent runs recorded yet."));
+    }
+
+    #[test]
+    fn format_pane_renders_rows_in_flight_first_with_status_labels() {
+        let runs = vec![
+            run(20, AgentRunStatus::Completed),
+            run(21, AgentRunStatus::Running),
+        ];
+        let out = format_agent_run_pane(&runs);
+        assert!(out.contains("Agent runs:"));
+        assert!(out.contains("run") && out.contains("status") && out.contains("provider"));
+        assert!(out.contains("running") && out.contains("completed"));
+        assert!(out.contains("deepseek"));
+        // In-flight (run 21, Running) sorts before terminal (run 20, Completed).
+        let running_pos = out.find("running").expect("running row");
+        let completed_pos = out.find("completed").expect("completed row");
+        assert!(
+            running_pos < completed_pos,
+            "in-flight runs must render before terminal ones",
+        );
+    }
+
+    #[test]
+    fn format_pane_truncates_long_model() {
+        let mut r = run(30, AgentRunStatus::Running);
+        r.model = "acmecorp/some-extremely-long-model-identifier-slug".to_string();
+        let out = format_agent_run_pane(std::slice::from_ref(&r));
+        assert!(
+            out.contains('…'),
+            "an over-long model cell must be truncated"
         );
     }
 

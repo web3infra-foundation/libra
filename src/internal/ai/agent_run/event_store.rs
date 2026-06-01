@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::{
     AgentRunId,
     event::{AgentRunEvent, AgentRunEventEnvelope},
+    run::AgentRun,
 };
 
 /// Append-only store for per-run agent event transcripts, rooted at a
@@ -134,6 +135,120 @@ impl AgentRunEventStore {
         }
         Ok(events)
     }
+
+    /// Resolve the per-run **snapshot** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.run.json`.
+    ///
+    /// The `.run.json` suffix keeps the snapshot distinct from the run's
+    /// append-only `{run_id}.jsonl` event transcript in the same `agents/`
+    /// directory. Where the transcript is the run's event *history*, the
+    /// snapshot is its current materialized [`AgentRun`] state — the record
+    /// the MCP `libra://agents/runs` resources and the TUI agent pane read.
+    pub fn snapshot_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.run.json", run_id.0))
+    }
+
+    /// Persist the latest [`AgentRun`] snapshot, **overwriting** any prior
+    /// snapshot for the run. Unlike [`append`](Self::append), this is not
+    /// append-only: the snapshot is the run's *current* state, so the
+    /// producer rewrites it as the run transitions (spawned → running →
+    /// terminal). Creates the `{thread_id}/agents/` parent dirs on first
+    /// write. The snapshot is keyed by `run.id`, so the same store can hold
+    /// many runs under one thread.
+    pub fn write_snapshot(&self, thread_id: Uuid, run: &AgentRun) -> io::Result<()> {
+        let path = self.snapshot_path(thread_id, run.id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(run).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read one run's snapshot. A missing snapshot is `Ok(None)` (a run that
+    /// never persisted one) rather than an error; a present-but-corrupt
+    /// snapshot surfaces as an error so corruption is never silently treated
+    /// as "no run".
+    pub fn read_snapshot(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<AgentRun>> {
+        let path = self.snapshot_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// List every persisted run snapshot under a thread's `agents/` directory,
+    /// sorted by run id for deterministic output. A missing `agents/` directory
+    /// yields an empty vec. Only `*.run.json` snapshot files are read — the
+    /// sibling `.jsonl` event transcripts are skipped — and a snapshot file that
+    /// fails to parse fails the listing (corruption is not silently dropped).
+    pub fn list_snapshots(&self, thread_id: Uuid) -> io::Result<Vec<AgentRun>> {
+        let dir = self
+            .sessions_root
+            .join(thread_id.to_string())
+            .join("agents");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut runs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            let is_snapshot = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".run.json"));
+            if !is_snapshot {
+                continue;
+            }
+            let json = fs::read_to_string(&path)?;
+            let run: AgentRun = serde_json::from_str(&json).map_err(io::Error::other)?;
+            runs.push(run);
+        }
+        runs.sort_by_key(|run| run.id.0);
+        Ok(runs)
+    }
+
+    /// List every persisted run snapshot across **all** threads under the
+    /// sessions root, sorted by run id. The MCP `libra://agents/runs` list view
+    /// is not scoped to one thread, so it aggregates every `{thread_id}/agents/
+    /// *.run.json` snapshot. A missing sessions root yields an empty vec;
+    /// top-level entries whose name is not a UUID (non-thread directories) are
+    /// skipped, and a corrupt snapshot fails the listing.
+    pub fn list_all_snapshots(&self) -> io::Result<Vec<AgentRun>> {
+        let entries = match fs::read_dir(&self.sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut runs = Vec::new();
+        for entry in entries {
+            let thread_dir = entry?.path();
+            // Each top-level entry is a `{thread_id}` directory; parse its name
+            // as a UUID so `list_snapshots` can resolve its `agents/` subdir.
+            // Non-UUID entries (other session state) are skipped.
+            let Some(thread_id) = thread_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            runs.extend(self.list_snapshots(thread_id)?);
+        }
+        runs.sort_by_key(|run| run.id.0);
+        Ok(runs)
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
@@ -147,6 +262,7 @@ fn ensure_parent_dir(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::internal::ai::agent_run::{
+        AgentRunStatus, AgentTaskId,
         event::WorkspaceStrategy,
         workspace_strategy::{WorkspaceSizing, record_materialization},
     };
@@ -156,6 +272,19 @@ mod tests {
         let sessions_root = temp.path().join(".libra").join("sessions");
         let store = AgentRunEventStore::new(&sessions_root);
         (temp, store)
+    }
+
+    fn sample_run(id: AgentRunId, status: AgentRunStatus) -> AgentRun {
+        AgentRun {
+            id,
+            task_id: AgentTaskId::new(),
+            thread_id: Uuid::new_v4(),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            transcript_path: format!("agents/{}.jsonl", id.0),
+            workspace_path: None,
+            status,
+        }
     }
 
     /// The transcript path is exactly
@@ -313,6 +442,188 @@ mod tests {
             events[1].is_unknown(),
             "unrecognized future event must parse as Unknown, not fail the read",
         );
+    }
+
+    /// The snapshot path sits in the same `agents/` dir as the transcript but
+    /// carries the distinct `.run.json` suffix, so the run's current-state
+    /// snapshot never collides with its append-only `.jsonl` event log.
+    #[test]
+    fn snapshot_path_is_distinct_from_transcript() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+
+        let snapshot = store.snapshot_path(thread_id, run_id);
+        let transcript = store.transcript_path(thread_id, run_id);
+        assert_ne!(snapshot, transcript);
+        assert!(
+            snapshot
+                .to_string_lossy()
+                .ends_with(&format!("{}.run.json", run_id.0)),
+        );
+        assert_eq!(snapshot.parent(), transcript.parent());
+    }
+
+    /// A written snapshot round-trips: reading it back yields the same run
+    /// fields. (`AgentRun` is not `PartialEq`, so the key fields are checked
+    /// individually.)
+    #[test]
+    fn write_then_read_snapshot_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run = sample_run(AgentRunId::new(), AgentRunStatus::Running);
+
+        store
+            .write_snapshot(thread_id, &run)
+            .expect("write snapshot");
+        let back = store
+            .read_snapshot(thread_id, run.id)
+            .expect("read snapshot")
+            .expect("snapshot must be present");
+
+        assert_eq!(back.id, run.id);
+        assert_eq!(back.task_id, run.task_id);
+        assert_eq!(back.thread_id, run.thread_id);
+        assert_eq!(back.provider, run.provider);
+        assert_eq!(back.model, run.model);
+        assert_eq!(back.transcript_path, run.transcript_path);
+        assert_eq!(back.status, run.status);
+    }
+
+    /// A run that never persisted a snapshot reads as `None`, not an error.
+    #[test]
+    fn read_missing_snapshot_yields_none() {
+        let (_temp, store) = store();
+        let snapshot = store
+            .read_snapshot(Uuid::new_v4(), AgentRunId::new())
+            .expect("missing snapshot must read as Ok(None)");
+        assert!(snapshot.is_none());
+    }
+
+    /// The snapshot is current-state, not append-only: a second write for the
+    /// same run id overwrites the first, so a status transition is reflected.
+    #[test]
+    fn write_snapshot_overwrites_prior_state() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+
+        store
+            .write_snapshot(thread_id, &sample_run(run_id, AgentRunStatus::Running))
+            .expect("write running snapshot");
+        store
+            .write_snapshot(thread_id, &sample_run(run_id, AgentRunStatus::Completed))
+            .expect("overwrite with completed snapshot");
+
+        let back = store
+            .read_snapshot(thread_id, run_id)
+            .expect("read snapshot")
+            .expect("present");
+        assert_eq!(
+            back.status,
+            AgentRunStatus::Completed,
+            "the latest write must win — snapshot is current state, not history",
+        );
+    }
+
+    /// `list_snapshots` returns every run snapshot under a thread, sorted by
+    /// run id, and skips the sibling `.jsonl` event transcript (a run can have
+    /// both a transcript and a snapshot in the same `agents/` dir).
+    #[test]
+    fn list_snapshots_returns_all_sorted_and_skips_transcripts() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_a = sample_run(
+            AgentRunId::from(Uuid::from_u128(1)),
+            AgentRunStatus::Running,
+        );
+        let run_b = sample_run(
+            AgentRunId::from(Uuid::from_u128(2)),
+            AgentRunStatus::Completed,
+        );
+
+        store.write_snapshot(thread_id, &run_b).expect("write b");
+        store.write_snapshot(thread_id, &run_a).expect("write a");
+        // Also append an event transcript for run_a — it must NOT be parsed as
+        // a snapshot by the listing.
+        store
+            .append(
+                thread_id,
+                run_a.id,
+                &AgentRunEvent::Started {
+                    agent_run_id: run_a.id,
+                },
+            )
+            .expect("append transcript event");
+
+        let runs = store.list_snapshots(thread_id).expect("list snapshots");
+        assert_eq!(
+            runs.len(),
+            2,
+            "exactly the two snapshots, not the transcript"
+        );
+        assert_eq!(runs[0].id, run_a.id, "sorted by run id: u128(1) first");
+        assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// `list_all_snapshots` aggregates snapshots across every thread under the
+    /// sessions root (the MCP run-list view is not thread-scoped), sorted by run
+    /// id, and skips non-UUID top-level entries.
+    #[test]
+    fn list_all_snapshots_aggregates_across_threads() {
+        let (temp, store) = store();
+        let thread_a = Uuid::new_v4();
+        let thread_b = Uuid::new_v4();
+        let run_a = sample_run(
+            AgentRunId::from(Uuid::from_u128(1)),
+            AgentRunStatus::Running,
+        );
+        let run_b = sample_run(
+            AgentRunId::from(Uuid::from_u128(2)),
+            AgentRunStatus::Completed,
+        );
+        store.write_snapshot(thread_a, &run_a).expect("write a");
+        store.write_snapshot(thread_b, &run_b).expect("write b");
+        // A non-UUID sibling directory under the sessions root must be ignored.
+        std::fs::create_dir_all(
+            temp.path()
+                .join(".libra")
+                .join("sessions")
+                .join("not-a-thread"),
+        )
+        .expect("mk non-thread dir");
+
+        let runs = store.list_all_snapshots().expect("list all snapshots");
+        assert_eq!(
+            runs.len(),
+            2,
+            "both threads' snapshots, skipping non-thread dirs"
+        );
+        assert_eq!(runs[0].id, run_a.id, "sorted by run id across threads");
+        assert_eq!(runs[1].id, run_b.id);
+    }
+
+    /// A missing sessions root lists as empty (no runs ever persisted).
+    #[test]
+    fn list_all_snapshots_missing_root_yields_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = AgentRunEventStore::new(temp.path().join("nonexistent-sessions"));
+        assert!(
+            store
+                .list_all_snapshots()
+                .expect("missing root → empty")
+                .is_empty()
+        );
+    }
+
+    /// A missing `agents/` directory (no runs ever persisted) lists as empty.
+    #[test]
+    fn list_snapshots_missing_dir_yields_empty() {
+        let (_temp, store) = store();
+        let runs = store
+            .list_snapshots(Uuid::new_v4())
+            .expect("missing dir must list as empty, not error");
+        assert!(runs.is_empty());
     }
 
     /// Pins the documented `read()` contract: a line whose `kind` IS

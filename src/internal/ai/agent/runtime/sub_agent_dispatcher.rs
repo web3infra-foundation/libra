@@ -70,7 +70,10 @@ use super::sub_agent::{
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
-    agent_run::{AgentRunEvent, AgentRunEventEnvelope, AgentRunId},
+    agent_run::{
+        AgentRun, AgentRunEvent, AgentRunEventEnvelope, AgentRunId, AgentRunStatus, AgentTaskId,
+        event_store::AgentRunEventStore,
+    },
     completion::CompletionUsageSummary,
     permission::{
         EDIT_TOOLS, PermissionRuleset, agent_permission_spec_to_ruleset, assert_no_escalation,
@@ -104,6 +107,55 @@ impl Default for MultiAgentConfig {
             max_subagent_depth: 1,
             max_concurrent_subagents: 1,
         }
+    }
+}
+
+/// Inputs captured at `Spawned` time so the dispatch tail can persist (and
+/// later update) an [`AgentRun`] snapshot for a sub-agent run (CEX-S2-16).
+///
+/// Present only when workspace isolation supplies a `sessions_root`; the
+/// snapshot lands in the same `{thread_id}/agents/` directory as the run's
+/// event transcript (the `thread_id` is parsed from `parent_thread_id` with a
+/// fresh-uuid fallback, matching [`materialize_isolated_workspace`]), so the MCP
+/// `libra://agents/runs` resources and the TUI agent pane can read the run's
+/// current state. Snapshot writes are best-effort: a failure is logged and
+/// swallowed so persistence never breaks a dispatch.
+struct RunSnapshotCtx {
+    store: AgentRunEventStore,
+    thread_id: uuid::Uuid,
+    task_id: AgentTaskId,
+    provider: String,
+    model: String,
+    transcript_path: String,
+}
+
+/// Write the current [`AgentRun`] snapshot for a run at `status`, overwriting any
+/// prior snapshot. A `None` context (isolation not configured) is a no-op.
+fn persist_run_snapshot(
+    snapshot: Option<&RunSnapshotCtx>,
+    run_id: AgentRunId,
+    status: AgentRunStatus,
+) {
+    let Some(ctx) = snapshot else {
+        return;
+    };
+    let run = AgentRun {
+        id: run_id,
+        task_id: ctx.task_id,
+        thread_id: ctx.thread_id,
+        provider: ctx.provider.clone(),
+        model: ctx.model.clone(),
+        transcript_path: ctx.transcript_path.clone(),
+        workspace_path: None,
+        status,
+    };
+    if let Err(err) = ctx.store.write_snapshot(ctx.thread_id, &run) {
+        tracing::warn!(
+            error = %err,
+            agent_run_id = %run_id.0,
+            ?status,
+            "failed to persist AgentRun snapshot",
+        );
     }
 }
 
@@ -487,6 +539,39 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 );
             }
 
+            // CEX-S2-16: when workspace isolation supplies a sessions root,
+            // persist the run snapshot so MCP / TUI surfaces can read it. The
+            // snapshot is keyed by a Uuid task id (the invocation's task id when
+            // it parses as one, else a fresh id) and lands beside the run's
+            // event transcript. Captured once here and reused at the terminal
+            // update below. Best-effort — see `persist_run_snapshot`.
+            let run_snapshot = self.workspace_isolation.as_ref().map(|isolation| {
+                let thread_id = uuid::Uuid::parse_str(ctx.parent_thread_id)
+                    .unwrap_or_else(|_| uuid::Uuid::new_v4());
+                let store = AgentRunEventStore::new(isolation.sessions_root.clone());
+                let snapshot_task_id = invocation
+                    .task_id
+                    .as_deref()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                    .map(AgentTaskId::from)
+                    // `AgentTaskId::default()` mints a fresh UUID (the newtype's
+                    // `Default` is `new()`), so this is the no-task-id fallback.
+                    .unwrap_or_default();
+                let transcript_path = store
+                    .transcript_path(thread_id, agent_run_id)
+                    .to_string_lossy()
+                    .into_owned();
+                RunSnapshotCtx {
+                    store,
+                    thread_id,
+                    task_id: snapshot_task_id,
+                    provider: provider_id.clone(),
+                    model: model_id.clone(),
+                    transcript_path,
+                }
+            });
+            persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, AgentRunStatus::Running);
+
             // Bind the task id to the run id so future call sites
             // that grep the JSONL stream can correlate the dispatch
             // back to its `Spawned` event. Both the P3.4 child runner
@@ -681,6 +766,17 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     "failed to append AgentRunEvent::Completed/Failed to parent session JSONL"
                 );
             }
+
+            // CEX-S2-16: update the persisted run snapshot to its terminal
+            // state. Every non-success terminal (Failed / Cancelled / TimedOut /
+            // BudgetExceeded) collapses to the coarse `Failed` status — the
+            // precise reason stays in the terminal event above. Best-effort.
+            let terminal_status = if outcome.is_ok() {
+                AgentRunStatus::Completed
+            } else {
+                AgentRunStatus::Failed
+            };
+            persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, terminal_status);
 
             // CEX-S2-12 / S2-INV-03 + CEX-S2-11 (5): tear down the
             // isolated workspace now that the child run is done so no
@@ -2125,6 +2221,97 @@ mod tests {
             }
             other => panic!("second event must be Completed, got {other:?}"),
         }
+    }
+
+    /// CEX-S2-16: when workspace isolation supplies a sessions root, a dispatch
+    /// persists an [`AgentRun`] snapshot the MCP / TUI surfaces can read. A
+    /// successful dispatch (here the placeholder branch — isolation is
+    /// configured but no child runner, so no materialization is needed) leaves a
+    /// `Completed` snapshot carrying the run's provider / model, under the
+    /// thread's `agents/` directory. With no isolation configured the dispatcher
+    /// writes no snapshot (the prior tests stay green), so this pins the new
+    /// behaviour without changing the default path.
+    #[tokio::test]
+    async fn isolated_dispatch_persists_completed_run_snapshot() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+
+        // A sessions root we can read the snapshot back from after dispatch.
+        let sessions_temp = tempfile::tempdir().expect("sessions tempdir");
+        let sessions_root = sessions_temp.path().to_path_buf();
+        let dispatcher = dispatcher.with_workspace_isolation(
+            crate::internal::ai::agent::runtime::WorkspaceIsolationConfig {
+                fuse_state:
+                    crate::internal::ai::orchestrator::workspace::FuseProvisionState::default(),
+                sessions_root: sessions_root.clone(),
+                allow_full_copy: false,
+            },
+        );
+
+        let mut sub = explore_subagent();
+        sub.model = ModelBinding::parse("anthropic/claude-3-5-haiku-latest");
+        registry.insert(sub);
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let (permission_service, _asker) = allow_once_service();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        // A real UUID thread id so the snapshot lands at a findable path
+        // (`{thread_id}/agents/{run}.run.json`) rather than the fresh-uuid
+        // fallback the dispatcher uses for a non-UUID thread id.
+        let thread_uuid = uuid::Uuid::new_v4();
+        let parent_thread = thread_uuid.to_string();
+        let parent_session: SessionId = "session-snap".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                invocation("explore"),
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+            .expect("dispatch with isolation configured must succeed");
+        assert_eq!(result.agent_name, "explore");
+
+        let snapshot_store =
+            crate::internal::ai::agent_run::event_store::AgentRunEventStore::new(sessions_root);
+        let runs = snapshot_store
+            .list_snapshots(thread_uuid)
+            .expect("snapshot listing must succeed");
+        assert_eq!(runs.len(), 1, "exactly one AgentRun snapshot was persisted");
+        assert_eq!(
+            runs[0].status,
+            crate::internal::ai::agent_run::AgentRunStatus::Completed,
+            "a successful dispatch must leave a Completed snapshot, not a stuck Running one",
+        );
+        assert_eq!(runs[0].provider, "anthropic");
+        assert_eq!(runs[0].model, "claude-3-5-haiku-latest");
+        assert!(
+            runs[0].transcript_path.ends_with(".jsonl"),
+            "snapshot must record the run's transcript path",
+        );
     }
 
     /// OC-Phase 3 P3.4 seam: when a `SubAgentChildRunner` is attached

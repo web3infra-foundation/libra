@@ -3068,7 +3068,7 @@ where
     let source_pool = {
         let db_path = storage_root.join(DATABASE);
         let db_path_str = db_path.to_string_lossy();
-        match establish_connection(&db_path_str).await {
+        let pool = match establish_connection(&db_path_str).await {
             Ok(conn) => SourcePool::with_persistence(Arc::new(conn)),
             Err(err) => {
                 tracing::warn!(
@@ -3079,7 +3079,13 @@ where
                 );
                 SourcePool::new()
             }
-        }
+        };
+        // CEX-S2-14 (agent.md:1959): apply the configured per-slug source-call
+        // concurrency limit so concurrent sub-agents cannot overwhelm one
+        // backend. `0` (the default) leaves the pool unthrottled.
+        pool.with_source_concurrency_limit(
+            agents_config.multi_agent.source_concurrency_limit as usize,
+        )
     };
     if let Err(error) = register_builtin_mcp_source_from_project_config(
         &source_pool,
