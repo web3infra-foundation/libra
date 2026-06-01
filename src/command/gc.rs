@@ -23,8 +23,10 @@ use git_internal::{
     },
 };
 use ring::rand::{SecureRandom, SystemRandom};
-use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
-use serde::Serialize;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryResult, Statement,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     command::verify_pack,
@@ -259,6 +261,22 @@ struct GcReplaceLockGuard {
     token: String,
     /// Open handle keeping the create-new mutex file alive for this process.
     _file: fs::File,
+}
+
+/// Read-only worktree entry used to validate linked-worktree `.libra` symlinks.
+#[derive(Deserialize)]
+struct GcWorktreeEntry {
+    /// Canonical absolute worktree path persisted by `worktree add`.
+    path: String,
+    /// Whether this entry represents the main worktree.
+    is_main: bool,
+}
+
+/// Read-only worktree state used before GC acquires any lock.
+#[derive(Deserialize)]
+struct GcWorktreeState {
+    /// Worktrees registered for a shared `.libra` storage directory.
+    worktrees: Vec<GcWorktreeEntry>,
 }
 
 impl Drop for GcReplaceLockGuard {
@@ -599,8 +617,8 @@ fn read_gc_lock_content(path: &Path) -> CliResult<String> {
     })
 }
 
-/// Return whether `pid` appears to identify a live process.
 #[cfg(unix)]
+/// Return whether `pid` appears to identify a live process.
 fn process_is_running(pid: u32) -> bool {
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if result == 0 {
@@ -609,8 +627,8 @@ fn process_is_running(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Return whether `pid` appears to identify a live process.
 #[cfg(not(unix))]
+/// Return whether `pid` appears to identify a live process.
 fn process_is_running(_pid: u32) -> bool {
     false
 }
@@ -800,11 +818,8 @@ fn ensure_repository_storage_metadata() -> CliResult<()> {
         let storage = current.join(util::ROOT_DIR);
         match fs::symlink_metadata(&storage) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CliError::fatal(format!(
-                    "refusing to use symlink repository metadata directory '{}'",
-                    storage.display()
-                ))
-                .with_stable_code(StableErrorCode::RepoCorrupt));
+                ensure_registered_linked_worktree_storage(&current, &storage)?;
+                return Ok(());
             }
             Ok(metadata)
                 if metadata.file_type().is_dir() && is_valid_repository_storage_dir(&storage) =>
@@ -826,6 +841,89 @@ fn ensure_repository_storage_metadata() -> CliResult<()> {
             return Ok(());
         }
     }
+}
+
+/// Validate that a `.libra` symlink belongs to a registered linked worktree.
+fn ensure_registered_linked_worktree_storage(
+    worktree_root: &Path,
+    storage_link: &Path,
+) -> CliResult<()> {
+    let storage = fs::canonicalize(storage_link).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to resolve symlink repository metadata directory '{}': {}",
+            storage_link.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    if !is_valid_repository_storage_dir(&storage) {
+        return Err(CliError::fatal(format!(
+            "refusing to use symlink repository metadata directory '{}' because target '{}' is not a valid repository storage directory",
+            storage_link.display(),
+            storage.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt));
+    }
+    let worktree = fs::canonicalize(worktree_root).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to resolve linked worktree '{}': {}",
+            worktree_root.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let state = read_worktree_state_read_only(&storage)?;
+    let registered = state.worktrees.iter().any(|entry| {
+        !entry.is_main
+            && fs::canonicalize(Path::new(&entry.path))
+                .map(|path| path == worktree)
+                .unwrap_or(false)
+    });
+    if registered {
+        return Ok(());
+    }
+    Err(CliError::fatal(format!(
+        "refusing to use symlink repository metadata directory '{}' because '{}' is not a registered linked worktree",
+        storage_link.display(),
+        worktree.display()
+    ))
+    .with_stable_code(StableErrorCode::RepoCorrupt))
+}
+
+/// Read `worktrees.json` without creating, repairing, or rewriting it.
+fn read_worktree_state_read_only(storage: &Path) -> CliResult<GcWorktreeState> {
+    let path = storage.join("worktrees.json");
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to inspect linked worktree registry '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(CliError::fatal(format!(
+            "linked worktree registry '{}' is not a regular file",
+            path.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt));
+    }
+    let data = fs::read(&path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read linked worktree registry '{}': {}",
+            path.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    serde_json::from_slice(&data).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to parse linked worktree registry '{}': {}",
+            path.display(),
+            error
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
 }
 
 /// Return whether a raw `.libra` candidate matches repository discovery markers.
@@ -956,6 +1054,7 @@ fn is_hex_prefix(prefix: &str) -> bool {
 
 /// Load root object IDs and non-reachability prune protections.
 async fn collect_roots_from_database() -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
+    ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let mut roots = HashSet::new();
     let mut protected = HashSet::new();
@@ -1023,12 +1122,48 @@ fn insert_optional_root(
     Ok(())
 }
 
+/// Add a required hash to a root set, rejecting empty or null placeholders.
+fn insert_required_root(
+    roots: &mut HashSet<ObjectHash>,
+    raw: String,
+    source: &str,
+) -> CliResult<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || is_null_oid(trimmed) {
+        return Err(
+            CliError::fatal(format!("{source} is missing a valid object id"))
+                .with_stable_code(StableErrorCode::RepoCorrupt),
+        );
+    }
+    roots.insert(parse_stored_hash(trimmed, source)?);
+    Ok(())
+}
+
 /// Add newline-separated object IDs to a root set.
 fn insert_line_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -> CliResult<()> {
     for line in raw.lines() {
-        insert_optional_root(roots, Some(line.to_string()), source)?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            insert_required_root(roots, trimmed.to_string(), source)?;
+        }
     }
     Ok(())
+}
+
+/// Decode a required text root field and fail closed on schema corruption.
+fn required_root_text(row: &QueryResult, index: usize, source: &str) -> CliResult<String> {
+    row.try_get_by_index(index).map_err(|error| {
+        CliError::fatal(format!("failed to decode {source}: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
+}
+
+/// Decode an optional text root field and fail closed on non-NULL decode errors.
+fn optional_root_text(row: &QueryResult, index: usize, source: &str) -> CliResult<Option<String>> {
+    row.try_get_by_index(index).map_err(|error| {
+        CliError::fatal(format!("failed to decode {source}: {error}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })
 }
 
 /// Load object IDs held by an in-progress rebase state row.
@@ -1049,28 +1184,28 @@ async fn rebase_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
     for row in rows {
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(0).ok(),
+            required_root_text(&row, 0, "rebase_state.onto")?,
             "rebase_state.onto",
         )?;
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(1).ok(),
+            required_root_text(&row, 1, "rebase_state.orig_head")?,
             "rebase_state.orig_head",
         )?;
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(2).ok(),
+            required_root_text(&row, 2, "rebase_state.current_head")?,
             "rebase_state.current_head",
         )?;
-        let todo: String = row.try_get_by_index(3).unwrap_or_default();
-        let done: String = row.try_get_by_index(4).unwrap_or_default();
+        let todo = required_root_text(&row, 3, "rebase_state.todo")?;
+        let done = required_root_text(&row, 4, "rebase_state.done")?;
         insert_line_roots(&mut roots, &todo, "rebase_state.todo")?;
         insert_line_roots(&mut roots, &done, "rebase_state.done")?;
         insert_optional_root(
             &mut roots,
-            row.try_get_by_index(5).ok().flatten(),
+            optional_root_text(&row, 5, "rebase_state.stopped_sha")?,
             "rebase_state.stopped_sha",
         )?;
     }
@@ -1094,42 +1229,61 @@ async fn bisect_state_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet<Obj
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
     for row in rows {
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(0).ok(),
+            required_root_text(&row, 0, "bisect_state.orig_head")?,
             "bisect_state.orig_head",
         )?;
         insert_optional_root(
             &mut roots,
-            row.try_get_by_index(1).ok().flatten(),
+            optional_root_text(&row, 1, "bisect_state.bad")?,
             "bisect_state.bad",
         )?;
-        let good_json: String = row.try_get_by_index(2).unwrap_or_default();
-        let skipped_json: Option<String> = row.try_get_by_index(4).ok().flatten();
-        insert_json_roots(&mut roots, &good_json, "bisect_state.good")?;
+        let good_json = required_root_text(&row, 2, "bisect_state.good")?;
+        let skipped_json = optional_root_text(&row, 4, "bisect_state.skipped")?;
+        insert_required_json_roots(&mut roots, &good_json, "bisect_state.good")?;
         if let Some(skipped) = skipped_json {
-            insert_json_roots(&mut roots, &skipped, "bisect_state.skipped")?;
+            insert_optional_json_roots(&mut roots, &skipped, "bisect_state.skipped")?;
         }
         insert_optional_root(
             &mut roots,
-            row.try_get_by_index(3).ok().flatten(),
+            optional_root_text(&row, 3, "bisect_state.current")?,
             "bisect_state.current",
         )?;
     }
     Ok(roots)
 }
 
-/// Add object IDs from a JSON string array to a root set.
-fn insert_json_roots(roots: &mut HashSet<ObjectHash>, raw: &str, source: &str) -> CliResult<()> {
+/// Add object IDs from an optional JSON string array to a root set.
+fn insert_optional_json_roots(
+    roots: &mut HashSet<ObjectHash>,
+    raw: &str,
+    source: &str,
+) -> CliResult<()> {
     if raw.trim().is_empty() {
         return Ok(());
+    }
+    insert_required_json_roots(roots, raw, source)
+}
+
+/// Add object IDs from a required JSON string array to a root set.
+fn insert_required_json_roots(
+    roots: &mut HashSet<ObjectHash>,
+    raw: &str,
+    source: &str,
+) -> CliResult<()> {
+    if raw.trim().is_empty() {
+        return Err(
+            CliError::fatal(format!("{source} is missing a JSON object list"))
+                .with_stable_code(StableErrorCode::RepoCorrupt),
+        );
     }
     let hashes: Vec<String> = serde_json::from_str(raw).map_err(|error| {
         CliError::fatal(format!("invalid {source} object list: {error}"))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
     for hash in hashes {
-        insert_optional_root(roots, Some(hash), source)?;
+        insert_required_root(roots, hash, source)?;
     }
     Ok(())
 }
@@ -1290,22 +1444,22 @@ async fn agent_checkpoint_roots<C: ConnectionTrait>(db: &C) -> CliResult<HashSet
     for row in rows {
         insert_optional_root(
             &mut roots,
-            row.try_get_by_index(0).ok().flatten(),
+            optional_root_text(&row, 0, "agent_checkpoint.parent_commit")?,
             "agent_checkpoint.parent_commit",
         )?;
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(1).ok(),
+            required_root_text(&row, 1, "agent_checkpoint.tree_oid")?,
             "agent_checkpoint.tree_oid",
         )?;
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(2).ok(),
+            required_root_text(&row, 2, "agent_checkpoint.metadata_blob_oid")?,
             "agent_checkpoint.metadata_blob_oid",
         )?;
-        insert_optional_root(
+        insert_required_root(
             &mut roots,
-            row.try_get_by_index(3).ok(),
+            required_root_text(&row, 3, "agent_checkpoint.traces_commit")?,
             "agent_checkpoint.traces_commit",
         )?;
     }
@@ -1392,8 +1546,31 @@ fn is_null_oid(raw: &str) -> bool {
 fn index_roots() -> CliResult<HashSet<ObjectHash>> {
     let mut roots = HashSet::new();
     let index_path = path::index();
-    if !index_path.exists() {
-        return Ok(roots);
+    match fs::symlink_metadata(&index_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CliError::fatal(format!(
+                "refusing to read symlink index '{}'",
+                index_path.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(CliError::fatal(format!(
+                "index '{}' is not a regular file",
+                index_path.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(roots),
+        Err(error) => {
+            return Err(CliError::fatal(format!(
+                "failed to inspect index '{}': {}",
+                index_path.display(),
+                format_io_error(&error)
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed));
+        }
     }
     let index = git_internal::internal::index::Index::load(&index_path).map_err(|error| {
         CliError::fatal(format!(
@@ -1411,6 +1588,35 @@ fn index_roots() -> CliResult<HashSet<ObjectHash>> {
         }
     }
     Ok(roots)
+}
+
+/// Ensure the repository database is a regular file before SQLite opens it.
+fn ensure_regular_repository_database() -> CliResult<()> {
+    let database = path::database();
+    match fs::symlink_metadata(&database) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::fatal(format!(
+            "refusing to use symlink repository database '{}'",
+            database.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(CliError::fatal(format!(
+            "repository database '{}' is not a regular file",
+            database.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(CliError::fatal(format!(
+            "repository database '{}' is missing",
+            database.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to inspect repository database '{}': {}",
+            database.display(),
+            format_io_error(&error)
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
 }
 
 /// Traverse the object graph from roots and mark all reachable objects.
@@ -1551,6 +1757,7 @@ async fn prune_unreachable_loose_objects(
 
 /// Remove local cloud-backup index rows for an object no longer present locally.
 async fn remove_object_index_rows(hash: &ObjectHash) -> CliResult<()> {
+    ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let repo_id = current_repo_id(&db).await?;
     object_index::Entity::delete_many()
@@ -2890,13 +3097,102 @@ mod tests {
 
         let repo = tempdir().unwrap();
         let external = tempdir().unwrap();
+        fs::write(external.path().join(util::DATABASE), b"").unwrap();
         symlink(external.path(), repo.path().join(util::ROOT_DIR)).unwrap();
         let _guard = test::ChangeDirGuard::new(repo.path());
 
         let error = ensure_repository_storage_metadata().unwrap_err();
 
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
-        assert!(error.render().contains("symlink repository metadata"));
+        assert!(error.render().contains("linked worktree registry"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers allowing a `.libra` symlink for a registered linked worktree.
+    fn ensure_repository_storage_metadata_allows_registered_linked_worktree() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        fs::write(storage.path().join(util::DATABASE), b"").unwrap();
+        let repo_path = fs::canonicalize(repo.path()).unwrap();
+        fs::write(
+            storage.path().join("worktrees.json"),
+            serde_json::json!({
+                "worktrees": [
+                    {
+                        "path": repo_path,
+                        "is_main": false,
+                        "locked": false,
+                        "lock_reason": null
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        symlink(storage.path(), repo.path().join(util::ROOT_DIR)).unwrap();
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        ensure_repository_storage_metadata().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers rejecting a valid storage symlink when the worktree is not registered.
+    fn ensure_repository_storage_metadata_rejects_unregistered_linked_worktree() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        fs::write(storage.path().join(util::DATABASE), b"").unwrap();
+        let other_path = fs::canonicalize(other.path()).unwrap();
+        fs::write(
+            storage.path().join("worktrees.json"),
+            serde_json::json!({
+                "worktrees": [
+                    {
+                        "path": other_path,
+                        "is_main": false,
+                        "locked": false,
+                        "lock_reason": null
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        symlink(storage.path(), repo.path().join(util::ROOT_DIR)).unwrap();
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let error = ensure_repository_storage_metadata().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("not a registered linked worktree"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers failing closed when linked-worktree registration is corrupt.
+    fn ensure_repository_storage_metadata_rejects_corrupt_worktree_registry() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        fs::write(storage.path().join(util::DATABASE), b"").unwrap();
+        fs::write(storage.path().join("worktrees.json"), b"{").unwrap();
+        symlink(storage.path(), repo.path().join(util::ROOT_DIR)).unwrap();
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let error = ensure_repository_storage_metadata().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("linked worktree registry"));
     }
 
     #[test]
@@ -2917,7 +3213,7 @@ mod tests {
         let error = ensure_repository_storage_metadata().unwrap_err();
 
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
-        assert!(error.render().contains("symlink repository metadata"));
+        assert!(error.render().contains("linked worktree registry"));
     }
 
     #[tokio::test]
@@ -3278,6 +3574,33 @@ mod tests {
     }
 
     #[test]
+    /// Covers required roots rejecting missing and all-zero placeholders.
+    fn insert_required_root_rejects_missing_or_null_oid() {
+        let mut roots = HashSet::new();
+        let zero = "0".repeat(get_hash_kind().size() * 2);
+
+        for raw in ["", "   ", zero.as_str()] {
+            let error =
+                insert_required_root(&mut roots, raw.to_string(), "rebase_state.onto").unwrap_err();
+            assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+            assert!(error.render().contains("rebase_state.onto"));
+        }
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    /// Covers required JSON root lists rejecting missing content.
+    fn insert_required_json_roots_rejects_empty_string() {
+        let mut roots = HashSet::new();
+
+        let error = insert_required_json_roots(&mut roots, "  ", "bisect_state.good").unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("bisect_state.good"));
+        assert!(roots.is_empty());
+    }
+
+    #[test]
     /// Covers filesystem error normalization.
     fn format_io_error_normalizes_not_found() {
         let error = io::Error::new(io::ErrorKind::NotFound, "missing");
@@ -3367,6 +3690,29 @@ mod tests {
         assert!(!roots.is_empty());
     }
 
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers rejecting symlinked repository databases before SQLite opens them.
+    fn ensure_regular_repository_database_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let database = path::database();
+        let external = repo.path().join("external.db");
+        fs::remove_file(&database).unwrap();
+        fs::write(&external, b"sqlite").unwrap();
+        symlink(&external, &database).unwrap();
+
+        let error = ensure_regular_repository_database().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("symlink repository database"));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     /// Covers rebase state commits being protected as roots.
@@ -3429,6 +3775,53 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    /// Covers fail-closed decoding for malformed rebase state roots.
+    async fn rebase_state_roots_rejects_malformed_columns() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE IF EXISTS rebase_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE rebase_state (
+                onto TEXT,
+                orig_head TEXT,
+                current_head TEXT,
+                todo TEXT,
+                done TEXT,
+                stopped_sha TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO rebase_state
+                (onto, orig_head, current_head, todo, done, stopped_sha)
+             VALUES (?, ?, NULL, '', '', NULL)",
+            [
+                test_hash(26).to_string().into(),
+                test_hash(27).to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let error = rebase_state_roots(&db).await.unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("rebase_state.current_head"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     /// Covers bisect state commits being protected as roots.
     async fn collect_roots_includes_bisect_state() {
         let repo = tempdir().unwrap();
@@ -3478,6 +3871,49 @@ mod tests {
         for hash in [orig_head, bad, good, current, skipped] {
             assert!(roots.contains(&hash));
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers fail-closed decoding for malformed bisect state roots.
+    async fn bisect_state_roots_rejects_malformed_columns() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE IF EXISTS bisect_state".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE bisect_state (
+                orig_head TEXT,
+                bad TEXT,
+                good TEXT,
+                current TEXT,
+                skipped TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO bisect_state
+                (orig_head, bad, good, current, skipped)
+             VALUES (?, NULL, NULL, NULL, NULL)",
+            [test_hash(35).to_string().into()],
+        ))
+        .await
+        .unwrap();
+
+        let error = bisect_state_roots(&db).await.unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("bisect_state.good"));
     }
 
     #[tokio::test]
@@ -3710,6 +4146,74 @@ mod tests {
         for hash in expected {
             assert!(roots.contains(&hash));
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers fail-closed decoding for malformed agent checkpoint roots.
+    async fn agent_checkpoint_roots_rejects_malformed_columns() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE IF EXISTS agent_checkpoint".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "CREATE TABLE agent_checkpoint (
+                parent_commit TEXT,
+                tree_oid TEXT,
+                metadata_blob_oid TEXT,
+                traces_commit TEXT
+            )",
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO agent_checkpoint
+                (parent_commit, tree_oid, metadata_blob_oid, traces_commit)
+             VALUES (NULL, NULL, ?, ?)",
+            [
+                test_hash(58).to_string().into(),
+                test_hash(59).to_string().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let error = agent_checkpoint_roots(&db).await.unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("agent_checkpoint.tree_oid"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    /// Covers rejecting symlinked indexes before loading index contents.
+    fn index_roots_rejects_symlink_index() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let index = path::index();
+        let external = repo.path().join("external.index");
+        let _ = fs::remove_file(&index);
+        fs::write(&external, b"index").unwrap();
+        symlink(&external, &index).unwrap();
+
+        let error = index_roots().unwrap_err();
+
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(error.render().contains("symlink index"));
     }
 
     #[tokio::test]
