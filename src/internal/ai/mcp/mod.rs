@@ -34,6 +34,7 @@
 //!
 //! See `resource.rs` for detailed parameter structures.
 
+pub mod agents_resource;
 pub mod authz;
 pub mod resource;
 pub mod server;
