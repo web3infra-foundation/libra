@@ -8,12 +8,20 @@
 //! for `distillable = true` entries and records their ids in
 //! `distillable_evidence_ids` before the `MergeDecision` is persisted.
 //!
-//! This module currently owns the pure, side-effect-free distillable-scan step.
-//! The orchestrator-wired pieces — triggering the test DAG and routing a
-//! validation failure back to the originating `AgentTask` — touch
-//! `orchestrator::verifier` and land separately.
+//! This module owns the **pure, side-effect-free** stages: the distillable
+//! evidence scan, failure → originating-task routing, and
+//! [`validate_merge_candidate`] (the output stage that composes the risk score,
+//! conflicts, test evidence and distillable ids into the filled
+//! `MergeDecision`). The remaining orchestrator-wired piece — actually
+//! *executing* the verification test DAG to produce `test_evidence` — touches
+//! `orchestrator::verifier` and lands separately; this module takes that
+//! evidence as an input so the field-filling stays deterministic and testable.
 
-use super::{AgentEvidence, AgentPatchSet, AgentRun, AgentTaskId, EvidenceId};
+use super::{
+    AgentEvidence, AgentPatchSet, AgentRun, AgentRunEvent, AgentTaskId, Conflict, EvidenceId,
+    MergeCandidate, MergeDecision, MergeDecisionPayloadV0, compute_merge_risk_score,
+    gather_merge_risk_inputs,
+};
 
 /// Collect the ids of every `distillable = true` evidence record, in input
 /// order, ready to fill `MergeDecisionPayloadV0::distillable_evidence_ids`
@@ -52,6 +60,43 @@ pub fn resolve_task_for_patchset(
     runs.iter()
         .find(|run| run.id == patchset.agent_run_id)
         .map(|run| run.task_id)
+}
+
+/// Assemble the validated [`MergeDecision`] for a reviewed candidate — the
+/// **pure output stage** of the CEX-S2-15 ValidatorEngine (完成判定: "填充
+/// CEX-S2-13 已声明的字段"). Composes the merge risk score (gathered from the
+/// candidate's `runs` + `events`), the detected `conflicts`, the verification
+/// `test_evidence` the engine produced, and the distillable-evidence scan over
+/// `all_evidence` into [`MergeDecisionPayloadV0`], then builds the event via
+/// [`MergeDecision::for_candidate`] — which derives the aggregate ids and
+/// `resulting_state` from the candidate, so the engine **never decides the
+/// verdict** (that stays with Layer 1 human review per S2-INV-07; the engine
+/// only vets and fills fields).
+///
+/// Running the verification test DAG to produce `test_evidence`, and the
+/// patch-scope check behind `unverified_patch_scope`, are the engine's I/O and
+/// are the caller's job. This function is pure so the field-filling contract —
+/// every CEX-S2-13 `None`/empty default becoming its computed value — is
+/// deterministically unit-testable without the orchestrator.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_merge_candidate(
+    candidate: &MergeCandidate,
+    runs: &[AgentRun],
+    events: &[AgentRunEvent],
+    conflicts: Vec<Conflict>,
+    test_evidence: Vec<EvidenceId>,
+    all_evidence: &[AgentEvidence],
+    unverified_patch_scope: u32,
+) -> MergeDecision {
+    let risk_inputs =
+        gather_merge_risk_inputs(runs, events, conflicts.len() as u32, unverified_patch_scope);
+    let payload = MergeDecisionPayloadV0 {
+        risk_score: Some(compute_merge_risk_score(&risk_inputs)),
+        conflict_list: conflicts,
+        test_evidence,
+        distillable_evidence_ids: collect_distillable_evidence_ids(all_evidence),
+    };
+    MergeDecision::for_candidate(candidate, payload)
 }
 
 #[cfg(test)]
@@ -200,6 +245,62 @@ mod tests {
         assert_eq!(
             resolve_task_for_patchset(&patchset(AgentRunId::new()), &[]),
             None,
+        );
+    }
+
+    /// CEX-S2-15 完成判定: the ValidatorEngine's pure output stage fills every
+    /// CEX-S2-13 `MergeDecision` field that defaults to `None`/empty — risk
+    /// score (gathered from the candidate's runs + events), conflict list, test
+    /// evidence, and distillable ids — while leaving the verdict
+    /// (`resulting_state`) as the candidate's (the engine vets, never decides).
+    #[test]
+    fn validate_merge_candidate_fills_the_s2_13_declared_fields() {
+        use super::super::BudgetDimension;
+
+        let run_id = AgentRunId::new();
+        let r = run(run_id, AgentTaskId::new()); // status Failed
+        let candidate = MergeCandidate::from_patchsets(
+            MergeCandidateId::new(),
+            std::slice::from_ref(&patchset(run_id)),
+        );
+
+        let events = vec![AgentRunEvent::BudgetExceeded {
+            agent_run_id: run_id,
+            dimension: BudgetDimension::Token,
+        }];
+        let conflicts = vec![Conflict {
+            kind: "overlapping_hunk".to_string(),
+            path: "src/a.rs".to_string(),
+            detail: None,
+        }];
+        let test_evidence = vec![EvidenceId::new(), EvidenceId::new()];
+        let distillable = evidence(true);
+        let distillable_id = distillable.id;
+        let all_evidence = vec![distillable, evidence(false)];
+
+        let decision = validate_merge_candidate(
+            &candidate,
+            std::slice::from_ref(&r),
+            &events,
+            conflicts,
+            test_evidence.clone(),
+            &all_evidence,
+            1, // unverified_patch_scope (validator-determined)
+        );
+
+        // Aggregate ids + verdict mirror the candidate (engine does not decide).
+        assert_eq!(decision.merge_candidate_id, candidate.id);
+        assert_eq!(decision.resulting_state, candidate.review_state);
+        // Every S2-13 None/empty default is now its computed value.
+        assert!(
+            decision.payload.risk_score.is_some(),
+            "risk_score filled from a Failed run + Token breach + conflict + unverified scope",
+        );
+        assert_eq!(decision.payload.conflict_list.len(), 1);
+        assert_eq!(decision.payload.test_evidence, test_evidence);
+        assert_eq!(
+            decision.payload.distillable_evidence_ids,
+            vec![distillable_id]
         );
     }
 }
