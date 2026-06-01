@@ -1,7 +1,10 @@
 //! Integration tests for `gc`, covering reachability pruning, stale pack cleanup,
 //! structured output, and CLI error handling.
 
-use std::{fs, process::Command};
+use std::{
+    fs::{self, FileTimes, OpenOptions},
+    time::{Duration, SystemTime},
+};
 
 use serial_test::serial;
 use tempfile::tempdir;
@@ -31,13 +34,13 @@ fn copy_pack_fixture_to_pack_dir(repo: &std::path::Path, prefix: &str) -> std::p
 }
 
 fn make_file_old(path: &std::path::Path) {
-    let status = Command::new("touch")
-        .arg("-t")
-        .arg("202001010000.00")
-        .arg(path)
-        .status()
-        .expect("touch should run");
-    assert!(status.success(), "touch should update mtime for {path:?}");
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open file for mtime update");
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+    file.set_times(FileTimes::new().set_modified(old))
+        .expect("set mtime for pack sidecar");
 }
 
 fn write_unreachable_blob(repo: &std::path::Path, name: &str, contents: &str) -> String {
