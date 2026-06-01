@@ -72,7 +72,7 @@ use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
     agent_run::{
         AgentContextPack, AgentRun, AgentRunEvent, AgentRunEventEnvelope, AgentRunId,
-        AgentRunStatus, AgentTaskId, event_store::AgentRunEventStore,
+        AgentRunStatus, AgentTaskId, RunUsage, event_store::AgentRunEventStore,
     },
     completion::CompletionUsageSummary,
     permission::{
@@ -545,6 +545,9 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             // it parses as one, else a fresh id) and lands beside the run's
             // event transcript. Captured once here and reused at the terminal
             // update below. Best-effort — see `persist_run_snapshot`.
+            // Wall-clock timing for the persisted per-run `RunUsage` (budget
+            // view). Started here at `Spawned`, read at the terminal transition.
+            let run_started = std::time::Instant::now();
             let run_snapshot = self.workspace_isolation.as_ref().map(|isolation| {
                 let thread_id = uuid::Uuid::parse_str(ctx.parent_thread_id)
                     .unwrap_or_else(|_| uuid::Uuid::new_v4());
@@ -776,6 +779,7 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                     model_id,
                     final_text: String::new(),
                     steps_used: 0,
+                    tool_call_count: 0,
                     usage: CompletionUsageSummary::default(),
                 })
             };
@@ -821,6 +825,48 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                 AgentRunStatus::Failed
             };
             persist_run_snapshot(run_snapshot.as_ref(), agent_run_id, terminal_status);
+
+            // CEX-S2-16: persist the run's terminal usage totals (wall-clock +
+            // tokens / cost / tool-calls) so the MCP `runs/{id}/budget` view can
+            // report them against the run's budget. Best-effort. `source_call`
+            // attribution is a separate concern (the trace-id chain) and is not
+            // counted here.
+            if let Some(snapshot) = run_snapshot.as_ref() {
+                let wall_clock_ms = run_started.elapsed().as_millis() as u64;
+                let usage = match &outcome {
+                    Ok(result) => RunUsage {
+                        prompt_tokens: result.usage.input_tokens,
+                        completion_tokens: result.usage.output_tokens,
+                        cached_tokens: result.usage.cached_tokens.unwrap_or(0),
+                        reasoning_tokens: result.usage.reasoning_tokens.unwrap_or(0),
+                        wall_clock_ms,
+                        provider_latency_ms: 0,
+                        cost_estimate_micro_dollars: result
+                            .usage
+                            .cost_usd
+                            .map(|cost| (cost * 1_000_000.0) as u64)
+                            .unwrap_or(0),
+                        tool_call_count: result.tool_call_count,
+                    },
+                    // A failed run carries no usage payload; record the elapsed
+                    // wall-clock so the budget view still reflects the attempt.
+                    Err(_) => RunUsage {
+                        wall_clock_ms,
+                        ..RunUsage::default()
+                    },
+                };
+                if let Err(err) =
+                    snapshot
+                        .store
+                        .write_run_usage(snapshot.thread_id, agent_run_id, &usage)
+                {
+                    tracing::warn!(
+                        error = %err,
+                        agent_run_id = %agent_run_id.0,
+                        "failed to persist AgentRun usage totals",
+                    );
+                }
+            }
 
             // CEX-S2-12 / S2-INV-03 + CEX-S2-11 (5): tear down the
             // isolated workspace now that the child run is done so no
@@ -2390,6 +2436,7 @@ mod tests {
                         model_id: "runner-model".to_string(),
                         final_text: "runner produced this".to_string(),
                         steps_used: 7,
+                        tool_call_count: 0,
                         usage: CompletionUsageSummary::default(),
                     })
                 })

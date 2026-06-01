@@ -2006,6 +2006,7 @@ mod tests {
                         model_id: "default".to_string(),
                         final_text: "Found 3 TODOs in 2 files.".to_string(),
                         steps_used: 2,
+                        tool_call_count: 0,
                         // Stamp a recognisable non-default usage so
                         // the observer's `on_sub_agent_completed`
                         // assertion below can distinguish a forwarded

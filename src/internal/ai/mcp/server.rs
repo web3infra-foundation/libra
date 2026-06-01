@@ -279,24 +279,26 @@ impl LibraMcpServer {
     /// Serve a `libra://agents/*` resource (CEX-S2-16). The URI has already been
     /// parsed by [`super::agents_resource::AgentResourceRequest::parse`].
     ///
-    /// The run **list**, **detail**, **permissions**, and **context** views read
-    /// the records the sub-agent dispatcher persists under
+    /// The run **list**, **detail**, **permissions**, **context**, and **budget**
+    /// views read the records the sub-agent dispatcher persists under
     /// `<storage_root>/sessions` (the `AgentRun` snapshot and its sibling
-    /// permission profile + context pack, CEX-S2-16 run persistence). The
-    /// remaining id-targeting view (budget — which needs per-run usage telemetry)
-    /// and merge candidates have no persisted record through this server yet, so
-    /// they return a structured not-found. With no working dir (an in-memory
-    /// server) there is nothing to read: the list view is empty.
+    /// permission profile, context pack, and usage totals — CEX-S2-16 run
+    /// persistence). Merge candidates have no persisted record through this
+    /// server yet (they need patch-set persistence), so they return a structured
+    /// not-found. With no working dir (an in-memory server) there is nothing to
+    /// read: the list view is empty.
     fn read_agent_resource(
         &self,
         uri: &str,
         request: super::agents_resource::AgentResourceRequest,
     ) -> Result<Vec<ResourceContents>, ErrorData> {
         use super::agents_resource::{
-            AgentResourceRequest, render_run_context, render_run_detail, render_run_list,
-            render_run_permissions,
+            AgentResourceRequest, render_run_budget, render_run_context, render_run_detail,
+            render_run_list, render_run_permissions,
         };
-        use crate::internal::ai::agent_run::{AgentRunId, event_store::AgentRunEventStore};
+        use crate::internal::ai::agent_run::{
+            AgentBudget, AgentRunId, event_store::AgentRunEventStore,
+        };
 
         // Build the snapshot/permissions store rooted at the same sessions root
         // the dispatcher writes to (`resolve_storage_root` = shared
@@ -388,10 +390,37 @@ impl LibraMcpServer {
                     )),
                 }
             }
+            AgentResourceRequest::RunBudget { ref run_id } => {
+                let usage = match (find_run(run_id), store.as_ref()) {
+                    (Some(run), Some(store)) => {
+                        store.read_run_usage(run.thread_id, run.id).map_err(|err| {
+                            ErrorData::internal_error(
+                                format!("failed to read run usage: {err}"),
+                                None,
+                            )
+                        })?
+                    }
+                    _ => None,
+                };
+                match usage {
+                    // The run carries no configured per-run budget caps, so the
+                    // default (unlimited) `AgentBudget` is reported — the usage
+                    // totals are real; nothing is "exceeded". `source_call_count`
+                    // is not yet attributed per run (trace-id work), reported 0.
+                    Some(usage) => {
+                        let body = render_run_budget(run_id, &AgentBudget::default(), &usage, 0);
+                        Ok(vec![ResourceContents::text(body.to_string(), uri)])
+                    }
+                    None => Err(ErrorData::resource_not_found(
+                        format!("No persisted usage record for run `{run_id}`"),
+                        None,
+                    )),
+                }
+            }
             other => Err(ErrorData::resource_not_found(
                 format!(
                     "Sub-agent run resource `{}` has no persisted record through this server yet \
-                     (run budget and merge candidates are not persisted)",
+                     (merge candidates are not persisted)",
                     other.run_id().unwrap_or("<merge-candidate>"),
                 ),
                 None,

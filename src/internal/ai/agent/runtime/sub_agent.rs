@@ -508,6 +508,10 @@ pub struct TaskResult {
     pub model_id: String,
     pub final_text: String,
     pub steps_used: u32,
+    /// Number of tool calls the child made during the run (counted via the
+    /// tool-loop `on_tool_call_begin` hook). Distinct from `steps_used` (model
+    /// turns); feeds the persisted per-run `RunUsage` for the budget view.
+    pub tool_call_count: u32,
     pub usage: CompletionUsageSummary,
 }
 
@@ -980,6 +984,7 @@ impl DefaultSubAgentChildRunner {
 #[derive(Debug)]
 struct ChildRunObserver {
     steps_used: u32,
+    tool_call_count: u32,
     usage: CompletionUsageSummary,
     child_store: SessionJsonlStore,
     child_session: Arc<Mutex<SessionState>>,
@@ -996,6 +1001,7 @@ impl ChildRunObserver {
     ) -> Self {
         Self {
             steps_used: 0,
+            tool_call_count: 0,
             usage: CompletionUsageSummary::default(),
             child_store,
             child_session,
@@ -1060,6 +1066,7 @@ impl super::tool_loop::ToolLoopObserver for ChildRunObserver {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
+        self.tool_call_count = self.tool_call_count.saturating_add(1);
         self.append_child_event(
             SessionEvent::tool_call(SessionToolCallEvent {
                 event_id: uuid::Uuid::new_v4(),
@@ -1344,6 +1351,7 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 model_id,
                 final_text: turn.final_text,
                 steps_used: observer.steps_used,
+                tool_call_count: observer.tool_call_count,
                 usage: observer.usage,
             })
         })

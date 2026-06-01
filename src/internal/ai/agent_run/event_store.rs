@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::{
     AgentRunId,
     context_pack::AgentContextPack,
-    event::{AgentRunEvent, AgentRunEventEnvelope},
+    event::{AgentRunEvent, AgentRunEventEnvelope, RunUsage},
     permission::AgentPermissionProfile,
     run::AgentRun,
 };
@@ -329,6 +329,49 @@ impl AgentRunEventStore {
         run_id: AgentRunId,
     ) -> io::Result<Option<AgentContextPack>> {
         let path = self.context_pack_path(thread_id, run_id);
+        match fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve the per-run **usage** path
+    /// `.libra/sessions/{thread_id}/agents/{run_id}.usage.json`. A sibling of
+    /// the run snapshot holding the run's terminal [`RunUsage`] (tokens / tool
+    /// calls / wall-clock / cost) for the MCP `libra://agents/runs/{id}/budget`
+    /// resource.
+    pub fn usage_path(&self, thread_id: Uuid, run_id: AgentRunId) -> PathBuf {
+        self.sessions_root
+            .join(thread_id.to_string())
+            .join("agents")
+            .join(format!("{}.usage.json", run_id.0))
+    }
+
+    /// Persist a run's terminal usage totals (write-once at the run's terminal
+    /// transition). Creates the `{thread_id}/agents/` parent dirs on first write.
+    pub fn write_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+        usage: &RunUsage,
+    ) -> io::Result<()> {
+        let path = self.usage_path(thread_id, run_id);
+        ensure_parent_dir(&path)?;
+        let json = serde_json::to_string_pretty(usage).map_err(io::Error::other)?;
+        fs::write(&path, json)
+    }
+
+    /// Read a run's persisted usage totals. A missing record is `Ok(None)`; a
+    /// present-but-corrupt record surfaces as an error.
+    pub fn read_run_usage(
+        &self,
+        thread_id: Uuid,
+        run_id: AgentRunId,
+    ) -> io::Result<Option<RunUsage>> {
+        let path = self.usage_path(thread_id, run_id);
         match fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json)
                 .map(Some)
@@ -760,6 +803,41 @@ mod tests {
             store
                 .read_run_context_pack(Uuid::new_v4(), AgentRunId::new())
                 .expect("missing pack reads Ok(None)")
+                .is_none(),
+        );
+    }
+
+    /// A run's terminal usage round-trips through its sibling `*.usage.json`
+    /// record; a missing record reads as `None`.
+    #[test]
+    fn write_then_read_run_usage_round_trips() {
+        let (_temp, store) = store();
+        let thread_id = Uuid::new_v4();
+        let run_id = AgentRunId::new();
+        let usage = RunUsage {
+            prompt_tokens: 120,
+            completion_tokens: 60,
+            wall_clock_ms: 4_200,
+            tool_call_count: 3,
+            cost_estimate_micro_dollars: 1_500,
+            ..RunUsage::default()
+        };
+
+        store
+            .write_run_usage(thread_id, run_id, &usage)
+            .expect("write usage");
+        let back = store
+            .read_run_usage(thread_id, run_id)
+            .expect("read usage")
+            .expect("usage must be present");
+        assert_eq!(back.prompt_tokens, 120);
+        assert_eq!(back.tool_call_count, 3);
+        assert_eq!(back.wall_clock_ms, 4_200);
+
+        assert!(
+            store
+                .read_run_usage(Uuid::new_v4(), AgentRunId::new())
+                .expect("missing usage reads Ok(None)")
                 .is_none(),
         );
     }

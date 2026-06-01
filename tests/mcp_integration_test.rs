@@ -282,6 +282,20 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_run_context_pack(thread_id, run_id, &context_pack)
         .expect("persist run context pack");
 
+    // And the run's terminal usage, served by the budget view.
+    use libra::internal::ai::agent_run::RunUsage;
+    let usage = RunUsage {
+        prompt_tokens: 120,
+        completion_tokens: 60,
+        wall_clock_ms: 4_200,
+        tool_call_count: 3,
+        cost_estimate_micro_dollars: 1_500,
+        ..RunUsage::default()
+    };
+    store
+        .write_run_usage(thread_id, run_id, &usage)
+        .expect("persist run usage");
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -355,6 +369,27 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::from_str(&context_text).expect("valid JSON body");
     assert_eq!(context_body["agent_run_id"], run_id.0.to_string());
     assert_eq!(context_body["goal"], "summarise the repo");
+
+    // The budget view serves the persisted usage against the (unlimited) budget.
+    let budget_uri = format!("libra://agents/runs/{}/budget", run_id.0);
+    let budget = server
+        .read_resource_impl(&budget_uri)
+        .await
+        .expect("agents/runs/{id}/budget must read the persisted usage");
+    let budget_text = match &budget[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let budget_body: serde_json::Value =
+        serde_json::from_str(&budget_text).expect("valid JSON body");
+    assert_eq!(budget_body["agent_run_id"], run_id.0.to_string());
+    assert_eq!(budget_body["usage"]["tool_call_count"], 3);
+    assert_eq!(budget_body["usage"]["total_tokens"], 180);
+    assert_eq!(
+        budget_body["exceeded_dimensions"],
+        serde_json::json!([]),
+        "an unlimited default budget exceeds nothing",
+    );
 }
 
 /// Scenario: end-to-end create + read + list flow for a Task object via MCP.
