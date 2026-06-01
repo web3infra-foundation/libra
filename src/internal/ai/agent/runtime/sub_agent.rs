@@ -228,6 +228,12 @@ pub struct PermissionAskRequest<'a> {
     pub thread_id: &'a str,
     pub session_id: &'a SessionId,
     pub source: PermissionAskSource,
+    /// The task this ask belongs to, when known (CEX-S2-16 验收 (4): the
+    /// approval prompt surfaces `agent_id` / `task_id` / `command` / `scope`).
+    /// The agent identity and the command/scope are already carried by
+    /// [`PermissionAskSource`], `permission`, and `patterns` respectively; this
+    /// adds the task id. `None` when the dispatch carries no resume task id.
+    pub task_id: Option<&'a str>,
 }
 
 /// Object-safe trait the [`PermissionService`] delegates to.
@@ -278,8 +284,8 @@ impl PermissionService {
 /// `reply_tx`. Mirrors the existing exec-approval flow's shape so
 /// the future TUI integration can reuse the same widget skeleton.
 ///
-/// `permission`, `patterns`, `thread_id`, `session_id`, `source`
-/// are owned String/clone copies of the original
+/// `permission`, `patterns`, `thread_id`, `session_id`, `source`,
+/// `task_id` are owned String/clone copies of the original
 /// [`PermissionAskRequest`]'s borrowed shape — the channel needs
 /// 'static data because the asker future is detached from the
 /// dispatch lifetime.
@@ -290,6 +296,8 @@ pub struct ChannelPermissionAsk {
     pub thread_id: String,
     pub session_id: SessionId,
     pub source: PermissionAskSource,
+    /// Owned copy of [`PermissionAskRequest::task_id`] (CEX-S2-16 验收 (4)).
+    pub task_id: Option<String>,
     pub reply_tx: tokio::sync::oneshot::Sender<PermissionReply>,
 }
 
@@ -334,6 +342,7 @@ impl PermissionAsker for ChannelPermissionAsker {
             thread_id: request.thread_id.to_string(),
             session_id: request.session_id.clone(),
             source: request.source,
+            task_id: request.task_id.map(str::to_string),
             reply_tx,
         };
         let send_result = self.tx.send(ask);
@@ -1644,6 +1653,7 @@ mod tests {
                 name: "explore".to_string(),
                 prompt_digest: "abc123".to_string(),
             },
+            task_id: Some("task-77"),
         };
 
         // Happy path: consumer replies with Once.
@@ -1657,6 +1667,8 @@ mod tests {
             let ask = rx.recv().await.expect("consumer should receive ask");
             assert_eq!(ask.permission, "shell");
             assert_eq!(ask.patterns, vec!["ls".to_string()]);
+            // CEX-S2-16 验收 (4): the task id rides the channel to the prompt.
+            assert_eq!(ask.task_id.as_deref(), Some("task-77"));
             ask.reply_tx
                 .send(PermissionReply::Once)
                 .expect("reply send must succeed");

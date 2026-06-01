@@ -510,6 +510,10 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
                         name: invocation.subagent_type.clone(),
                         prompt_digest: prompt_digest.clone(),
                     },
+                    // CEX-S2-16 验收 (4): surface the task this spawn belongs to
+                    // in the approval prompt (the agent name + command + scope are
+                    // already carried by `source` / `permission` / `patterns`).
+                    task_id: invocation.task_id.as_deref(),
                 };
                 match ctx.permission_service.ask(request).await {
                     PermissionReply::Once | PermissionReply::Always { .. } => {

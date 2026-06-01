@@ -3839,6 +3839,7 @@ async fn build_subagent_runtime_for_session(
                 thread_id = %ask.thread_id,
                 session_id = %ask.session_id,
                 source = ?ask.source,
+                task_id = ?ask.task_id,
                 "permission ask received via ChannelPermissionAsker; \
                  auto-rejecting until interactive TUI prompt widget lands",
             );
