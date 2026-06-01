@@ -5225,16 +5225,37 @@ where
 
     /// Render the response cell for an `/agent …` invocation (CEX-S2-16). The
     /// parser lives in [`super::agent_command::parse_agent_subcommand`]; this
-    /// helper renders the typed result. `/agent list` points at the `/agents`
-    /// pane; `/agent cancel <id>` requests cancellation of a single run without
-    /// ending the main session.
+    /// helper renders the typed result. `/agent list` shows the live sub-agent
+    /// **runs** projected from their persisted snapshots (distinct from
+    /// `/agents`, which shows the declarative agent config); `/agent cancel
+    /// <id>` requests cancellation of a single run without ending the session.
     fn format_agent_command_response(&mut self, args: &str) -> String {
         use super::agent_command::{AgentSubcommand, parse_agent_subcommand};
         match parse_agent_subcommand(args) {
-            Ok(AgentSubcommand::List) => format_agents_table(&self.agents_config),
+            Ok(AgentSubcommand::List) => self.format_agent_runs_pane(),
             Ok(AgentSubcommand::Cancel { run_id }) => self.cancel_agent_run(&run_id),
             Err(err) => err.to_string(),
         }
+    }
+
+    /// Render the live agent-run pane for `/agent list` from the `AgentRun`
+    /// snapshots the dispatcher persisted under the repo's sessions root
+    /// (CEX-S2-16). The sessions root is resolved exactly as the dispatcher /
+    /// MCP server resolve it (`try_get_storage_path` with the `<repo>/.libra`
+    /// fallback, then `sessions`) so the same runs are surfaced. Reading is
+    /// best-effort: an unreadable store renders the empty-pane placeholder
+    /// rather than failing the command.
+    fn format_agent_runs_pane(&self) -> String {
+        use crate::internal::ai::agent_run::event_store::AgentRunEventStore;
+
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let sessions_root = crate::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join("sessions");
+        let runs = AgentRunEventStore::new(sessions_root)
+            .list_all_snapshots()
+            .unwrap_or_default();
+        super::agent_pane::format_agent_run_pane(&runs)
     }
 
     /// Request cancellation of a single sub-agent run by id, leaving the main
