@@ -382,6 +382,8 @@ async fn resolve_head_object(head: &str, storage: &ClientStorage) -> CliResult<O
     let mut results = HashSet::new();
     if let Some(hash) = resolve_tag_object_ref(head).await {
         results.insert(hash);
+    } else if let Ok(hash) = util::get_commit_base(head).await {
+        results.insert(hash);
     }
 
     if let Ok(hash) = ObjectHash::from_str(head) {
@@ -393,8 +395,6 @@ async fn resolve_head_object(head: &str, storage: &ClientStorage) -> CliResult<O
                 results.insert(hash);
             }
         }
-    } else if let Ok(hash) = util::get_commit_base(head).await {
-        results.insert(hash);
     }
 
     if results.len() == 1 {
@@ -500,34 +500,27 @@ fn apply_prune_plan(
 
 /// Remove a loose object file and prune empty parent directories.
 fn remove_loose_object(info: &LooseObjectInfo, objects_dir: &Path) -> CliResult<()> {
-    let abs_path = fs::canonicalize(&info.path).map_err(|error| {
-        CliError::fatal(format!(
-            "failed to resolve object path '{}': {error}",
-            info.path.display()
-        ))
-        .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
-    if !abs_path.starts_with(objects_dir) {
+    if !info.path.starts_with(objects_dir) {
         return Err(CliError::fatal(format!(
             "refusing to prune object outside objects dir: {}",
-            abs_path.display()
+            info.path.display()
         ))
         .with_stable_code(StableErrorCode::InternalInvariant));
     }
 
-    match fs::remove_file(&abs_path) {
+    match fs::remove_file(&info.path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(CliError::fatal(format!(
                 "failed to remove object '{}': {error}",
-                abs_path.display()
+                info.path.display()
             ))
             .with_stable_code(StableErrorCode::IoWriteFailed));
         }
     }
 
-    let Some(parent) = abs_path.parent() else {
+    let Some(parent) = info.path.parent() else {
         return Ok(());
     };
 
