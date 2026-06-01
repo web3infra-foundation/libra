@@ -19,7 +19,9 @@ pub use checksum::{
     ChecksumError, checksum_changed, compute_package_checksum, verify_against_manifest,
 };
 pub use diff::{CapabilityDiff, StringSetDelta};
-pub use installer::{InstallDecision, InstallError, prepare_install};
+pub use installer::{
+    InstallDecision, InstallError, LoadedPackage, MANIFEST_FILE, load_package_dir, prepare_install,
+};
 pub use manifest::{BundledCapabilities, CapabilityPackageManifest, ManifestValidationError};
 pub use registry::{
     ActiveCapabilities, ActiveCapabilitiesDelta, InstalledPackage, active_capabilities,

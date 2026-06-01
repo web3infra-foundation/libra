@@ -12,12 +12,82 @@
 //! the install gate (verify → diff → confirm) is deterministic and unit-testable
 //! without any I/O.
 
+use std::{io, path::Path};
+
 use super::{
     checksum::{self, ChecksumError, verify_against_manifest},
     diff::CapabilityDiff,
     manifest::{CapabilityPackageManifest, ManifestValidationError},
     registry::InstalledPackage,
 };
+
+/// File name of the JSON manifest at the root of a capability-package directory.
+/// JSON (not TOML) so the serde-`transparent` id / digest newtypes round-trip
+/// exactly as the in-crate schema tests already pin.
+pub const MANIFEST_FILE: &str = "manifest.json";
+
+/// A capability package loaded from a local directory: its parsed manifest plus
+/// every bundled content file as a `(relative_path, bytes)` entry, ready for
+/// [`prepare_install`]. The manifest file itself is excluded from `entries`
+/// because it carries the checksum and so cannot be part of its own digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedPackage {
+    /// The parsed `manifest.json`.
+    pub manifest: CapabilityPackageManifest,
+    /// Bundled content files, sorted by relative path with `/` separators.
+    pub entries: Vec<(String, Vec<u8>)>,
+}
+
+/// Load a capability package from a local directory: parse `manifest.json` and
+/// read every other file as a content entry (paths normalised to `/`-separated
+/// and sorted for determinism). The manifest is *not* re-validated or
+/// checksum-verified here — that is [`prepare_install`]'s job — so a malformed
+/// manifest surfaces as an `InvalidData` error naming the file, and a missing
+/// manifest as the underlying `NotFound`.
+pub fn load_package_dir(dir: &Path) -> io::Result<LoadedPackage> {
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read package manifest '{}': {err}",
+                manifest_path.display()
+            ),
+        )
+    })?;
+    let manifest: CapabilityPackageManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid package manifest '{}': {err}",
+                    manifest_path.display()
+                ),
+            )
+        })?;
+
+    let mut entries = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
+        let entry = entry
+            .map_err(|err| io::Error::other(format!("failed to walk package directory: {err}")))?;
+        if !entry.file_type().is_file() || entry.path() == manifest_path {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(dir)
+            .map_err(|err| io::Error::other(format!("package path escaped its root: {err}")))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        entries.push((rel, std::fs::read(entry.path())?));
+    }
+    // `WalkDir::sort_by_file_name` orders directory walk, not the flattened
+    // relative paths; sort the collected entries so the load is deterministic
+    // regardless of directory nesting.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(LoadedPackage { manifest, entries })
+}
 
 /// The vetted outcome of evaluating a package for install/update, ready to
 /// render to the user and (on confirmation) commit to the store.
@@ -220,5 +290,63 @@ mod tests {
         m.publisher = "   ".to_string(); // empty identity field
         let err = prepare_install(m, &entries, &[]).expect_err("must reject");
         assert!(matches!(err, InstallError::Manifest(_)));
+    }
+
+    #[test]
+    fn load_package_dir_parses_manifest_collects_content_and_passes_the_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(dir.join("skills/explore.md"), b"explore body").unwrap();
+        std::fs::write(dir.join("commands/build.md"), b"build body").unwrap();
+
+        // The loader excludes manifest.json and sorts entries by relative path.
+        let expected_entries = vec![
+            ("commands/build.md".to_string(), b"build body".to_vec()),
+            ("skills/explore.md".to_string(), b"explore body".to_vec()),
+        ];
+        let m = CapabilityPackageManifest {
+            package_id: PackageId("acme.toolkit".to_string()),
+            version: "1.0.0".to_string(),
+            publisher: "acme".to_string(),
+            checksum: checksum::compute_package_checksum(&expected_entries),
+            bundled: BundledCapabilities {
+                skills: vec!["explore".to_string()],
+                commands: vec!["build".to_string()],
+                ..BundledCapabilities::default()
+            },
+            requested_permissions: Vec::new(),
+            install_warnings: Vec::new(),
+        };
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            serde_json::to_vec_pretty(&m).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_package_dir(dir).expect("load package dir");
+        assert_eq!(loaded.manifest.package_id.0, "acme.toolkit");
+        assert_eq!(
+            loaded.entries, expected_entries,
+            "manifest excluded, content collected + sorted",
+        );
+
+        // End-to-end: the freshly-loaded package passes the install gate (its
+        // on-disk content hashes to exactly the manifest's declared checksum).
+        let decision =
+            prepare_install(loaded.manifest, &loaded.entries, &[]).expect("install gate");
+        assert!(!decision.is_update);
+        assert!(
+            !decision.requires_confirmation,
+            "no mutating capability bundled"
+        );
+    }
+
+    #[test]
+    fn load_package_dir_missing_manifest_is_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = load_package_dir(temp.path()).expect_err("no manifest");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
