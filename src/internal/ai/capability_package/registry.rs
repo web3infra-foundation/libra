@@ -77,6 +77,21 @@ pub fn active_capabilities(installed: &[InstalledPackage]) -> ActiveCapabilities
     active
 }
 
+/// Whether a package may be **auto-enabled** at install time, or must instead
+/// wait for explicit project-config / user confirmation (CEX-S2-17 应该完成的
+///功能: "package 默认不能启用 mutating source 或 Worker sub-agent；必须由项目
+/// 配置或用户确认").
+///
+/// A package that bundles a mutating capability — a Source Pool source / MCP
+/// server, or a sub-agent definition — must **not** be auto-enabled: enabling it
+/// would register a mutating source or a spawnable agent without a human in the
+/// loop. A package bundling only skills / commands carries no mutating
+/// capability and may be auto-enabled. Pure; no I/O.
+pub fn may_auto_enable(manifest: &CapabilityPackageManifest) -> bool {
+    let bundle = &manifest.bundled;
+    bundle.sources.is_empty() && bundle.sub_agents.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +218,37 @@ mod tests {
             !active_capabilities(&disabled).sources.contains("acme-mcp"),
             "disabling the package must drop its source registration",
         );
+    }
+
+    #[test]
+    fn skills_and_commands_only_may_auto_enable() {
+        // No mutating capability -> safe to auto-enable.
+        let m = manifest("safe", bundle(&["lint"], &["/acme"], &[], &[]));
+        assert!(may_auto_enable(&m));
+    }
+
+    #[test]
+    fn bundling_a_source_blocks_auto_enable() {
+        // CEX-S2-17: a mutating source must not auto-enable.
+        let m = manifest("mcp", bundle(&[], &[], &["acme-mcp"], &[]));
+        assert!(
+            !may_auto_enable(&m),
+            "a package bundling a source must require confirmation",
+        );
+    }
+
+    #[test]
+    fn bundling_a_sub_agent_blocks_auto_enable() {
+        let m = manifest("agent", bundle(&[], &[], &[], &["worker"]));
+        assert!(
+            !may_auto_enable(&m),
+            "a package bundling a sub-agent must require confirmation",
+        );
+    }
+
+    #[test]
+    fn empty_package_may_auto_enable() {
+        let m = manifest("empty", BundledCapabilities::default());
+        assert!(may_auto_enable(&m));
     }
 }
