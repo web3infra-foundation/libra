@@ -45,6 +45,11 @@ pub struct AgentRunRow {
     /// (CEX-S2-16 "source calls" pane field; the trace link landed in
     /// v0.17.1254). `None` when the join is skipped or no rows exist for the run.
     pub source_calls: Option<u64>,
+    /// The run's live activity — the tool it is currently executing, optionally
+    /// with the file — joined from the `LiveRunRegistry` (CEX-S2-16 live fields).
+    /// `None` for terminal runs (not in the registry) or when the join is
+    /// skipped; in-flight runs render it in the `activity` column.
+    pub current_activity: Option<String>,
 }
 
 impl AgentRunRow {
@@ -61,6 +66,7 @@ impl AgentRunRow {
             workspace_path: run.workspace_path.clone(),
             usage: None,
             source_calls: None,
+            current_activity: None,
         }
     }
 }
@@ -103,12 +109,31 @@ where
     F: Fn(&AgentRun) -> Option<RunUsage>,
     G: Fn(&AgentRun) -> Option<u64>,
 {
+    agent_pane_rows_full(runs, usage_lookup, source_calls_lookup, |_| None)
+}
+
+/// Like [`agent_pane_rows_with_usage_and_sources`], but additionally joins each
+/// run's live activity (the tool/file it is currently executing) via
+/// `activity_lookup` (e.g. a `LiveRunRegistry` snapshot lookup). Ordering is
+/// identical and deterministic. Pure — all three joins live in the closures.
+pub fn agent_pane_rows_full<F, G, H>(
+    runs: &[AgentRun],
+    usage_lookup: F,
+    source_calls_lookup: G,
+    activity_lookup: H,
+) -> Vec<AgentRunRow>
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+    G: Fn(&AgentRun) -> Option<u64>,
+    H: Fn(&AgentRun) -> Option<String>,
+{
     let mut rows: Vec<AgentRunRow> = runs
         .iter()
         .map(|run| {
             let mut row = AgentRunRow::from_run(run);
             row.usage = usage_lookup(run);
             row.source_calls = source_calls_lookup(run);
+            row.current_activity = activity_lookup(run);
             row
         })
         .collect();
@@ -154,6 +179,29 @@ where
     ))
 }
 
+/// Like [`format_agent_run_pane_with_usage_and_sources`], but also joins each
+/// in-flight run's live activity (current tool/file) via `activity_lookup` (a
+/// `LiveRunRegistry` snapshot lookup) for the `activity` column. Terminal runs —
+/// or a skipped join — render `-`. Pure — the I/O lives in the closures.
+pub fn format_agent_run_pane_full<F, G, H>(
+    runs: &[AgentRun],
+    usage_lookup: F,
+    source_calls_lookup: G,
+    activity_lookup: H,
+) -> String
+where
+    F: Fn(&AgentRun) -> Option<RunUsage>,
+    G: Fn(&AgentRun) -> Option<u64>,
+    H: Fn(&AgentRun) -> Option<String>,
+{
+    render_pane(&agent_pane_rows_full(
+        runs,
+        usage_lookup,
+        source_calls_lookup,
+        activity_lookup,
+    ))
+}
+
 /// Shared table renderer over already-ordered rows, factored out of the public
 /// entry point so the layout has a single source of truth.
 fn render_pane(rows: &[AgentRunRow]) -> String {
@@ -163,8 +211,8 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
 
     let mut out = String::from("Agent runs:\n");
     let header = format!(
-        "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6}",
-        "run", "status", "provider", "model", "elapsed", "tokens", "cost", "src"
+        "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6} {:<28}",
+        "run", "status", "provider", "model", "elapsed", "tokens", "cost", "src", "activity"
     );
     out.push_str(&header);
     out.push('\n');
@@ -187,8 +235,14 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
         let source_calls = row
             .source_calls
             .map_or_else(|| "-".to_string(), |count| count.to_string());
+        // `activity` is the live current tool/file for an in-flight run; `-`
+        // for terminal runs or when the live join is skipped.
+        let activity = row
+            .current_activity
+            .as_deref()
+            .map_or_else(|| "-".to_string(), |value| truncate(value, 28));
         out.push_str(&format!(
-            "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6}\n",
+            "  {:<36} {:<10} {:<12} {:<24} {:>9} {:>10} {:>10} {:>6} {:<28}\n",
             row.agent_run_id.0,
             status_label(row.status),
             truncate(&row.provider, 12),
@@ -197,6 +251,7 @@ fn render_pane(rows: &[AgentRunRow]) -> String {
             tokens,
             cost,
             source_calls,
+            activity,
         ));
     }
     out
@@ -511,6 +566,50 @@ mod tests {
                 .contains(&run(47, AgentRunStatus::Completed).id.0.to_string())
                 && line.trim_end().ends_with('-')),
             "no-join src cell renders a dash: {out_dash}",
+        );
+    }
+
+    #[test]
+    fn rows_full_joins_current_activity() {
+        let runs = vec![run(48, AgentRunStatus::Running)];
+        let rows = agent_pane_rows_full(
+            &runs,
+            |_| None,
+            |_| None,
+            |_| Some("apply_patch src/lib.rs".to_string()),
+        );
+        assert_eq!(
+            rows[0].current_activity.as_deref(),
+            Some("apply_patch src/lib.rs"),
+        );
+    }
+
+    #[test]
+    fn format_pane_shows_activity_for_in_flight_run_and_dash_when_absent() {
+        let runs = vec![run(49, AgentRunStatus::Running)];
+        // With a live-activity join: the `activity` header + current tool render.
+        let out = format_agent_run_pane_full(
+            &runs,
+            |_| None,
+            |_| None,
+            |_| Some("apply_patch src/lib.rs".to_string()),
+        );
+        assert!(out.contains("activity"), "activity header present: {out}");
+        assert!(
+            out.contains("apply_patch"),
+            "current tool must render in the activity column: {out}",
+        );
+
+        // Without a live join, the activity header is still present (the column
+        // is rendered for every pane) and the cell is a dash.
+        let out_dash = format_agent_run_pane_with_usage_and_sources(&runs, |_| None, |_| None);
+        assert!(
+            out_dash.contains("activity"),
+            "activity header present even without a join: {out_dash}",
+        );
+        assert!(
+            out_dash.trim_end().ends_with('-'),
+            "no-join activity cell renders a dash: {out_dash}",
         );
     }
 

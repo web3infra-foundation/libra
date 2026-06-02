@@ -75,7 +75,7 @@ mod welcome_shader;
 
 // Curated public surface: only types that callers outside the module need.
 pub use agent_pane::{
-    AgentRunRow, agent_pane_rows, format_agent_run_pane_with_usage,
+    AgentRunRow, agent_pane_rows, format_agent_run_pane_full, format_agent_run_pane_with_usage,
     format_agent_run_pane_with_usage_and_sources,
 };
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};

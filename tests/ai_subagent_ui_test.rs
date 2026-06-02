@@ -144,10 +144,14 @@ async fn agents_pane_shows_source_call_count_from_source_call_log() {
     );
 
     assert!(pane.contains("src"), "src header present: {pane}");
-    // The run's row (rightmost `src` column) reports exactly 3 attributed calls.
+    // The run's row reports exactly 3 attributed source calls in its `src`
+    // column (the trailing `activity` column is `-` for this terminal run, so
+    // the count is not the line's last token).
     assert!(
-        pane.lines()
-            .any(|line| line.contains(&run_id.0.to_string()) && line.trim_end().ends_with('3')),
+        pane.lines().any(|line| {
+            line.contains(&run_id.0.to_string())
+                && line.split_whitespace().any(|token| token == "3")
+        }),
         "the run's src column must show 3 source calls: {pane}",
     );
 }
