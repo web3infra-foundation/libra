@@ -46,7 +46,7 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--no-squash` | Create a merge commit instead of squashing (the default; overrides `--squash`). |
 | `--into-name <name>` | Override the branch name recorded in the auto-generated merge message. |
 | `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
-| `--stat`, `--no-stat` | Accepted for Git-compatible CLI surface. Libra currently has no reusable diffstat renderer, so merge success output remains unchanged. |
+| `--stat`, `-n`/`--no-stat` | Print (or suppress) a diffstat of what the merge brought in. `--summary`/`--no-summary` are accepted aliases. Honors the `merge.stat` config; defaults off so existing output stays stable. |
 | `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
 | `--cleanup <mode>` | Validate the message cleanup mode (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Libra already trims merge messages. |
 | `--no-verify` | Accepted for Git compatibility. Libra runs no pre-merge or commit-msg hooks yet, so this has no effect. |
@@ -64,6 +64,7 @@ Progress output is controlled by the global `--progress=<json\|text\|none\|auto>
 |-----|--------|----------|
 | `merge.ff` | `true`/`false`/`only` | Default/true allows fast-forward, false behaves like `--no-ff`, only behaves like `--ff-only`. CLI flags override config. |
 | `merge.conflictstyle` | `merge`/`diff3` | Selects default conflict marker style. |
+| `merge.stat` | `true`/`false` | When true, print a diffstat after a successful merge (off by default; `--stat`/`--no-stat` override). |
 
 `merge.commit` is intentionally absent because stock Git does not define that config key.
 

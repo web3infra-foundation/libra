@@ -149,12 +149,17 @@ pub struct MergeArgs {
     #[arg(long = "into-name", value_name = "NAME")]
     pub into_name: Option<String>,
 
-    /// Show a diffstat after merging when supported
-    #[arg(long, conflicts_with = "no_stat")]
+    /// Show a diffstat of what the merge brought in
+    #[arg(long, visible_alias = "summary", conflicts_with = "no_stat")]
     pub stat: bool,
 
-    /// Suppress diffstat output
-    #[arg(long = "no-stat", conflicts_with = "stat")]
+    /// Suppress the merge diffstat
+    #[arg(
+        short = 'n',
+        long = "no-stat",
+        visible_alias = "no-summary",
+        conflicts_with = "stat"
+    )]
     pub no_stat: bool,
 
     /// Conflict marker style
@@ -479,8 +484,33 @@ pub async fn execute(args: MergeArgs) {
 /// Returns [`CliError`] when the target is invalid, histories are unrelated,
 /// conflicts need resolution, objects cannot be read, or HEAD/worktree updates fail.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
+    let want_stat = resolve_merge_stat(&args).await;
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
-    render_merge_output(&result, output)
+    render_merge_output(&result, want_stat, output)
+}
+
+/// Resolve whether to print a diffstat after the merge. `--stat`/`--no-stat`
+/// (and the `--summary`/`--no-summary` aliases) win over the `merge.stat`
+/// config key. Unlike Git, Libra defaults the diffstat off so existing merge
+/// output stays stable unless explicitly requested.
+async fn resolve_merge_stat(args: &MergeArgs) -> bool {
+    if args.no_stat {
+        return false;
+    }
+    if args.stat {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.stat")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
@@ -624,12 +654,25 @@ fn read_merge_message(args: &MergeArgs) -> Result<Option<String>, MergeError> {
     Ok(None)
 }
 
-fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_merge_output(
+    result: &MergeOutput,
+    want_stat: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("merge", result, output);
     }
     if output.quiet {
         return Ok(());
+    }
+
+    if want_stat
+        && !result.up_to_date
+        && !result.aborted
+        && result.conflicted_paths.is_empty()
+        && let Some(stat) = render_merge_diffstat(result)
+    {
+        info_println!(output, "{stat}");
     }
 
     if result.up_to_date {
@@ -1848,6 +1891,168 @@ fn count_item_map_changes(
         .into_iter()
         .filter(|path| before.get(path) != after.get(path))
         .count()
+}
+
+/// Build the diffstat shown by `--stat` from the pre-merge HEAD tree to the
+/// merge result (commit tree for committed merges, staged index for
+/// `--squash`/`--no-commit`). Returns `None` when nothing changed or the
+/// trees cannot be loaded.
+fn render_merge_diffstat(result: &PullMergeSummary) -> Option<String> {
+    let old_items = match &result.old_commit {
+        Some(id) => commit_items_for_stat(id)?,
+        None => HashMap::new(),
+    };
+    let new_items = match &result.commit {
+        Some(id) => commit_items_for_stat(id)?,
+        None => {
+            // Squash / no-commit leave the result staged rather than committed.
+            let index = Index::load(path::index()).ok()?;
+            index_tree_items(&index).ok()?
+        }
+    };
+    merge_diffstat(&old_items, &new_items)
+}
+
+fn commit_items_for_stat(commit_id: &str) -> Option<HashMap<PathBuf, MergeTreeEntry>> {
+    let oid = ObjectHash::from_str(commit_id).ok()?;
+    let commit: Commit = load_object(&oid).ok()?;
+    commit_tree_items(&commit).ok()
+}
+
+/// Format a Git-style diffstat (`path | N +++--` lines plus a summary line)
+/// for the files that differ between two tree-item maps.
+fn merge_diffstat(
+    old: &HashMap<PathBuf, MergeTreeEntry>,
+    new: &HashMap<PathBuf, MergeTreeEntry>,
+) -> Option<String> {
+    let mut paths: Vec<PathBuf> = old.keys().chain(new.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+
+    struct StatRow {
+        path: String,
+        total: usize,
+        insertions: usize,
+        deletions: usize,
+        binary: bool,
+    }
+
+    let mut rows = Vec::new();
+    let mut total_insertions = 0usize;
+    let mut total_deletions = 0usize;
+    for path in paths {
+        let (old_entry, new_entry) = (old.get(&path), new.get(&path));
+        if old_entry == new_entry {
+            continue;
+        }
+        let (insertions, deletions, binary) = file_line_delta(old_entry, new_entry);
+        total_insertions += insertions;
+        total_deletions += deletions;
+        rows.push(StatRow {
+            path: path.display().to_string(),
+            total: insertions + deletions,
+            insertions,
+            deletions,
+            binary,
+        });
+    }
+    if rows.is_empty() {
+        return None;
+    }
+
+    let name_width = rows.iter().map(|row| row.path.len()).max().unwrap_or(0);
+    let count_width = rows
+        .iter()
+        .map(|row| row.total.to_string().len())
+        .max()
+        .unwrap_or(1);
+    // Scale the +/- bar so the widest row fits in ~60 columns, matching Git's
+    // capped histogram behaviour.
+    let max_total = rows.iter().map(|row| row.total).max().unwrap_or(0);
+    let scale = if max_total > 60 {
+        60.0 / max_total as f64
+    } else {
+        1.0
+    };
+
+    let mut out = String::new();
+    for row in &rows {
+        if row.binary {
+            out.push_str(&format!(" {:<name_width$} | Bin\n", row.path));
+            continue;
+        }
+        let plus = ((row.insertions as f64) * scale).round() as usize;
+        let minus = ((row.deletions as f64) * scale).round() as usize;
+        let plus = if row.insertions > 0 { plus.max(1) } else { 0 };
+        let minus = if row.deletions > 0 { minus.max(1) } else { 0 };
+        out.push_str(&format!(
+            " {:<name_width$} | {:>count_width$} {}{}\n",
+            row.path,
+            row.total,
+            "+".repeat(plus),
+            "-".repeat(minus),
+        ));
+    }
+    let mut summary = format!(
+        " {} file{} changed",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+    if total_insertions > 0 {
+        summary.push_str(&format!(
+            ", {} insertion{}(+)",
+            total_insertions,
+            if total_insertions == 1 { "" } else { "s" }
+        ));
+    }
+    if total_deletions > 0 {
+        summary.push_str(&format!(
+            ", {} deletion{}(-)",
+            total_deletions,
+            if total_deletions == 1 { "" } else { "s" }
+        ));
+    }
+    out.push_str(&summary);
+    Some(out)
+}
+
+/// Count inserted/deleted lines between the blob at two tree entries. Returns
+/// `(insertions, deletions, is_binary)`; binary differences report `(0, 0, true)`.
+fn file_line_delta(
+    old: Option<&MergeTreeEntry>,
+    new: Option<&MergeTreeEntry>,
+) -> (usize, usize, bool) {
+    let load = |entry: Option<&MergeTreeEntry>| -> Option<Vec<u8>> {
+        let entry = entry?;
+        let blob: Blob = load_object(&entry.hash).ok()?;
+        Some(blob.data)
+    };
+    let old_data = load(old);
+    let new_data = load(new);
+    let is_binary = old_data.as_deref().map(is_binary_blob).unwrap_or(false)
+        || new_data.as_deref().map(is_binary_blob).unwrap_or(false);
+    if is_binary {
+        return (0, 0, true);
+    }
+    let old_lines = old_data.as_deref().map(bytes_to_lines).unwrap_or_default();
+    let new_lines = new_data.as_deref().map(bytes_to_lines).unwrap_or_default();
+    let ops = git_internal::diff::compute_diff(&old_lines, &new_lines);
+    let insertions = ops
+        .iter()
+        .filter(|op| matches!(op, git_internal::diff::DiffOperation::Insert { .. }))
+        .count();
+    let deletions = ops
+        .iter()
+        .filter(|op| matches!(op, git_internal::diff::DiffOperation::Delete { .. }))
+        .count();
+    (insertions, deletions, false)
+}
+
+fn bytes_to_lines(data: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(data)
+        .lines()
+        .map(String::from)
+        .collect()
 }
 
 fn add_blob_index_entry(

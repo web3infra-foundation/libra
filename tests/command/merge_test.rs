@@ -1536,3 +1536,98 @@ fn test_merge_help_accepts_git_compat_flags() {
         );
     }
 }
+
+#[test]
+fn test_merge_stat_reports_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\nbeta\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "--stat", "feature"], temp_path);
+    assert_cli_success(&output, "merge --stat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("feature.txt"),
+        "stat should list feature.txt: {stdout}"
+    );
+    assert!(
+        stdout.contains("file") && stdout.contains("changed"),
+        "stat should show a summary line: {stdout}"
+    );
+    assert!(
+        stdout.contains("insertion"),
+        "stat should report insertions: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_summary_alias_reports_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "--summary", "feature"], temp_path);
+    assert_cli_success(&output, "merge --summary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("changed"),
+        "--summary alias should print a diffstat summary: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_no_stat_default_omits_diffstat() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "alpha\n", "feat change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "feature"], temp_path);
+    assert_cli_success(&output, "merge without --stat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("changed,"),
+        "default merge output should not include a diffstat: {stdout}"
+    );
+}
