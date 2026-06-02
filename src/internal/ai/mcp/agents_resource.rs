@@ -164,6 +164,16 @@ pub fn render_run_budget(
     source_call_count: u32,
 ) -> Value {
     let exceeded = budget.exceeded_dimensions(usage, source_call_count);
+    // CEX-S2-16 (1) "budget remaining": the headroom still unspent on each
+    // enforced dimension (`limit - used`, saturating), the inverse of
+    // `exceeded_dimensions`. Rendered in declaration order as
+    // `{dimension, remaining}` objects so the view is deterministic and a
+    // consumer can read both the dimension and its remaining quantity.
+    let remaining = budget
+        .remaining_dimensions(usage, source_call_count)
+        .into_iter()
+        .map(|(dimension, remaining)| json!({ "dimension": dimension, "remaining": remaining }))
+        .collect::<Vec<_>>();
     json!({
         "agent_run_id": run_id,
         "budget": budget,
@@ -175,6 +185,7 @@ pub fn render_run_budget(
             "cost_estimate_micro_dollars": usage.cost_estimate_micro_dollars,
         },
         "exceeded_dimensions": exceeded,
+        "remaining": remaining,
     })
 }
 
@@ -400,6 +411,39 @@ mod tests {
             let body = render_run_budget("r1", &budget, &usage, 0);
             assert_eq!(body["usage"]["total_tokens"], json!(100));
             assert_eq!(body["exceeded_dimensions"], json!(["token"]));
+            // CEX-S2-16 (1) "budget remaining": an over-budget token dimension
+            // saturates to zero headroom (never wraps) and is the only enforced
+            // dimension reported.
+            assert_eq!(
+                body["remaining"],
+                json!([{ "dimension": "token", "remaining": 0 }]),
+            );
+        }
+
+        /// The budget view reports per-dimension remaining headroom for an
+        /// under-budget run, in `BudgetDimension` declaration order, alongside
+        /// an empty `exceeded_dimensions` (CEX-S2-16 (1) "budget remaining").
+        #[test]
+        fn budget_view_reports_remaining_headroom() {
+            let budget = AgentBudget {
+                max_tokens: Some(1_000),
+                max_source_calls: Some(4),
+                ..AgentBudget::default()
+            };
+            let usage = RunUsage {
+                prompt_tokens: 250,
+                completion_tokens: 50, // total 300 → 700 left
+                ..RunUsage::default()
+            };
+            let body = render_run_budget("r1", &budget, &usage, 1); // 1 source call → 3 left
+            assert_eq!(body["exceeded_dimensions"], json!([]));
+            assert_eq!(
+                body["remaining"],
+                json!([
+                    { "dimension": "token", "remaining": 700 },
+                    { "dimension": "source_call", "remaining": 3 },
+                ]),
+            );
         }
 
         #[test]
