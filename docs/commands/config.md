@@ -414,6 +414,142 @@ Git uses `git config key value` (implicit set) and `git config key` (implicit ge
 
 Git exits with code 1 when a key is not found, which is indistinguishable from other errors in scripts. Libra's `--default` flag provides an explicit fallback value, allowing scripts and agents to handle missing keys without error-code parsing.
 
+## Git Config Compatibility Matrix
+
+This matrix tracks how `libra config` aligns with `git config` (Git 2.54.0 baseline). The
+goal is **high-value script compatibility**, not a byte-for-byte clone: capabilities that
+conflict with Libra's SQLite/vault-backed model are recorded as *intentional differences* or
+*deferred* rather than silently emulated.
+
+Status legend: **implemented** · **partial** · **deferred** (recognised, fails fast with a clear
+message) · **intentional difference** (deliberately not emulated) · **not applicable**.
+
+| Git capability | Libra status | Notes |
+|---|---|---|
+| `--get`, `--get-all`, `get`, `get --all` | implemented | Cascade local→global; last-one-wins for single get |
+| `set`, legacy positional set | implemented | Plaintext, auto-encrypted, and `--stdin` values |
+| `--list` / `-l`, `list` | implemented | Supports `--name-only` |
+| `--unset`, `--unset-all` | implemented | Multi-value protection (exit 5 on ambiguity) |
+| `--local`, `--global` | implemented | Local default; global at `~/.libra/config.db` |
+| `--null` / `-z` | implemented | Git record format `key\nvalue\0` (text output only) |
+| `--show-origin` | implemented | Emits `file:<path>` SQLite origin (not a scope label) |
+| `--show-scope` | implemented | Emits `local`/`global` scope label |
+| `--name-only` (list / legacy `--get-regexp`) | implemented | Single-key modern `get --name-only` → exit 129 |
+| `--get-regexp` | implemented | Key regex; text output is Git-style `key value` |
+| `--append` / legacy `--add` / `set --add` | implemented | Append a value without replacing |
+| `--replace-all` / `set --all` | implemented | Transactional replace of all matching values |
+| `--value=<pattern>` | implemented | Regex (or literal with `--fixed-value`) value filter for get/set/unset |
+| `--fixed-value` | implemented | Literal `--value` matching; disables regex/negation parsing |
+| `--ignore-case` / `-i` | implemented | Case-insensitive key/value regex matching |
+| `rename-section`, `--rename-section` | implemented | Generic dotted-prefix move (no remote-specific cascade) |
+| `remove-section`, `--remove-section` | implemented | Generic dotted-prefix delete |
+| `--type=bool\|int\|path` (+ `--bool`/`--int`/`--path`) | implemented | Output canonicalisation + write validation |
+| `--default` | partial | get / get-all / get-regexp only; mutation combos → exit 129 |
+| `--import` (Libra extension) | implemented | Reads `git config --list -z`; not a Git capability |
+| vault-backed secrets, SSH/GPG key generation | Libra-only | Not a Git capability |
+| `--type=bool-or-int\|expiry-date\|color` | deferred | exit 129; semantics lower value for Libra core flows |
+| `--type` + `--list` | deferred | exit 129; Git silently drops non-canonicalisable entries |
+| `--no-type`, `--no-value`, `--show-names`/`--no-show-names` | deferred | exit 129; multi-flag clear/show state machines not implemented |
+| `--get-color`, `--get-colorbool` | deferred | exit 129; legacy color helpers |
+| `--url`, `--get-urlmatch` | deferred | exit 129; advanced URL matching |
+| `--system` | intentional difference | exit 129; no privileged system writes (see Design Rationale) |
+| `--worktree` | intentional difference | exit 129; worktree-scoped config model not designed |
+| `--file <path>` / `-f` | intentional difference | exit 129; use `libra config --import` to ingest a Git file |
+| `--blob <blob>` | intentional difference | exit 129; blob-backed config is not authoritative storage |
+| `--includes` / `--no-includes` / `includeIf` | intentional difference | exit 129; include graphs conflict with SQLite-backed config |
+| `edit` | intentional difference | SQLite store cannot be safely text-edited |
+
+> **No SQL schema migration is required for this roadmap.** All new behaviour (multi-value
+> filtering, section operations, typed values, output flags) uses the existing
+> `config_kv(id, key, value, encrypted)` table; complex mutations are made atomic at the
+> application layer via explicit sea-orm transactions, not new DDL.
+
+## Decision Ledger
+
+This ledger records the binding decision for each Git config capability. Script-visible
+behaviour (stdout / stderr / exit codes) is contractually stable once marked *supported*.
+
+| Capability | Decision | Behaviour |
+|---|---|---|
+| `--null` / `-z` | supported | Text output only. Value is NUL-terminated; key/value separated by `\n` (Git-style `key\nvalue\0`), **not** `key=value\0`. With JSON output → exit 129. With `--stdin` → exit 129 (does not parse stdin). |
+| `--show-origin` | supported | Adds `file:<path>` origin (local → repo `.libra/libra.db`, global → resolved global DB). Never emits a `local`/`global` scope label as the origin. |
+| `--show-scope` | supported | Adds a `local`/`global` scope label. Cascaded get reports the winning scope. |
+| `--name-only` | supported (list + legacy regexp) | Records contain only keys. Legacy single-key `--get <key> --name-only` → exit 129; modern `get --name-only` deferred. |
+| `--append` / `--add` | supported | Append a value; never replaces existing values. `set --add` remains as Libra subcommand UX. |
+| `--replace-all` / `set --all` | supported | Transactionally replace all matching values for a key. No-match → insert and exit 0. |
+| `--value=<pattern>` | supported | Regex value filter on get/set/unset. Invalid regex → exit 6. Leading `!` negates (unless `--fixed-value`). Honours the sensitive/encrypted interaction contract below. |
+| `--ignore-case` / `-i` | supported | Case-insensitive key regex and `--value` regex matching (not literal `--fixed-value`). |
+| `--fixed-value` | supported | `--value` is matched literally; value regex/negation parsing disabled. Key regex length limit still applies. |
+| `rename-section` / `remove-section` | supported | Modern subcommands + legacy `--rename-section` / `--remove-section`. Section maps to a dotted prefix (`remote.origin` → `remote.origin.`). |
+| `--type=bool\|int\|path` (+ `--bool`/`--int`/`--path`) | supported | Output canonicalisation; write validation for bool/int. Integers accept case-insensitive `k`/`m`/`g` suffixes (1024-based) and emit canonical decimal. |
+| `--no-value` / `--show-names` / `--no-show-names` / `--no-type` | deferred | exit 129 with an explanatory message. |
+| `--type=bool-or-int\|expiry-date\|color` | deferred | exit 129 (type not yet supported). |
+| `--type` + `--list` | deferred | exit 129 (avoids silently dropping non-canonicalisable entries). |
+| `--system` / `--worktree` | rejected | exit 129; no system/worktree config writes. |
+| `--file` / `-f` | rejected | exit 129; suggests `libra config --import`. Never reads an arbitrary plaintext file. |
+| `--blob` | rejected | exit 129; blob-backed config unsupported. |
+| `--includes` / `--no-includes` | rejected | exit 129; include graphs are not SQLite-backed authoritative config. |
+| `--url` / `--get-urlmatch` / `--get-color` / `--get-colorbool` | deferred | exit 129; advanced/legacy helpers. |
+| `--default` combos | current scope | get / get-all / get-regexp only; mutation combos → exit 129. |
+| Missing key exit code | Git-like exit 1 | `--get missing.key` (no `--default`) exits 1 with empty stdout. |
+| JSON interaction | structured JSON | JSON rejects `--null` and `--name-only` (exit 129). Existing `origin` field keeps its scope meaning; `scope`/`origin_type`/`origin_path` carry precise data. |
+
+### `--show-origin` vs `--show-scope`
+
+These are **distinct** and must never be conflated:
+
+- `--show-origin` emits a Git-style **origin path**: `file:<absolute-path>` where the path is
+  the SQLite database file backing the value (`.libra/libra.db` for local, the resolved global
+  DB for global). On Windows the `file:<path>` form is fixed by documentation and tests; if URI
+  normalisation is not implemented, the platform difference is recorded rather than left to vary.
+- `--show-scope` emits a **scope label**: `local` or `global`.
+
+In text mode the prefix fields precede `key`/`value`, tab-separated (or NUL-separated under
+`--null`). In JSON mode they appear as the `origin_type`/`origin_path` and `scope` fields.
+
+### JSON backward compatibility
+
+Existing JSON fields **do not change meaning**. In particular the `origin` field continues to
+carry the **scope label** (`local`/`global`). Git-style origin paths are exposed only through the
+new `origin_type` (`"file"`) and `origin_path` fields, and the scope label is also surfaced via
+the new `scope` field. New fields appear only when `--show-origin`/`--show-scope` is requested
+(`skip_serializing_if`). No existing field is renamed, removed, or repurposed.
+
+## Value Filtering and Sensitive/Encrypted Values
+
+`--value` / `--fixed-value` are intended for public multi-value config (e.g. `remote.*.fetch`
+refspecs). For a **sensitive key** (`is_sensitive_key(key)` true, or a row stored with
+`encrypted != 0`):
+
+- Without `--reveal`, the filter matches against the **stored ciphertext** (or redacted form);
+  output entries are still redacted (`<REDACTED>`) unless `--reveal` is given and the key is not a
+  vault internal.
+- With `--reveal` (and decryption permitted), the value is decrypted before pattern matching;
+  decryption/canonicalisation error messages never include the secret or ciphertext.
+- Section rename/remove may move ordinary auto-encrypted sensitive keys (ciphertext and the
+  `encrypted` flag travel with the key name), but any `vault.*` section is rejected and managed
+  only by dedicated vault/config commands.
+
+> **Shell history warning:** a `--value` pattern typed on the command line may be recorded in
+> shell history. Avoid `--value` on sensitive keys; prefer an exact key or a dedicated vault
+> command. Libra emits a one-time stderr warning when `--value` is used on a sensitive key.
+
+All user-supplied regexes (key and value) are bounded to **4 KiB** and evaluated by Rust's
+linear-time `regex` engine (no catastrophic backtracking); an over-long or invalid regex exits 6.
+
+## Transaction Boundaries and Helper Split
+
+Complex mutations (`--value`-filtered replace/unset, `rename-section`, `remove-section`) run
+inside an **explicit transaction** in the command layer (`conn.begin()` →
+`*_with_conn(&txn, …)` → `txn.commit()`), so a validation failure, conflict, or write error
+leaves **no partial change** (the transaction is dropped without commit). Value matchers, section
+mutators, and type canonicalisers live in `src/internal/config.rs` as testable `_with_conn`
+helpers (which never `begin`/`commit` themselves); the command layer only parses, orchestrates,
+renders, and maps errors. SQLite write failures — including `database is locked`/`SQLITE_BUSY`
+and `SQLITE_FULL` (disk full) — map to exit 4 with an actionable message and no committed change.
+The 30-second busy-timeout configured by `establish_connection_with_busy_timeout` makes lock
+contention rare.
+
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Feature | Git | jj | Libra |
@@ -425,10 +561,10 @@ Git exits with code 1 when a key is not found, which is indistinguishable from o
 | Edit in editor | `git config -e` | `jj config edit` | Not supported (SQLite storage) |
 | Regex search | `git config --get-regexp` | No | `libra config get --regexp` |
 | Show origin | `git config --show-origin` | No | `libra config list --show-origin` |
-| Type coercion | `--type=bool\|int\|path` | No (TOML types) | Not supported (this batch) |
+| Type coercion | `--type=bool\|int\|path` | No (TOML types) | **`--type=bool\|int\|path`** (+ `--bool`/`--int`/`--path`) |
 | Default fallback | `--default value` | No | `--default value` |
-| Null-delimited | `-z` | No | Not supported (this batch) |
-| Rename/remove section | Yes | No | Not supported (this batch) |
+| Null-delimited | `-z` | No | **`-z` / `--null`** (`key\nvalue\0`) |
+| Rename/remove section | Yes | No | **`rename-section` / `remove-section`** (generic dotted prefix) |
 | JSON output | No | No | **`--json`** |
 | Secret redaction | No | No | **Auto-detect** |
 | Import from Git | N/A | N/A | **`libra config import`** |

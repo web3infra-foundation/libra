@@ -67,7 +67,7 @@ batch document.
 | remote | supported | |
 | hash-object | partial | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects. Other object types and advanced Git hash-object flags are unsupported |
 | open | supported | |
-| config | supported | vault-backed |
+| config | supported | vault-backed; partial Git config parity with documented intentional differences (see [docs/commands/config.md](docs/commands/config.md) Git Config Compatibility Matrix) |
 | db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
 | reflog | supported | |
 | worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree |
