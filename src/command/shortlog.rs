@@ -70,15 +70,27 @@ use crate::{
 
 const SHORTLOG_EXAMPLES: &str = "\
 EXAMPLES:
-    libra shortlog                  Summarize commits reachable from HEAD by author
-    libra shortlog HEAD~5           Summarize a subset of history starting from a revision
-    libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
-    libra shortlog --since 24h      Restrict to commits in the last 24 hours
-    libra shortlog --json           Structured JSON output for agents";
+  libra shortlog
+  libra shortlog HEAD~5
+  libra shortlog -n -s
+  libra shortlog --json
+";
 
 #[derive(Parser, Debug)]
 #[command(after_help = SHORTLOG_EXAMPLES)]
 pub struct ShortlogArgs {
+    /// Show only the top N authors
+    #[clap(long = "top", value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Show only authors with at least N commits
+    #[clap(long = "min-count", value_name = "N")]
+    pub min_count: Option<usize>,
+
+    /// Reverse output order
+    #[clap(long = "reverse")]
+    pub reverse: bool,
+
     /// Sort output according to the number of commits per author
     #[clap(short = 'n', long = "numbered")]
     pub numbered: bool,
@@ -91,12 +103,12 @@ pub struct ShortlogArgs {
     #[clap(short = 'e', long = "email")]
     pub email: bool,
 
-    /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
-    #[clap(long = "since", value_name = "DATE")]
+    /// Show commits more recent than a specific date
+    #[clap(long = "since")]
     pub since: Option<String>,
 
-    /// Show commits older than DATE (RFC3339, `YYYY-MM-DD`, or relative like `1h`)
-    #[clap(long = "until", value_name = "DATE")]
+    /// Show commits older than a specific date
+    #[clap(long = "until")]
     pub until: Option<String>,
 
     /// Revision to summarize. Defaults to HEAD.
@@ -248,6 +260,17 @@ fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>)
     } else {
         authors.sort_by_key(|stats| stats.name.to_lowercase());
     }
+    if let Some(min) = args.min_count {
+        authors.retain(|author| author.count >= min);
+    }
+
+    if args.reverse {
+        authors.reverse();
+    }
+
+    if let Some(top) = args.top {
+        authors.truncate(top);
+    }
 
     ShortlogOutput {
         revision: revision.to_string(),
@@ -321,8 +344,7 @@ async fn get_commits_for_shortlog(
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();
 
-    // newest first
-    commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
+    commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     Ok(commits)
 }
@@ -399,6 +421,11 @@ mod tests {
 
         let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
         assert!(args.since.is_some());
+
+        let args = ShortlogArgs::parse_from(["shortlog","--top","5","--min-count","2","--reverse",]);
+        assert_eq!(args.top, Some(5));
+        assert_eq!(args.min_count, Some(2));
+        assert!(args.reverse);
     }
 
     #[test]
@@ -457,5 +484,34 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.stable_code(), StableErrorCode::RepoNotFound);
+    }
+
+    #[test]
+    fn test_shortlog_filters() {
+        let mut authors = vec![
+            ShortlogAuthor {
+                name: "Alice".to_string(),
+                email: None,
+                count: 10,
+                subjects: vec![],
+            },
+            ShortlogAuthor {
+                name: "Bob".to_string(),
+                email: None,
+                count: 5,
+                subjects: vec![],
+            },
+            ShortlogAuthor {
+                name: "Tom".to_string(),
+                email: None,
+                count: 1,
+                subjects: vec![],
+            },
+        ];
+
+        authors.retain(|a| a.count >= 5);
+        assert_eq!(authors.len(), 2);
+        authors.reverse();
+        assert_eq!(authors[0].name, "Bob");
     }
 }
