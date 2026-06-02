@@ -7,7 +7,7 @@
 //! `execute_safe`/equivalent structured handlers so future agents can modify
 //! command flows without missing repository, index, worktree, network, or
 //! rendering consequences.
-
+pub mod stats;
 pub mod add;
 pub mod agent;
 pub mod automation;

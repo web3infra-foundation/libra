@@ -37,6 +37,7 @@ Command Groups:
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing db, fsck, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect
+  Statistics              stats
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -271,6 +272,7 @@ struct Cli {
 /// The Commands enum represents the subcommands that can be used with the CLI.
 /// subcommand's execute and args are defined in `command` module
 #[derive(Subcommand, Debug)]
+
 enum Commands {
     // Each variant of the enum represents a subcommand.
     // The about attribute provides a brief description of the subcommand.
@@ -432,6 +434,13 @@ enum Commands {
         hide = true
     )]
     Hooks(command::hooks::HooksArgs),
+    #[command(about = "统计当前工作目录中的文件分布")]
+    Stats(StatsArgs),
+}
+#[derive(clap::Args, Debug)]
+pub struct StatsArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1198,6 +1207,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Agent(cmd_args) => command::agent::execute_safe(cmd_args, &output).await?,
         Commands::Hooks(cmd_args) => command::hooks::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
+        Commands::Stats(cmd_args) => command::stats::execute_safe(cmd_args, &output).await?,
     }
 
     // Check for warnings when --exit-code-on-warning is active.
