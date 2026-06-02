@@ -31,6 +31,7 @@ batch document.
 | usage | intentionally-different | Libra AI provider/model usage reporting extension, not a Git command |
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
+| package | intentionally-different | Libra AI capability-package install/list/diff extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
 | mv | partial | sparse-checkout flag unsupported |
@@ -50,7 +51,7 @@ batch document.
 | commit | supported | |
 | switch | supported | |
 | rebase | partial | `--autosquash` / `--reapply-cherry-picks` not supported |
-| merge | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
+| merge | partial | fast-forward, best-base single-head three-way, clean disjoint octopus, `--squash`, `--no-ff`, `--ff-only`, `--no-commit`, message/signoff/shortlog, `ours` strategy, `-X ours/theirs`, binary conflict handling, and diff3 markers supported; `--autostash`, signature verification/signing flags, progress flags, `--into-name`, `--no-verify`, diff algorithms, whitespace strategy options, subtree/custom strategies/drivers, and conflicted octopus resolution deferred |
 | reset | supported | |
 | rev-parse | supported | |
 | rev-list | supported | |

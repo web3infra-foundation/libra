@@ -321,6 +321,18 @@ impl SessionJsonlStore {
         })?;
 
         let path = self.events_path();
+
+        // Serialize the whole JSONL line (event + newline) into one buffer and
+        // emit it with a single `O_APPEND` `write_all`. Streaming the JSON
+        // straight to the file (multiple writes, then a separate `\n`) lets two
+        // concurrent appends interleave their partial JSON and corrupt both
+        // lines — which CEX-S2-14 parallel sub-agent dispatch would trigger,
+        // since concurrent child runs append `Spawned`/`Completed` events to the
+        // same parent session log. One buffered append keeps each line whole.
+        let mut line = serde_json::to_vec(event)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        line.push(b'\n');
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -335,9 +347,7 @@ impl SessionJsonlStore {
                 )
             })?;
 
-        serde_json::to_writer(&mut file, event)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        file.write_all(b"\n").map_err(|err| {
+        file.write_all(&line).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!(
@@ -721,6 +731,44 @@ mod tests {
             }
             other => panic!("expected SessionSnapshot, got {other:?}"),
         }
+    }
+
+    /// Concurrency contract (CEX-S2-14 prerequisite): many `append`s racing on
+    /// the same store each land as one whole, parseable JSONL line — none
+    /// interleave their JSON. Parallel sub-agent dispatch has concurrent child
+    /// runs appending `Spawned`/`Completed` events to the same parent session
+    /// log, so a partial-write interleave would corrupt the replay stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_each_land_as_one_intact_line() {
+        let tmp = TempDir::new().expect("tmp dir");
+        let store = SessionJsonlStore::new(tmp.path().to_path_buf());
+        const N: usize = 64;
+
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                // A sizeable, distinct summary so any partial-write interleave
+                // would corrupt the JSON detectably (load would error/miscount).
+                let mut state = SessionState::new("/tmp/work");
+                state.summary = format!("event-{i}-{}", "x".repeat(256));
+                store
+                    .append(&SessionEvent::snapshot(state))
+                    .expect("concurrent append must succeed");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("append task must not panic");
+        }
+
+        // load_events errors on a malformed line, so a clean load of exactly N
+        // events proves every concurrent append is a whole, intact line.
+        let events = store.load_events().expect("every line parses");
+        assert_eq!(
+            events.len(),
+            N,
+            "all {N} concurrent appends survived intact (no interleave / loss)",
+        );
     }
 
     /// `load_state()` returns the latest snapshot when multiple are

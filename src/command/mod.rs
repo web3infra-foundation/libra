@@ -44,6 +44,7 @@ pub mod merge;
 pub mod mv;
 pub mod open;
 pub mod prune;
+pub mod package;
 pub mod publish;
 pub mod pull;
 pub mod push;

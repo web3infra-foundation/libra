@@ -616,6 +616,17 @@ pub fn builtin_migrations() -> Vec<Migration> {
                 "../../../sql/migrations/2026052301_source_call_log_down.sql"
             )),
         },
+        // CEX-S2-14 trace chain: attribute a sub-agent's Source-Pool calls to
+        // its run via `agent_run_id` (producer reads it from the invocation's
+        // ToolRuntimeContext). Additive column; NULL = main-session call.
+        Migration {
+            version: 2026060201,
+            name: "source_call_log_agent_run_id",
+            up: include_str!("../../../sql/migrations/2026060201_source_call_log_agent_run_id.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026060201_source_call_log_agent_run_id_down.sql"
+            )),
+        },
     ]
 }
 
@@ -730,9 +741,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 7);
+        assert_eq!(runner.len(), 8);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026052301));
+        assert_eq!(runner.max_registered_version(), Some(2026060201));
     }
 
     #[test]

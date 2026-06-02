@@ -1,43 +1,73 @@
 # `libra merge`
 
-Merge one target into the current branch.
+Merge one or more targets into the current branch.
 
 ## Synopsis
 
 ```text
-libra merge <branch>
+libra merge <branch> [<branch>...]
 libra merge --continue
 libra merge --abort
+libra merge --quit
 ```
 
 ## Description
 
 `libra merge <branch>` resolves a local branch, commit hash, or remote-tracking ref such as `refs/remotes/origin/main`.
 
-If the current branch can be fast-forwarded, Libra moves the branch pointer to the target commit and restores the index and working tree. If the branches have diverged, Libra performs a single-head three-way merge using the merge base.
+If the current branch can be fast-forwarded, Libra moves the branch pointer to the target commit and restores the index and working tree. If the branches have diverged, Libra performs a single-head three-way merge using the best merge base. Clean multi-head merges are supported for disjoint changes and create an N-parent octopus merge commit.
 
 Clean three-way merges create a two-parent merge commit, update HEAD, rebuild the index, restore the working tree, and write a merge reflog entry. Conflicting three-way merges write conflict markers to the working tree, write unmerged index stages, save Libra merge state, and return `LBR-CONFLICT-002` with hints for `libra merge --continue` and `libra merge --abort`.
 
-Libra still does not implement octopus merges, custom strategies, `--squash`, `--no-ff`, strategy options, message editing, or signature verification.
+Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.ff`), squash merges, `--no-commit`, custom merge messages, signoff trailers, `-s ours`, `-X ours|theirs`, binary conflict detection, diff3 conflict markers, and simple octopus merges. Deferred Git merge features are listed below and are intentionally not accepted as no-op flags.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `<branch>` | Target branch, commit, or remote-tracking ref to merge. |
+| `<branch>...` | Target branches, commits, or remote-tracking refs to merge. Multiple targets use octopus mode and must be clean/disjoint. |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
+| `--quit` | Remove merge state while leaving the index and working tree untouched. |
+| `--ff-only` | Refuse unless the target can fast-forward HEAD. Overrides `merge.ff`. |
+| `--no-ff` | Create a merge commit even when a fast-forward is possible. Overrides `merge.ff`. |
+| `--squash` | Apply merged changes to the index and working tree without moving HEAD or writing merge state. Cannot be combined with `--no-ff` or `--commit`. |
+| `--no-commit` | Stop after a clean real merge with merge state, index, and worktree updated; finish with `libra merge --continue`. Fast-forwards still fast-forward unless `--no-ff` is also used. |
+| `--commit` | Explicitly request the default commit-after-clean-merge behavior. |
+| `--allow-unrelated-histories` | Permit a two-head merge without a common ancestor. |
+| `-m`, `--message <msg>` | Use the provided merge commit message. |
+| `-F`, `--file <path>` | Read the merge commit message from a file. |
+| `--signoff` | Append a `Signed-off-by` trailer to merge commit messages. |
+| `-s ours`, `--strategy ours` | Use Git's `ours` strategy for the merge result. |
+| `-X ours`, `-X theirs` | Resolve content/delete conflicts in favor of one side. |
+| `--log[=<n>]` | Append up to `n` shortlog entries to the merge commit message (`20` when omitted). |
+| `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
+| `--stat`, `--no-stat` | Accepted for Git-compatible CLI surface. Libra currently has no reusable diffstat renderer, so merge success output remains unchanged. |
 | `--json` | Emit a structured success envelope. |
 | `--machine` | Emit the same structured envelope as one compact JSON line. |
 | `--quiet` | Suppress human success output. |
+
+## Supported Merge Config
+
+| Key | Values | Behavior |
+|-----|--------|----------|
+| `merge.ff` | `true`/`false`/`only` | Default/true allows fast-forward, false behaves like `--no-ff`, only behaves like `--ff-only`. CLI flags override config. |
+| `merge.conflictstyle` | `merge`/`diff3` | Selects default conflict marker style. |
+
+`merge.commit` is intentionally absent because stock Git does not define that config key.
 
 ## Common Commands
 
 ```bash
 libra merge feature-x
+libra merge left right
 libra merge refs/remotes/origin/main
+libra merge --ff-only feature-x
+libra merge --no-ff --no-commit feature-x
+libra merge --squash feature-x
 libra merge --continue
 libra merge --abort
+libra merge --quit
 libra merge --json feature-x
 ```
 
@@ -50,6 +80,10 @@ When a merge conflicts:
 3. Run `libra merge --continue` to create the two-parent merge commit.
 
 Run `libra merge --abort` before continuing to restore the branch, index, and working tree to the pre-merge commit. `libra status` shows the in-progress merge target and the continue/abort commands while merge state exists.
+
+## Deferred Git Merge Features
+
+The following Git flags are not implemented and are not accepted as ignored no-ops: `--autostash`, `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--progress`, `--no-progress`, `--into-name`, `--no-verify`, `--diff-algorithm`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
 
 ## Human Output
 
@@ -112,14 +146,14 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 
 | Parameter | Libra | Git | jj |
 |-----------|-------|-----|----|
-| Branch target | `<branch>` (single target) | `<commit>...` (one or more) | N/A (use `jj new`) |
+| Branch target | `<branch>...` (clean octopus supported) | `<commit>...` (one or more) | N/A (use `jj new`) |
 | Fast-forward | Supported | Supported | N/A |
 | Single-head three-way | Supported | Supported | N/A |
 | Continue / abort | `--continue`, `--abort` | `--continue`, `--abort` | N/A |
-| Octopus merge | Not supported | Supported | N/A |
-| Squash | Not supported | `--squash` | N/A |
-| Custom strategy | Not supported | `--strategy`, `-X` | N/A |
-| Commit message | Not supported | `-m <msg>` | N/A |
+| Octopus merge | Clean disjoint changes supported; conflicts refused | Supported | N/A |
+| Squash | Supported | `--squash` | N/A |
+| Custom strategy | `ours` and `-X ours/theirs` only | `--strategy`, `-X` | N/A |
+| Commit message | `-m`, `-F`, `--log`, `--signoff` | `-m <msg>` | N/A |
 | Verify signatures | Not supported | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
 

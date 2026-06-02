@@ -18,6 +18,8 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     diff::StringSetDelta,
     manifest::{BundledCapabilities, CapabilityPackageManifest},
@@ -25,12 +27,18 @@ use super::{
 
 /// One installed package plus whether it is currently enabled. A package can be
 /// installed-but-disabled; only enabled packages register their capabilities.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Serialize` / `Deserialize` so the installer can persist the installed set
+/// via [`super::store::InstalledPackageStore`]; `enabled` defaults to `false`
+/// (default-deny) when a hand-edited or older store omits it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstalledPackage {
     /// The package's manifest (carries id / version / bundles).
     pub manifest: CapabilityPackageManifest,
     /// Whether the package is enabled. Default-deny: an installed package that
     /// is not explicitly enabled registers nothing.
+    #[serde(default)]
     pub enabled: bool,
 }
 

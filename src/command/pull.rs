@@ -272,6 +272,7 @@ pub(crate) async fn run_pull(
         &child_output,
         merge::PullMergeOptions {
             ff_only: args.ff_only,
+            ..Default::default()
         },
     )
     .await
@@ -600,9 +601,19 @@ fn is_timeout_io_error(error: &std::io::Error) -> bool {
 
 fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
     match error {
-        merge::PullMergeError::MissingAction | merge::PullMergeError::ConflictingAction => {
+        merge::PullMergeError::MissingAction
+        | merge::PullMergeError::ConflictingAction
+        | merge::PullMergeError::SquashNoFf
+        | merge::PullMergeError::SquashCommit
+        | merge::PullMergeError::InvalidMergeFfConfig { .. } => {
             CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
+        }
+        merge::PullMergeError::MessageFileRead { .. } => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        merge::PullMergeError::SignoffIdentity => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
         merge::PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
             .with_stable_code(StableErrorCode::CliInvalidTarget),
@@ -621,6 +632,8 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
             .with_hint("or run 'libra pull --rebase' to replay local commits"),
         merge::PullMergeError::Conflicts { .. }
+        | merge::PullMergeError::OctopusConflict { .. }
+        | merge::PullMergeError::DirectoryFileConflict { .. }
         | merge::PullMergeError::DirtyWorktree
         | merge::PullMergeError::UntrackedOverwrite { .. }
         | merge::PullMergeError::MergeInProgress

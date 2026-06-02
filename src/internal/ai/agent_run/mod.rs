@@ -66,9 +66,12 @@ pub mod event_store;
 pub mod evidence;
 pub mod evidence_query;
 pub mod hook_dispatch;
+pub mod live_registry;
 pub mod merge_metrics;
 pub mod merge_pipeline;
 pub mod parallel;
+pub mod parallel_executor;
+pub mod patch_capture;
 pub mod patchset;
 pub mod permission;
 pub mod review_summary;
@@ -270,6 +273,7 @@ pub use evidence_query::{
 pub use hook_dispatch::{
     HookOutcome, PreToolUseDecision, classify_post_tool_use, classify_pre_tool_use,
 };
+pub use live_registry::{LiveRunRegistry, LiveRunSnapshot, LiveRunState};
 pub use merge_metrics::{MergeMetrics, MergeOutcomeCounts};
 pub use merge_pipeline::{
     MergeDecisionSignals, build_merge_decision_payload, build_payload_from_patches,
@@ -279,14 +283,20 @@ pub use parallel::{
     ParallelRunSnapshot, ParallelRunState, ParallelSchedulerSnapshot, ParallelSchedulerState,
     ParallelTaskRequest,
 };
+pub use parallel_executor::{ParallelTask, run_parallel};
 pub use patchset::AgentPatchSet;
 pub use permission::AgentPermissionProfile;
 pub use review_summary::{MergeReviewCounts, render_merge_review_summary};
-pub use risk_score::{BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score};
+pub use risk_score::{
+    BudgetExceededCounts, MergeRiskInputs, compute_merge_risk_score, gather_merge_risk_inputs,
+};
 pub use run::{AgentRun, AgentRunStatus};
 pub use task::AgentTask;
 pub use trace::ToolCallTraceId;
-pub use validator::{collect_distillable_evidence_ids, resolve_task_for_patchset};
+pub use validator::{
+    collect_distillable_evidence_ids, count_unverified_patch_scope, resolve_task_for_patchset,
+    validate_merge_candidate,
+};
 pub use workspace_strategy::{
     SPARSE_FILE_COUNT_THRESHOLD, SPARSE_REPO_SIZE_THRESHOLD_BYTES, WorkspaceSizing,
     WriteScopeViolation, check_write_in_scope, record_materialization, resolve_full_copy_fallback,

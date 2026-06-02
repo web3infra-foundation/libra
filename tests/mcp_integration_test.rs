@@ -296,6 +296,45 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         .write_run_usage(thread_id, run_id, &usage)
         .expect("persist run usage");
 
+    // Persist source-call telemetry into the repo DB the budget view reads
+    // (the v0.17.1254 trace link): two calls attributed to this run plus one
+    // main-session call (NULL run) that must NOT be counted. The DB lives at the
+    // same `<storage_root>/libra.db` the dispatcher and budget view resolve.
+    {
+        use libra::internal::{db::create_database, model::source_call_log::ActiveModel};
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+
+        let db_path = libra::utils::util::try_get_storage_path(Some(working_dir.clone()))
+            .unwrap_or_else(|_| working_dir.join(".libra"))
+            .join(libra::utils::util::DATABASE);
+        let conn = create_database(db_path.to_str().expect("utf-8 db path"))
+            .await
+            .expect("bootstrap repo db");
+        for (i, attributed) in [true, true, false].into_iter().enumerate() {
+            ActiveModel {
+                id: Set(format!("c-{i}")),
+                session_id: Set("s".to_string()),
+                source_slug: Set("mcp:git".to_string()),
+                tool_name: Set("status".to_string()),
+                registered_tool_name: Set("status".to_string()),
+                tool_call_id: Set(format!("tc-{i}")),
+                agent_run_id: Set(attributed.then(|| run_id.0.to_string())),
+                credential_ref: Set(None),
+                latency_ms: Set(None),
+                input_bytes: Set(0),
+                output_bytes: Set(0),
+                cost_estimate_micros: Set(None),
+                approval_decision: Set(None),
+                state_namespace: Set("mcp:git".to_string()),
+                success: Set(1),
+                created_at: Set("2026-06-02T00:00:00Z".to_string()),
+            }
+            .insert(&conn)
+            .await
+            .expect("insert source call row");
+        }
+    }
+
     let server =
         LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
 
@@ -332,6 +371,9 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
         serde_json::from_str(&detail_text).expect("valid JSON body");
     assert_eq!(detail_body["id"], run_id.0.to_string());
     assert_eq!(detail_body["model"], "deepseek-chat");
+    // The detail view carries the run's persisted source-call count (the two
+    // calls attributed to this run; CEX-S2-16, v0.17.1254 trace link).
+    assert_eq!(detail_body["source_call_count"], 2);
 
     // The permissions view resolves the run's thread via its snapshot and
     // serves the persisted profile.
@@ -385,10 +427,102 @@ async fn test_mcp_agents_runs_lists_persisted_snapshots() {
     assert_eq!(budget_body["agent_run_id"], run_id.0.to_string());
     assert_eq!(budget_body["usage"]["tool_call_count"], 3);
     assert_eq!(budget_body["usage"]["total_tokens"], 180);
+    // The two source calls attributed to this run surface; the NULL-run call
+    // does not (CEX-S2-16 `source_call_count`, v0.17.1254 trace link).
+    assert_eq!(
+        budget_body["usage"]["source_call_count"], 2,
+        "the budget view must report this run's real source-call count: {budget_body}",
+    );
     assert_eq!(
         budget_body["exceeded_dimensions"],
         serde_json::json!([]),
         "an unlimited default budget exceeds nothing",
+    );
+}
+
+/// Scenario (CEX-S2-16 B2a/B2b): once the dispatcher has persisted a
+/// `MergeCandidate` under the working dir's sessions root, the MCP
+/// `libra://agents/merge-candidates/{id}` view resolves it (scanning the thread
+/// dirs) and an unknown id is a clean structured not-found. Pins the read path
+/// that B2a/B2b made servable (the template is now advertised).
+#[tokio::test]
+async fn test_mcp_agents_merge_candidate_view_serves_persisted_record() {
+    use libra::internal::ai::agent_run::{
+        AgentPatchSet, AgentPatchSetId, AgentRunId, MergeCandidate, MergeCandidateId,
+        event_store::AgentRunEventStore,
+    };
+
+    let temp_dir = tempdir().unwrap();
+    let working_dir = temp_dir.path().to_path_buf();
+    let storage = Arc::new(LocalStorage::new(working_dir.join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        working_dir.clone(),
+        db_conn,
+    ));
+
+    let sessions_root = working_dir.join(".libra").join("sessions");
+    let store = AgentRunEventStore::new(&sessions_root);
+    let thread_id = uuid::Uuid::new_v4();
+    let run_id = AgentRunId::new();
+    let patchset = AgentPatchSet {
+        id: AgentPatchSetId::new(),
+        agent_run_id: run_id,
+        patchset_id: uuid::Uuid::new_v4(),
+        workspace_scope_constrained: true,
+    };
+    let candidate =
+        MergeCandidate::from_patchsets(MergeCandidateId::new(), std::slice::from_ref(&patchset));
+    let candidate_id = candidate.id;
+    store
+        .write_merge_candidate(thread_id, &candidate)
+        .expect("persist merge candidate");
+
+    let server =
+        LibraMcpServer::new_with_working_dir(Some(history_manager), Some(storage), working_dir);
+
+    let uri = format!("libra://agents/merge-candidates/{}", candidate_id.0);
+    let contents = server
+        .read_resource_impl(&uri)
+        .await
+        .expect("merge-candidates/{id} must read the persisted record");
+    let text = match &contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text resource contents"),
+    };
+    let body: serde_json::Value = serde_json::from_str(&text).expect("valid JSON body");
+    assert_eq!(body["id"], candidate_id.0.to_string());
+    assert!(
+        body["agent_run_ids"]
+            .as_array()
+            .expect("agent_run_ids array")
+            .iter()
+            .any(|r| r == &run_id.0.to_string()),
+        "the candidate's owning run id must surface: {body}",
+    );
+    assert!(
+        body["patchset_ids"]
+            .as_array()
+            .expect("patchset_ids array")
+            .iter()
+            .any(|p| p == &patchset.id.0.to_string()),
+        "the candidate's patchset id must surface: {body}",
+    );
+
+    // An unknown candidate id is a clean structured not-found, not an internal
+    // error, and names the missing id.
+    let missing = uuid::Uuid::new_v4();
+    let missing_uri = format!("libra://agents/merge-candidates/{missing}");
+    let err = server
+        .read_resource_impl(&missing_uri)
+        .await
+        .expect_err("unknown merge candidate must be a not-found");
+    assert!(
+        err.message.contains("No persisted merge candidate")
+            && err.message.contains(&missing.to_string()),
+        "not-found error should name the missing candidate: {}",
+        err.message,
     );
 }
 

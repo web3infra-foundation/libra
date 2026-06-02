@@ -127,9 +127,19 @@ pub fn render_run_list(runs: &[AgentRun]) -> Value {
     json!({ "runs": runs.iter().map(render_run_row).collect::<Vec<_>>() })
 }
 
-/// Render the `libra://agents/runs/{id}` detail body.
-pub fn render_run_detail(run: &AgentRun) -> Value {
-    render_run_row(run)
+/// Render the `libra://agents/runs/{id}` detail body — the run summary plus its
+/// persisted source-call count (CEX-S2-16; the per-run trace link landed
+/// v0.17.1254). The list view stays lean (no per-run count query); the detail
+/// view carries the activity metric.
+pub fn render_run_detail(run: &AgentRun, source_call_count: u32) -> Value {
+    let mut body = render_run_row(run);
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "source_call_count".to_string(),
+            Value::from(source_call_count),
+        );
+    }
+    body
 }
 
 /// Render the `libra://agents/runs/{id}/permissions` body from the run's
