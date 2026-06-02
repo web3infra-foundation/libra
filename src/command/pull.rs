@@ -652,11 +652,15 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::StateSave(..)
         | merge::PullMergeError::StateCleanup(..)
         | merge::PullMergeError::Autostash(..)
+        | merge::PullMergeError::Sign(..)
         | merge::PullMergeError::IndexSave(..)
         | merge::PullMergeError::TreeCreate(..)
         | merge::PullMergeError::CommitSave(..)
         | merge::PullMergeError::WorkdirReset(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+        }
+        merge::PullMergeError::UnsignedTarget { .. } => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
         merge::PullMergeError::HeadResolve(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)

@@ -1768,10 +1768,89 @@ fn test_merge_help_lists_whitespace_flags() {
         "--ignore-space-at-eol",
         "--ignore-cr-at-eol",
         "--autostash",
+        "--gpg-sign",
+        "--no-gpg-sign",
+        "--verify-signatures",
+        "--no-verify-signatures",
     ] {
         assert!(
             stdout.contains(flag),
             "merge --help should list {flag}: {stdout}"
         );
     }
+}
+
+#[test]
+fn test_merge_verify_signatures_rejects_unsigned_target() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Disable vault signing so the feature commit is unsigned.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "vault.signing", "false"], temp_path),
+        "disable signing",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+
+    let output = run_libra_command(&["merge", "--verify-signatures", "feature"], temp_path);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("not signed"),
+        "verify-signatures should reject unsigned target: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_merge_gpg_sign_produces_signed_merge_commit() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    // Turn vault signing off so only `-S` can produce a signature.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "vault.signing", "false"], temp_path),
+        "disable signing",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feat add");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "-S", "feature"], temp_path);
+    assert_cli_success(&output, "merge -S");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let head = Head::current_commit()
+        .await
+        .expect("merge should create HEAD");
+    let commit: Commit = load_object(&head).expect("load merge commit");
+    assert!(
+        commit.message.contains("PGP SIGNATURE"),
+        "merge -S should embed a PGP signature: {}",
+        commit.message
+    );
 }

@@ -26,7 +26,7 @@ use git_internal::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    get_target_commit, load_object, log, reset,
+    commit, get_target_commit, load_object, log, reset,
     restore::{self, RestoreArgs},
     save_object, stash, status, switch,
 };
@@ -217,6 +217,22 @@ pub struct MergeArgs {
     /// Do not update the rerere database (default; accepted for Git compatibility)
     #[arg(long = "no-rerere-autoupdate", conflicts_with = "rerere_autoupdate")]
     pub no_rerere_autoupdate: bool,
+
+    /// GPG-sign the merge commit using the vault signing key
+    #[arg(short = 'S', long = "gpg-sign", conflicts_with = "no_gpg_sign")]
+    pub gpg_sign: bool,
+
+    /// Do not GPG-sign the merge commit (default; overrides --gpg-sign)
+    #[arg(long = "no-gpg-sign", conflicts_with = "gpg_sign")]
+    pub no_gpg_sign: bool,
+
+    /// Verify that the merged commit carries a signature before merging
+    #[arg(long = "verify-signatures", conflicts_with = "no_verify_signatures")]
+    pub verify_signatures: bool,
+
+    /// Do not verify the merged commit's signature (default)
+    #[arg(long = "no-verify-signatures", conflicts_with = "verify_signatures")]
+    pub no_verify_signatures: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -332,6 +348,8 @@ pub(crate) struct PullMergeOptions {
     pub into_name: Option<String>,
     pub autostash: bool,
     pub whitespace: WhitespaceMode,
+    pub sign: bool,
+    pub verify_signatures: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +477,10 @@ pub(crate) enum PullMergeError {
     StateCleanup(String),
     #[error("autostash failed: {0}")]
     Autostash(String),
+    #[error("failed to sign merge commit: {0}")]
+    Sign(String),
+    #[error("merge target '{target}' is not signed")]
+    UnsignedTarget { target: String },
     #[error("failed to load index: {0}")]
     IndexLoad(String),
     #[error("failed to save index: {0}")]
@@ -535,12 +557,16 @@ impl From<PullMergeError> for CliError {
             PullMergeError::StateSave(..)
             | PullMergeError::StateCleanup(..)
             | PullMergeError::Autostash(..)
+            | PullMergeError::Sign(..)
             | PullMergeError::IndexSave(..)
             | PullMergeError::TreeCreate(..)
             | PullMergeError::CommitSave(..)
             | PullMergeError::WorkdirReset(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
+            PullMergeError::UnsignedTarget { .. } => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("pass --no-verify-signatures to merge an unsigned commit"),
             PullMergeError::HeadResolve(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -693,7 +719,31 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
             ignore_space_at_eol: args.ignore_space_at_eol,
             ignore_cr_at_eol: args.ignore_cr_at_eol,
         },
+        sign: !args.no_gpg_sign && args.gpg_sign,
+        verify_signatures: resolve_verify_signatures(args).await,
     })
+}
+
+/// Resolve `--verify-signatures`/`--no-verify-signatures`, falling back to the
+/// `merge.verifySignatures` config key (default off).
+async fn resolve_verify_signatures(args: &MergeArgs) -> bool {
+    if args.no_verify_signatures {
+        return false;
+    }
+    if args.verify_signatures {
+        return true;
+    }
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "merge.verifySignatures")
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Resolve `--autostash`/`--no-autostash`, falling back to the
@@ -888,6 +938,12 @@ pub(crate) async fn run_merge_for_pull_with_options(
             detail: error.to_string(),
         })?;
 
+    if options.verify_signatures && !commit_is_signed(&target_commit) {
+        return Err(PullMergeError::UnsignedTarget {
+            target: upstream.to_string(),
+        });
+    }
+
     let Some(current_commit_id) = Head::current_commit().await else {
         let files_changed = count_changed_files(None, &target_commit)?;
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
@@ -1026,6 +1082,11 @@ async fn run_octopus_merge(
                 commit_id: commit_hash.to_string(),
                 detail: error.to_string(),
             })?;
+        if options.verify_signatures && !commit_is_signed(&target_commit) {
+            return Err(PullMergeError::UnsignedTarget {
+                target: branch.clone(),
+            });
+        }
         let lca = lca_commit(&current_commit, &target_commit)
             .await
             .map_err(|error| PullMergeError::History(error.to_string()))?;
@@ -1081,7 +1142,7 @@ async fn run_octopus_merge(
         )
     });
     let merge_commit =
-        Commit::from_tree_id(tree_id, parents.clone(), &format_commit_msg(&message, None));
+        create_merge_commit(tree_id, parents.clone(), &message, options.sign).await?;
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(
@@ -1242,11 +1303,13 @@ async fn perform_three_way_merge(
             continued: false,
         });
     }
-    let merge_commit = Commit::from_tree_id(
+    let merge_commit = create_merge_commit(
         tree_id,
         vec![current_commit.id, target_commit.id],
-        &format_commit_msg(&message, None),
-    );
+        &message,
+        options.sign,
+    )
+    .await?;
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| PullMergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(&head_name, merge_commit.id, upstream, "three-way").await?;
@@ -1447,11 +1510,8 @@ async fn run_merge_continue(
         Some(message) => message,
         None => merge_commit_message(&state.target_ref, &state.head_name, None, &options).await?,
     };
-    let merge_commit = Commit::from_tree_id(
-        tree_id,
-        vec![orig_head, target],
-        &format_commit_msg(&message, None),
-    );
+    let merge_commit =
+        create_merge_commit(tree_id, vec![orig_head, target], &message, options.sign).await?;
     save_object(&merge_commit, &merge_commit.id)
         .map_err(|error| MergeError::CommitSave(error.to_string()))?;
     update_head_with_reflog(
@@ -1488,6 +1548,47 @@ async fn reapply_recorded_autostash(autostash: Option<&str>) {
     if let Err(error) = stash::autostash_pop().await {
         eprintln!("warning: failed to reapply autostashed changes: {error}");
     }
+}
+
+/// Build the merge commit, GPG-signing it with the vault key when `sign` is
+/// requested (`--gpg-sign`/`-S`). Unsigned merges keep the existing
+/// placeholder-author behavior so default output is unchanged.
+async fn create_merge_commit(
+    tree_id: ObjectHash,
+    parents: Vec<ObjectHash>,
+    message: &str,
+    sign: bool,
+) -> Result<Commit, PullMergeError> {
+    if !sign {
+        return Ok(Commit::from_tree_id(
+            tree_id,
+            parents,
+            &format_commit_msg(message, None),
+        ));
+    }
+    let (author, committer) = util::create_signatures().await;
+    let gpgsig = commit::vault_sign_commit(&tree_id, &parents, &author, &committer, message, true)
+        .await
+        .map_err(|error| PullMergeError::Sign(error.to_string()))?;
+    match gpgsig {
+        Some(sig) => Ok(Commit::new(
+            author,
+            committer,
+            tree_id,
+            parents,
+            &format_commit_msg(message, Some(&sig)),
+        )),
+        None => Err(PullMergeError::Sign(
+            "vault signing key unavailable; configure libra vault to use --gpg-sign".to_string(),
+        )),
+    }
+}
+
+/// Whether a commit carries an embedded PGP/SSH signature.
+fn commit_is_signed(commit: &Commit) -> bool {
+    crate::common_utils::parse_commit_msg(&commit.message)
+        .1
+        .is_some()
 }
 
 async fn run_merge_quit() -> Result<MergeOutput, MergeError> {
@@ -2869,6 +2970,17 @@ mod tests {
         assert_eq!(
             PullMergeError::Autostash("stash push failed".to_string()).to_string(),
             "autostash failed: stash push failed",
+        );
+        assert_eq!(
+            PullMergeError::Sign("no key".to_string()).to_string(),
+            "failed to sign merge commit: no key",
+        );
+        assert_eq!(
+            PullMergeError::UnsignedTarget {
+                target: "feature".to_string(),
+            }
+            .to_string(),
+            "merge target 'feature' is not signed",
         );
     }
 

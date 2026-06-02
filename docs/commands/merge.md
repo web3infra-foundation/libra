@@ -36,6 +36,9 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--commit` | Explicitly request the default commit-after-clean-merge behavior. |
 | `--allow-unrelated-histories` | Permit a two-head merge without a common ancestor. |
 | `--autostash`, `--no-autostash` | Stash local changes before merging and reapply them afterward. Honors `merge.autoStash`. A conflict defers reapplication until `--continue`/`--abort`. |
+| `-S`, `--gpg-sign` | Sign the merge commit with the Libra vault key. (A key id is not accepted; the vault key is always used.) |
+| `--no-gpg-sign` | Do not sign the merge commit (the default). |
+| `--verify-signatures`, `--no-verify-signatures` | Require (or skip) a signature on the merged commit before merging. Honors `merge.verifySignatures`. |
 | `-m`, `--message <msg>` | Use the provided merge commit message. |
 | `-F`, `--file <path>` | Read the merge commit message from a file. |
 | `--signoff` | Append a `Signed-off-by` trailer to merge commit messages. |
@@ -68,6 +71,7 @@ Progress output is controlled by the global `--progress=<json\|text\|none\|auto>
 | `merge.conflictstyle` | `merge`/`diff3` | Selects default conflict marker style. |
 | `merge.stat` | `true`/`false` | When true, print a diffstat after a successful merge (off by default; `--stat`/`--no-stat` override). |
 | `merge.autoStash` | `true`/`false` | When true, autostash local changes around every merge (off by default; `--autostash`/`--no-autostash` override). |
+| `merge.verifySignatures` | `true`/`false` | When true, require the merged commit to be signed (off by default; `--verify-signatures`/`--no-verify-signatures` override). |
 
 `merge.commit` is intentionally absent because stock Git does not define that config key.
 
@@ -98,7 +102,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
+The following Git flags are not implemented and are not accepted as ignored no-ops: `--edit`/`--no-edit`, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution. Full cryptographic verification of signatures is reduced to a presence check; `--verify-signatures` confirms a signature exists rather than validating it against a keyring.
 
 ## Human Output
 
