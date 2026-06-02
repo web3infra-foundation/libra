@@ -49,6 +49,7 @@ Libra supports fast-forward policy flags/config (`--ff-only`, `--no-ff`, `merge.
 | `--conflict=diff3` | Include base content in conflict markers. `merge.conflictstyle=diff3` is also supported. |
 | `--stat`, `-n`/`--no-stat` | Print (or suppress) a diffstat of what the merge brought in. `--summary`/`--no-summary` are accepted aliases. Honors the `merge.stat` config; defaults off so existing output stays stable. |
 | `--diff-algorithm <algo>` | Validate the requested content-merge algorithm (`myers`/`histogram`/`patience`/`minimal`). Libra uses a single Myers-style backend. |
+| `--ignore-space-change`, `--ignore-all-space`, `--ignore-space-at-eol`, `--ignore-cr-at-eol` | Ignore the named whitespace class when auto-merging text, so a side whose only change is whitespace yields to the side with a real change. |
 | `--cleanup <mode>` | Validate the message cleanup mode (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Libra already trims merge messages. |
 | `--no-verify` | Accepted for Git compatibility. Libra runs no pre-merge or commit-msg hooks yet, so this has no effect. |
 | `--overwrite-ignore`, `--no-overwrite-ignore` | Accepted for Git compatibility; Libra always preserves ignored files during merge. |
@@ -97,7 +98,7 @@ Run `libra merge --abort` before continuing to restore the branch, index, and wo
 
 ## Deferred Git Merge Features
 
-The following Git flags are not implemented and are not accepted as ignored no-ops: `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, whitespace strategy options, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
+The following Git flags are not implemented and are not accepted as ignored no-ops: `--verify-signatures`, `-S`/`--gpg-sign`, `--no-gpg-sign`, `--edit`/`--no-edit`, custom merge drivers, custom strategies beyond `ours`, subtree strategy, and advanced octopus conflict resolution.
 
 ## Human Output
 

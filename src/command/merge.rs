@@ -174,6 +174,22 @@ pub struct MergeArgs {
     #[arg(long, value_enum)]
     pub conflict: Option<MergeConflictStyle>,
 
+    /// Ignore changes in amount of whitespace when auto-merging text
+    #[arg(long = "ignore-space-change")]
+    pub ignore_space_change: bool,
+
+    /// Ignore all whitespace when auto-merging text
+    #[arg(long = "ignore-all-space")]
+    pub ignore_all_space: bool,
+
+    /// Ignore whitespace at end of line when auto-merging text
+    #[arg(long = "ignore-space-at-eol")]
+    pub ignore_space_at_eol: bool,
+
+    /// Ignore carriage returns at end of line when auto-merging text
+    #[arg(long = "ignore-cr-at-eol")]
+    pub ignore_cr_at_eol: bool,
+
     /// Diff algorithm to use for content merges (myers, histogram, patience, minimal)
     #[arg(long = "diff-algorithm", value_name = "ALGO")]
     pub diff_algorithm: Option<String>,
@@ -221,6 +237,61 @@ pub enum MergeConflictStyle {
     Diff3,
 }
 
+/// Whitespace-insensitivity options for the textual three-way merge, mirroring
+/// Git's `-Xignore-*` strategy options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WhitespaceMode {
+    pub ignore_space_change: bool,
+    pub ignore_all_space: bool,
+    pub ignore_space_at_eol: bool,
+    pub ignore_cr_at_eol: bool,
+}
+
+impl WhitespaceMode {
+    fn is_active(&self) -> bool {
+        self.ignore_space_change
+            || self.ignore_all_space
+            || self.ignore_space_at_eol
+            || self.ignore_cr_at_eol
+    }
+
+    /// Canonicalize `content` so two blobs that differ only by the ignored
+    /// whitespace classes compare equal.
+    fn canonicalize(&self, content: &[u8]) -> Vec<u8> {
+        if !self.is_active() {
+            return content.to_vec();
+        }
+        let text = String::from_utf8_lossy(content);
+        let mut out = String::with_capacity(text.len());
+        for raw in text.split_inclusive('\n') {
+            let had_newline = raw.ends_with('\n');
+            let line = raw.strip_suffix('\n').unwrap_or(raw);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            out.push_str(&self.canonicalize_line(line));
+            if had_newline {
+                out.push('\n');
+            }
+        }
+        out.into_bytes()
+    }
+
+    fn canonicalize_line(&self, line: &str) -> String {
+        if self.ignore_all_space {
+            return line.chars().filter(|c| !c.is_whitespace()).collect();
+        }
+        let mut result = line.to_string();
+        if self.ignore_space_change {
+            // Collapse runs of whitespace to a single space and trim the edges.
+            let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+            result = collapsed;
+        } else if self.ignore_space_at_eol {
+            result = result.trim_end().to_string();
+        }
+        // `ignore_cr_at_eol` is handled by the `\r` strip in `canonicalize`.
+        result
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PullMergeSummary {
     pub strategy: String,
@@ -260,6 +331,7 @@ pub(crate) struct PullMergeOptions {
     pub conflict_style: MergeConflictStyle,
     pub into_name: Option<String>,
     pub autostash: bool,
+    pub whitespace: WhitespaceMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +687,12 @@ async fn merge_options_from_args(args: &MergeArgs) -> Result<PullMergeOptions, M
         conflict_style: resolve_conflict_style(args.conflict).await?,
         into_name: args.into_name.clone(),
         autostash: resolve_autostash(args).await,
+        whitespace: WhitespaceMode {
+            ignore_space_change: args.ignore_space_change,
+            ignore_all_space: args.ignore_all_space,
+            ignore_space_at_eol: args.ignore_space_at_eol,
+            ignore_cr_at_eol: args.ignore_cr_at_eol,
+        },
     })
 }
 
@@ -1814,7 +1892,8 @@ fn resolve_three_way_with_options(
             if ours.hash == theirs.hash {
                 MergeResolution::Use(theirs)
             } else if let Some(base) = base
-                && let Some(merged) = try_merge_blob_contents(base, ours, theirs)?
+                && let Some(merged) =
+                    try_merge_blob_contents(base, ours, theirs, options.whitespace)?
             {
                 MergeResolution::Use(merged)
             } else {
@@ -1876,6 +1955,7 @@ fn try_merge_blob_contents(
     base: &MergeTreeEntry,
     ours: MergeTreeEntry,
     theirs: MergeTreeEntry,
+    whitespace: WhitespaceMode,
 ) -> Result<Option<MergeTreeEntry>, PullMergeError> {
     if base.mode != ours.mode
         || base.mode != theirs.mode
@@ -1893,6 +1973,24 @@ fn try_merge_blob_contents(
         || is_binary_blob(&theirs_blob.data)
     {
         return Ok(None);
+    }
+
+    // When whitespace differences are ignored, a side whose only change is
+    // whitespace yields to the side with a real change, preserving that side's
+    // original formatting rather than a normalized blob.
+    if whitespace.is_active() {
+        let base_norm = whitespace.canonicalize(&base_blob.data);
+        let ours_norm = whitespace.canonicalize(&ours_blob.data);
+        let theirs_norm = whitespace.canonicalize(&theirs_blob.data);
+        if ours_norm == theirs_norm {
+            return Ok(Some(ours));
+        }
+        if ours_norm == base_norm {
+            return Ok(Some(theirs));
+        }
+        if theirs_norm == base_norm {
+            return Ok(Some(ours));
+        }
     }
 
     let Ok(merged_bytes) = diffy::merge_bytes(&base_blob.data, &ours_blob.data, &theirs_blob.data)
@@ -2771,6 +2869,52 @@ mod tests {
         assert_eq!(
             PullMergeError::Autostash("stash push failed".to_string()).to_string(),
             "autostash failed: stash push failed",
+        );
+    }
+
+    #[test]
+    fn whitespace_mode_canonicalize_ignores_configured_classes() {
+        let all_space = WhitespaceMode {
+            ignore_all_space: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            all_space.canonicalize(b"a b  c\n"),
+            all_space.canonicalize(b"abc\n"),
+        );
+
+        let space_change = WhitespaceMode {
+            ignore_space_change: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            space_change.canonicalize(b"  a   b  \n"),
+            space_change.canonicalize(b"a b\n"),
+        );
+
+        let space_at_eol = WhitespaceMode {
+            ignore_space_at_eol: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            space_at_eol.canonicalize(b"a b   \n"),
+            space_at_eol.canonicalize(b"a b\n"),
+        );
+
+        let cr_at_eol = WhitespaceMode {
+            ignore_cr_at_eol: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            cr_at_eol.canonicalize(b"a b\r\n"),
+            cr_at_eol.canonicalize(b"a b\n"),
+        );
+
+        let none = WhitespaceMode::default();
+        assert_ne!(
+            none.canonicalize(b"a  b\n"),
+            none.canonicalize(b"a b\n"),
+            "default mode preserves whitespace differences"
         );
     }
 

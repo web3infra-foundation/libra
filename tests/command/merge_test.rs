@@ -1713,3 +1713,65 @@ async fn test_merge_autostash_preserves_local_changes_on_three_way() {
         "three-way merge should produce a two-parent commit"
     );
 }
+
+#[test]
+fn test_merge_ignore_all_space_resolves_whitespace_only_side() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    commit_file(temp_path, "code.txt", "fn main() {}\n", "base code");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    // theirs: a real semantic change
+    commit_file(
+        temp_path,
+        "code.txt",
+        "fn main() { run(); }\n",
+        "real change",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    // ours: whitespace-only reformatting of the same line
+    commit_file(temp_path, "code.txt", "fn  main()  {}\n", "whitespace only");
+
+    let output = run_libra_command(&["merge", "--ignore-all-space", "feature"], temp_path);
+    assert_cli_success(&output, "merge --ignore-all-space");
+
+    let merged = std::fs::read_to_string(temp_path.join("code.txt")).expect("read merged code");
+    assert!(
+        merged.contains("run();"),
+        "the real change should win over whitespace-only edits: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "whitespace-only side should not conflict: {merged}"
+    );
+}
+
+#[test]
+fn test_merge_help_lists_whitespace_flags() {
+    let repo = tempfile::tempdir().expect("tempdir for merge --help");
+    let output = run_libra_command(&["merge", "--help"], repo.path());
+    assert_cli_success(&output, "merge help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--ignore-space-change",
+        "--ignore-all-space",
+        "--ignore-space-at-eol",
+        "--ignore-cr-at-eol",
+        "--autostash",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "merge --help should list {flag}: {stdout}"
+        );
+    }
+}
