@@ -449,6 +449,10 @@ pub struct AppConfig {
     pub initial_goal: Option<String>,
     /// Source Pool control surface backing `/source` commands.
     pub source_pool: SourcePool,
+    /// CEX-S2-16 live-run registry — the in-flight sub-agent runs' current
+    /// tool/file, shared with the sub-agent child runner (the writer) so the
+    /// `/agents` pane can render each running child's live activity.
+    pub live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 /// The main application struct.
@@ -577,6 +581,9 @@ pub struct App<M: CompletionModel> {
     goal_session: Option<super::goal_session::GoalSession>,
     /// Source Pool control state for this TUI session.
     source_pool: SourcePool,
+    /// CEX-S2-16 live-run registry the `/agents` pane reads for in-flight runs'
+    /// current tool/file (written by the sub-agent child runner).
+    live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -755,6 +762,7 @@ where
             next_code_ui_item_id: 1,
             goal_session: initial_goal_session,
             source_pool: app_config.source_pool,
+            live_run_registry: app_config.live_run_registry,
         }
     }
 
@@ -5266,12 +5274,34 @@ where
             }
             None => std::collections::HashMap::new(),
         };
-        // Join each run's persisted terminal usage (tokens + cost estimate) and
-        // its source-call count; missing records leave those cells as `-`.
-        super::agent_pane::format_agent_run_pane_with_usage_and_sources(
+        // Snapshot the live registry once so the activity join is a cheap map
+        // lookup (CEX-S2-16 live fields). Only in-flight runs get an activity —
+        // a terminal run's lingering entry (if any) is never shown.
+        let live: std::collections::HashMap<_, _> = self
+            .live_run_registry
+            .snapshot()
+            .into_iter()
+            .map(|entry| (entry.agent_run_id, entry.state))
+            .collect();
+        // Join each run's persisted terminal usage (tokens + cost estimate), its
+        // source-call count, and — for in-flight runs — its live current
+        // tool/file; missing records leave those cells as `-`.
+        super::agent_pane::format_agent_run_pane_full(
             &runs,
             |run| store.read_run_usage(run.thread_id, run.id).ok().flatten(),
             |run| source_call_counts.get(&run.id.0.to_string()).copied(),
+            |run| {
+                if !run.status.is_in_flight() {
+                    return None;
+                }
+                live.get(&run.id).map(|state| match &state.current_file {
+                    Some(file) => match &state.current_tool {
+                        Some(tool) => format!("{tool} {file}"),
+                        None => file.clone(),
+                    },
+                    None => state.current_tool.clone().unwrap_or_default(),
+                })
+            },
         )
     }
 

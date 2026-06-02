@@ -974,14 +974,34 @@ pub trait SubAgentChildRunner: Send + Sync {
 /// - No byte-for-byte golden transcript fixture. The child JSONL stream
 ///   stores session snapshots for each tool step; later schema work may
 ///   add dedicated `ToolCall` / `ToolResult` event variants.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultSubAgentChildRunner;
+#[derive(Clone, Debug, Default)]
+pub struct DefaultSubAgentChildRunner {
+    /// CEX-S2-16 live-run registry the child tool loop records its current
+    /// tool/file into (for the `/agents` pane's live fields). `None` (the
+    /// default, and every bare `new()` runner) means no live tracking — the
+    /// child loop's registry writes are inert.
+    live_run_registry: Option<crate::internal::ai::agent_run::LiveRunRegistry>,
+}
 
 impl DefaultSubAgentChildRunner {
-    /// Construct a fresh runner. Stateless — provided for ergonomics
+    /// Construct a fresh runner with no live tracking. Provided for ergonomics
     /// alongside [`Default::default`].
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Attach a [`LiveRunRegistry`] so the child tool loop records its current
+    /// tool/file (CEX-S2-16 live fields). `libra code`'s session bootstrap wires
+    /// this with the same registry instance the `/agents` pane reads, so an
+    /// in-flight sub-agent's activity becomes visible end-to-end.
+    ///
+    /// [`LiveRunRegistry`]: crate::internal::ai::agent_run::LiveRunRegistry
+    pub fn with_live_run_registry(
+        mut self,
+        registry: crate::internal::ai::agent_run::LiveRunRegistry,
+    ) -> Self {
+        self.live_run_registry = Some(registry);
+        self
     }
 }
 
@@ -1282,6 +1302,11 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                     &provider_id,
                     &model_id,
                 )),
+                // CEX-S2-16 live fields: hand the child loop the session's
+                // live-run registry (when wired) so it records the tool it is
+                // currently executing, keyed by this run's `agent_run_id`. The
+                // `/agents` pane reads the same registry instance.
+                live_run_registry: self.live_run_registry.clone(),
                 ..ToolLoopConfig::default()
             };
 
@@ -2088,6 +2113,24 @@ mod tests {
         // assertion; this drop just keeps clippy from flagging an
         // unused binding.
         drop(dispatcher);
+    }
+
+    /// CEX-S2-16: `with_live_run_registry` attaches the registry the child loop
+    /// records its current tool/file into; a bare `new()` runner carries none
+    /// (live tracking off). The child config passes this through to the loop,
+    /// closing the writer chain runner → child config → tool loop.
+    #[test]
+    fn default_child_runner_carries_live_run_registry() {
+        use crate::internal::ai::agent_run::LiveRunRegistry;
+
+        let registry = LiveRunRegistry::new();
+        let runner = DefaultSubAgentChildRunner::new().with_live_run_registry(registry);
+        assert!(runner.live_run_registry.is_some());
+        assert!(
+            DefaultSubAgentChildRunner::new()
+                .live_run_registry
+                .is_none()
+        );
     }
 
     /// CEX-S2-14: a dispatcher that does NOT override `dispatch_batch`

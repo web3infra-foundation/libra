@@ -3139,6 +3139,11 @@ where
              dispatcher integration is a v0.17.783+ follow-up",
         );
     }
+    // CEX-S2-16 live fields: one registry instance, shared into the sub-agent
+    // child runner (the writer — records each child's current tool/file) and the
+    // App (the `/agents` pane reader), so an in-flight sub-agent's live activity
+    // is visible end-to-end.
+    let live_run_registry = crate::internal::ai::agent_run::LiveRunRegistry::new();
     if agents_config.sub_agents.enabled {
         match build_subagent_runtime_for_session(
             &agents_config,
@@ -3155,6 +3160,7 @@ where
             // so dispatched sub-agents inherit the parent's authority
             // rather than running unsandboxed (S2-INV-06).
             config.runtime_context.clone(),
+            live_run_registry.clone(),
         )
         .await
         {
@@ -3213,6 +3219,7 @@ where
             auto_classify_first_user_message,
             initial_goal: params.initial_goal.clone(),
             source_pool,
+            live_run_registry,
         },
     );
 
@@ -3750,6 +3757,7 @@ async fn build_subagent_runtime_for_session(
     agent_router: &AgentProfileRouter,
     hook_runner: Option<std::sync::Arc<crate::internal::ai::hooks::HookRunner>>,
     runtime_context: Option<ToolRuntimeContext>,
+    live_run_registry: crate::internal::ai::agent_run::LiveRunRegistry,
 ) -> anyhow::Result<crate::internal::ai::agent::runtime::SubAgentToolLoopRuntime> {
     use crate::internal::ai::{
         agent::{
@@ -3790,7 +3798,12 @@ async fn build_subagent_runtime_for_session(
             ),
         },
     )
-    .with_default_child_runner()
+    // CEX-S2-16 live fields: the child runner records each child loop's current
+    // tool/file into the shared registry (the `/agents` pane reads the same one).
+    .with_child_runner(std::sync::Arc::new(
+        crate::internal::ai::agent::runtime::DefaultSubAgentChildRunner::new()
+            .with_live_run_registry(live_run_registry),
+    ))
     // CEX-S2-12 / S2-INV-03: confine each dispatched sub-agent to a
     // materialized per-run workspace so its writes never touch the main
     // worktree. `sessions_root` = the `.libra/sessions` dir the per-run
