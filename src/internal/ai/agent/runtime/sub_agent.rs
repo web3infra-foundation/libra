@@ -1310,6 +1310,24 @@ impl SubAgentChildRunner for DefaultSubAgentChildRunner {
                 ..ToolLoopConfig::default()
             };
 
+            // CEX-S2-16 live fields: register this run as in-flight so the
+            // `/agents` pane lists it immediately, and finish it on EVERY exit
+            // (completion, failure, parent-abort cancel, or panic) via the
+            // scope guard below, so the registry never retains a stale terminal
+            // run. The pane's in-flight filter already hides a lingering entry;
+            // this keeps the live map bounded to genuinely-running children.
+            if let Some(live_registry) = self.live_run_registry.as_ref() {
+                live_registry.register(request.agent_run_id);
+            }
+            let _live_run_finish = scopeguard::guard(
+                (self.live_run_registry.clone(), request.agent_run_id),
+                |(registry, run_id)| {
+                    if let Some(registry) = registry {
+                        registry.finish(&run_id);
+                    }
+                },
+            );
+
             // Drive the history-aware tool loop with our observer so
             // the returned `TaskResult` reports the real per-turn
             // count and accumulated usage instead of a `1` / default
@@ -2131,6 +2149,28 @@ mod tests {
                 .live_run_registry
                 .is_none()
         );
+    }
+
+    /// CEX-S2-16: the runner's scope guard finishes the run on EVERY exit. This
+    /// pins that exact pattern: the run is in the registry while the guard is
+    /// alive and removed once it drops (so a terminal run never lingers).
+    #[test]
+    fn live_run_finish_guard_removes_run_on_drop() {
+        use crate::internal::ai::agent_run::{AgentRunId, LiveRunRegistry};
+
+        let registry = LiveRunRegistry::new();
+        let run_id = AgentRunId::new();
+        registry.register(run_id);
+        assert!(registry.get(&run_id).is_some(), "registered while running");
+        {
+            let _guard = scopeguard::guard((Some(registry.clone()), run_id), |(reg, id)| {
+                if let Some(reg) = reg {
+                    reg.finish(&id);
+                }
+            });
+            assert!(registry.get(&run_id).is_some(), "still present mid-run");
+        }
+        assert!(registry.is_empty(), "guard drop finishes the run");
     }
 
     /// CEX-S2-14: a dispatcher that does NOT override `dispatch_batch`
