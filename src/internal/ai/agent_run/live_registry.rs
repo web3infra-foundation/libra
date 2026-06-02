@@ -47,7 +47,7 @@ pub struct LiveRunSnapshot {
 }
 
 /// Thread-safe in-memory registry of in-flight sub-agent runs' live state.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct LiveRunRegistry {
     inner: Arc<Mutex<HashMap<AgentRunId, LiveRunState>>>,
 }

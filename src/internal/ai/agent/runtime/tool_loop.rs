@@ -201,6 +201,13 @@ pub struct ToolLoopConfig {
     /// observers and future loop integrations without changing legacy
     /// non-Goal callers.
     pub goal_stop_policy: Option<GoalStopPolicy>,
+    /// CEX-S2-16: optional live-run registry the loop updates with the tool it
+    /// is currently executing, so the `/agents` pane can show a still-running
+    /// sub-agent's real-time activity. Keyed by the run id carried on
+    /// [`ToolRuntimeContext::agent_run_id`] (the v0.17.1254 trace link). `None`
+    /// (the default, including the parent session loop) means no live tracking —
+    /// the writes are inert, so the loop is byte-identical to before.
+    pub live_run_registry: Option<crate::internal::ai::agent_run::LiveRunRegistry>,
 }
 
 impl Default for ToolLoopConfig {
@@ -230,6 +237,7 @@ impl Default for ToolLoopConfig {
             source_session_id: None,
             preserve_reasoning_content: false,
             goal_stop_policy: None,
+            live_run_registry: None,
         }
     }
 }
@@ -622,6 +630,20 @@ where
                     continue;
                 }
 
+                // CEX-S2-16: record the tool this run is about to execute so the
+                // `/agents` pane can surface a still-running sub-agent's live
+                // activity. Inert when no registry / run id is configured (the
+                // parent session loop and every current caller pass `None`), so
+                // the sequential path stays byte-identical.
+                if let Some(live_registry) = config.live_run_registry.as_ref()
+                    && let Some(run_id) = live_run_id(&config)
+                {
+                    live_registry.set_current_tool(run_id, &call.function.name);
+                    if let Some(path) = tool_call_path_arg(&call.function.arguments) {
+                        live_registry.set_current_file(run_id, path);
+                    }
+                }
+
                 let mut invocation = ToolInvocation::new(
                     call.id.clone(),
                     call.function.name.clone(),
@@ -979,6 +1001,29 @@ fn parse_task_invocation(arguments: &Value) -> Result<TaskInvocation, String> {
 
 fn task_tool_allowed_by_runtime(config: &ToolLoopConfig, tool_name: &str) -> bool {
     tool_name == "task" && config.subagent_runtime.is_some()
+}
+
+/// CEX-S2-16: the live run id the tool loop tags registry updates with, parsed
+/// from the `agent_run_id` the trace link (v0.17.1254) stamps on the runtime
+/// context. `None` for the parent session loop (no run id) or a malformed id —
+/// either way the live-registry writes are skipped.
+fn live_run_id(config: &ToolLoopConfig) -> Option<crate::internal::ai::agent_run::AgentRunId> {
+    let raw = config.runtime_context.as_ref()?.agent_run_id.as_deref()?;
+    uuid::Uuid::parse_str(raw)
+        .ok()
+        .map(crate::internal::ai::agent_run::AgentRunId::from)
+}
+
+/// Extract the file a tool call operates on from its arguments — a `path` /
+/// `file` / `file_path` string field — for the live `/agents` pane's
+/// current-file column. `None` for tools that touch no file, or when arguments
+/// arrive as a JSON-encoded string rather than an object.
+fn tool_call_path_arg(arguments: &Value) -> Option<String> {
+    let obj = arguments.as_object()?;
+    ["path", "file", "file_path"]
+        .iter()
+        .find_map(|key| obj.get(*key).and_then(|value| value.as_str()))
+        .map(ToString::to_string)
 }
 
 /// Outcome of the CEX-S2-14 parallel `task`-batch branch: fall through to the
@@ -2097,6 +2142,7 @@ mod tests {
                 source_session_id: None,
                 preserve_reasoning_content: false,
                 goal_stop_policy: None,
+                live_run_registry: None,
             },
             &mut observer,
         )
@@ -2613,6 +2659,122 @@ mod tests {
         );
     }
 
+    /// CEX-S2-16: the live run id is parsed from the runtime context's
+    /// `agent_run_id` (the v0.17.1254 trace link). The parent session loop (no
+    /// run id) and malformed ids resolve to `None`, skipping live tracking.
+    #[test]
+    fn live_run_id_parses_agent_run_id_from_runtime_context() {
+        use crate::internal::ai::agent_run::AgentRunId;
+
+        let id = uuid::Uuid::from_u128(0x0abc);
+        let config = ToolLoopConfig {
+            runtime_context: Some(ToolRuntimeContext {
+                agent_run_id: Some(id.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(live_run_id(&config), Some(AgentRunId(id)));
+
+        // No runtime context (parent session loop) → None.
+        assert_eq!(live_run_id(&ToolLoopConfig::default()), None);
+
+        // Malformed id → None, never a panic.
+        let bad = ToolLoopConfig {
+            runtime_context: Some(ToolRuntimeContext {
+                agent_run_id: Some("not-a-uuid".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(live_run_id(&bad), None);
+    }
+
+    /// CEX-S2-16: the current-file is extracted from a `path` / `file` /
+    /// `file_path` argument; tools with no such field (or string-encoded args)
+    /// yield `None`.
+    #[test]
+    fn tool_call_path_arg_extracts_known_file_fields() {
+        assert_eq!(
+            tool_call_path_arg(&json!({ "path": "src/a.rs" })).as_deref(),
+            Some("src/a.rs"),
+        );
+        assert_eq!(
+            tool_call_path_arg(&json!({ "file": "b.rs" })).as_deref(),
+            Some("b.rs"),
+        );
+        assert_eq!(
+            tool_call_path_arg(&json!({ "file_path": "c.rs" })).as_deref(),
+            Some("c.rs"),
+        );
+        assert_eq!(tool_call_path_arg(&json!({ "query": "x" })), None);
+        assert_eq!(tool_call_path_arg(&json!("string-encoded-args")), None);
+    }
+
+    /// CEX-S2-16: end-to-end, the tool loop records the tool it is executing into
+    /// the live registry *before* dispatch, so an observer reading the registry
+    /// during the call sees the current tool. Proves the writer fires for a run
+    /// whose runtime context carries an `agent_run_id`.
+    #[tokio::test]
+    async fn live_registry_records_the_current_tool_during_execution() {
+        use crate::internal::ai::agent_run::{AgentRunId, LiveRunRegistry};
+
+        struct RegistryProbeObserver {
+            registry: LiveRunRegistry,
+            run_id: AgentRunId,
+            captured_tool: Arc<Mutex<Option<String>>>,
+        }
+        impl ToolLoopObserver for RegistryProbeObserver {
+            fn on_tool_call_end(
+                &mut self,
+                _call_id: &str,
+                _tool_name: &str,
+                _result: &Result<ToolOutput, String>,
+            ) {
+                *self.captured_tool.lock().unwrap() =
+                    self.registry.get(&self.run_id).and_then(|s| s.current_tool);
+            }
+        }
+
+        let run_id = AgentRunId::new();
+        let registry = LiveRunRegistry::new();
+        let captured_tool = Arc::new(Mutex::new(None));
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut tool_registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        tool_registry.register("mock_tool", Arc::new(MockHandler));
+
+        let mut observer = RegistryProbeObserver {
+            registry: registry.clone(),
+            run_id,
+            captured_tool: Arc::clone(&captured_tool),
+        };
+
+        run_tool_loop_with_history_and_observer(
+            &MockModel,
+            Vec::new(),
+            "hello",
+            &tool_registry,
+            ToolLoopConfig {
+                live_run_registry: Some(registry.clone()),
+                runtime_context: Some(ToolRuntimeContext {
+                    agent_run_id: Some(run_id.0.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &mut observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            captured_tool.lock().unwrap().as_deref(),
+            Some("mock_tool"),
+            "the loop must record the executing tool into the live registry",
+        );
+    }
+
     /// Scenario: every provider request is mirrored as an append-only context frame,
     /// and large tool results are moved to session attachments before replay.
     #[tokio::test]
@@ -3044,6 +3206,7 @@ mod tests {
                 source_session_id: None,
                 preserve_reasoning_content: false,
                 goal_stop_policy: None,
+                live_run_registry: None,
             },
             &mut observer,
         )
@@ -3180,6 +3343,7 @@ mod tests {
                 source_session_id: None,
                 preserve_reasoning_content: false,
                 goal_stop_policy: None,
+                live_run_registry: None,
             },
             &mut observer,
         )
