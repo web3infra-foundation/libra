@@ -3119,6 +3119,33 @@ mod tests {
     }
 
     #[test]
+    fn best_common_ancestor_picks_lca_in_criss_cross_history() {
+        // A is the root; B and C diverge from A; D and E are independent merges
+        // of B and C — a criss-cross. The merge base of D and E must be a real
+        // lowest common ancestor (B or C), never the older shared ancestor A.
+        let tree = ObjectHash::new(&[7u8; 20]);
+        let a = Commit::from_tree_id(tree, vec![], "A");
+        let b = Commit::from_tree_id(tree, vec![a.id], "B");
+        let c = Commit::from_tree_id(tree, vec![a.id], "C");
+        let d = Commit::from_tree_id(tree, vec![b.id, c.id], "D");
+        let e = Commit::from_tree_id(tree, vec![b.id, c.id], "E");
+
+        let lhs = vec![d, b.clone(), c.clone(), a.clone()];
+        let rhs = vec![e, b.clone(), c.clone(), a.clone()];
+        let base = best_common_ancestor(lhs, rhs).expect("a common ancestor exists");
+
+        assert!(
+            base.id == b.id || base.id == c.id,
+            "criss-cross merge base must be a real LCA (B or C), got {}",
+            base.id
+        );
+        assert_ne!(
+            base.id, a.id,
+            "must not select the suboptimal older ancestor A"
+        );
+    }
+
+    #[test]
     fn merge_tree_items_preserves_mode_from_changed_side() {
         let path = PathBuf::from("script.sh");
         let base = merge_entry(1, TreeItemMode::Blob);
